@@ -2,7 +2,7 @@
 
 Agent development collaboration components for DeepSeek Harness.
 
-This repository is currently in its structure-only bootstrap stage. Runtime code, package manifests, dependencies, and build configuration will be added incrementally.
+The Message component now contains the first process-local runtime slice. Other components remain structural placeholders and will be added incrementally.
 
 ## Components
 
