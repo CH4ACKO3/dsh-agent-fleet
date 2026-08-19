@@ -11,4 +11,7 @@ This repository is currently in its structure-only bootstrap stage. Runtime code
 - `message` — communication and coordination between agents.
 - `ui` — future fleet management and inspection surfaces.
 
+The detailed ownership and dependency rules are defined in
+[`docs/architecture/modules.md`](docs/architecture/modules.md).
+
 Architecture notes, decisions, and protocol documents live under `docs/`.
