@@ -1,3 +1,3 @@
 # UI
 
-Fleet management, task inspection, and collaboration timeline surfaces.
+Future fleet management and inspection surfaces.

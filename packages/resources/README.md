@@ -1,3 +1,3 @@
 # Resources
 
-Shared-resource metadata, references, ownership, and access boundaries.
+Resources, workspaces, and storage used by fleet agents.

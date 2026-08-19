@@ -1,3 +1,3 @@
 # Core
 
-Fleet coordination, agent registry, task lifecycle, leases, permissions, and team events.
+Registration, control, shared contracts, and common foundations for the fleet.
