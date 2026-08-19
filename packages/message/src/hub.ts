@@ -7,8 +7,11 @@ import type {
   CreateChannelInput,
   FleetChannel,
   FleetMessage,
+  FleetMessageKind,
+  FleetMeeting,
   FleetTarget,
   MessageAgent,
+  OpenMeetingInput,
   ReadMessagesInput,
   ReadMessagesResult,
   SendMessageInput,
@@ -56,12 +59,20 @@ function channelId(target: string): string {
   return target.slice(1)
 }
 
+function meetingId(target: string): string {
+  if (!target.startsWith('meeting:') || target.length === 'meeting:'.length) {
+    throw new Error(`expected a Meeting target such as meeting:design-review, received ${target}`)
+  }
+  return target.slice('meeting:'.length)
+}
+
 function directConversation(left: string, right: string): string {
   return [left, right].sort().join('\u0000')
 }
 
 export class MessageHub {
   private readonly channels = new Map<string, FleetChannel>()
+  private readonly meetings = new Map<string, FleetMeeting>()
   private readonly history: FleetMessage[] = []
   private readonly waiters = new Set<Waiter>()
   private sequence = 0
@@ -91,6 +102,10 @@ export class MessageHub {
 
     const resources = uniqueStrings(input.resources ?? [], 'resource id')
     const mentions = uniqueStrings(input.mentions ?? [], 'mention').map(agentTarget)
+    if (input.to.startsWith('meeting:')) {
+      if (mentions.length > 0) throw new Error('meeting messages do not accept mentions')
+      return this.sendMeeting(sender, input, text, resources)
+    }
     if (input.to.startsWith('@')) {
       if (mentions.length > 0) throw new Error('direct messages do not accept mentions')
       return this.sendDirect(sender, input, text, resources)
@@ -117,6 +132,9 @@ export class MessageHub {
         if (!message.conversation.startsWith('@')) return false
         return directConversation(message.from, agentTarget(message.conversation)) === conversation
       })
+    } else if (input.conversation.startsWith('meeting:')) {
+      const meeting = this.requireMeeting(sender.id, meetingId(input.conversation))
+      messages = this.history.filter(message => message.conversation === `meeting:${meeting.id}`)
     } else {
       throw new Error(`invalid Fleet conversation ${input.conversation}`)
     }
@@ -180,6 +198,73 @@ export class MessageHub {
     this.channels.set(name, archived)
     this.changed()
     return snapshot(archived)
+  }
+
+  listMeetings(sender: MessageAgent): FleetMeeting[] {
+    this.assertOpen()
+    return snapshot([...this.meetings.values()].filter(meeting =>
+      meeting.participants.includes(sender.id),
+    ))
+  }
+
+  openMeeting(sender: MessageAgent, input: OpenMeetingInput): FleetMeeting {
+    this.assertOpen()
+    const id = input.id.trim()
+    if (!CHANNEL_NAME.test(id)) throw new Error('meeting id must use lower-kebab-case')
+    if (this.meetings.has(id)) throw new Error(`meeting ${id} already exists`)
+
+    const title = input.title.trim()
+    if (title.length === 0) throw new Error('meeting title cannot be empty')
+    const agenda = input.agenda.trim()
+    if (agenda.length === 0) throw new Error('meeting agenda cannot be empty')
+    const invited = uniqueStrings(input.participants, 'meeting participant').map(agentTarget)
+    const participants = [sender.id, ...invited.filter(id => id !== sender.id)]
+    if (participants.length < 2) {
+      throw new Error('a meeting requires at least one invited participant')
+    }
+    for (const participant of participants) this.requireAgent(participant)
+
+    const meeting: FleetMeeting = {
+      id,
+      title,
+      agenda,
+      initiator: sender.id,
+      participants,
+      status: 'open',
+      createdAt: new Date().toISOString(),
+    }
+    this.meetings.set(id, meeting)
+    const message = this.appendMessage(sender.id, {
+      to: `meeting:${id}`,
+      text: agenda,
+      delivery: 'wakeup',
+    }, agenda, [], [], 'meeting_opened')
+    this.deliverMeeting(meeting, sender.id, message, true)
+    return snapshot(meeting)
+  }
+
+  closeMeeting(sender: MessageAgent, id: string): FleetMeeting {
+    this.assertOpen()
+    const meeting = this.requireMeeting(sender.id, id)
+    if (meeting.initiator !== sender.id) {
+      throw new Error(`only meeting initiator ${meeting.initiator} can close meeting ${id}`)
+    }
+    if (meeting.status === 'closed') return snapshot(meeting)
+
+    const closed: FleetMeeting = {
+      ...meeting,
+      status: 'closed',
+      closedAt: new Date().toISOString(),
+    }
+    this.meetings.set(id, closed)
+    const text = 'The meeting has ended.'
+    const message = this.appendMessage(sender.id, {
+      to: `meeting:${id}`,
+      text,
+      delivery: 'wakeup',
+    }, text, [], [], 'meeting_closed')
+    this.deliverMeeting(closed, sender.id, message, true)
+    return snapshot(closed)
   }
 
   wait(timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
@@ -272,17 +357,37 @@ export class MessageHub {
     }
   }
 
+  private sendMeeting(
+    sender: MessageAgent,
+    input: SendMessageInput,
+    text: string,
+    resources: string[],
+  ): SendMessageResult {
+    const meeting = this.requireMeeting(sender.id, meetingId(input.to))
+    if (meeting.status === 'closed') throw new Error(`meeting ${meeting.id} is closed`)
+    const message = this.appendMessage(sender.id, input, text, resources, [])
+    const wake = input.delivery === 'wakeup'
+    this.deliverMeeting(meeting, sender.id, message, wake)
+    return {
+      messageId: message.id,
+      recipients: meeting.participants.length - 1,
+      woken: wake ? meeting.participants.length - 1 : 0,
+    }
+  }
+
   private appendMessage(
     sender: string,
     input: SendMessageInput,
     text: string,
     resources: string[],
     mentions: string[],
+    kind: FleetMessageKind = 'text',
   ): FleetMessage {
     this.requireReply(sender, input.to, input.replyTo)
     const message: FleetMessage = {
       id: `msg_${randomUUID()}`,
       sequence: ++this.sequence,
+      kind,
       conversation: input.to,
       from: sender,
       text,
@@ -302,6 +407,10 @@ export class MessageHub {
     const reply = this.history.find(message => message.id === replyTo)
     if (reply === undefined) throw new Error(`unknown reply target ${replyTo}`)
     if (target.startsWith('#')) {
+      if (reply.conversation !== target) throw new Error(`reply target ${replyTo} is in another conversation`)
+      return
+    }
+    if (target.startsWith('meeting:')) {
       if (reply.conversation !== target) throw new Error(`reply target ${replyTo} is in another conversation`)
       return
     }
@@ -328,6 +437,17 @@ export class MessageHub {
     else target.inject(input)
   }
 
+  private deliverMeeting(
+    meeting: FleetMeeting,
+    senderId: string,
+    message: FleetMessage,
+    wake: boolean,
+  ): void {
+    for (const participant of meeting.participants) {
+      if (participant !== senderId) this.deliver(this.requireAgent(participant), message, wake, false)
+    }
+  }
+
   private requireAgent(id: string): MessageAgent {
     const agent = this.agents.get(id)
     if (agent === undefined) throw new Error(`Agent ${id} is not running in this process`)
@@ -339,6 +459,15 @@ export class MessageHub {
     if (channel === undefined) throw new Error(`unknown channel #${id}`)
     if (!this.canRead(channel, agentId)) throw new Error(`Agent ${agentId} cannot access #${id}`)
     return channel
+  }
+
+  private requireMeeting(agentId: string, id: string): FleetMeeting {
+    const meeting = this.meetings.get(id)
+    if (meeting === undefined) throw new Error(`unknown meeting ${id}`)
+    if (!meeting.participants.includes(agentId)) {
+      throw new Error(`Agent ${agentId} cannot access meeting ${id}`)
+    }
+    return meeting
   }
 
   private canRead(channel: FleetChannel, agentId: string): boolean {

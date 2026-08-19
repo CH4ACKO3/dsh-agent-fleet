@@ -18,16 +18,23 @@ class FakeAgent implements MessageAgent {
   }
 }
 
-function setup(): { hub: MessageHub; lead: FakeAgent; reviewer: FakeAgent; qa: FakeAgent } {
+function setup(): {
+  hub: MessageHub
+  lead: FakeAgent
+  reviewer: FakeAgent
+  qa: FakeAgent
+  observer: FakeAgent
+} {
   const lead = new FakeAgent('lead')
   const reviewer = new FakeAgent('reviewer')
   const qa = new FakeAgent('qa')
-  const agents = new Map([lead, reviewer, qa].map(agent => [agent.id, agent]))
+  const observer = new FakeAgent('observer')
+  const agents = new Map([lead, reviewer, qa, observer].map(agent => [agent.id, agent]))
   const directory: AgentDirectory = {
     get: id => agents.get(id),
     list: () => [...agents.values()],
   }
-  return { hub: new MessageHub(directory), lead, reviewer, qa }
+  return { hub: new MessageHub(directory), lead, reviewer, qa, observer }
 }
 
 describe('MessageHub', () => {
@@ -120,5 +127,71 @@ describe('MessageHub', () => {
     })
 
     await expect(waiting).resolves.toEqual({ timedOut: false, revision: 1 })
+  })
+
+  it('opens a Meeting with an attributed agenda and wakes every participant', () => {
+    const { hub, lead, reviewer, qa, observer } = setup()
+    const meeting = hub.openMeeting(lead, {
+      id: 'design-review',
+      title: 'Design review',
+      agenda: 'Agree on the storage boundary.',
+      participants: ['@reviewer', '@qa'],
+    })
+
+    expect(meeting).toMatchObject({
+      initiator: 'lead',
+      participants: ['lead', 'reviewer', 'qa'],
+      status: 'open',
+    })
+    expect(reviewer.followedUp[0]).toContain('Agree on the storage boundary.')
+    expect(qa.followedUp[0]).toContain('Agree on the storage boundary.')
+    expect(observer.followedUp).toHaveLength(0)
+    expect(hub.read(reviewer, { conversation: 'meeting:design-review' }).messages[0]).toMatchObject({
+      kind: 'meeting_opened',
+      from: 'lead',
+    })
+  })
+
+  it('injects every quiet Meeting message in full for all other participants', () => {
+    const { hub, lead, reviewer, qa, observer } = setup()
+    hub.openMeeting(lead, {
+      id: 'design-review',
+      title: 'Design review',
+      agenda: 'Review the design.',
+      participants: ['@reviewer', '@qa'],
+    })
+    hub.send(reviewer, {
+      to: 'meeting:design-review',
+      text: 'The transaction boundary needs one owner.',
+      delivery: 'quiet',
+    })
+
+    expect(lead.injected[0]).toContain('The transaction boundary needs one owner.')
+    expect(qa.injected[0]).toContain('The transaction boundary needs one owner.')
+    expect(qa.injected[0]).not.toContain('Call fleet_messages')
+    expect(observer.injected).toHaveLength(0)
+    expect(() => hub.read(observer, { conversation: 'meeting:design-review' })).toThrow('cannot access')
+  })
+
+  it('lets only the initiator close a Meeting and rejects later messages', () => {
+    const { hub, lead, reviewer } = setup()
+    hub.openMeeting(lead, {
+      id: 'design-review',
+      title: 'Design review',
+      agenda: 'Review the design.',
+      participants: ['@reviewer'],
+    })
+
+    expect(() => hub.closeMeeting(reviewer, 'design-review')).toThrow('only meeting initiator')
+    expect(hub.closeMeeting(lead, 'design-review')).toMatchObject({ status: 'closed' })
+    expect(reviewer.followedUp.at(-1)).toContain('The meeting has ended.')
+    expect(hub.read(reviewer, { conversation: 'meeting:design-review' }).messages.at(-1)).toMatchObject({
+      kind: 'meeting_closed',
+    })
+    expect(() => hub.send(reviewer, {
+      to: 'meeting:design-review',
+      text: 'Too late.',
+      delivery: 'quiet',
+    })).toThrow('is closed')
   })
 })

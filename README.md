@@ -8,7 +8,7 @@ The Message component now contains the first process-local runtime slice. Other 
 
 - `core` — registration, control, shared contracts, and common foundations.
 - `resources` — resources, workspaces, and storage.
-- `message` — communication and coordination between agents.
+- `message` — direct messages, channels, meetings, and agent coordination.
 - `ui` — future fleet management and inspection surfaces.
 
 The detailed ownership and dependency rules are defined in

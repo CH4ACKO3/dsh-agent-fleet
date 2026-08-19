@@ -25,6 +25,7 @@ const MESSAGE_SCHEMA = {
   properties: {
     id: { type: 'string', required: true },
     sequence: { type: 'integer', required: true },
+    kind: { type: 'string', required: true, enum: ['text', 'meeting_opened', 'meeting_closed'] },
     conversation: { type: 'string', required: true },
     from: { type: 'string', required: true },
     text: { type: 'string', required: true },
@@ -61,6 +62,21 @@ const SEND_SCHEMA = {
   },
 } as const
 
+const MEETING_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    title: { type: 'string', required: true },
+    agenda: { type: 'string', required: true },
+    initiator: { type: 'string', required: true },
+    participants: { type: 'array', required: true, items: { type: 'string' } },
+    status: { type: 'string', required: true, enum: ['open', 'closed'] },
+    createdAt: { type: 'string', required: true },
+    closedAt: { type: 'string' },
+  },
+} as const
+
 const READ_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -86,6 +102,16 @@ const CHANNEL_RESULT_SCHEMA = {
     action: { type: 'string', required: true, enum: ['list', 'create', 'archive'] },
     channels: { type: 'array', items: CHANNEL_SCHEMA },
     channel: CHANNEL_SCHEMA,
+  },
+} as const
+
+const MEETING_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    action: { type: 'string', required: true, enum: ['list', 'open', 'close'] },
+    meetings: { type: 'array', items: MEETING_SCHEMA },
+    meeting: MEETING_SCHEMA,
   },
 } as const
 
@@ -118,9 +144,9 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send a process-local Fleet message without waking an idle Agent. Use @agent-id for a direct message or #channel for a Channel post.',
+    description: 'Send a process-local Fleet message without waking an idle Agent. Use @agent-id for a direct message, #channel for a Channel post, or meeting:id for a Meeting message. Meeting messages enter every other participant\'s context in full.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @agent-id or #channel form.' },
+      to: { type: 'string', required: true, description: 'Target in @agent-id, #channel, or meeting:id form.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
@@ -139,9 +165,9 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_followup',
-    description: 'Send a process-local Fleet message and start the target Agent\'s next turn. A Channel target requires explicit @agent-id mentions and never wakes the whole Channel.',
+    description: 'Send a process-local Fleet message and start the recipient Agents\' next turns. A Channel target requires explicit @agent-id mentions; a Meeting target wakes every other participant.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @agent-id or #channel form.' },
+      to: { type: 'string', required: true, description: 'Target in @agent-id, #channel, or meeting:id form.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
       mentions: { type: 'array', items: { type: 'string' }, description: 'Required explicit @agent-id targets for a Channel follow-up.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
@@ -162,9 +188,9 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_messages',
-    description: 'Read process-local Fleet message history for one direct conversation or Channel. This is a history query and does not acknowledge an inbox.',
+    description: 'Read process-local Fleet message history for one direct conversation, Channel, or Meeting. This is a history query and does not acknowledge an inbox.',
     parameters: {
-      conversation: { type: 'string', required: true, description: 'Conversation in @agent-id or #channel form.' },
+      conversation: { type: 'string', required: true, description: 'Conversation in @agent-id, #channel, or meeting:id form.' },
       after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
       limit: { type: 'integer', description: 'Number of messages, from 1 through 100. Defaults to 50.' },
     },
@@ -180,7 +206,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_wait',
-    description: 'Wait for the next process-local Fleet message or Channel change. This does not read messages or wake another Agent.',
+    description: 'Wait for the next process-local Fleet message, Channel change, or Meeting change. This does not read messages or wake another Agent.',
     parameters: {
       timeout_ms: { type: 'integer', description: 'Wait duration in milliseconds, from 10000 through 3600000. Defaults to 30000.' },
     },
@@ -224,6 +250,44 @@ export function apply(ctx: Context): void {
       return Promise.resolve({
         action: 'archive' as const,
         channel: hub.archiveChannel(caller, args.name),
+      })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_meeting',
+    description: 'List visible Fleet Meetings, open a non-blocking Meeting, or close one as its initiator. Opening and closing wake every other participant.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['list', 'open', 'close'] },
+      id: { type: 'string', description: 'Lower-kebab-case Meeting id used as meeting:id.' },
+      title: { type: 'string', description: 'Meeting title required when opening.' },
+      agenda: { type: 'string', description: 'Opening agenda delivered to all participants.' },
+      participants: { type: 'array', items: { type: 'string' }, description: 'Invited participants in @agent-id form.' },
+    },
+    output: jsonOutput(MEETING_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_meeting')
+      if (args.action === 'list') {
+        return Promise.resolve({ action: 'list' as const, meetings: hub.listMeetings(caller) })
+      }
+      if (args.id === undefined) throw new Error(`fleet_meeting ${args.action} requires id`)
+      if (args.action === 'open') {
+        if (args.title === undefined || args.agenda === undefined || args.participants === undefined) {
+          throw new Error('fleet_meeting open requires title, agenda, and participants')
+        }
+        return Promise.resolve({
+          action: 'open' as const,
+          meeting: hub.openMeeting(caller, {
+            id: args.id,
+            title: args.title,
+            agenda: args.agenda,
+            participants: args.participants,
+          }),
+        })
+      }
+      return Promise.resolve({
+        action: 'close' as const,
+        meeting: hub.closeMeeting(caller, args.id),
       })
     },
   }))

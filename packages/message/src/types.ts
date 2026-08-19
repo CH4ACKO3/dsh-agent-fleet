@@ -11,12 +11,14 @@ export interface AgentDirectory {
   list(): MessageAgent[]
 }
 
-export type FleetTarget = `@${string}` | `#${string}`
+export type FleetTarget = `@${string}` | `#${string}` | `meeting:${string}`
 export type FleetDelivery = 'quiet' | 'wakeup'
+export type FleetMessageKind = 'text' | 'meeting_opened' | 'meeting_closed'
 
 export interface FleetMessage {
   readonly id: string
   readonly sequence: number
+  readonly kind: FleetMessageKind
   readonly conversation: FleetTarget
   readonly from: string
   readonly text: string
@@ -68,6 +70,24 @@ export interface CreateChannelInput {
   readonly name: string
   readonly topic?: string
   readonly members?: readonly string[]
+}
+
+export interface FleetMeeting {
+  readonly id: string
+  readonly title: string
+  readonly agenda: string
+  readonly initiator: string
+  readonly participants: string[]
+  readonly status: 'open' | 'closed'
+  readonly createdAt: string
+  readonly closedAt?: string
+}
+
+export interface OpenMeetingInput {
+  readonly id: string
+  readonly title: string
+  readonly agenda: string
+  readonly participants: readonly string[]
 }
 
 export interface WaitResult {

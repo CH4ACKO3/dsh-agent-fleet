@@ -2,20 +2,26 @@
 
 DSH Agent Fleet 的进程内通信组件。
 
-当前实现提供五个模型工具：
+当前实现提供六个模型工具：
 
 - `fleet_send`：静默私信或频道发言；
 - `fleet_followup`：唤醒指定 Agent；
 - `fleet_messages`：读取私信或频道历史；
 - `fleet_wait`：等待下一次消息或频道变化；
 - `fleet_channel`：列出、创建和归档频道。
+- `fleet_meeting`：列出、发起和结束会议。
 
-消息历史和频道只保存在当前进程。实际投递直接使用 DSH Agent 的 `inject` 和
+消息历史、频道和会议只保存在当前进程。实际投递直接使用 DSH Agent 的 `inject` 和
 `followup`；模块不维护第二套 inbox、ack、恢复或重试状态。二进制内容由 Resources
 保存，消息只携带资源 ID。
 
 Agent 目标目前使用 DSH Agent ID，例如 `@agent-id`。频道使用 `#channel`。在 Core
 提供 Fleet 成员目录后，Core 可以在调用本模块前解析角色名和别名。
+
+会议使用 `meeting:meeting-id`。发起和结束会议会唤醒所有其他参会者；会中普通消息
+会通过 `inject` 将完整正文直接加入所有其他参会者的上下文，而不是像频道广播一样
+只发送历史提示。使用 `fleet_followup` 向会议发言时，会唤醒所有其他参会者。只有
+发起人可以结束会议，结束后不再接受新消息。
 
 ## 使用
 
