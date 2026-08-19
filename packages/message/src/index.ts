@@ -83,6 +83,7 @@ const READ_SCHEMA = {
   properties: {
     messages: { type: 'array', required: true, items: MESSAGE_SCHEMA },
     hasMore: { type: 'boolean', required: true },
+    revision: { type: 'integer', required: true },
   },
 } as const
 
@@ -208,6 +209,7 @@ export function apply(ctx: Context): void {
     name: 'fleet_wait',
     description: 'Wait for the next process-local Fleet message, Channel change, or Meeting change. This does not read messages or wake another Agent.',
     parameters: {
+      after_revision: { type: 'integer', description: 'Last revision returned by fleet_messages or fleet_wait. Returns immediately if Fleet has advanced.' },
       timeout_ms: { type: 'integer', description: 'Wait duration in milliseconds, from 10000 through 3600000. Defaults to 30000.' },
     },
     output: jsonOutput(WAIT_SCHEMA),
@@ -217,7 +219,7 @@ export function apply(ctx: Context): void {
         throw new Error('timeout_ms must be an integer from 10000 through 3600000')
       }
       callingAgent(exec.agent, 'fleet_wait')
-      return hub.wait(timeoutMs, exec.signal)
+      return hub.wait(args.after_revision, timeoutMs, exec.signal)
     },
   }))
 

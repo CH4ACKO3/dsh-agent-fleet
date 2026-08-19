@@ -101,6 +101,14 @@ describe('MessageHub', () => {
     expect(() => hub.read(qa, { conversation: '#review-room' })).toThrow('cannot access')
   })
 
+  it('lets only the creator archive a Channel', () => {
+    const { hub, lead, reviewer } = setup()
+    hub.createChannel(lead, { name: 'review-room' })
+
+    expect(() => hub.archiveChannel(reviewer, 'review-room')).toThrow('only Channel creator')
+    expect(hub.archiveChannel(lead, 'review-room')).toMatchObject({ archived: true })
+  })
+
   it('validates replies against the current conversation', () => {
     const { hub, lead, reviewer, qa } = setup()
     const first = hub.send(lead, {
@@ -119,7 +127,7 @@ describe('MessageHub', () => {
 
   it('releases waiters on the next Fleet change', async () => {
     const { hub, lead, reviewer } = setup()
-    const waiting = hub.wait(1_000)
+    const waiting = hub.wait(undefined, 1_000)
     hub.send(lead, {
       to: '@reviewer',
       text: 'A change occurred.',
@@ -127,6 +135,18 @@ describe('MessageHub', () => {
     })
 
     await expect(waiting).resolves.toEqual({ timedOut: false, revision: 1 })
+  })
+
+  it('does not miss a message accepted before waiting starts', async () => {
+    const { hub, lead, reviewer } = setup()
+    const baseline = hub.read(lead, { conversation: '@reviewer' }).revision
+    hub.send(reviewer, {
+      to: '@lead',
+      text: 'Already arrived.',
+      delivery: 'quiet',
+    })
+
+    await expect(hub.wait(baseline, 1_000)).resolves.toEqual({ timedOut: false, revision: 1 })
   })
 
   it('opens a Meeting with an attributed agenda and wakes every participant', () => {

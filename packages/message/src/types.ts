@@ -53,6 +53,7 @@ export interface ReadMessagesInput {
 export interface ReadMessagesResult {
   readonly messages: FleetMessage[]
   readonly hasMore: boolean
+  readonly revision: number
 }
 
 export interface FleetChannel {

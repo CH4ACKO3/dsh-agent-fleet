@@ -149,6 +149,7 @@ export class MessageHub {
     return {
       messages: snapshot(page),
       hasMore: start + page.length < messages.length,
+      revision: this.revision,
     }
   }
 
@@ -192,6 +193,7 @@ export class MessageHub {
     const channel = this.channels.get(name)
     if (channel === undefined) throw new Error(`unknown channel ${name}`)
     if (!this.canRead(channel, sender.id)) throw new Error(`Agent ${sender.id} cannot access #${name}`)
+    if (channel.createdBy !== sender.id) throw new Error(`only Channel creator ${channel.createdBy} can archive #${name}`)
     if (channel.archived) return snapshot(channel)
 
     const archived = { ...channel, archived: true }
@@ -267,10 +269,19 @@ export class MessageHub {
     return snapshot(closed)
   }
 
-  wait(timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
+  wait(afterRevision: number | undefined, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
     this.assertOpen()
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
       throw new Error('timeout must be a positive integer')
+    }
+    if (afterRevision !== undefined) {
+      if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
+        throw new Error('after revision must be a non-negative integer')
+      }
+      if (afterRevision > this.revision) throw new Error('after revision is ahead of Fleet state')
+      if (afterRevision < this.revision) {
+        return Promise.resolve({ timedOut: false, revision: this.revision })
+      }
     }
     if (signal?.aborted === true) return Promise.reject(signal.reason ?? new Error('fleet_wait aborted'))
 
