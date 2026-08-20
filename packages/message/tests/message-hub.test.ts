@@ -127,7 +127,7 @@ describe('MessageHub', () => {
 
   it('releases waiters on the next Fleet change', async () => {
     const { hub, lead, reviewer } = setup()
-    const waiting = hub.wait(undefined, 1_000)
+    const waiting = hub.wait(reviewer, undefined, 1_000)
     hub.send(lead, {
       to: '@reviewer',
       text: 'A change occurred.',
@@ -146,7 +146,42 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
 
-    await expect(hub.wait(baseline, 1_000)).resolves.toEqual({ timedOut: false, revision: 1 })
+    await expect(hub.wait(lead, baseline, 1_000)).resolves.toEqual({ timedOut: false, revision: 1 })
+  })
+
+  it('does not release an Agent waiter for an unrelated private conversation', async () => {
+    const { hub, lead, reviewer, observer } = setup()
+    const waiting = hub.wait(observer, undefined, 10)
+    hub.send(lead, {
+      to: '@reviewer',
+      text: 'Private review request.',
+      delivery: 'quiet',
+    })
+
+    await expect(waiting).resolves.toEqual({ timedOut: true, revision: 0 })
+  })
+
+  it('keeps decentralized Channel task replies visible while waking only mentioned peers', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const task = hub.send(lead, {
+      to: '#general',
+      text: 'Please claim the parser review.',
+      delivery: 'quiet',
+    })
+    hub.send(reviewer, {
+      to: '#general',
+      text: 'Claimed; the parser review is complete.',
+      replyTo: task.messageId,
+      mentions: ['@lead'],
+      delivery: 'wakeup',
+    })
+
+    expect(hub.read(qa, { conversation: '#general' }).messages.at(-1)).toMatchObject({
+      from: 'reviewer',
+      replyTo: task.messageId,
+    })
+    expect(lead.followedUp.at(-1)).toContain('parser review is complete')
+    expect(qa.followedUp).toHaveLength(0)
   })
 
   it('opens a Meeting with an attributed agenda and wakes every participant', () => {

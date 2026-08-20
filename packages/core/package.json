@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-agent-fleet/message",
+  "name": "@dsh-agent-fleet/core",
   "version": "0.1.0",
-  "description": "Process-local messaging and coordination tools for DSH Agent Fleet",
+  "description": "Process-local agent registry and control for DSH Agent Fleet",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -31,7 +31,6 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-session": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.8"
   },

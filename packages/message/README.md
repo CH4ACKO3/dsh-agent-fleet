@@ -18,6 +18,11 @@ DSH Agent Fleet 的进程内通信组件。
 Agent 目标目前使用 DSH Agent ID，例如 `@agent-id`。频道使用 `#channel`。在 Core
 提供 Fleet 成员目录后，Core 可以在调用本模块前解析角色名和别名。
 
+频道是持久的异步协作空间，不形成 Agent 上下级关系。Agent 可以在频道中发布工作，
+其他 Agent 使用 `reply_to` 认领、补充或返回结果；使用 `fleet_followup` 时，消息对所有
+频道成员可见，但只有明确 `mentions` 的 Agent 会被唤醒。频道的 `createdBy` 只控制归档，
+不代表频道负责人。`fleet_wait` 只响应当前 Agent 可见的消息、频道或会议变化。
+
 会议使用 `meeting:meeting-id`。发起和结束会议会唤醒所有其他参会者；会中普通消息
 会通过 `inject` 将完整正文直接加入所有其他参会者的上下文，而不是像频道广播一样
 只发送历史提示。使用 `fleet_followup` 向会议发言时，会唤醒所有其他参会者。只有

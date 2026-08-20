@@ -8,9 +8,9 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "pnpm --filter @dsh-agent-fleet/message build",
-    "test": "pnpm --filter @dsh-agent-fleet/message test",
-    "typecheck": "pnpm --filter @dsh-agent-fleet/message typecheck"
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -20,6 +20,6 @@
     "@deepseek-ai/dsh-tools": "0.1.0-rc.8",
     "@types/node": "^22.20.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.11"
   }
 }

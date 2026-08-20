@@ -2,7 +2,7 @@
 
 Agent development collaboration components for DeepSeek Harness.
 
-The Message component now contains the first process-local runtime slice. Other components remain structural placeholders and will be added incrementally.
+Core and Message contain the first process-local runtime slices. Resources and UI remain structural placeholders and will be added incrementally.
 
 ## Components
 

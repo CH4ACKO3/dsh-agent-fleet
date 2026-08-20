@@ -2,6 +2,16 @@
 
 Fleet 的控制平面和公共基础。
 
+当前进程内实现提供 `fleet_agent` 工具，用于：
+
+- 将当前 DSH Agent 注册为 Fleet 成员；
+- 查询、更新和注销自己的 Fleet 成员信息；
+- 创建受 Core 管理的子 Agent；
+- 由创建者取消或停止受管理 Agent。
+
+Core 只保存成员名称、角色和能力等 Fleet 元数据。Agent 的实际创建、运行状态、取消
+和停止均委托给 DSH 原生 `AgentRegistry`，不实现第二套 Agent loop。
+
 ## 负责
 
 - 定义 Project、Team、Agent、Work、Decision 等公共实体与标识。

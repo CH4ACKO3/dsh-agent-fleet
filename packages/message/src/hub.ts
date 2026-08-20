@@ -23,6 +23,7 @@ const CHANNEL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MAX_MESSAGE_LENGTH = 65_536
 
 interface Waiter {
+  readonly agentId: string
   finish(result: WaitResult): void
   fail(error: unknown): void
 }
@@ -75,6 +76,7 @@ export class MessageHub {
   private readonly meetings = new Map<string, FleetMeeting>()
   private readonly history: FleetMessage[] = []
   private readonly waiters = new Set<Waiter>()
+  private readonly agentRevisions = new Map<string, number>()
   private sequence = 0
   private revision = 0
   private closed = false
@@ -149,7 +151,7 @@ export class MessageHub {
     return {
       messages: snapshot(page),
       hasMore: start + page.length < messages.length,
-      revision: this.revision,
+      revision: this.agentRevision(sender.id),
     }
   }
 
@@ -183,7 +185,7 @@ export class MessageHub {
       archived: false,
     }
     this.channels.set(channel.id, channel)
-    this.changed()
+    this.changed(this.visibleChannelAgentIds(channel))
     return snapshot(channel)
   }
 
@@ -198,7 +200,7 @@ export class MessageHub {
 
     const archived = { ...channel, archived: true }
     this.channels.set(name, archived)
-    this.changed()
+    this.changed(this.visibleChannelAgentIds(archived))
     return snapshot(archived)
   }
 
@@ -242,6 +244,7 @@ export class MessageHub {
       delivery: 'wakeup',
     }, agenda, [], [], 'meeting_opened')
     this.deliverMeeting(meeting, sender.id, message, true)
+    this.changed(meeting.participants)
     return snapshot(meeting)
   }
 
@@ -266,10 +269,16 @@ export class MessageHub {
       delivery: 'wakeup',
     }, text, [], [], 'meeting_closed')
     this.deliverMeeting(closed, sender.id, message, true)
+    this.changed(closed.participants)
     return snapshot(closed)
   }
 
-  wait(afterRevision: number | undefined, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
+  wait(
+    sender: MessageAgent,
+    afterRevision: number | undefined,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<WaitResult> {
     this.assertOpen()
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
       throw new Error('timeout must be a positive integer')
@@ -278,9 +287,10 @@ export class MessageHub {
       if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
         throw new Error('after revision must be a non-negative integer')
       }
-      if (afterRevision > this.revision) throw new Error('after revision is ahead of Fleet state')
-      if (afterRevision < this.revision) {
-        return Promise.resolve({ timedOut: false, revision: this.revision })
+      const revision = this.agentRevision(sender.id)
+      if (afterRevision > revision) throw new Error('after revision is ahead of Agent-visible Fleet state')
+      if (afterRevision < revision) {
+        return Promise.resolve({ timedOut: false, revision })
       }
     }
     if (signal?.aborted === true) return Promise.reject(signal.reason ?? new Error('fleet_wait aborted'))
@@ -296,6 +306,7 @@ export class MessageHub {
         operation()
       }
       const waiter: Waiter = {
+        agentId: sender.id,
         finish: result => { settle(() => { resolve(result) }) },
         fail: error => { settle(() => { reject(error) }) },
       }
@@ -303,7 +314,7 @@ export class MessageHub {
         waiter.fail(signal?.reason ?? new Error('fleet_wait aborted'))
       }
       const timer = setTimeout(() => {
-        waiter.finish({ timedOut: true, revision: this.revision })
+        waiter.finish({ timedOut: true, revision: this.agentRevision(sender.id) })
       }, timeoutMs)
       signal?.addEventListener('abort', onAbort, { once: true })
       this.waiters.add(waiter)
@@ -327,6 +338,7 @@ export class MessageHub {
     const target = this.requireAgent(targetId)
     const message = this.appendMessage(sender.id, input, text, resources, [])
     this.deliver(target, message, input.delivery === 'wakeup', false)
+    this.changed([sender.id, target.id])
     return { messageId: message.id, recipients: 1, woken: input.delivery === 'wakeup' ? 1 : 0 }
   }
 
@@ -359,6 +371,7 @@ export class MessageHub {
       const wake = input.delivery === 'wakeup' && mentioned.has(recipient.id)
       this.deliver(recipient, message, wake, !wake)
     }
+    this.changed([sender.id, ...recipients.map(recipient => recipient.id)])
     return {
       messageId: message.id,
       recipients: recipients.length,
@@ -379,6 +392,7 @@ export class MessageHub {
     const message = this.appendMessage(sender.id, input, text, resources, [])
     const wake = input.delivery === 'wakeup'
     this.deliverMeeting(meeting, sender.id, message, wake)
+    this.changed(meeting.participants)
     return {
       messageId: message.id,
       recipients: meeting.participants.length - 1,
@@ -409,7 +423,6 @@ export class MessageHub {
       createdAt: new Date().toISOString(),
     }
     this.history.push(message)
-    this.changed()
     return message
   }
 
@@ -485,10 +498,24 @@ export class MessageHub {
     return channel.open || channel.members.includes(agentId)
   }
 
-  private changed(): void {
+  private visibleChannelAgentIds(channel: FleetChannel): string[] {
+    return this.agents.list()
+      .filter(agent => this.canRead(channel, agent.id))
+      .map(agent => agent.id)
+  }
+
+  private agentRevision(agentId: string): number {
+    return this.agentRevisions.get(agentId) ?? 0
+  }
+
+  private changed(agentIds: readonly string[]): void {
     this.revision += 1
     const result = { timedOut: false, revision: this.revision }
-    for (const waiter of [...this.waiters]) waiter.finish(result)
+    const visible = new Set(agentIds)
+    for (const agentId of visible) this.agentRevisions.set(agentId, this.revision)
+    for (const waiter of [...this.waiters]) {
+      if (visible.has(waiter.agentId)) waiter.finish(result)
+    }
   }
 
   private assertOpen(): void {

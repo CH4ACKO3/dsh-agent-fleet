@@ -145,7 +145,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send a process-local Fleet message without waking an idle Agent. Use @agent-id for a direct message, #channel for a Channel post, or meeting:id for a Meeting message. Meeting messages enter every other participant\'s context in full.',
+    description: 'Send a process-local Fleet message without waking an idle Agent. Use #channel as a shared asynchronous coordination log and reply_to to continue a task thread without creating an Agent hierarchy. Meeting messages enter every other participant\'s context in full.',
     parameters: {
       to: { type: 'string', required: true, description: 'Target in @agent-id, #channel, or meeting:id form.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
@@ -166,7 +166,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_followup',
-    description: 'Send a process-local Fleet message and start the recipient Agents\' next turns. A Channel target requires explicit @agent-id mentions; a Meeting target wakes every other participant.',
+    description: 'Send a process-local Fleet message and start selected Agents\' next turns. In a Channel, the message remains visible to every member but only explicitly mentioned peers wake; no Channel member is its coordinator by default.',
     parameters: {
       to: { type: 'string', required: true, description: 'Target in @agent-id, #channel, or meeting:id form.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
@@ -207,7 +207,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_wait',
-    description: 'Wait for the next process-local Fleet message, Channel change, or Meeting change. This does not read messages or wake another Agent.',
+    description: 'Wait for the next Fleet change visible to the calling Agent. Unrelated private conversations and Channels do not complete the wait. This does not read messages or wake another Agent.',
     parameters: {
       after_revision: { type: 'integer', description: 'Last revision returned by fleet_messages or fleet_wait. Returns immediately if Fleet has advanced.' },
       timeout_ms: { type: 'integer', description: 'Wait duration in milliseconds, from 10000 through 3600000. Defaults to 30000.' },
@@ -218,14 +218,14 @@ export function apply(ctx: Context): void {
       if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 10_000 || timeoutMs > 3_600_000) {
         throw new Error('timeout_ms must be an integer from 10000 through 3600000')
       }
-      callingAgent(exec.agent, 'fleet_wait')
-      return hub.wait(args.after_revision, timeoutMs, exec.signal)
+      const caller = callingAgent(exec.agent, 'fleet_wait')
+      return hub.wait(caller, args.after_revision, timeoutMs, exec.signal)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'fleet_channel',
-    description: 'List visible process-local Fleet Channels, create one, or archive one. Omit members when creating an open Channel; provide explicit @agent-id members for a private Channel.',
+    description: 'List, create, or archive shared asynchronous coordination Channels. A Channel has no leader; createdBy only controls archival. Omit members for an open Channel or provide explicit @agent-id members for a private Channel.',
     parameters: {
       action: { type: 'string', required: true, enum: ['list', 'create', 'archive'] },
       name: { type: 'string', description: 'Lower-kebab-case Channel name without #.' },
