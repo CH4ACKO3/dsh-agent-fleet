@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import { FleetCore } from '../src/core.js'
 import type {
@@ -11,12 +12,26 @@ import type {
 class FakeAgent implements RuntimeAgent {
   status: 'idle' | 'running' = 'idle'
   readonly cancellations: Array<{ readonly kind: 'user' | 'parent' }> = []
+  readonly injected: UserMessage[] = []
+  readonly followedUp: UserMessage[] = []
 
   constructor(readonly id: string) {}
 
   cancel(cause: { readonly kind: 'user' | 'parent' }): void {
     this.cancellations.push(cause)
     this.status = 'idle'
+  }
+
+  whenIdle(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  inject(message: UserMessage): void {
+    this.injected.push(message)
+  }
+
+  followup(message: UserMessage): void {
+    this.followedUp.push(message)
   }
 }
 
@@ -90,6 +105,32 @@ describe('FleetCore', () => {
     expect(() => core.register(lead, { name: 'lead-copy', role: 'Lead' })).toThrow('already registered')
   })
 
+  it('resolves Fleet names while preserving native Agent targets', () => {
+    const { core, lead } = setup()
+    core.register(lead, { name: 'tech-lead', role: 'Lead' })
+
+    expect(core.resolveTarget('@tech-lead')).toBe('@lead-id')
+    expect(core.resolveTarget('@native-agent-id')).toBe('@native-agent-id')
+    expect(core.nameForAgent('lead-id')).toBe('tech-lead')
+    expect(core.nameForAgent('native-agent-id')).toBeUndefined()
+  })
+
+  it('keeps the first registered project root shared by the Fleet', () => {
+    const { core } = setup()
+
+    expect(core.bindProjectRoot('/repo')).toBe('/repo')
+    expect(core.bindProjectRoot('/repo/.worktrees/reviewer')).toBe('/repo')
+    expect(core.projectRoot()).toBe('/repo')
+  })
+
+  it('removes member metadata when the native Agent is disposed', () => {
+    const { core, lead } = setup()
+    core.register(lead, { name: 'tech-lead', role: 'Lead' })
+
+    core.disposed(lead.id)
+    expect(core.list()).toEqual([])
+  })
+
   it('creates and stops a managed Agent through its creator', async () => {
     const { core, runtime, lead, reviewer } = setup()
     const created = await core.create(lead, {
@@ -98,6 +139,7 @@ describe('FleetCore', () => {
       capabilities: ['review'],
       cwd: '/workspace',
       model: 'deepseek-chat',
+      persona: 'Review code independently.',
     })
 
     expect(created).toMatchObject({
@@ -106,7 +148,11 @@ describe('FleetCore', () => {
       managed: true,
       status: 'idle',
     })
-    expect(runtime.creates[0]).toMatchObject({ cwd: '/workspace', model: 'deepseek-chat' })
+    expect(runtime.creates[0]).toMatchObject({
+      cwd: '/workspace',
+      model: 'deepseek-chat',
+      persona: 'Review code independently.',
+    })
     await expect(core.stop(reviewer, 'reviewer')).rejects.toThrow('only creator')
     await expect(core.stop(lead, 'reviewer')).resolves.toMatchObject({ status: 'offline' })
     expect(runtime.get(created.id)).toBeUndefined()

@@ -25,9 +25,14 @@ const MESSAGE_SCHEMA = {
   properties: {
     id: { type: 'string', required: true },
     sequence: { type: 'integer', required: true },
-    kind: { type: 'string', required: true, enum: ['text', 'meeting_opened', 'meeting_closed'] },
+    kind: {
+      type: 'string',
+      required: true,
+      enum: ['text', 'meeting_opened', 'meeting_closed', 'vote_opened', 'vote_cast', 'vote_closed'],
+    },
     conversation: { type: 'string', required: true },
     from: { type: 'string', required: true },
+    fromName: { type: 'string' },
     text: { type: 'string', required: true },
     replyTo: { type: 'string' },
     resources: { type: 'array', required: true, items: { type: 'string' } },
@@ -44,11 +49,15 @@ const CHANNEL_SCHEMA = {
     id: { type: 'string', required: true },
     name: { type: 'string', required: true },
     topic: { type: 'string', required: true },
+    summary: { type: 'string', required: true },
+    body: { type: 'string', required: true },
+    revision: { type: 'integer', required: true },
     open: { type: 'boolean', required: true },
     members: { type: 'array', required: true, items: { type: 'string' } },
     createdBy: { type: 'string', required: true },
     createdAt: { type: 'string', required: true },
     archived: { type: 'boolean', required: true },
+    updatedAt: { type: 'string', required: true },
   },
 } as const
 
@@ -100,9 +109,44 @@ const CHANNEL_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', required: true, enum: ['list', 'create', 'archive'] },
+    action: { type: 'string', required: true, enum: ['list', 'create', 'update', 'archive'] },
     channels: { type: 'array', items: CHANNEL_SCHEMA },
     channel: CHANNEL_SCHEMA,
+  },
+} as const
+
+const VOTE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    channel: { type: 'string', required: true },
+    kind: { type: 'string', required: true, enum: ['start_work', 'finish', 'blocked', 'message'] },
+    statement: { type: 'string', required: true },
+    initiator: { type: 'string', required: true },
+    voters: { type: 'array', required: true, items: { type: 'string' } },
+    approvals: { type: 'array', required: true, items: { type: 'string' } },
+    rejection: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        voter: { type: 'string', required: true },
+        reason: { type: 'string', required: true },
+      },
+    },
+    status: { type: 'string', required: true, enum: ['open', 'approved', 'rejected'] },
+    createdAt: { type: 'string', required: true },
+    closedAt: { type: 'string' },
+  },
+} as const
+
+const VOTE_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'cast'] },
+    votes: { type: 'array', items: VOTE_SCHEMA },
+    vote: VOTE_SCHEMA,
   },
 } as const
 
@@ -131,13 +175,33 @@ function callingAgent(agent: Agent | undefined, tool: string): Agent {
   return agent
 }
 
+interface FleetDirectory {
+  resolveTarget(value: string): `@${string}`
+  nameForAgent(id: string): string | undefined
+}
+
+function fleetDirectory(ctx: Context): FleetDirectory | undefined {
+  return ctx.get('fleetCore') as FleetDirectory | undefined
+}
+
 export function apply(ctx: Context): void {
   const hub = new MessageHub({
     get(id): MessageAgent | undefined {
+      const core = fleetDirectory(ctx)
+      if (core !== undefined && core.nameForAgent(id) === undefined) return undefined
       return ctx.agents.get(SessionId(id))
     },
     list(): MessageAgent[] {
-      return ctx.agents.list()
+      const agents = ctx.agents.list()
+      const core = fleetDirectory(ctx)
+      return core === undefined ? agents : agents.filter(agent => core.nameForAgent(String(agent.id)) !== undefined)
+    },
+    resolve(reference): string {
+      const core = fleetDirectory(ctx)
+      return core?.resolveTarget(reference).slice(1) ?? reference
+    },
+    displayName(id): string | undefined {
+      return fleetDirectory(ctx)?.nameForAgent(id)
     },
   })
   ctx.provide('fleetMessages', hub)
@@ -147,7 +211,7 @@ export function apply(ctx: Context): void {
     name: 'fleet_send',
     description: 'Send a process-local Fleet message without waking an idle Agent. Use #channel as a shared asynchronous coordination log and reply_to to continue a task thread without creating an Agent hierarchy. Meeting messages enter every other participant\'s context in full.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @agent-id, #channel, or meeting:id form.' },
+      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
@@ -168,7 +232,7 @@ export function apply(ctx: Context): void {
     name: 'fleet_followup',
     description: 'Send a process-local Fleet message and start selected Agents\' next turns. In a Channel, the message remains visible to every member but only explicitly mentioned peers wake; no Channel member is its coordinator by default.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @agent-id, #channel, or meeting:id form.' },
+      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
       mentions: { type: 'array', items: { type: 'string' }, description: 'Required explicit @agent-id targets for a Channel follow-up.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
@@ -191,7 +255,7 @@ export function apply(ctx: Context): void {
     name: 'fleet_messages',
     description: 'Read process-local Fleet message history for one direct conversation, Channel, or Meeting. This is a history query and does not acknowledge an inbox.',
     parameters: {
-      conversation: { type: 'string', required: true, description: 'Conversation in @agent-id, #channel, or meeting:id form.' },
+      conversation: { type: 'string', required: true, description: 'Conversation in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
       limit: { type: 'integer', description: 'Number of messages, from 1 through 100. Defaults to 50.' },
     },
@@ -225,12 +289,14 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'fleet_channel',
-    description: 'List, create, or archive shared asynchronous coordination Channels. A Channel has no leader; createdBy only controls archival. Omit members for an open Channel or provide explicit @agent-id members for a private Channel.',
+    description: 'List, create, update, or archive shared asynchronous coordination Channels. Summary and body are the current shared state; messages remain the chronological log.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['list', 'create', 'archive'] },
+      action: { type: 'string', required: true, enum: ['list', 'create', 'update', 'archive'] },
       name: { type: 'string', description: 'Lower-kebab-case Channel name without #.' },
       topic: { type: 'string', description: 'Short Channel topic used when creating.' },
       members: { type: 'array', items: { type: 'string' }, description: 'Optional private Channel members in @agent-id form.' },
+      summary: { type: 'string', description: 'Concise current Channel summary.' },
+      body: { type: 'string', description: 'Free-form current Channel work state.' },
     },
     output: jsonOutput(CHANNEL_RESULT_SCHEMA),
     execute(args, exec) {
@@ -246,12 +312,75 @@ export function apply(ctx: Context): void {
             name: args.name,
             ...(args.topic === undefined ? {} : { topic: args.topic }),
             ...(args.members === undefined ? {} : { members: args.members }),
+            ...(args.summary === undefined ? {} : { summary: args.summary }),
+            ...(args.body === undefined ? {} : { body: args.body }),
+          }),
+        })
+      }
+      if (args.action === 'update') {
+        return Promise.resolve({
+          action: 'update' as const,
+          channel: hub.updateChannel(caller, args.name, {
+            ...(args.summary === undefined ? {} : { summary: args.summary }),
+            ...(args.body === undefined ? {} : { body: args.body }),
           }),
         })
       }
       return Promise.resolve({
         action: 'archive' as const,
         channel: hub.archiveChannel(caller, args.name),
+      })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_vote',
+    description: 'Create or cast a non-blocking Channel Vote. Every other active member who can read the Channel votes once; one rejection rejects, and unanimous approval passes.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'cast'] },
+      id: { type: 'string', description: 'Vote id required for get or cast.' },
+      channel: { type: 'string', description: 'Channel target such as #main. Required for create; optional filter for list.' },
+      kind: { type: 'string', enum: ['start_work', 'finish', 'blocked', 'message'], description: 'Vote outcome kind required for create.' },
+      statement: { type: 'string', description: 'Concrete proposal and evidence required for create.' },
+      response: { type: 'string', enum: ['approve', 'reject'], description: 'Vote response required for cast.' },
+      reason: { type: 'string', description: 'Required when rejecting.' },
+    },
+    output: jsonOutput(VOTE_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_vote')
+      if (args.action === 'list') {
+        return Promise.resolve({
+          action: 'list' as const,
+          votes: hub.listVotes(caller, args.channel),
+        })
+      }
+      if (args.action === 'get') {
+        if (args.id === undefined) throw new Error('fleet_vote get requires id')
+        return Promise.resolve({ action: 'get' as const, vote: hub.getVote(caller, args.id) })
+      }
+      if (args.action === 'create') {
+        if (args.channel === undefined || args.kind === undefined || args.statement === undefined) {
+          throw new Error('fleet_vote create requires channel, kind, and statement')
+        }
+        return Promise.resolve({
+          action: 'create' as const,
+          vote: hub.createVote(caller, {
+            channel: args.channel as `#${string}`,
+            kind: args.kind,
+            statement: args.statement,
+          }),
+        })
+      }
+      if (args.id === undefined || args.response === undefined) {
+        throw new Error('fleet_vote cast requires id and response')
+      }
+      return Promise.resolve({
+        action: 'cast' as const,
+        vote: hub.castVote(caller, {
+          id: args.id,
+          response: args.response,
+          ...(args.reason === undefined ? {} : { reason: args.reason }),
+        }),
       })
     },
   }))

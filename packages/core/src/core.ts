@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
+import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import type {
   AgentRuntime,
   CreateFleetAgentInput,
   FleetAgent,
   RegisterFleetAgentInput,
+  ResumeFleetAgentInput,
   RuntimeAgent,
   RuntimeAgentHandle,
   UpdateFleetAgentInput,
@@ -51,6 +53,7 @@ export class FleetCore {
   private readonly memberNamesByAgent = new Map<string, string>()
   private readonly handles = new Map<string, RuntimeAgentHandle>()
   private readonly creatingNames = new Set<string>()
+  private sharedRoot: string | undefined
   private closed = false
 
   constructor(private readonly runtime: AgentRuntime) {}
@@ -63,6 +66,37 @@ export class FleetCore {
   get(name: string): FleetAgent {
     this.assertOpen()
     return this.describe(this.requireMember(memberName(name)))
+  }
+
+  resolveTarget(reference: string): `@${string}` {
+    this.assertOpen()
+    const value = reference.trim()
+    const id = value.startsWith('@') ? value.slice(1) : value
+    if (id.length === 0) throw new Error('Fleet Agent target cannot be empty')
+    return `@${this.members.get(id)?.id ?? id}`
+  }
+
+  nameForAgent(id: string): string | undefined {
+    this.assertOpen()
+    return this.memberNamesByAgent.get(id)
+  }
+
+  bindProjectRoot(path: string): string {
+    this.assertOpen()
+    this.sharedRoot ??= requiredText(path, 'project root')
+    return this.sharedRoot
+  }
+
+  resetProjectRoot(path: string): string {
+    this.assertOpen()
+    if (this.members.size > 0) throw new Error('cannot reset the Fleet project root while members are registered')
+    this.sharedRoot = requiredText(path, 'project root')
+    return this.sharedRoot
+  }
+
+  projectRoot(): string | undefined {
+    this.assertOpen()
+    return this.sharedRoot
   }
 
   register(agent: RuntimeAgent, input: RegisterFleetAgentInput): FleetAgent {
@@ -113,6 +147,14 @@ export class FleetCore {
     return result
   }
 
+  disposed(id: string): void {
+    const name = this.memberNamesByAgent.get(id)
+    if (name === undefined) return
+    this.members.delete(name)
+    this.memberNamesByAgent.delete(id)
+    this.handles.delete(name)
+  }
+
   async create(owner: RuntimeAgent, input: CreateFleetAgentInput): Promise<FleetAgent> {
     this.assertOpen()
     this.requireLive(owner.id)
@@ -130,6 +172,49 @@ export class FleetCore {
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+        ...(input.persona === undefined ? {} : { persona: input.persona }),
+      })
+      this.assertOpen()
+      if (this.memberNamesByAgent.has(handle.agent.id)) {
+        throw new Error(`Agent ${handle.agent.id} is already registered`)
+      }
+      const member: MemberRecord = {
+        id: handle.agent.id,
+        name,
+        role,
+        capabilities,
+        createdBy: owner.id,
+        registeredAt: new Date().toISOString(),
+      }
+      this.members.set(name, member)
+      this.memberNamesByAgent.set(member.id, name)
+      this.handles.set(name, handle)
+      return this.describe(member)
+    } catch (error) {
+      if (handle !== undefined) await handle.dispose()
+      throw error
+    } finally {
+      this.creatingNames.delete(name)
+    }
+  }
+
+  async resume(owner: RuntimeAgent, input: ResumeFleetAgentInput): Promise<FleetAgent> {
+    this.assertOpen()
+    this.requireLive(owner.id)
+    const name = memberName(input.name)
+    this.requireAvailableName(name)
+    const role = requiredText(input.role, 'role')
+    const capabilities = uniqueStrings(input.capabilities ?? [])
+    this.creatingNames.add(name)
+
+    let handle: RuntimeAgentHandle | undefined
+    try {
+      handle = await this.runtime.resume(owner, {
+        id: requiredText(input.id, 'Agent id'),
+        ...(input.provider === undefined ? {} : { provider: input.provider }),
+        ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+        ...(input.persona === undefined ? {} : { persona: input.persona }),
       })
       this.assertOpen()
       if (this.memberNamesByAgent.has(handle.agent.id)) {
@@ -172,6 +257,30 @@ export class FleetCore {
     if (caller.id !== member.createdBy) {
       throw new Error(`only creator ${member.createdBy ?? 'unknown'} can stop Fleet Agent ${member.name}`)
     }
+    return this.stopManaged(member.name)
+  }
+
+  inject(name: string, message: UserMessage): void {
+    this.requireLive(this.requireMember(memberName(name)).id).inject(message)
+  }
+
+  followup(name: string, message: UserMessage): void {
+    this.requireLive(this.requireMember(memberName(name)).id).followup(message)
+  }
+
+  whenIdle(name: string): Promise<void> {
+    return this.requireLive(this.requireMember(memberName(name)).id).whenIdle()
+  }
+
+  cancelManaged(name: string, exceptAgentId?: string): void {
+    const member = this.requireMember(memberName(name))
+    if (member.id === exceptAgentId) return
+    const agent = this.runtime.get(member.id)
+    if (agent?.status === 'running') agent.cancel({ kind: 'parent' })
+  }
+
+  async stopManaged(name: string): Promise<FleetAgent> {
+    const member = this.requireMember(memberName(name))
     const handle = this.handles.get(member.name)
     if (handle === undefined) throw new Error(`Fleet Agent ${member.name} is not managed by Core`)
     await handle.dispose()
@@ -188,6 +297,7 @@ export class FleetCore {
     this.handles.clear()
     this.members.clear()
     this.memberNamesByAgent.clear()
+    this.sharedRoot = undefined
     await Promise.all(handles.map(handle => handle.dispose()))
   }
 

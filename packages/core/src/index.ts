@@ -1,6 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import {
+  appendDelegatedPolicyOverrides,
+  applyChildComposition,
+  captureDelegatedPolicyOverrides,
+  childSessionMeta,
+  resolveChildAgentOptions,
+  resolveChildDepth,
+} from '@deepseek-ai/dsh-subagent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
@@ -72,23 +80,50 @@ export function apply(ctx: Context): void {
     async create(owner, input): Promise<RuntimeAgentHandle> {
       const nativeOwner = ctx.agents.get(SessionId(owner.id))
       if (nativeOwner === undefined) throw new Error(`Agent ${owner.id} is not running in this process`)
-      const handle: AgentHandle = await nativeOwner.ctx.agents.create({
+      const childDepth = resolveChildDepth(nativeOwner, undefined)
+      const delegatedPolicies = captureDelegatedPolicyOverrides(nativeOwner)
+      const handle: AgentHandle = await ctx.agents.create({
         sessionId: SessionId(input.id),
         meta: {
-          origin: 'subagent',
-          delegationDepth: (nativeOwner.session.header.delegationDepth ?? 0) + 1,
+          ...childSessionMeta(nativeOwner, childDepth, 0),
           ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         },
+        agentOptions: resolveChildAgentOptions(nativeOwner, {
+          ...(input.provider === undefined ? {} : { provider: input.provider }),
+          ...(input.model === undefined ? {} : { model: input.model }),
+          ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+        }, childDepth),
+        setup(childCtx) {
+          if (childCtx.agent === undefined) throw new Error('Fleet child Agent setup requires ctx.agent')
+          appendDelegatedPolicyOverrides(childCtx.agent.session, delegatedPolicies)
+          applyChildComposition(childCtx, nativeOwner, {
+            ...(input.persona === undefined ? {} : { persona: input.persona }),
+          })
+        },
+      })
+      return handle
+    },
+    async resume(owner, input): Promise<RuntimeAgentHandle> {
+      const nativeOwner = ctx.agents.get(SessionId(owner.id))
+      if (nativeOwner === undefined) throw new Error(`Agent ${owner.id} is not running in this process`)
+      const handle: AgentHandle = await ctx.agents.resume({
+        resumeSessionId: SessionId(input.id),
         agentOptions: {
           ...(input.provider === undefined ? {} : { provider: input.provider }),
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+        },
+        setup(childCtx) {
+          applyChildComposition(childCtx, nativeOwner, {
+            ...(input.persona === undefined ? {} : { persona: input.persona }),
+          })
         },
       })
       return handle
     },
   })
   ctx.provide('fleetCore', core)
+  ctx.on('agent/disposed', ({ agent }) => { core.disposed(String(agent.id)) })
   ctx.effect(() => async () => { await core.close() }, 'fleetCore.close()')
 
   ctx.tools.register(defineTool({
@@ -107,6 +142,7 @@ export function apply(ctx: Context): void {
       provider: { type: 'string', description: 'Optional DSH provider route for a newly created Agent.' },
       model: { type: 'string', description: 'Optional model id for a newly created Agent.' },
       max_tokens: { type: 'integer', description: 'Optional positive output token limit for a newly created Agent.' },
+      persona: { type: 'string', description: 'Optional per-Agent persona used by a newly created Agent.' },
     },
     output: jsonOutput(AGENT_RESULT_SCHEMA),
     async execute(args, exec) {
@@ -118,14 +154,14 @@ export function apply(ctx: Context): void {
         if (args.name === undefined || args.role === undefined) {
           throw new Error('fleet_agent register requires name and role')
         }
-        return {
-          action: 'register' as const,
-          agent: core.register(caller, {
-            name: args.name,
-            role: args.role,
-            ...(args.capabilities === undefined ? {} : { capabilities: args.capabilities }),
-          }),
-        }
+        const agent = core.register(caller, {
+          name: args.name,
+          role: args.role,
+          ...(args.capabilities === undefined ? {} : { capabilities: args.capabilities }),
+        })
+        const cwd = caller.session.header.cwd
+        if (cwd !== undefined) core.bindProjectRoot(cwd)
+        return { action: 'register' as const, agent }
       }
       if (args.action === 'update') {
         return {
@@ -145,18 +181,19 @@ export function apply(ctx: Context): void {
       }
       if (args.action === 'create') {
         if (args.role === undefined) throw new Error('fleet_agent create requires role')
-        return {
-          action: 'create' as const,
-          agent: await core.create(caller, {
-            name: args.name,
-            role: args.role,
-            ...(args.capabilities === undefined ? {} : { capabilities: args.capabilities }),
-            ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
-            ...(args.provider === undefined ? {} : { provider: args.provider }),
-            ...(args.model === undefined ? {} : { model: args.model }),
-            ...(args.max_tokens === undefined ? {} : { maxTokens: args.max_tokens }),
-          }),
-        }
+        const agent = await core.create(caller, {
+          name: args.name,
+          role: args.role,
+          ...(args.capabilities === undefined ? {} : { capabilities: args.capabilities }),
+          ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+          ...(args.provider === undefined ? {} : { provider: args.provider }),
+          ...(args.model === undefined ? {} : { model: args.model }),
+          ...(args.max_tokens === undefined ? {} : { maxTokens: args.max_tokens }),
+          ...(args.persona === undefined ? {} : { persona: args.persona }),
+        })
+        const cwd = caller.session.header.cwd
+        if (cwd !== undefined) core.bindProjectRoot(cwd)
+        return { action: 'create' as const, agent }
       }
       if (args.action === 'cancel') {
         return { action: 'cancel' as const, agent: core.cancel(caller, args.name) }

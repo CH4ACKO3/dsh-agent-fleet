@@ -2,31 +2,41 @@
 
 DSH Agent Fleet 的进程内通信组件。
 
-当前实现提供六个模型工具：
+当前实现提供七个模型工具：
 
 - `fleet_send`：静默私信或频道发言；
 - `fleet_followup`：唤醒指定 Agent；
 - `fleet_messages`：读取私信或频道历史；
 - `fleet_wait`：等待下一次消息或频道变化；
-- `fleet_channel`：列出、创建和归档频道。
+- `fleet_channel`：列出、创建、更新和归档频道；
 - `fleet_meeting`：列出、发起和结束会议。
+- `fleet_vote`：在频道中创建、读取和参与一致同意 Vote。
 
-消息历史、频道和会议只保存在当前进程。实际投递直接使用 DSH Agent 的 `inject` 和
-`followup`；模块不维护第二套 inbox、ack、恢复或重试状态。二进制内容由 Resources
-保存，消息只携带资源 ID。
+Message 单独安装时，消息历史、频道、会议和 Vote 只保存在当前进程；由根插件启动
+Team run 时，它们同时进入该 run 的持久协作轨迹。实际投递直接使用 DSH Agent 的 `inject` 和
+`followup`；模块不维护第二套 inbox、ack、恢复或重试状态。消息可以携带资源 ID，
+但不负责保存文件内容。安装 Resources 后，可以先用 `fleet_resource add` 注册普通文件或
+二进制文件，再由接收方用 `fleet_resource get` 解析资源 ID。
 
-Agent 目标目前使用 DSH Agent ID，例如 `@agent-id`。频道使用 `#channel`。在 Core
-提供 Fleet 成员目录后，Core 可以在调用本模块前解析角色名和别名。
+Agent 目标可以使用 Core 注册的 Fleet 名称（例如 `@reviewer`）或原生 DSH Agent ID。
+频道使用 `#channel`。与 Core 一起安装时，只有已注册 Fleet 成员能够参与通信，消息中
+同时保留原生 ID 并展示 Fleet 名称；Message 单独安装时仍按原生 Agent ID 工作。
 
 频道是持久的异步协作空间，不形成 Agent 上下级关系。Agent 可以在频道中发布工作，
 其他 Agent 使用 `reply_to` 认领、补充或返回结果；使用 `fleet_followup` 时，消息对所有
 频道成员可见，但只有明确 `mentions` 的 Agent 会被唤醒。频道的 `createdBy` 只控制归档，
 不代表频道负责人。`fleet_wait` 只响应当前 Agent 可见的消息、频道或会议变化。
+频道的 `summary` 和 `body` 是可替换的当前共享状态，`revision` 随更新递增；消息仍是
+独立的时间顺序记录。
 
 会议使用 `meeting:meeting-id`。发起和结束会议会唤醒所有其他参会者；会中普通消息
 会通过 `inject` 将完整正文直接加入所有其他参会者的上下文，而不是像频道广播一样
 只发送历史提示。使用 `fleet_followup` 向会议发言时，会唤醒所有其他参会者。只有
 发起人可以结束会议，结束后不再接受新消息。
+
+Vote 属于频道。创建者以外、当前可读取该频道的所有在线 Fleet 成员各投一次；任一
+拒绝立即结束 Vote，所有 voter 同意才通过。`finish` 和 `blocked` Vote 在根插件的 Team
+run 中会驱动对应终态。
 
 ## 使用
 

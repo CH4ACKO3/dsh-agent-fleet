@@ -20,6 +20,7 @@ class FakeAgent implements MessageAgent {
 
 function setup(): {
   hub: MessageHub
+  agents: Map<string, FakeAgent>
   lead: FakeAgent
   reviewer: FakeAgent
   qa: FakeAgent
@@ -34,7 +35,7 @@ function setup(): {
     get: id => agents.get(id),
     list: () => [...agents.values()],
   }
-  return { hub: new MessageHub(directory), lead, reviewer, qa, observer }
+  return { hub: new MessageHub(directory), agents, lead, reviewer, qa, observer }
 }
 
 describe('MessageHub', () => {
@@ -56,6 +57,44 @@ describe('MessageHub', () => {
       from: 'lead',
       resources: ['res_parser'],
     })
+  })
+
+  it('shows a Fleet name while retaining the native sender id', () => {
+    const lead = new FakeAgent('lead-id')
+    const reviewer = new FakeAgent('reviewer-id')
+    const members = new Map([lead, reviewer].map(agent => [agent.id, agent]))
+    const hub = new MessageHub({
+      get: id => members.get(id),
+      list: () => [...members.values()],
+      displayName: id => id === 'lead-id' ? 'tech-lead' : 'reviewer',
+    })
+
+    hub.send(lead, {
+      to: '@reviewer-id',
+      text: 'Please review the parser.',
+      delivery: 'quiet',
+    })
+
+    expect(reviewer.injected[0]).toContain('from=@tech-lead')
+    expect(hub.read(reviewer, { conversation: '@lead-id' }).messages[0]).toMatchObject({
+      from: 'lead-id',
+      fromName: 'tech-lead',
+    })
+  })
+
+  it('rejects a sender excluded by the Agent directory', () => {
+    const member = new FakeAgent('member')
+    const outsider = new FakeAgent('outsider')
+    const hub = new MessageHub({
+      get: id => id === member.id ? member : undefined,
+      list: () => [member],
+    })
+
+    expect(() => hub.send(outsider, {
+      to: '#general',
+      text: 'Should not enter the Fleet channel.',
+      delivery: 'quiet',
+    })).toThrow('is not available to Fleet')
   })
 
   it('uses followup for direct wakeup messages', () => {
@@ -107,6 +146,71 @@ describe('MessageHub', () => {
 
     expect(() => hub.archiveChannel(reviewer, 'review-room')).toThrow('only Channel creator')
     expect(hub.archiveChannel(lead, 'review-room')).toMatchObject({ archived: true })
+  })
+
+  it('keeps a revisioned current state separate from Channel messages', () => {
+    const { hub, lead, reviewer } = setup()
+    hub.createChannel(lead, {
+      name: 'delivery',
+      summary: 'Kickoff',
+      body: 'Backlog: vertical slice',
+    })
+
+    expect(hub.updateChannel(reviewer, 'delivery', {
+      summary: 'Implementation',
+      body: 'In Progress: vertical slice',
+    })).toMatchObject({
+      summary: 'Implementation',
+      body: 'In Progress: vertical slice',
+      revision: 1,
+    })
+    expect(hub.read(lead, { conversation: '#delivery' }).messages).toEqual([])
+  })
+
+  it('approves a Channel Vote only after every other readable member approves', () => {
+    const { hub, lead, reviewer, qa, observer } = setup()
+    hub.createChannel(lead, {
+      name: 'delivery',
+      members: ['@reviewer', '@qa', '@observer'],
+    })
+    const opened = hub.createVote(lead, {
+      channel: '#delivery',
+      kind: 'finish',
+      statement: 'Ship artifact.zip after independent review.',
+    })
+
+    expect(opened).toMatchObject({
+      status: 'open',
+      initiator: 'lead',
+      voters: ['reviewer', 'qa', 'observer'],
+    })
+    expect(reviewer.followedUp.at(-1)).toContain('Vote')
+    expect(hub.castVote(reviewer, { id: opened.id, response: 'approve' }).status).toBe('open')
+    expect(hub.castVote(qa, { id: opened.id, response: 'approve' }).status).toBe('open')
+    expect(hub.castVote(observer, { id: opened.id, response: 'approve' })).toMatchObject({
+      status: 'approved',
+      approvals: ['reviewer', 'qa', 'observer'],
+    })
+    expect(lead.followedUp.at(-1)).toContain('approved')
+  })
+
+  it('rejects a Channel Vote immediately with a required reason', () => {
+    const { hub, lead, reviewer } = setup()
+    const opened = hub.createVote(lead, {
+      channel: '#general',
+      kind: 'start_work',
+      statement: 'Begin implementation.',
+    })
+
+    expect(() => hub.castVote(reviewer, { id: opened.id, response: 'reject' })).toThrow('requires a reason')
+    expect(hub.castVote(reviewer, {
+      id: opened.id,
+      response: 'reject',
+      reason: 'Acceptance criteria are missing.',
+    })).toMatchObject({
+      status: 'rejected',
+      rejection: { voter: 'reviewer', reason: 'Acceptance criteria are missing.' },
+    })
   })
 
   it('validates replies against the current conversation', () => {
@@ -248,5 +352,24 @@ describe('MessageHub', () => {
       text: 'Too late.',
       delivery: 'quiet',
     })).toThrow('is closed')
+  })
+
+  it('keeps a Meeting usable when a participant goes offline', () => {
+    const { hub, agents, lead, reviewer, qa } = setup()
+    hub.openMeeting(lead, {
+      id: 'design-review',
+      title: 'Design review',
+      agenda: 'Review the design.',
+      participants: ['@reviewer', '@qa'],
+    })
+    agents.delete(qa.id)
+
+    expect(hub.send(reviewer, {
+      to: 'meeting:design-review',
+      text: 'The review can continue.',
+      delivery: 'wakeup',
+    })).toMatchObject({ recipients: 1, woken: 1 })
+    expect(lead.followedUp.at(-1)).toContain('The review can continue.')
+    expect(hub.closeMeeting(lead, 'design-review')).toMatchObject({ status: 'closed' })
   })
 })

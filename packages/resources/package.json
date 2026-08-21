@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-agent-fleet/core",
+  "name": "@dsh-agent-fleet/resources",
   "version": "0.1.0",
-  "description": "Process-local agent registry and control for DSH Agent Fleet",
+  "description": "Shared workspace files and advisory work paths for DSH Agent Fleet",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -31,8 +31,8 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-fs": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.8"
   },
   "license": "MIT"
