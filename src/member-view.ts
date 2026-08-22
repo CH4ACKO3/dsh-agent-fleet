@@ -12,6 +12,18 @@ export const FLEET_MEMBER_TOOL_GROUPS = [
 
 export type FleetMemberToolGroup = typeof FLEET_MEMBER_TOOL_GROUPS[number]
 
+export const FLEET_MEMBER_TOOL_GROUP_ACTIONS: Record<FleetMemberToolGroup, readonly string[]> = {
+  messages: ['message.read', 'message.post'],
+  coordination: ['meeting.join'],
+  resources: ['resource.read', 'work.read', 'work.claim'],
+  status: ['member-status.read', 'member-status.write'],
+  schedule: [],
+  tasks: [],
+  calendar: [],
+  documents: [],
+  git: [],
+}
+
 export const FLEET_MEMBER_PERMISSIONS = [
   'channel.manage',
   'meeting.manage',
@@ -34,12 +46,6 @@ export type FleetMemberPermission = typeof FLEET_MEMBER_PERMISSIONS[number]
 export interface FleetMemberContacts {
   readonly members: '*' | string[]
   readonly channels: '*' | string[]
-}
-
-export interface FleetWorkspaceMount {
-  readonly name: string
-  readonly path: string
-  readonly access: 'read' | 'write'
 }
 
 /** Persistent identity fields shared by ordinary members and user-facing assistants. */

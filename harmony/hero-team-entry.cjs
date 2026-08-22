@@ -2,6 +2,8 @@
 
 const { component, element } = require('dsh-harmony-react')
 
+const DSH_CLIENT_VERSION = '0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0'
+
 function replaceExactly(context, before, after) {
   const first = context.source.indexOf(before)
   if (first < 0 || context.source.indexOf(before, first + before.length) >= 0) {
@@ -16,7 +18,7 @@ module.exports = [
     description: 'Adds a team creation action beside the native agent preset control.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-agent-preset',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: { name: 'AgentPresetSeat' },
@@ -37,7 +39,7 @@ module.exports = [
         id: 'fleet-agent-session-runtime-face',
         target: {
           package: '@deepseek-ai/dsh-client-runtime',
-          version: '0.1.0-rc.8',
+          version: DSH_CLIENT_VERSION,
           file: 'lib/client.js',
         },
         select: 'SourceFile',
@@ -54,7 +56,7 @@ module.exports = [
         id: 'fleet-agent-session-provider',
         target: {
           package: '@deepseek-ai/dsh-client-ui-renderer',
-          version: '0.1.0-rc.8',
+          version: DSH_CLIENT_VERSION,
           file: 'lib/client.js',
         },
         select: 'SourceFile',
@@ -92,7 +94,7 @@ module.exports = [
     description: 'Carries a staged Fleet mode through the native first composer submission.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: { name: 'InputBar' },
@@ -110,7 +112,7 @@ module.exports = [
     description: 'Shares the native ChatView implementation with the Fleet Agent perspective without replacing its renderer slots.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: { name: 'ChatView' },
@@ -128,7 +130,7 @@ module.exports = [
     description: 'Keeps the native Session view region mounted for an established but message-free Fleet Help Session.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: { name: 'ConversationSession' },
@@ -146,7 +148,7 @@ module.exports = [
     description: 'Primes the native ChatView runtime offscreen when a non-chat view is restored first.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: 'SourceFile',
@@ -183,7 +185,7 @@ module.exports = [
     description: 'Adds the collapsed Fleet Help entry immediately before native Session search.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-workspace',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: {
@@ -205,7 +207,7 @@ module.exports = [
     description: 'Presents a blank Fleet Help Session as an established empty conversation instead of the new-Session Hero.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: { name: 'ConversationRoot' },
@@ -223,7 +225,7 @@ module.exports = [
     description: 'Keeps the native Session title and view tabs visible for an empty Fleet Help conversation.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: { name: 'ConversationSessionHeader' },
@@ -241,7 +243,7 @@ module.exports = [
     description: 'Pins Fleet Help above the native Workspace and Session tree.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-workspace',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: {
@@ -263,7 +265,7 @@ module.exports = [
     description: 'Keeps the dedicated Fleet Help Session out of the ordinary Session tree without archiving it.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-workspace',
-      version: '0.1.0-rc.8',
+      version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
     select: { name: 'WorkspaceBrowser' },

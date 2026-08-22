@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { FleetAccessService } from 'dsh-agent-fleet'
+import { FleetAuthorizationService } from 'dsh-agent-fleet'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
 import { FLEET_GIT_PERMISSIONS, FleetGitIntegration, FleetGitWebRemote, apply } from '../src/index.js'
@@ -35,13 +35,13 @@ describe('FleetGitWebRemote', () => {
 
   it('registers that namespace with native Fleet access alone', async () => {
     const ctx = new Context()
-    const access = new FleetAccessService()
+    const access = new FleetAuthorizationService()
     apply(ctx)
-    ctx.provide('fleetAccess', access)
+    ctx.provide('fleetAuthorization', access)
     await Promise.resolve()
-    expect(access.permissionIds()).toEqual([
+    expect(access.actionIds()).toEqual(expect.arrayContaining([
       'git.inspect', 'git.scope-check', 'git.worktree-create', 'git.worktree-manage',
-    ])
+    ]))
   })
 
   it('supplies fleet_git only through the optional integration provider', () => {
@@ -58,7 +58,7 @@ describe('FleetGitWebRemote', () => {
       memberFor: () => 'developer',
       hasMember: () => true,
       hasPermission: () => true,
-      workspacesFor: () => [{ path: root, access: 'write' }],
+      workspaceFor: () => root,
       permissions: new Set([
         'git.inspect', 'git.scope-check', 'git.worktree-create', 'git.worktree-manage',
       ]),

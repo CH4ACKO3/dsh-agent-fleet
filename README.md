@@ -12,8 +12,8 @@ Install it as a DSH profile layer with `dsh plugin --profile <profile> add dsh-a
 
 ## Components
 
-- `core` — registration, flat member lifecycle, control, and a shared project root.
-- `resources` — shared plan/checklist files, file/binary references, and advisory work paths.
+- `core` — registration, flat member lifecycle, control, and unified authorization.
+- `resources` — Team resource-directory files, file/binary references, and advisory work paths.
 - `message` — Fleet-scoped direct messages, Channels, Meetings, Votes, and shared Channel state.
 - `ui` — embedded Team entry and startup configuration surface for DSH Web.
 
@@ -28,7 +28,7 @@ The root bundle adds lifecycle, archive, and trace tools:
   process restart.
 - `fleet_trace` reads the durable Team coordination timeline or a member's native DSH Session events.
 - `fleet_archive export` writes a complete archive for a paused Team. Member Sessions, messages,
-  traces, shared documents, and uploaded Team files are always included; workspace files are opt-in.
+  traces and Team resource files are always included; workspace files are opt-in.
   `fleet_archive import` creates a paused copy with new Team and Session ids by default; use
   `import_mode: "restore"` to preserve the archive identities for disaster recovery. Either mode can
   continue the same work through `fleet_run resume`.
@@ -40,9 +40,9 @@ reported as an unavailable extension instead of being discarded. During restore,
 receive the source Team and the source-to-imported Session id map so their own references can follow
 a copied Team.
 
-Each Team writes only its workflow index, current/last work record, and cross-member coordination
-events under `.fleet/runs/<team-id>/`. Complete member transcripts remain in the configured DSH
-Session persistence backend. Creating or resuming a Team therefore requires `sessionPersistence`;
+Each Team writes its workflow index, current/last work record, and cross-member coordination events
+under Fleet-owned DSH storage. `<projectRoot>/.fleet/<team-id>/` contains only real Team resource files.
+Complete member transcripts remain in the configured DSH Session persistence backend. Creating or resuming a Team therefore requires `sessionPersistence`;
 Core, Message, and Resources remain independently usable without it.
 
 The initialization format keeps Team identity and members under `core`, then stores settings

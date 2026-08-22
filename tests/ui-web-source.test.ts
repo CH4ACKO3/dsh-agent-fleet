@@ -223,7 +223,7 @@ describe('Fleet Web panel source', () => {
           presence: 'error', statusText: '正在验证团队运行时状态投影', provider: 'deepseek', model: 'deepseek-chat',
         }],
         resources: [{ id: 'plan', name: 'plan.md', kind: 'plan', path: '/workspace/fleet/.fleet/plan.md' }],
-        workspaces: [{ id: 'workspace:/workspace/fleet/src', name: 'source', path: '/workspace/fleet/src' }],
+        workspaces: [{ id: 'workspace:/workspace/fleet', name: 'project', path: '/workspace/fleet' }],
         messages: expect.arrayContaining([
           expect.objectContaining({ id: 'message-1', conversationId: '#general', senderId: 'builder' }),
         ]),

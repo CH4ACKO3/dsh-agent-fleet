@@ -418,7 +418,7 @@ export function installGitTools(ctx: Context, fleetGit: FleetGit, options: {
   readonly memberFor: (agentId: string) => string | undefined
   readonly hasMember: (member: string) => boolean
   readonly hasPermission: (agentId: string, permission: string) => boolean
-  readonly workspacesFor: (agentId: string) => readonly FleetGitWorkspace[]
+  readonly workspaceFor: (agentId: string) => string | undefined
   readonly permissions: ReadonlySet<string>
 }): () => void {
   const actions = [
@@ -452,10 +452,12 @@ export function installGitTools(ctx: Context, fleetGit: FleetGit, options: {
         const intent = args.intent ?? 'read'
         const cwd = args.cwd?.trim() || agent.session.header.cwd
         if (cwd === undefined) throw new Error('fleet_git scope checking requires a working directory')
+        const workspace = options.workspaceFor(agentId) ?? agent.session.header.cwd
+        if (workspace === undefined) throw new Error('fleet_git scope checking requires a Fleet workspace')
         const scope = fleetGit.scope(
           caller,
           cwd,
-          options.workspacesFor(agentId),
+          [{ path: workspace, access: 'write' }],
           intent,
           args.paths ?? [],
           args.branch,

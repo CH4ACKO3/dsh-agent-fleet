@@ -20,7 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FleetRunService } from '../src/run.js'
 import type { FleetRunMember } from '../src/run.js'
 import { FleetArchiveRegistry } from '../src/archive.js'
-import { FleetAccessService } from '../src/access.js'
+import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
 import { normalizeFleetSetupConfiguration } from '../src/setup.js'
 
@@ -340,7 +340,7 @@ function setup(root: string, options?: {
       },
     },
   } as unknown as Context
-  const collaboration = new FleetCollaborationService(context, new FleetAccessService())
+  const collaboration = new FleetCollaborationService(context, new FleetAuthorizationService())
   const service = new FleetRunService(context, core, collaboration, {
     registryDirectory: join(root, '.fleet-registry'),
     ...(options?.archives === undefined ? {} : { archives: options.archives }),
@@ -557,13 +557,9 @@ describe('FleetRunService', () => {
     })
     const lead = run.members.find(member => member.name === 'lead')
     if (lead === undefined) throw new Error('expected lead member')
-    first.service.resourceStore(run.id).createDocument(lead.sessionId, {
-      name: 'decision-log',
-      title: 'Decision log',
-      content: 'Keep this document across archive import.',
-    })
-    const sharedPlan = join(source.root, '.fleet', 'runs', run.id, 'plan.md')
+    const sharedPlan = join(source.root, '.fleet', run.id, 'plan.md')
     writeFileSync(sharedPlan, '# Persistent plan\n')
+    writeFileSync(join(source.root, '.fleet', run.id, 'decision-log.md'), 'Keep this document across archive import.\n')
     writeFileSync(join(source.root, 'workspace-result.txt'), 'workspace payload\n')
     await first.service.pauseTeam(first.launcher as unknown as Agent, run.id)
     for (const member of run.members) {
@@ -619,8 +615,8 @@ describe('FleetRunService', () => {
     expect(imported.extensions).toEqual({ missing: ['missing.plugin'], failed: [] })
     expect(restoredPluginState).toEqual(['{"counter":7}\n'])
     expect(readFileSync(join(restoredRoot, 'workspace-result.txt'), 'utf8')).toBe('workspace payload\n')
-    expect(readFileSync(join(restoredRoot, '.fleet', 'runs', run.id, 'plan.md'), 'utf8')).toBe('# Persistent plan\n')
-    expect(existsSync(join(restoredRoot, '.fleet', 'runs', run.id, 'extensions', 'missing.plugin', 'opaque.bin')))
+    expect(readFileSync(join(restoredRoot, '.fleet', run.id, 'plan.md'), 'utf8')).toBe('# Persistent plan\n')
+    expect(existsSync(join(targetHost.root, '.fleet-registry', run.id, 'extensions', 'missing.plugin', 'opaque.bin')))
       .toBe(true)
     expect([...second.persistedHeaders.values()].map(header => header.cwd)).toEqual(
       run.members.map(() => restoredRoot),
@@ -636,7 +632,7 @@ describe('FleetRunService', () => {
     expect(copied.run.id).not.toBe(run.id)
     expect(copied.run.members.map(member => member.sessionId)).not.toEqual(run.members.map(member => member.sessionId))
     expect(readFileSync(join(copiedRoot, 'workspace-result.txt'), 'utf8')).toBe('workspace payload\n')
-    expect(readFileSync(join(copiedRoot, '.fleet', 'runs', copied.run.id, 'plan.md'), 'utf8'))
+    expect(readFileSync(join(copiedRoot, '.fleet', copied.run.id, 'plan.md'), 'utf8'))
       .toBe('# Persistent plan\n')
     for (const member of copied.run.members) {
       expect(second.persistedHeaders.get(member.sessionId)?.parentSession).toBeUndefined()
@@ -653,10 +649,8 @@ describe('FleetRunService', () => {
       projectRoot: copiedRoot,
     })
     expect(copiedResumed).toMatchObject({ status: 'running', runtimeState: 'active' })
-    expect(second.service.resourceStore(copied.run.id).listDocuments()).toContainEqual(expect.objectContaining({
-      name: 'decision-log',
-      content: 'Keep this document across archive import.',
-    }))
+    expect(readFileSync(join(copiedRoot, '.fleet', copied.run.id, 'decision-log.md'), 'utf8'))
+      .toBe('Keep this document across archive import.\n')
 
     const restoringAssistant = second.runtime.add('restoring-assistant-2', restoredRoot)
     const resumed = await second.service.resume(restoringAssistant as unknown as Agent, {
@@ -664,10 +658,8 @@ describe('FleetRunService', () => {
       projectRoot: restoredRoot,
     })
     expect(resumed).toMatchObject({ status: 'running', runtimeState: 'active' })
-    expect(second.service.resourceStore(run.id).listDocuments()).toContainEqual(expect.objectContaining({
-      name: 'decision-log',
-      content: 'Keep this document across archive import.',
-    }))
+    expect(readFileSync(join(restoredRoot, '.fleet', run.id, 'decision-log.md'), 'utf8'))
+      .toBe('Keep this document across archive import.\n')
     expect(second.runtime.resumes.map(input => input.id)).toEqual(expect.arrayContaining([
       ...run.members.map(member => member.sessionId),
       ...copied.run.members.map(member => member.sessionId),
@@ -802,7 +794,7 @@ describe('FleetRunService', () => {
       },
     } as unknown as Context)
     expect(restrict).toHaveBeenCalledWith({
-      deny: ['fleet_agent', 'fleet_run', 'fleet_archive', 'fleet_assistant', 'fleet_trace', 'fleet_setup', 'fleet_member', 'fleet_workspace'],
+      deny: ['fleet_agent', 'fleet_run', 'fleet_archive', 'fleet_assistant', 'fleet_trace', 'fleet_setup', 'fleet_member'],
     })
     expect(register.mock.calls.map(call => (call[0] as { name: string }).name)).toEqual([
       'fleet_send',
@@ -1194,7 +1186,7 @@ describe('FleetRunService', () => {
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'closed', settled: true })
     expect(persisted.size).toBe(2)
     expect(core.list()).toEqual([])
-    expect(readFileSync(join(root, '.fleet', 'runs', run.id, 'run.json'), 'utf8')).toContain('"status": "closed"')
+    expect(readFileSync(join(root, '.fleet-registry', run.id, 'run.json'), 'utf8')).toContain('"status": "closed"')
     disconnect()
   })
 
@@ -1240,7 +1232,7 @@ describe('FleetRunService', () => {
     })
     const leadProjection = service.readMemberProjection(run.id, 'lead', 0, 100).events
     expect(leadProjection.some(event => event.type.startsWith('session.'))).toBe(false)
-    expect(readFileSync(join(root, '.fleet', 'runs', run.id, 'events.jsonl'), 'utf8')).not.toContain('"type":"session.')
+    expect(readFileSync(join(root, '.fleet-registry', run.id, 'events.jsonl'), 'utf8')).not.toContain('"type":"session.')
 
     service.end(launcher as unknown as Agent, 'Journal projection test complete.')
     await service.wait(run.id, 1_000)
@@ -1255,7 +1247,7 @@ describe('FleetRunService', () => {
       projectRoot: root,
       requiredPaths: [],
     })
-    const eventsPath = join(root, '.fleet', 'runs', run.id, 'events.jsonl')
+    const eventsPath = join(root, '.fleet-registry', run.id, 'events.jsonl')
     const legacySequence = 123_456
     const legacy = {
       sequence: legacySequence,
@@ -1426,7 +1418,7 @@ describe('FleetRunService', () => {
       }),
     }))
     expect(projection.events.some(event => event.type.startsWith('session.'))).toBe(false)
-    expect(readFileSync(join(root, '.fleet', 'runs', run.id, 'events.jsonl'), 'utf8')).not.toContain('"type":"session.')
+    expect(readFileSync(join(root, '.fleet-registry', run.id, 'events.jsonl'), 'utf8')).not.toContain('"type":"session.')
 
     const tail = await service.readMemberTraceTail(run.id, 'lead', 240)
     expect(tail.hasMore).toBe(true)
@@ -1439,7 +1431,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('derives one acknowledged activity inbox from messages and Team service events', async () => {
+  it('derives one acknowledged activity inbox from Team messages', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -1458,19 +1450,8 @@ describe('FleetRunService', () => {
       text: 'Please review the release task.',
       delivery: 'quiet',
     })
-    service.projectTasks(run.id).create(reviewerId, {
-      title: 'Review release',
-      assignees: ['lead'],
-    })
-    service.calendar(run.id).create(reviewerId, {
-      title: 'Release sync',
-      agenda: 'Confirm the release state.',
-      attendees: ['lead'],
-      startAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-
     const inbox = service.activityInbox(lead as unknown as Agent, { runId: run.id, unreadOnly: true })
-    expect(inbox.items.map(item => item.kind)).toEqual(expect.arrayContaining(['message', 'task', 'calendar']))
+    expect(inbox.items.map(item => item.kind)).toContain('message')
     const first = inbox.items[0]
     if (first === undefined) throw new Error('expected Fleet activity')
     expect(service.acknowledgeActivity(lead as unknown as Agent, first.sequence, run.id)).toMatchObject({
@@ -1543,7 +1524,7 @@ describe('FleetRunService', () => {
       kind: 'finish',
       statement: 'Persisted approval should finish this work.',
     })
-    const eventsPath = join(root, '.fleet', 'runs', run.id, 'events.jsonl')
+    const eventsPath = join(root, '.fleet-registry', run.id, 'events.jsonl')
     const storedEvents = readFileSync(eventsPath, 'utf8').trim().split('\n')
       .map(line => JSON.parse(line) as { readonly sequence: number })
     const sequence = (storedEvents.at(-1)?.sequence ?? 0) + 1
@@ -1599,7 +1580,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('persists member-maintained status and scheduled Team tasks across restart', async () => {
+  it('persists member-maintained status across restart', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
     const run = await first.service.create(first.launcher as unknown as Agent, {
@@ -1608,18 +1589,8 @@ describe('FleetRunService', () => {
       requiredPaths: [],
     })
     const leadId = run.members.find(member => member.name === 'lead')?.sessionId ?? ''
-    const reviewerId = run.members.find(member => member.name === 'reviewer')?.sessionId ?? ''
     first.service.memberStatusBoard(run.id).set(leadId, 'Waiting for the architecture review')
-    const task = first.service.scheduledTasks(run.id).create(leadId, {
-      title: 'Architecture follow-up',
-      instructions: 'Review the decision and post the outcome to #main.',
-      assignees: ['@reviewer'],
-      dueAt: new Date(Date.now() + 60 * 60_000).toISOString(),
-    })
-    expect(first.service.readTrace(run.id, 0, 100).events.map(event => event.type)).toEqual(expect.arrayContaining([
-      'member_status.updated',
-      'schedule.created',
-    ]))
+    expect(first.service.readTrace(run.id, 0, 100).events.map(event => event.type)).toContain('member_status.updated')
     for (const member of run.members) {
       const agent = first.runtime.get(member.sessionId)
       if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
@@ -1633,39 +1604,25 @@ describe('FleetRunService', () => {
       projectRoot: root,
     })
 
-    expect(second.service.memberStatusBoard(run.id).get(reviewerId, '@lead')).toMatchObject({
+    const resumedReviewerId = second.service.status(run.id).members.find(member => member.name === 'reviewer')?.sessionId ?? ''
+    expect(second.service.memberStatusBoard(run.id).get(resumedReviewerId, '@lead')).toMatchObject({
       message: 'Waiting for the architecture review',
     })
-    expect(second.service.scheduledTasks(run.id).list(reviewerId)).toContainEqual(expect.objectContaining({
-      id: task.id,
-      title: 'Architecture follow-up',
-      status: 'scheduled',
-      assignees: ['reviewer'],
-    }))
     expect(second.service.readTrace(run.id, 0, 100).events
-      .filter(event => event.type === 'member_status.updated' || event.type === 'schedule.created')).toHaveLength(2)
+      .filter(event => event.type === 'member_status.updated')).toHaveLength(1)
 
     second.service.end(second.launcher as unknown as Agent, 'Collaboration components restored successfully.')
     await second.service.wait(run.id, 1_000)
     second.disconnect()
   })
 
-  it('loads Team services at DSH startup and delivers overdue tasks after member resume', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))
+  it('loads dormant Team state at DSH startup and resumes it repeatedly', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
     const run = await first.service.create(first.launcher as unknown as Agent, {
       configPath,
       projectRoot: root,
       requiredPaths: [],
-    })
-    const leadId = run.members.find(member => member.name === 'lead')?.sessionId ?? ''
-    first.service.scheduledTasks(run.id).create(leadId, {
-      title: 'Background review reminder',
-      instructions: 'Post the delayed review result to #main.',
-      assignees: ['@reviewer'],
-      dueAt: '2026-08-21T00:01:00.000Z',
     })
     expect(existsSync(join(root, '.fleet-registry', `${run.id}.json`))).toBe(true)
     for (const member of run.members) {
@@ -1677,13 +1634,6 @@ describe('FleetRunService', () => {
 
     const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
     expect(second.service.status(run.id)).toMatchObject({ id: run.id, status: 'idle' })
-    expect(() => second.service.scheduledTasks(run.id)).toThrow(/have not resumed/)
-
-    vi.advanceTimersByTime(60_000)
-    expect(second.service.readTrace(run.id, 0, 100).events.map(event => event.type)).toEqual(expect.arrayContaining([
-      'schedule.triggered',
-      'schedule.delivery_deferred',
-    ]))
 
     const resumed = await second.service.resume(second.launcher as unknown as Agent, {
       runId: run.id,
@@ -1691,10 +1641,7 @@ describe('FleetRunService', () => {
     })
     const reviewer = second.runtime.get(resumed.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
     if (reviewer === undefined) throw new Error('expected resumed reviewer')
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('Background review reminder') }),
-    ])
-    expect(second.service.readTrace(run.id, 0, 100).events.map(event => event.type)).toContain('schedule.delivered')
+    expect(reviewer.messages).toEqual([])
     for (const member of resumed.members) {
       const agent = second.runtime.get(member.sessionId)
       if (agent !== undefined) second.persisted.set(member.sessionId, structuredClone(agent.session.events))
@@ -1894,9 +1841,7 @@ describe('FleetRunService', () => {
     second.disconnect()
   })
 
-  it('restores Team services and turns assignments, invitations, deadlines, and calendar starts into collaboration', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-08-21T10:00:00Z'))
+  it('restores Team messages and real resource references across restart', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
     const run = await first.service.create(first.launcher as unknown as Agent, {
@@ -1910,28 +1855,16 @@ describe('FleetRunService', () => {
     const reviewer = first.runtime.get(reviewerId)
     if (lead === undefined || reviewer === undefined) throw new Error('expected live members')
 
-    const task = first.service.projectTasks(run.id).create(leadId, {
-      title: 'Review the service release',
-      description: 'Check the persistent Team service behavior.',
-      assignees: ['reviewer'],
-      dueAt: '2026-08-21T10:02:00Z',
+    const resourcePath = join(root, '.fleet', run.id, 'release-notes.md')
+    writeFileSync(resourcePath, 'The Team resource is a real file.\n')
+    const resource = first.service.resourceStore(run.id).addResource(leadId, {
+      path: resourcePath,
+      label: 'release-notes.md',
+      mediaType: 'text/markdown',
     })
-    const document = first.service.resourceStore(run.id).createDocument(leadId, {
-      name: 'release-notes',
-      title: 'Release notes',
-      content: 'The Team services share one durable event journal.',
+    first.service.messageHub(run.id).send(lead, {
+      to: '@reviewer', text: 'Review the persisted resource.', resources: [resource.id], delivery: 'quiet',
     })
-    const calendarEvent = first.service.calendar(run.id).create(leadId, {
-      title: 'Release review',
-      agenda: 'Review the service release and record follow-up work.',
-      attendees: ['reviewer'],
-      startAt: '2026-08-21T10:01:00Z',
-    })
-    expect(first.service.messageHub(run.id).inbox(reviewer, { unreadOnly: true }).map(item => item.message.text))
-      .toEqual(expect.arrayContaining([
-        expect.stringContaining(`Fleet task ${task.id}`),
-        expect.stringContaining(`Fleet calendar ${calendarEvent.id}`),
-      ]))
 
     for (const member of run.members) {
       const agent = first.runtime.get(member.sessionId)
@@ -1941,7 +1874,6 @@ describe('FleetRunService', () => {
     await first.core.close()
 
     const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
-    await vi.advanceTimersByTimeAsync(120_000)
     const resumed = await second.service.resume(second.launcher as unknown as Agent, {
       runId: run.id,
       projectRoot: root,
@@ -1950,49 +1882,10 @@ describe('FleetRunService', () => {
     const resumedReviewer = second.runtime.get(reviewerId)
     if (resumedLead === undefined || resumedReviewer === undefined) throw new Error('expected resumed members')
 
-    expect(second.service.projectTasks(run.id).get(leadId, task.id)).toMatchObject({
-      id: task.id,
-      status: 'open',
-      assignees: ['reviewer'],
-      dueNotifiedAt: '2026-08-21T10:02:00.000Z',
-    })
-    expect(second.service.resourceStore(run.id).getDocument(document.id)).toEqual(document)
-    const started = second.service.calendar(run.id).get(leadId, calendarEvent.id)
-    expect(started).toMatchObject({ status: 'open', occurrence: 1, meetingId: expect.any(String) })
+    expect(second.service.resourceStore(run.id).getResource(resource.id)).toEqual(resource)
+    expect(readFileSync(resourcePath, 'utf8')).toBe('The Team resource is a real file.\n')
     expect(second.service.messageHub(run.id).inbox(resumedReviewer, { unreadOnly: true }).map(item => item.message.text))
-      .toEqual(expect.arrayContaining([
-        expect.stringContaining(`Fleet task ${task.id}`),
-        expect.stringContaining(`Fleet calendar ${calendarEvent.id}`),
-      ]))
-    expect(second.service.messageHub(run.id).listMeetings(resumedReviewer)).toContainEqual(
-      expect.objectContaining({ id: started.meetingId, status: 'open' }),
-    )
-    if (started.meetingId === undefined) throw new Error('expected linked calendar meeting')
-    second.service.messageHub(run.id).joinMeeting(resumedReviewer, started.meetingId)
-    expect(second.service.messageHub(run.id).closeMeeting(resumedLead, started.meetingId, {
-      summary: 'The persistent services are ready.',
-      decisions: ['Keep the Team journal as the source of truth.'],
-      actionItems: [{ text: 'Finish the release review.', assignee: '@reviewer', taskId: task.id }],
-      resources: [document.id],
-    })).toMatchObject({
-      summary: 'The persistent services are ready.',
-      actionItems: [{ taskId: task.id }],
-    })
-    expect(second.service.calendar(run.id).get(leadId, calendarEvent.id)).toMatchObject({
-      status: 'closed',
-      lastMeetingClosedAt: expect.any(String),
-    })
-    expect(resumedReviewer.messages.some(message => message.content.some(part =>
-      part.type === 'text' && part.text.includes(`Fleet task due ${task.id}`),
-    ))).toBe(true)
-    expect(second.service.readTrace(run.id, 0, 200).events.map(event => event.type)).toEqual(expect.arrayContaining([
-      'task.notification_delivered',
-      'calendar.notification_delivered',
-      'calendar.meeting_opened',
-      'task.due_delivered',
-    ]))
-
-    vi.useRealTimers()
+      .toContain('Review the persisted resource.')
     second.service.end(second.launcher as unknown as Agent, 'Team service recovery verified.', resumed.id)
     await second.service.wait(resumed.id, 1_000)
     second.disconnect()
@@ -2009,8 +1902,8 @@ describe('FleetRunService', () => {
     const lead = run.members.find(member => member.name === 'lead')
     if (lead === undefined) throw new Error('expected lead member')
     first.persisted.set(lead.sessionId, structuredClone(first.runtime.get(lead.sessionId)?.session.events ?? []))
-    const runPath = join(root, '.fleet', 'runs', run.id, 'run.json')
-    const eventsPath = join(root, '.fleet', 'runs', run.id, 'events.jsonl')
+    const runPath = join(root, '.fleet-registry', run.id, 'run.json')
+    const eventsPath = join(root, '.fleet-registry', run.id, 'events.jsonl')
     writeFileSync(runPath, `${JSON.stringify({
       ...JSON.parse(readFileSync(runPath, 'utf8')),
       members: [lead],
@@ -2054,7 +1947,7 @@ describe('FleetRunService', () => {
       projectRoot: root,
       requiredPaths: [],
     })
-    const runPath = join(root, '.fleet', 'runs', run.id, 'run.json')
+    const runPath = join(root, '.fleet-registry', run.id, 'run.json')
     writeFileSync(runPath, `${JSON.stringify({
       ...JSON.parse(readFileSync(runPath, 'utf8')),
       status: 'closed',
@@ -2309,11 +2202,8 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('persists dynamic formal members, paused state, and workspaces across restart, resume, and removal', async () => {
+  it('persists dynamic formal members and paused state across restart, resume, and removal', async () => {
     const { root, configPath } = fixture()
-    const researchRoot = join(root, 'research')
-    const reviewRoot = join(researchRoot, 'review')
-    mkdirSync(reviewRoot, { recursive: true })
     const first = setup(root)
     const run = await first.service.create(first.launcher as unknown as Agent, {
       configPath,
@@ -2334,16 +2224,9 @@ describe('FleetRunService', () => {
     const added = await first.service.addMember(first.launcher as unknown as Agent, {
       runId: run.id,
       view: { ...view, toolGroups: [...view.toolGroups], permissions: [...view.permissions] },
-      workspaces: [{ name: 'research', path: researchRoot, access: 'write' }],
     })
     expect(added).toMatchObject({ name: 'researcher', displayName: 'Morgan', role: 'researcher' })
-    expect(first.runtime.creates.at(-1)).toMatchObject({ cwd: realpathSync(researchRoot) })
-    expect(first.service.memberWorkspaces(first.launcher as unknown as Agent, run.id, 'researcher').workspaces)
-      .toEqual([{ name: 'research', path: realpathSync(researchRoot), access: 'write' }])
-    expect(first.service.readWebTeamProjection(run.id, 0, 500).events).toContainEqual(expect.objectContaining({
-      type: 'workspace.assigned',
-      data: expect.objectContaining({ member: 'researcher' }),
-    }))
+    expect(first.runtime.creates.at(-1)).toMatchObject({ cwd: root })
 
     for (const member of first.service.status(run.id).members) {
       const agent = first.runtime.get(member.sessionId)
@@ -2359,12 +2242,6 @@ describe('FleetRunService', () => {
     })
     expect(resumed.members.map(member => member.name)).toEqual(['lead', 'reviewer', 'researcher'])
     expect(second.service.memberViews(run.id)).toContainEqual(expect.objectContaining({ id: 'researcher', name: 'Morgan' }))
-    expect(second.service.memberWorkspaces(second.launcher as unknown as Agent, run.id, 'researcher').workspaces)
-      .toEqual([{ name: 'research', path: realpathSync(researchRoot), access: 'write' }])
-
-    second.service.assignMemberWorkspaces(second.launcher as unknown as Agent, run.id, 'researcher', [
-      { name: 'review', path: reviewRoot, access: 'read' },
-    ])
     expect(await second.service.pauseMember(second.launcher as unknown as Agent, run.id, 'researcher'))
       .toMatchObject({ name: 'researcher', status: 'paused' })
     expect(second.runtime.get(added.sessionId)).toBeUndefined()
@@ -2402,8 +2279,6 @@ describe('FleetRunService', () => {
       name: 'researcher', displayName: 'Morgan Reed', role: 'senior researcher', status: 'paused',
     }))
     expect(third.runtime.resumes.some(input => input.id === added.sessionId)).toBe(false)
-    expect(third.service.memberWorkspaces(third.launcher as unknown as Agent, run.id, 'researcher').workspaces)
-      .toEqual([{ name: 'review', path: realpathSync(reviewRoot), access: 'read' }])
 
     expect(await third.service.resumeMember(third.launcher as unknown as Agent, run.id, 'researcher'))
       .toMatchObject({ name: 'researcher', status: 'idle' })
@@ -2422,7 +2297,7 @@ describe('FleetRunService', () => {
     expect(third.service.status(run.id).members.map(member => member.name)).toEqual(['lead', 'reviewer'])
     expect(third.service.memberViews(run.id).some(member => member.id === 'researcher')).toBe(false)
     expect(third.service.readTrace(run.id, 0, 300).events.map(event => event.type)).toEqual(expect.arrayContaining([
-      'member_view_added', 'workspace.assigned', 'member_paused', 'member_view_updated', 'member_resumed',
+      'member_view_added', 'member_paused', 'member_view_updated', 'member_resumed',
       'member_view_removed', 'member_detached',
     ]))
 

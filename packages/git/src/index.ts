@@ -17,7 +17,7 @@ export * from './contract.js'
 export * from './git.js'
 
 export const name = '@ch4acko3/dsh-agent-fleet-git'
-export const inject = ['typert', 'fleetAccess'] as const
+export const inject = ['typert', 'fleetAuthorization'] as const
 
 export const FLEET_GIT_PERMISSIONS = [
   { id: 'inspect', description: 'Inspect Git operation scope.' },
@@ -77,11 +77,11 @@ export class FleetGitWebRemote extends TypertRemoteService {
 }
 
 export function apply(ctx: Context): void {
-  ctx.inject(['fleetAccess'], scope => {
+  ctx.inject(['fleetAuthorization'], scope => {
     scope.provide('fleetGitIntegration', new FleetGitIntegration())
-    return scope.fleetAccess.registerNamespace({
+    return scope.fleetAuthorization.registerNamespace({
       namespace: 'git',
-      permissions: FLEET_GIT_PERMISSIONS,
+      actions: FLEET_GIT_PERMISSIONS,
     })
   })
   ctx.inject(['typert'], scope => {

@@ -564,25 +564,6 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       })
       continue
     }
-    if (event.type === 'workspace.assigned') {
-      const data = asRecord(event.data)
-      const member = string(data?.member)
-      if (member === undefined || !Array.isArray(data?.workspaces)) continue
-      const workspaces = data.workspaces.flatMap((candidate): Array<{
-        readonly name: string
-        readonly path: string
-        readonly access: 'read' | 'write'
-      }> => {
-        const workspace = asRecord(candidate)
-        const name = string(workspace?.name)
-        const path = string(workspace?.path)
-        const access = string(workspace?.access)
-        return name === undefined || path === undefined || (access !== 'read' && access !== 'write')
-          ? []
-          : [{ name, path, access }]
-      })
-      memberWorkspaces.set(member, workspaces)
-    }
   }
 
   const workspacesByPath = new Map<string, FleetPanelWorkspace>()

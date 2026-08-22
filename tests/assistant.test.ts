@@ -146,7 +146,6 @@ describe('FleetAssistantRuntime', () => {
       'fleet_assistant',
       'fleet_send',
       'fleet_meeting',
-      'fleet_schedule',
     ]))
     expect(fixture.restrict).not.toHaveBeenCalled()
     expect(fixture.section).toHaveBeenCalledWith(expect.objectContaining({

@@ -41,7 +41,7 @@ describe('FleetGit', () => {
       memberFor: () => 'reviewer',
       hasMember: () => true,
       hasPermission: (_agentId, permission) => permission === 'git.inspect' || permission === 'git.scope-check',
-      workspacesFor: () => [{ path: root, access: 'read' }],
+      workspaceFor: () => root,
       permissions: new Set(['git.inspect', 'git.scope-check']),
     })
 
@@ -60,7 +60,7 @@ describe('FleetGit', () => {
     } as unknown as Context, new FleetGit(root), {
       memberFor: () => 'reviewer', hasMember: () => true,
       hasPermission: (_agentId, permission) => permission === 'git.inspect' && inspect,
-      workspacesFor: () => [{ path: root, access: 'read' }],
+      workspaceFor: () => root,
       permissions: new Set(['git.inspect']),
     })
     const caller = { agent: { id: 'agent-1', session: { header: { cwd: root } } } }

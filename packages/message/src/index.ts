@@ -659,7 +659,7 @@ export function installMessageTools(
           assignee: { type: 'string' },
           task_id: { type: 'string' },
         },
-      }, description: 'Action items; task_id links an existing fleet_task.' },
+      }, description: 'Action items; task_id may link an external task tracked by an optional integration.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids attached to the meeting result.' },
     },
     output: jsonOutput(MEETING_RESULT_SCHEMA),

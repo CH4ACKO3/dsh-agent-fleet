@@ -19,5 +19,5 @@ sandbox 委派逻辑，不实现第二套 Agent loop。
 DSH Session 仍保留创建因果关系，但 Fleet 成员在协作关系上是平级的。
 
 Core 还负责把 Fleet 名称解析为原生 Agent ID，并在 DSH Agent 销毁时清理对应成员。
-首次注册或创建成员时，Core 会把调用者的工作目录绑定为当前 Fleet 的共享项目根，供
-Resources 中的共享 plan/checklist 使用。它不保存文件、不传递消息，也不包含 UI。
+每个成员的文件边界直接采用其原生 DSH Session `cwd` 与 sandbox；Core 不再维护第二套
+多工作区分配。它不保存业务文件、不传递消息，也不包含 UI。
