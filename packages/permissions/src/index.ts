@@ -47,28 +47,31 @@ const ID = /^[a-z][a-z0-9-]*$/u
 export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
   {
     id: 'observer', name: 'Observer', parents: [], preset: true,
-    toolGroups: ['messages', 'status', 'resources', 'documents'], permissions: [],
+    toolGroups: ['messages', 'status', 'resources'], permissions: [],
   },
   {
-    id: 'member', name: 'Member', parents: ['observer'], preset: true,
-    toolGroups: ['coordination', 'tasks', 'calendar'], permissions: [],
+    id: 'member', name: 'Collaborator', parents: ['observer'], preset: true,
+    toolGroups: ['coordination'], permissions: [],
   },
   {
-    id: 'builder', name: 'Builder', parents: ['member'], preset: true,
-    toolGroups: ['git'], permissions: [
-      'resource.write', 'document.write',
-      'git.inspect', 'git.scope-check', 'git.worktree-create',
-    ],
+    id: 'researcher', name: 'Researcher', parents: ['member'], preset: true,
+    toolGroups: [], permissions: ['resource.write'],
+  },
+  {
+    id: 'reviewer', name: 'Reviewer', parents: ['researcher'], preset: true,
+    toolGroups: ['git'], permissions: ['git.inspect', 'git.scope-check'],
+  },
+  {
+    id: 'builder', name: 'Builder', parents: ['reviewer'], preset: true,
+    toolGroups: [], permissions: ['git.worktree-create'],
   },
   {
     id: 'facilitator', name: 'Facilitator', parents: ['member'], preset: true,
-    toolGroups: ['schedule'], permissions: ['channel.manage', 'meeting.manage', 'vote.create', 'schedule.create'],
+    toolGroups: [], permissions: ['channel.manage', 'meeting.manage', 'vote.create'],
   },
   {
     id: 'maintainer', name: 'Maintainer', parents: ['builder', 'facilitator'], preset: true,
-    toolGroups: [], permissions: [
-      'task.manage', 'calendar.manage', 'team.manage', 'workspace.manage', 'git.worktree-manage',
-    ],
+    toolGroups: [], permissions: ['team.manage', 'git.worktree-manage'],
   },
   {
     id: 'op', name: 'OP', parents: [], preset: true, toolGroups: [], permissions: [], op: true,
@@ -78,6 +81,8 @@ export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
 const NATIVE_PRESET_COMBINATIONS: readonly (readonly string[])[] = [
   ['observer'],
   ['member'],
+  ['researcher'],
+  ['reviewer'],
   ['builder'],
   ['facilitator'],
   ['builder', 'facilitator'],

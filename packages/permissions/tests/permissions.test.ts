@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import { FleetAuthorizationService, type FleetMemberView, type FleetRunService } from 'dsh-agent-fleet'
-import { FleetPermissionService, parseFleetPermissionConfiguration } from '../src/index.js'
+import {
+  FLEET_PERMISSION_PRESETS,
+  FleetPermissionService,
+  parseFleetPermissionConfiguration,
+} from '../src/index.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -11,8 +15,8 @@ const alice: FleetMemberView = {
 
 const builder: FleetMemberView = {
   id: 'builder', name: 'Blake', role: 'Engineer', prompt: '',
-  toolGroups: ['messages', 'status', 'resources', 'documents', 'coordination', 'tasks', 'calendar', 'git'],
-  permissions: ['resource.write', 'document.write', 'git.inspect', 'git.scope-check', 'git.worktree-create'],
+  toolGroups: ['messages', 'status', 'resources', 'coordination', 'git'],
+  permissions: ['resource.write', 'git.inspect', 'git.scope-check', 'git.worktree-create'],
   contacts: { members: '*', channels: '*' },
 }
 
@@ -32,6 +36,19 @@ function fixture(configuration: Record<string, unknown> = {}, members: FleetMemb
 }
 
 describe('FleetPermissionService', () => {
+  it('provides default groups for common Agent collaboration roles', () => {
+    expect(FLEET_PERMISSION_PRESETS.map(group => [group.id, group.name, group.parents])).toEqual([
+      ['observer', 'Observer', []],
+      ['member', 'Collaborator', ['observer']],
+      ['researcher', 'Researcher', ['member']],
+      ['reviewer', 'Reviewer', ['researcher']],
+      ['builder', 'Builder', ['reviewer']],
+      ['facilitator', 'Facilitator', ['member']],
+      ['maintainer', 'Maintainer', ['builder', 'facilitator']],
+      ['op', 'OP', []],
+    ])
+  })
+
   it('rejects malformed Team permission modules instead of silently widening access', () => {
     expect(() => parseFleetPermissionConfiguration({})).toThrow(/members must be an object/)
     expect(() => parseFleetPermissionConfiguration({ version: 2, members: {} })).toThrow(/version must be 1/)
@@ -66,7 +83,7 @@ describe('FleetPermissionService', () => {
       },
     })
     expect(access.resolve('team-1', alice)).toEqual({
-      toolGroups: ['messages', 'status', 'resources', 'documents'],
+      toolGroups: ['messages', 'status', 'resources'],
       actions: expect.arrayContaining(['message.read', 'message.post', 'member-status.read', 'member-status.write', 'resource.read']),
       op: false,
     })
@@ -79,13 +96,30 @@ describe('FleetPermissionService', () => {
     })
     const effective = access.resolve('team-1', alice)
     expect(effective.toolGroups).toEqual(expect.arrayContaining([
-      'messages', 'status', 'resources', 'documents', 'coordination', 'tasks', 'calendar', 'git',
+      'messages', 'status', 'resources', 'coordination', 'git',
     ]))
     expect(effective.actions).toEqual(expect.arrayContaining([
-      'resource.write', 'document.write', 'git.inspect', 'git.scope-check', 'git.worktree-create',
+      'resource.write', 'git.inspect', 'git.scope-check', 'git.worktree-create',
     ]))
     expect(effective.actions).not.toContain('team.manage')
     expect(stored()).toBeDefined()
+  })
+
+  it('keeps research and review roles below implementation authority', () => {
+    const { access, permissions } = fixture()
+    permissions.setMember('team-1', 'alice', {
+      groups: ['researcher'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
+    })
+    expect(access.resolve('team-1', alice)).toMatchObject({ actions: expect.arrayContaining(['resource.write']) })
+    expect(access.resolve('team-1', alice).toolGroups).not.toContain('git')
+
+    permissions.setMember('team-1', 'alice', {
+      groups: ['reviewer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
+    })
+    const reviewer = access.resolve('team-1', alice)
+    expect(reviewer.actions).toEqual(expect.arrayContaining(['resource.write', 'git.inspect', 'git.scope-check']))
+    expect(reviewer.actions).not.toContain('git.worktree-create')
+    expect(reviewer.toolGroups).toContain('git')
   })
 
   it('supports OP, DEOP, and reset to the fixed profile', () => {

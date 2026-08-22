@@ -32,6 +32,22 @@ function commit(root: string, message: string, paths: readonly string[]): void {
 }
 
 describe('FleetGit', () => {
+  it('does not expose fleet_git without an explicit Git action', () => {
+    const root = repository()
+    const registered: unknown[] = []
+    installGitTools({
+      tools: { register: (tool: unknown) => { registered.push(tool) } },
+    } as unknown as Context, new FleetGit(root), {
+      memberFor: () => 'reviewer',
+      hasMember: () => true,
+      hasPermission: () => false,
+      workspaceFor: () => root,
+      permissions: new Set(),
+    })
+
+    expect(registered).toEqual([])
+  })
+
   it('exposes only inspection actions without write permissions', () => {
     const root = repository()
     const registered: Array<{ readonly name: string; readonly parameters: { readonly properties: Record<string, { readonly enum?: readonly string[] }> } }> = []
