@@ -1,9 +1,9 @@
 # Agent Fleet Permissions
 
-Optional dynamic permission groups for `dsh-agent-fleet`. Without this package, Fleet keeps its fixed member permissions.
+Optional dynamic action groups for `dsh-agent-fleet`. Without this package, Fleet keeps each member's static tool groups and actions.
 
-The package supplies preset groups, custom group inheritance, direct grants and denies, and OP/DEOP. It recognizes matching native Fleet access profiles as preset groups, while preserving custom fixed profiles exactly. Changes are persisted per Team and refresh affected member tools without restarting the Team.
+The package supplies preset groups, custom group inheritance, direct grants and denies, and OP/DEOP. It recognizes matching native Fleet profiles for display while leaving an unconfigured member on the Core baseline. Changes are persisted per Team and refresh affected member tools without restarting the Team.
 
-The built-in Agent-oriented groups are `Observer`, `Collaborator`, `Researcher`, `Reviewer`, `Builder`, `Facilitator`, `Maintainer`, and `OP`. Research and review actions build incrementally toward implementation; facilitation remains a separate branch until `Maintainer`, so coordinating a Team does not automatically grant source-control authority.
+The built-in Agent-oriented groups are `Observer`, `Collaborator`, `Researcher`, `Facilitator`, `Maintainer`, and `OP`. They contain only Fleet's own actions; feature plugins contribute their actions dynamically instead of being hard-coded into generic presets.
 
-Feature plugins can register a capability namespace through `ctx.fleetAuthorization.registerNamespace(...)`; their permission ids then participate in the same groups and OP expansion.
+Feature plugins can register an action namespace through `ctx.fleetAuthorization.registerNamespace(...)`; their action ids then participate in direct grants and OP expansion. This plugin does not decide access to concrete workspaces, files, conversations, datasets, secrets, or repositories.

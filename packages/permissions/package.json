@@ -1,7 +1,7 @@
 {
   "name": "@ch4acko3/dsh-agent-fleet-permissions",
   "version": "0.1.0",
-  "description": "Dynamic permission groups and capability namespaces for Agent Fleet",
+  "description": "Dynamic action groups, grants, denies, and OP for Agent Fleet",
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"
@@ -33,8 +33,8 @@
         "zh-CN": "Agent Fleet 权限组"
       },
       "summary": {
-        "en": "Optional dynamic groups, presets, OP, and namespaced permissions for Fleet Teams.",
-        "zh-CN": "为 Fleet Team 提供可选的动态权限组、预设、OP 与命名空间权限。"
+        "en": "Optional dynamic action groups, grants, denies, presets, and OP for Fleet Teams.",
+        "zh-CN": "为 Fleet Team 提供可选的动态 action 组、授权、拒绝、预设与 OP。"
       },
       "category": "development"
     },
