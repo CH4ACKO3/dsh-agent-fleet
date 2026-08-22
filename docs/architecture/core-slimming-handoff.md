@@ -85,7 +85,7 @@ Optional-plugin owners should avoid editing `src/run.ts`, `src/collaboration.ts`
 
 ## Handoff: Permissions plugin
 
-Owner scope: `packages/permissions`.
+Owner scope: the Permissions module in `packages/authorization`.
 
 Deliver:
 

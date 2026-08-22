@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FleetAuthorizationService } from 'dsh-agent-fleet'
+import type { FleetRunService } from 'dsh-agent-fleet'
+import { FleetAccessService, FleetGroupService } from '@ch4acko3/dsh-agent-fleet-authorization'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
 import { FLEET_GIT_PERMISSIONS, FleetGitWebRemote, apply } from '../src/index.js'
@@ -36,13 +38,23 @@ describe('FleetGitWebRemote', () => {
   it('registers Fleet actions, resource defaults, and member tools', async () => {
     const ctx = new Context()
     const access = new FleetAuthorizationService()
+    const runs = {
+      status: () => ({ projectRoot: '/project' }),
+      readExtensionState: () => undefined,
+      writeExtensionState: () => {},
+      exportConfiguration: () => ({ modules: {} }),
+    } as unknown as FleetRunService
+    const resourceAccess = new FleetAccessService(runs, new FleetGroupService(runs))
     apply(ctx)
     ctx.provide('fleetAuthorization', access)
-    await Promise.resolve()
+    ctx.provide('fleetRuns', runs)
+    ctx.provide('fleetAccess', resourceAccess)
+    await new Promise<void>(resolve => { setImmediate(resolve) })
     expect(access.actionIds()).toEqual(expect.arrayContaining([
       'git.inspect', 'git.scope-check', 'git.worktree-create', 'git.worktree-manage',
     ]))
     expect(access.resourceKindIds()).toContain('git-repository')
+    expect(resourceAccess.adapterKinds()).toContain('git-repository')
     const namespace = access.namespaces().find(candidate => candidate.namespace === 'git')
     expect(namespace?.installTools).toBeTypeOf('function')
   })

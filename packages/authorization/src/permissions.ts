@@ -13,22 +13,15 @@ import {
   type FleetMemberView,
   type FleetRunService,
 } from 'dsh-agent-fleet'
+import {
+  fleetPrivateGroupId,
+  type FleetAuthorizationGroup,
+  type FleetGroupService,
+} from './groups.js'
 
-export const name = '@ch4acko3/dsh-agent-fleet-permissions'
-export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-permissions'
+export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/permissions'
 
-export interface FleetPermissionGroup {
-  readonly id: string
-  readonly name: string
-  readonly parents: readonly string[]
-  readonly toolGroups: readonly string[]
-  readonly actions: readonly string[]
-  readonly op?: boolean
-  readonly preset?: boolean
-}
-
-export interface FleetMemberAccess {
-  readonly groups: readonly string[]
+export interface FleetPermissionAssignment {
   readonly grants: readonly string[]
   readonly denies: readonly string[]
   readonly toolGroups: readonly string[]
@@ -36,13 +29,24 @@ export interface FleetMemberAccess {
   readonly op?: boolean
 }
 
-export interface FleetPermissionState {
-  readonly groups: readonly FleetPermissionGroup[]
-  readonly members: Readonly<Record<string, FleetMemberAccess>>
+export interface FleetPermissionGroup extends FleetAuthorizationGroup {
+  readonly toolGroups: readonly string[]
+  readonly denyToolGroups?: readonly string[]
+  readonly actions: readonly string[]
+  readonly denies?: readonly string[]
+  readonly op?: boolean
 }
 
-const EMPTY_STATE: FleetPermissionState = { groups: [], members: {} }
-const ID = /^[a-z][a-z0-9-]*$/u
+export interface FleetMemberAccess extends FleetPermissionAssignment {
+  readonly groups: readonly string[]
+}
+
+export interface FleetPermissionState {
+  readonly version: 1
+  readonly groups: Readonly<Record<string, FleetPermissionAssignment>>
+}
+
+const EMPTY_STATE: FleetPermissionState = { version: 1, groups: {} }
 
 export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
   {
@@ -126,55 +130,42 @@ function cloneState(state: FleetPermissionState): FleetPermissionState {
   return structuredClone(state)
 }
 
-function parseState(value: JsonValue | undefined): FleetPermissionState {
-  if (value === undefined || value === null || typeof value !== 'object' || Array.isArray(value)) return cloneState(EMPTY_STATE)
-  const input = value as Record<string, JsonValue>
-  const groups = Array.isArray(input.groups) ? input.groups.flatMap(item => {
-    if (item === null || typeof item !== 'object' || Array.isArray(item)) return []
-    const group = item as Record<string, JsonValue>
-    if (typeof group.id !== 'string' || typeof group.name !== 'string') return []
-    return [{
-      id: group.id,
-      name: group.name,
-      parents: Array.isArray(group.parents) ? group.parents.filter((entry): entry is string => typeof entry === 'string') : [],
-      toolGroups: Array.isArray(group.toolGroups) ? group.toolGroups.filter((entry): entry is string => typeof entry === 'string') : [],
-      actions: Array.isArray(group.actions)
-        ? group.actions.filter((entry): entry is string => typeof entry === 'string')
-        : Array.isArray(group.permissions)
-          ? group.permissions.filter((entry): entry is string => typeof entry === 'string')
-          : [],
-      ...(group.op === true ? { op: true } : {}),
-    }]
-  }) : []
-  const members: Record<string, FleetMemberAccess> = {}
-  if (input.members !== null && typeof input.members === 'object' && !Array.isArray(input.members)) {
-    for (const [member, item] of Object.entries(input.members)) {
-      if (item === null || typeof item !== 'object' || Array.isArray(item)) continue
-      const access = item as Record<string, JsonValue>
-      const strings = (key: string): string[] => Array.isArray(access[key])
-        ? (access[key] as JsonValue[]).filter((entry): entry is string => typeof entry === 'string')
-        : []
-      members[member] = {
-        groups: strings('groups'), grants: strings('grants'), denies: strings('denies'),
-        toolGroups: strings('toolGroups'), denyToolGroups: strings('denyToolGroups'),
-        ...(access.op === true ? { op: true } : {}),
-      }
-    }
+function assignment(value: JsonValue): FleetPermissionAssignment {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { grants: [], denies: [], toolGroups: [], denyToolGroups: [] }
   }
-  return { groups, members }
+  const input = value as Record<string, JsonValue>
+  const strings = (key: string): string[] => Array.isArray(input[key])
+    ? (input[key] as JsonValue[]).filter((entry): entry is string => typeof entry === 'string')
+    : []
+  return {
+    grants: strings('grants'),
+    denies: strings('denies'),
+    toolGroups: strings('toolGroups'),
+    denyToolGroups: strings('denyToolGroups'),
+    ...(input.op === true ? { op: true } : {}),
+  }
+}
+
+function assignments(value: JsonValue | undefined): Record<string, FleetPermissionAssignment> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.entries(value).map(([id, entry]) => [id, assignment(entry)]))
+}
+
+function parseState(value: JsonValue | undefined): FleetPermissionState {
+  if (value === undefined) return cloneState(EMPTY_STATE)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Fleet Permission state must be an object')
+  }
+  const input = value as Record<string, JsonValue>
+  if (input.version !== 1 || typeof input.groups !== 'object'
+    || input.groups === null || Array.isArray(input.groups)) {
+    throw new Error('Fleet Permission state must contain version 1 groups')
+  }
+  return { version: 1, groups: assignments(input.groups) }
 }
 
 export function parseFleetPermissionConfiguration(value: unknown): FleetPermissionState {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`${FLEET_PERMISSIONS_CONFIGURATION_MODULE} must be an object`)
-  }
-  const input = value as Record<string, unknown>
-  if (input.version !== undefined && input.version !== 1) {
-    throw new Error(`${FLEET_PERMISSIONS_CONFIGURATION_MODULE}.version must be 1`)
-  }
-  if (typeof input.members !== 'object' || input.members === null || Array.isArray(input.members)) {
-    throw new Error(`${FLEET_PERMISSIONS_CONFIGURATION_MODULE}.members must be an object`)
-  }
   return parseState(value as JsonValue)
 }
 
@@ -185,7 +176,11 @@ function asJson(state: FleetPermissionState): JsonValue {
 export class FleetPermissionService implements FleetActionPolicy {
   private readonly states = new Map<string, FleetPermissionState>()
 
-  constructor(private readonly runs: FleetRunService, private readonly authorization: FleetAuthorizationService) {}
+  constructor(
+    private readonly runs: FleetRunService,
+    private readonly authorization: FleetAuthorizationService,
+    private readonly groupService: FleetGroupService,
+  ) {}
 
   state(teamId: string): FleetPermissionState {
     let state = this.states.get(teamId)
@@ -203,47 +198,64 @@ export class FleetPermissionService implements FleetActionPolicy {
   }
 
   groups(teamId: string): FleetPermissionGroup[] {
-    return [...FLEET_PERMISSION_PRESETS, ...this.state(teamId).groups].map(group => structuredClone(group))
+    const state = this.state(teamId)
+    const presets = new Map(FLEET_PERMISSION_PRESETS.map(group => [group.id, group]))
+    return this.groupService.groups(teamId).map(group => {
+      const access = presets.get(group.id) ?? state.groups[group.id]
+        ?? { grants: [], denies: [], toolGroups: [], denyToolGroups: [] }
+      return {
+        ...group,
+        toolGroups: [...access.toolGroups],
+        denyToolGroups: [...(access.denyToolGroups ?? [])],
+        actions: [...('actions' in access ? access.actions : access.grants)],
+        denies: [...(access.denies ?? [])],
+        ...(access.op === true ? { op: true } : {}),
+      }
+    })
   }
 
   resolve(input: FleetActionPolicyInput): FleetEffectiveAuthorization | undefined {
-    const assignment = this.state(input.teamId).members[input.member.id]
-    if (assignment === undefined) return undefined
-    const groups = new Map(this.groups(input.teamId).map(group => [group.id, group]))
+    const state = this.state(input.teamId)
+    const direct = state.groups[fleetPrivateGroupId(input.member.id)]
+    const memberships = this.groupService.membership(input.teamId, input.member.id)
+    if (direct === undefined && memberships.length === 0) return undefined
+    const presets = new Map(FLEET_PERMISSION_PRESETS.map(group => [group.id, group]))
     const actions = new Set<string>()
     const toolGroups = new Set<string>()
-    let op = assignment.op === true
-    const visiting = new Set<string>()
-    const visited = new Set<string>()
-    const addGroup = (id: string): void => {
-      if (visited.has(id)) return
-      if (visiting.has(id)) throw new Error(`cyclic Fleet permission group inheritance at ${id}`)
-      const group = groups.get(id)
-      if (group === undefined) throw new Error(`unknown Fleet permission group ${id}`)
-      visiting.add(id)
-      for (const parent of group.parents) addGroup(parent)
-      visiting.delete(id)
-      visited.add(id)
-      for (const toolGroup of group.toolGroups) toolGroups.add(toolGroup)
-      for (const action of group.actions) actions.add(action)
-      op ||= group.op === true
+    const deniedActions = new Set<string>()
+    const deniedToolGroups = new Set<string>()
+    let op = false
+    for (const id of this.groupService.expanded(input.teamId, input.member.id)) {
+      const group = presets.get(id)
+      const access = group ?? state.groups[id]
+      if (access === undefined) continue
+      for (const toolGroup of access.toolGroups) toolGroups.add(toolGroup)
+      for (const action of 'actions' in access ? access.actions : access.grants) actions.add(action)
+      for (const toolGroup of access.denyToolGroups ?? []) deniedToolGroups.add(toolGroup)
+      for (const action of access.denies ?? []) deniedActions.add(action)
+      op ||= access.op === true
     }
-    for (const group of assignment.groups) addGroup(group)
-    for (const toolGroup of assignment.toolGroups) toolGroups.add(toolGroup)
-    for (const permission of assignment.grants) actions.add(permission)
-    for (const toolGroup of assignment.denyToolGroups) toolGroups.delete(toolGroup)
+    for (const toolGroup of deniedToolGroups) toolGroups.delete(toolGroup)
     for (const toolGroup of toolGroups) {
       for (const action of FLEET_MEMBER_TOOL_GROUP_ACTIONS[toolGroup as keyof typeof FLEET_MEMBER_TOOL_GROUP_ACTIONS] ?? []) {
         actions.add(action)
       }
     }
-    for (const permission of assignment.denies) actions.delete(permission)
+    for (const action of deniedActions) actions.delete(action)
     return { toolGroups: [...toolGroups], actions: [...actions], op }
   }
 
   member(teamId: string, member: string): FleetMemberAccess | undefined {
-    const value = this.state(teamId).members[member]
-    if (value !== undefined) return structuredClone(value)
+    const value = this.state(teamId).groups[fleetPrivateGroupId(member)]
+    const groups = this.groupService.membership(teamId, member)
+    if (value !== undefined || groups.length > 0) return {
+      groups,
+      grants: [...(value?.grants ?? [])],
+      denies: [...(value?.denies ?? [])],
+      toolGroups: [...(value?.toolGroups ?? [])],
+      denyToolGroups: [...(value?.denyToolGroups ?? [])],
+      ...(value?.op === true ? { op: true } : {}),
+    }
     const view = this.memberView(teamId, member)
     return view === undefined ? undefined : nativeAssignment(view)
   }
@@ -258,9 +270,8 @@ export class FleetPermissionService implements FleetActionPolicy {
 
   setMember(teamId: string, member: string, value: FleetMemberAccess): FleetMemberAccess {
     if (!this.runs.memberViews(teamId).some(view => view.id === member)) throw new Error(`unknown Fleet member ${member}`)
-    for (const group of value.groups) if (!this.groups(teamId).some(candidate => candidate.id === group)) {
-      throw new Error(`unknown Fleet permission group ${group}`)
-    }
+    const knownGroups = new Set(this.groupService.groups(teamId).map(group => group.id))
+    for (const group of value.groups) if (!knownGroups.has(group)) throw new Error(`unknown Fleet permission group ${group}`)
     const knownToolGroups = new Set<string>(FLEET_MEMBER_TOOL_GROUPS)
     for (const group of [...value.toolGroups, ...value.denyToolGroups]) {
       if (!knownToolGroups.has(group)) throw new Error(`unknown Fleet tool group ${group}`)
@@ -269,23 +280,28 @@ export class FleetPermissionService implements FleetActionPolicy {
     for (const action of [...value.grants, ...value.denies]) {
       if (!knownActions.has(action)) throw new Error(`unknown Fleet action ${action}`)
     }
-    const normalized: FleetMemberAccess = {
-      groups: unique(value.groups), grants: unique(value.grants), denies: unique(value.denies),
+    const normalized: FleetPermissionAssignment = {
+      grants: unique(value.grants), denies: unique(value.denies),
       toolGroups: unique(value.toolGroups), denyToolGroups: unique(value.denyToolGroups),
       ...(value.op === true ? { op: true } : {}),
     }
+    const groups = this.groupService.setMembership(teamId, member, value.groups, false)
     const state = this.state(teamId)
-    this.save(teamId, { ...state, members: { ...state.members, [member]: normalized } })
+    this.save(teamId, {
+      ...state,
+      groups: { ...state.groups, [fleetPrivateGroupId(member)]: normalized },
+    })
     this.authorization.changed({ teamId, members: [member] })
-    return structuredClone(normalized)
+    return { groups, ...structuredClone(normalized) }
   }
 
   resetMember(teamId: string, member: string): void {
     this.requireMember(teamId, member)
     const state = this.state(teamId)
-    const members = { ...state.members }
-    delete members[member]
-    this.save(teamId, { ...state, members })
+    const groups = { ...state.groups }
+    delete groups[fleetPrivateGroupId(member)]
+    this.groupService.resetMembership(teamId, member, false)
+    this.save(teamId, { ...state, groups })
     this.authorization.changed({ teamId, members: [member] })
   }
 
@@ -299,60 +315,37 @@ export class FleetPermissionService implements FleetActionPolicy {
   }
 
   upsertGroup(teamId: string, value: FleetPermissionGroup): FleetPermissionGroup {
-    if (!ID.test(value.id)) throw new Error('Fleet permission group id must use lower-kebab-case')
-    if (FLEET_PERMISSION_PRESETS.some(group => group.id === value.id)) throw new Error(`cannot replace preset group ${value.id}`)
     const knownToolGroups = new Set<string>(FLEET_MEMBER_TOOL_GROUPS)
-    for (const group of value.toolGroups) if (!knownToolGroups.has(group)) throw new Error(`unknown Fleet tool group ${group}`)
+    for (const group of [...value.toolGroups, ...(value.denyToolGroups ?? [])]) {
+      if (!knownToolGroups.has(group)) throw new Error(`unknown Fleet tool group ${group}`)
+    }
     const knownActions = new Set<string>(this.authorization.actionIds())
-    for (const action of value.actions) if (!knownActions.has(action)) {
+    for (const action of [...value.actions, ...(value.denies ?? [])]) if (!knownActions.has(action)) {
       throw new Error(`unknown Fleet action ${action}`)
     }
-    const normalized: FleetPermissionGroup = {
-      id: value.id, name: value.name.trim() || value.id,
-      parents: unique(value.parents), toolGroups: unique(value.toolGroups), actions: unique(value.actions),
+    const normalized: FleetPermissionAssignment = {
+      grants: unique(value.actions), denies: unique(value.denies ?? []),
+      toolGroups: unique(value.toolGroups), denyToolGroups: unique(value.denyToolGroups ?? []),
       ...(value.op === true ? { op: true } : {}),
     }
+    const group = this.groupService.upsertGroup(teamId, value, false)
     const state = this.state(teamId)
-    const groups = [...state.groups.filter(group => group.id !== normalized.id), normalized]
-    const allGroups = new Map([...FLEET_PERMISSION_PRESETS, ...groups].map(group => [group.id, group]))
-    const resolved = new Set<string>()
-    const visiting = new Set<string>()
-    const visit = (id: string): void => {
-      if (resolved.has(id)) return
-      if (visiting.has(id)) throw new Error(`cyclic Fleet permission group inheritance at ${id}`)
-      const group = allGroups.get(id)
-      if (group === undefined) throw new Error(`unknown Fleet permission group ${id}`)
-      visiting.add(id)
-      for (const parent of group.parents) visit(parent)
-      visiting.delete(id)
-      resolved.add(id)
-    }
-    for (const group of allGroups.values()) visit(group.id)
-    const probe = { ...state, groups }
-    this.states.set(teamId, probe)
-    try {
-      for (const member of Object.keys(probe.members)) this.resolve({
-        teamId, member: this.requireMember(teamId, member),
-        base: { toolGroups: [], actions: [], op: false },
-      })
-    } catch (error) {
-      this.states.set(teamId, state)
-      throw error
-    }
-    this.save(teamId, probe)
+    this.save(teamId, { ...state, groups: { ...state.groups, [value.id]: normalized } })
     this.authorization.changed({ teamId })
-    return structuredClone(normalized)
+    return {
+      ...group,
+      toolGroups: [...normalized.toolGroups], denyToolGroups: [...normalized.denyToolGroups],
+      actions: [...normalized.grants], denies: [...normalized.denies],
+      ...(normalized.op === true ? { op: true } : {}),
+    }
   }
 
   deleteGroup(teamId: string, groupId: string): void {
-    if (FLEET_PERMISSION_PRESETS.some(group => group.id === groupId)) throw new Error(`cannot delete preset group ${groupId}`)
     const state = this.state(teamId)
-    if (!state.groups.some(group => group.id === groupId)) throw new Error(`unknown Fleet permission group ${groupId}`)
-    const groups = state.groups.filter(group => group.id !== groupId)
-    const members = Object.fromEntries(Object.entries(state.members).map(([member, access]) => [member, {
-      ...access, groups: access.groups.filter(group => group !== groupId),
-    }]))
-    this.save(teamId, { ...state, groups, members })
+    this.groupService.deleteGroup(teamId, groupId)
+    const groups = { ...state.groups }
+    delete groups[groupId]
+    this.save(teamId, { ...state, groups })
     this.authorization.changed({ teamId })
   }
 
@@ -370,7 +363,8 @@ export class FleetPermissionService implements FleetActionPolicy {
     const configuration = this.runs.exportConfiguration(teamId)
     const modules = configuration.modules
     if (typeof modules !== 'object' || modules === null || Array.isArray(modules)) return undefined
-    return (modules as Record<string, unknown>)[FLEET_PERMISSIONS_CONFIGURATION_MODULE] as JsonValue | undefined
+    const configured = modules as Record<string, unknown>
+    return configured[FLEET_PERMISSIONS_CONFIGURATION_MODULE] as JsonValue | undefined
   }
 
   private save(teamId: string, state: FleetPermissionState): void {
@@ -456,7 +450,8 @@ function installPermissionTool(
         if (args.id === undefined) throw new Error('fleet_permission upsert_group requires id')
         result = service.upsertGroup(teamId, {
           id: args.id, name: args.name ?? args.id, parents: args.parents ?? [],
-          toolGroups: args.tool_groups ?? [], actions: args.actions ?? [],
+          toolGroups: args.tool_groups ?? [], denyToolGroups: args.deny_tool_groups ?? [],
+          actions: args.actions ?? [], denies: args.denies ?? [],
           ...(args.group_op === true ? { op: true } : {}),
         })
       } else if (args.action === 'delete_group') {
@@ -474,10 +469,11 @@ function installPermissionTool(
   }))
 }
 
-export function apply(ctx: Context): void {
-  ctx.inject(['fleetAuthorization', 'fleetRuns', 'fleetConfiguration'], scope => {
-    const service = new FleetPermissionService(scope.fleetRuns, scope.fleetAuthorization)
+export function applyPermissions(ctx: Context): void {
+  ctx.inject(['fleetAuthorization', 'fleetRuns', 'fleetConfiguration', 'fleetGroups'], scope => {
+    const service = new FleetPermissionService(scope.fleetRuns, scope.fleetAuthorization, scope.fleetGroups)
     scope.provide('fleetPermissions', service)
+    const stopGroups = scope.fleetGroups.onChange(change => scope.fleetAuthorization.changed(change))
     const stopConfiguration = scope.fleetConfiguration.register({
       id: FLEET_PERMISSIONS_CONFIGURATION_MODULE,
       parse: parseFleetPermissionConfiguration,
@@ -494,6 +490,7 @@ export function apply(ctx: Context): void {
     return () => {
       stopNamespace()
       stopPolicy()
+      stopGroups()
       stopConfiguration()
     }
   })

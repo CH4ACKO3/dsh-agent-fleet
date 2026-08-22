@@ -1,7 +1,7 @@
 {
-  "name": "@ch4acko3/dsh-agent-fleet-permissions",
+  "name": "@ch4acko3/dsh-agent-fleet-authorization",
   "version": "0.1.0",
-  "description": "Dynamic action groups, grants, denies, and OP for Agent Fleet",
+  "description": "Optional groups, action permissions, and resource access policies for Agent Fleet",
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"
@@ -12,6 +12,14 @@
     ".": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
+    },
+    "./access": {
+      "types": "./lib/access.d.ts",
+      "default": "./lib/access.js"
+    },
+    "./permissions": {
+      "types": "./lib/permissions.d.ts",
+      "default": "./lib/permissions.js"
     },
     "./package.json": "./package.json"
   },
@@ -29,12 +37,12 @@
     "plugin": {
       "schemaVersion": 1,
       "displayName": {
-        "en": "Agent Fleet Permissions",
-        "zh-CN": "Agent Fleet 权限组"
+        "en": "Agent Fleet Authorization",
+        "zh-CN": "Agent Fleet 授权管理"
       },
       "summary": {
-        "en": "Optional dynamic action groups, grants, denies, presets, and OP for Fleet Teams.",
-        "zh-CN": "为 Fleet Team 提供可选的动态 action 组、授权、拒绝、预设与 OP。"
+        "en": "Optional Unix-style groups, action permissions, and resource keycards for Fleet Teams.",
+        "zh-CN": "为 Fleet Team 提供可选的类 Unix 权限组、动作权限与资源钥匙卡。"
       },
       "category": "development"
     },
