@@ -565,6 +565,10 @@ describe('FleetRunService', () => {
     writeFileSync(sharedPlan, '# Persistent plan\n')
     writeFileSync(join(source.root, '.fleet', run.id, 'decision-log.md'), 'Keep this document across archive import.\n')
     writeFileSync(join(source.root, 'workspace-result.txt'), 'workspace payload\n')
+    first.service.writeExtensionState(run.id, 'permissions', {
+      groups: [],
+      members: { lead: { groups: ['maintainer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [] } },
+    })
     await first.service.pauseTeam(first.launcher as unknown as Agent, run.id)
     for (const member of run.members) {
       const header = first.persistedHeaders.get(member.sessionId)
@@ -620,6 +624,9 @@ describe('FleetRunService', () => {
     expect(restoredPluginState).toEqual(['{"counter":7}\n'])
     expect(readFileSync(join(restoredRoot, 'workspace-result.txt'), 'utf8')).toBe('workspace payload\n')
     expect(readFileSync(join(restoredRoot, '.fleet', run.id, 'plan.md'), 'utf8')).toBe('# Persistent plan\n')
+    expect(second.service.readExtensionState(run.id, 'permissions')).toMatchObject({
+      members: { lead: { groups: ['maintainer'] } },
+    })
     expect(existsSync(join(targetHost.root, '.fleet-registry', run.id, 'extensions', 'missing.plugin', 'opaque.bin')))
       .toBe(true)
     expect([...second.persistedHeaders.values()].map(header => header.cwd)).toEqual(
@@ -638,6 +645,9 @@ describe('FleetRunService', () => {
     expect(readFileSync(join(copiedRoot, 'workspace-result.txt'), 'utf8')).toBe('workspace payload\n')
     expect(readFileSync(join(copiedRoot, '.fleet', copied.run.id, 'plan.md'), 'utf8'))
       .toBe('# Persistent plan\n')
+    expect(second.service.readExtensionState(copied.run.id, 'permissions')).toMatchObject({
+      members: { lead: { groups: ['maintainer'] } },
+    })
     for (const member of copied.run.members) {
       expect(second.persistedHeaders.get(member.sessionId)?.parentSession).toBeUndefined()
     }
