@@ -9,6 +9,7 @@ import {
 } from 'dsh-agent-fleet'
 
 import { FleetAccessService, applyAccess, type FleetAccessState } from '../src/access.js'
+import { FleetGroupService, fleetPrivateGroupId } from '../src/groups.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -24,8 +25,10 @@ function fixture(projectRoots: Readonly<Record<string, string>> = { 'team-1': '/
     writeExtensionState: (teamId: string, namespace: string, value: unknown) => {
       stored.set(`${teamId}:${namespace}`, structuredClone(value))
     },
+    exportConfiguration: () => ({ modules: {} }),
   } as unknown as FleetRunService
-  return { runs, stored, access: new FleetAccessService(runs) }
+  const groups = new FleetGroupService(runs)
+  return { runs, stored, groups, access: new FleetAccessService(runs, groups) }
 }
 
 function baseline(resource = true): FleetAuthorizationBaseline {
@@ -101,6 +104,48 @@ describe('FleetAccessService', () => {
     }, true)).toBe(false)
   })
 
+  it('combines shared and private group keycards with explicit deny taking precedence', () => {
+    const { access, groups, stored } = fixture()
+    groups.setMembership('team-1', 'alice', ['researcher'])
+    access.putRule('team-1', {
+      id: 'research-source', principal: { kind: 'group', id: 'researcher' },
+      resource: { kind: 'file', id: '/project/one/src' },
+      scope: 'tree', effect: 'allow', levels: ['write'],
+    })
+    access.putRule('team-1', {
+      id: 'personal-generated-deny', subject,
+      resource: { kind: 'file', id: '/project/one/src/generated' },
+      scope: 'tree', effect: 'deny', levels: ['read'],
+    })
+
+    expect(access.authorize({
+      teamId: 'team-1', subject, action: 'resource.write',
+      resource: { kind: 'file', id: '/project/one/src/index.ts' },
+    }, false)).toBe(true)
+    expect(access.authorize({
+      teamId: 'team-1', subject, action: 'resource.write',
+      resource: { kind: 'file', id: '/project/one/src/generated/client.ts' },
+    }, true)).toBe(false)
+    const persisted = stored.get('team-1:access') as FleetAccessState
+    expect(persisted.rules.find(rule => rule.id === 'personal-generated-deny')?.principal)
+      .toEqual({ kind: 'group', id: fleetPrivateGroupId('alice') })
+  })
+
+  it('removes orphaned keycards when a shared group is deleted', () => {
+    const { access, groups } = fixture()
+    groups.upsertGroup('team-1', { id: 'temporary', name: 'Temporary', parents: [] })
+    access.putRule('team-1', {
+      id: 'temporary-files', principal: { kind: 'group', id: 'temporary' },
+      resource: { kind: 'file', id: '/project/one/tmp' },
+      effect: 'allow', levels: ['write'],
+    })
+    const stop = groups.onChange(change => access.removeGroups(change.teamId, change.removedGroups ?? []))
+
+    groups.deleteGroup('team-1', 'temporary')
+    expect(access.rules('team-1')).toEqual([])
+    stop()
+  })
+
   it('leaves resource kinds without an Access adapter on their feature baseline', () => {
     const { access } = fixture()
     expect(access.authorize({
@@ -128,7 +173,7 @@ describe('FleetAccessService', () => {
     expect(persisted.rules[1]?.resource.id).toBe('team:notes')
 
     first.stored.set('team-2:access', structuredClone(persisted))
-    const restored = new FleetAccessService(first.runs)
+    const restored = new FleetAccessService(first.runs, first.groups)
     expect(restored.authorize({
       teamId: 'team-2', subject, action: 'resource.read',
       resource: { kind: 'file', id: '/project/new/src/index.ts' },
@@ -175,7 +220,26 @@ describe('FleetAccessService', () => {
   it('fails closed when persisted Access state is malformed', () => {
     const { runs, stored } = fixture()
     stored.set('team-1:access', { version: 1, modes: [], rules: [{ id: 'broken' }] })
-    expect(() => new FleetAccessService(runs).state('team-1')).toThrow(/resource/)
+    expect(() => new FleetAccessService(runs, new FleetGroupService(runs)).state('team-1')).toThrow(/resource/)
+  })
+
+  it('maps legacy subject keycards onto the subject private group', () => {
+    const { access, stored } = fixture()
+    stored.set('team-1:access', {
+      version: 1,
+      modes: [{ subject, resourceKind: 'file', mode: 'restricted' }],
+      rules: [{
+        id: 'legacy-read', subject,
+        resource: { kind: 'file', id: 'workspace:src' },
+        scope: 'tree', effect: 'allow', levels: ['read'],
+      }],
+    })
+
+    expect(access.state('team-1')).toMatchObject({
+      version: 2,
+      modes: [{ principal: { kind: 'group', id: fleetPrivateGroupId('alice') } }],
+      rules: [{ principal: { kind: 'group', id: fleetPrivateGroupId('alice') } }],
+    })
   })
 
   it('registers the optional Access policy and action namespace with Fleet', async () => {
@@ -185,6 +249,7 @@ describe('FleetAccessService', () => {
     applyAccess(ctx)
     ctx.provide('fleetRuns', runs)
     ctx.provide('fleetAuthorization', authorization)
+    ctx.provide('fleetGroups', new FleetGroupService(runs))
     await new Promise<void>(resolve => { setImmediate(resolve) })
 
     expect(ctx.get('fleetAccess')).toBeInstanceOf(FleetAccessService)

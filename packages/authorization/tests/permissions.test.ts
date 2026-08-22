@@ -12,6 +12,7 @@ import {
   FleetPermissionService,
   parseFleetPermissionConfiguration,
 } from '../src/permissions.js'
+import { FleetGroupService, fleetPrivateGroupId } from '../src/groups.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -27,7 +28,7 @@ const researcher: FleetMemberView = {
 }
 
 interface PermissionStorage {
-  value?: unknown
+  values?: Map<string, unknown>
 }
 
 function fixture(
@@ -35,19 +36,21 @@ function fixture(
   members: FleetMemberView[] = [alice],
   storage: PermissionStorage = {},
 ) {
+  const values = storage.values ??= new Map()
   const runs = {
-    readExtensionState: () => storage.value,
-    writeExtensionState: (_teamId: string, _namespace: string, value: unknown) => {
-      storage.value = structuredClone(value)
+    readExtensionState: (teamId: string, namespace: string) => values.get(`${teamId}:${namespace}`),
+    writeExtensionState: (teamId: string, namespace: string, value: unknown) => {
+      values.set(`${teamId}:${namespace}`, structuredClone(value))
     },
     memberViews: () => structuredClone(members),
     memberViewForAgent: () => structuredClone(members[0]),
     exportConfiguration: () => structuredClone(configuration),
   } as unknown as FleetRunService
   const authorization = new FleetAuthorizationService()
-  const permissions = new FleetPermissionService(runs, authorization)
+  const groups = new FleetGroupService(runs)
+  const permissions = new FleetPermissionService(runs, authorization, groups)
   authorization.installActionPolicy(permissions)
-  return { authorization, permissions, runs, stored: () => storage.value }
+  return { authorization, groups, permissions, runs, stored: () => values.get('team-1:permissions') }
 }
 
 describe('FleetPermissionService', () => {
@@ -67,8 +70,8 @@ describe('FleetPermissionService', () => {
 
   it('rejects malformed Team permission modules instead of silently widening access', () => {
     expect(() => parseFleetPermissionConfiguration({})).toThrow(/members must be an object/)
-    expect(() => parseFleetPermissionConfiguration({ version: 2, members: {} })).toThrow(/version must be 1/)
-    expect(parseFleetPermissionConfiguration({ members: {} })).toEqual({ groups: [], members: {} })
+    expect(() => parseFleetPermissionConfiguration({ version: 4, members: {} })).toThrow(/version must be/)
+    expect(parseFleetPermissionConfiguration({ members: {} })).toEqual({ version: 3, groups: {} })
   })
 
   it('adapts a native fixed profile without changing its effective access', () => {
@@ -192,6 +195,21 @@ describe('FleetPermissionService', () => {
     expect(effective.actions).toContain('channel.manage')
   })
 
+  it('stores personal permissions on the private member group while combining supplementary groups', () => {
+    const { authorization, permissions } = fixture()
+    permissions.setMember('team-1', 'alice', {
+      groups: ['researcher', 'facilitator'], grants: ['team.manage'], denies: [],
+      toolGroups: [], denyToolGroups: [],
+    })
+
+    expect(permissions.state('team-1').groups[fleetPrivateGroupId('alice')]).toMatchObject({
+      grants: ['team.manage'],
+    })
+    expect(authorization.resolve('team-1', alice).actions).toEqual(expect.arrayContaining([
+      'resource.write', 'channel.manage', 'meeting.manage', 'vote.create', 'team.manage',
+    ]))
+  })
+
   it('restores dynamic assignments from the Team extension state after restart', () => {
     const storage: PermissionStorage = {}
     const first = fixture({}, [alice], storage)
@@ -204,6 +222,31 @@ describe('FleetPermissionService', () => {
       groups: ['observer'], grants: ['vote.create'],
     })
     expect(second.authorization.resolve('team-1', alice).actions).toContain('vote.create')
+  })
+
+  it('migrates legacy member and group assignments into private and supplementary groups', () => {
+    const storage: PermissionStorage = { values: new Map([['team-1:permissions', {
+      groups: [{
+        id: 'legacy-builders', name: 'Legacy builders', parents: ['member'],
+        toolGroups: [], actions: ['team.manage'],
+      }],
+      members: {
+        alice: {
+          groups: ['legacy-builders'], grants: ['vote.create'], denies: [],
+          toolGroups: [], denyToolGroups: [],
+        },
+      },
+    }]]) }
+    const { authorization, groups, permissions } = fixture({}, [alice], storage)
+
+    expect(groups.membership('team-1', 'alice')).toEqual(['legacy-builders'])
+    expect(permissions.state('team-1').groups[fleetPrivateGroupId('alice')]).toMatchObject({
+      grants: ['vote.create'],
+    })
+    expect(authorization.resolve('team-1', alice).actions).toEqual(expect.arrayContaining([
+      'team.manage', 'vote.create',
+    ]))
+    expect(storage.values?.has('team-1:groups')).toBe(true)
   })
 
   it('allows registered plugin actions and rejects them after the plugin unregisters', () => {
@@ -262,7 +305,7 @@ describe('FleetPermissionService', () => {
       groups: [{
         id: 'legacy', name: 'Legacy', parents: [], toolGroups: [], permissions: ['team.manage'],
       }],
-    }).groups[0]).toMatchObject({ actions: ['team.manage'] })
+    }).groups.legacy).toMatchObject({ grants: ['team.manage'] })
   })
 
   it('rejects cyclic custom group inheritance', () => {

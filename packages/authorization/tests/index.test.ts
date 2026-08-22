@@ -9,6 +9,7 @@ import {
 
 import {
   FleetAccessService,
+  FleetGroupService,
   FleetPermissionService,
   apply,
 } from '../src/index.js'
@@ -30,6 +31,7 @@ describe('Agent Fleet Authorization plugin', () => {
 
     expect(ctx.get('fleetPermissions')).toBeInstanceOf(FleetPermissionService)
     expect(ctx.get('fleetAccess')).toBeInstanceOf(FleetAccessService)
+    expect(ctx.get('fleetGroups')).toBeInstanceOf(FleetGroupService)
     expect(authorization.actionIds()).toEqual(expect.arrayContaining([
       'permissions.manage', 'access.inspect', 'access.manage',
     ]))

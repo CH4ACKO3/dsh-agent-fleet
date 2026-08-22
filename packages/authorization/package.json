@@ -1,7 +1,7 @@
 {
   "name": "@ch4acko3/dsh-agent-fleet-authorization",
   "version": "0.1.0",
-  "description": "Optional action permissions and resource access policies for Agent Fleet",
+  "description": "Optional groups, action permissions, and resource access policies for Agent Fleet",
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"
@@ -41,8 +41,8 @@
         "zh-CN": "Agent Fleet 授权管理"
       },
       "summary": {
-        "en": "Optional permission groups and resource keycards for Fleet Teams.",
-        "zh-CN": "为 Fleet Team 提供可选的权限组与资源钥匙卡。"
+        "en": "Optional Unix-style groups, action permissions, and resource keycards for Fleet Teams.",
+        "zh-CN": "为 Fleet Team 提供可选的类 Unix 权限组、动作权限与资源钥匙卡。"
       },
       "category": "development"
     },
