@@ -73,12 +73,16 @@ export class FleetCollaborationService {
   private readonly pendingAccessRefresh = new Map<string, Set<string>>()
   private readonly stopAccess: () => void
   private readonly stopStatus: () => void
+  private readonly stopStep: () => void
 
   constructor(private readonly ctx: Context, private readonly authorization: FleetAuthorizationService) {
     this.stopAccess = authorization.onChange(change => this.scheduleAccessRefresh(change))
     this.stopStatus = ctx.on('agent/status', ({ agent, status }) => {
       if (status !== 'idle') return
       this.flushAccessRefresh(String(agent.id))
+    })
+    this.stopStep = ctx.on('session/event', (session, event) => {
+      if (event.type === 'step/end') this.flushAccessRefresh(String(session.id))
     })
   }
 
@@ -445,6 +449,7 @@ export class FleetCollaborationService {
     for (const team of this.teams.values()) team.close()
     this.teams.clear()
     this.pendingAccessRefresh.clear()
+    this.stopStep()
     this.stopStatus()
     this.stopAccess()
   }

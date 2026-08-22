@@ -145,15 +145,17 @@ describe('FleetAuthorizationService', () => {
     expect(access.actorForAgent('ordinary-session')).toBeUndefined()
   })
 
-  it('defers tool visibility refresh until a running Agent becomes idle', () => {
+  it('defers tool visibility refresh until the running Agent reaches a step boundary', () => {
     const access = new FleetAuthorizationService()
     const agent = { id: 'session-1', status: 'running' }
     let statusListener: ((payload: { readonly agent: { readonly id: string }; readonly status: string }) => void) | undefined
+    let sessionListener: ((session: { readonly id: string }, event: { readonly type: string }) => void) | undefined
     const collaboration = new FleetCollaborationService({
       agents: { get: () => agent },
       fs: { contains: () => true },
-      on: (event: string, listener: typeof statusListener) => {
-        if (event === 'agent/status') statusListener = listener
+      on: (event: string, listener: typeof statusListener | typeof sessionListener) => {
+        if (event === 'agent/status') statusListener = listener as typeof statusListener
+        if (event === 'session/event') sessionListener = listener as typeof sessionListener
         return () => {}
       },
     } as never, access)
@@ -171,10 +173,13 @@ describe('FleetAuthorizationService', () => {
 
     access.changed({ teamId: 'team-1', members: ['alice'] })
     expect(refresh).not.toHaveBeenCalled()
-    agent.status = 'idle'
-    statusListener?.({ agent, status: 'idle' })
+    sessionListener?.({ id: agent.id }, { type: 'step/end' })
     expect(refresh).toHaveBeenCalledOnce()
     expect(refresh).toHaveBeenCalledWith('alice')
+    access.changed({ teamId: 'team-1', members: ['alice'] })
+    agent.status = 'idle'
+    statusListener?.({ agent, status: 'idle' })
+    expect(refresh).toHaveBeenCalledTimes(2)
     collaboration.close()
   })
 })
