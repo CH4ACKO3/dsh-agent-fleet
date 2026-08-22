@@ -44,6 +44,26 @@ describe('Fleet configuration modules', () => {
     })
   })
 
+  it('publishes only setup-aware Host modules to the Team-building guide', () => {
+    const registry = new FleetConfigurationRegistry()
+    registry.register({
+      id: 'example/plugin',
+      setup: {
+        description: 'Enable the example capability.',
+        defaultValue: { enabled: true },
+      },
+      parse: value => value,
+    })
+    registry.register({ id: 'internal/plugin', parse: value => value })
+
+    expect(registry.guideModules()).toEqual(expect.arrayContaining([{
+      id: 'example/plugin',
+      description: 'Enable the example capability.',
+      defaultValue: { enabled: true },
+    }]))
+    expect(registry.guideModules().some(module => module.id === 'internal/plugin')).toBe(false)
+  })
+
   it('publishes Client editors, defaults, and templates through one registry', () => {
     const registry = new FleetConfigurationModuleRegistry()
     const dispose = registry.register({

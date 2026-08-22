@@ -212,6 +212,7 @@ export class FleetAssistantRuntime {
     return this.install(agent, {
       phase: 'setup',
       tools: FLEET_GUIDE_TOOL_NAMES,
+      restrictedTools: FLEET_GUIDE_TOOL_NAMES,
       prompt: FLEET_TEAM_BUILDER_PROMPT,
       setupId,
     })

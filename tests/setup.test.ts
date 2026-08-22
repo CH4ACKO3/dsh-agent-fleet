@@ -178,6 +178,38 @@ describe('FleetSetupService', () => {
     })
   })
 
+  it('describes the current setup modules and preserves omitted plugin blocks across draft updates', () => {
+    const fixture = setupFixture()
+    fixture.service.begin(fixture.agent)
+    const initial = configuration() as Record<string, unknown>
+    initial.modules = {
+      ...(initial.modules as Record<string, unknown>),
+      'example/plugin': { enabled: true, nested: { retained: true } },
+    }
+    fixture.service.stage(fixture.agent, { configuration: initial })
+
+    const updated = fixture.service.stage(fixture.agent, { configuration: configuration() })
+    expect(updated.configuration).toMatchObject({
+      modules: {
+        'example/plugin': { enabled: true, nested: { retained: true } },
+      },
+    })
+
+    const guide = fixture.service.configurationGuide()
+    const template = JSON.parse(guide.configurationTemplate) as Record<string, unknown>
+    expect(template).toMatchObject({
+      core: { name: '', positioning: '', members: [] },
+      modules: {
+        'dsh-agent-fleet/message': { defaultChannel: { id: 'main', name: 'Main' } },
+      },
+    })
+    expect(guide.modules.map(module => module.id)).toEqual(expect.arrayContaining([
+      'dsh-agent-fleet/message',
+      'dsh-agent-fleet/resources',
+      'dsh-agent-fleet/ui',
+    ]))
+  })
+
   it('restores the durable setup instead of initializing it again', () => {
     const fixture = setupFixture()
     const begun = fixture.service.begin(fixture.agent)
