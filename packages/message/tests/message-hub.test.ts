@@ -712,6 +712,31 @@ describe('MessageHub', () => {
     })
   })
 
+  it('checks current action authorization when a previously visible tool executes', async () => {
+    const { hub, lead } = setup()
+    const registered: Array<{
+      readonly name: string
+      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
+    }> = []
+    const allowed = new Set(['message.read', 'message.post'])
+    installMessageTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+    } as never, hub, {
+      coordination: false,
+      authorize: (_agentId, action) => allowed.has(action),
+    })
+    const send = registered.find(candidate => candidate.name === 'fleet_send')
+    if (send === undefined) throw new Error('expected fleet_send')
+
+    await expect(send.execute({ to: '#general', message: 'Allowed once.' }, { agent: lead }))
+      .resolves.toMatchObject({ recipients: expect.any(Number) })
+    allowed.delete('message.post')
+    await expect(async () => send.execute(
+      { to: '#general', message: 'Must now be denied.' },
+      { agent: lead },
+    )).rejects.toThrow('not authorized for message.post')
+  })
+
   it('excludes connected observers that are not default voters', () => {
     const { agents, lead, reviewer, qa, observer } = setup()
     const hub = new MessageHub({
