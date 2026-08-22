@@ -154,6 +154,7 @@ export interface FleetTraceEvent {
   readonly createdAt: string
   readonly scope: 'team' | 'member'
   readonly member?: string
+  readonly sessionId?: string
   readonly sourceSequence?: number
   readonly type: string
   readonly data: string
@@ -174,6 +175,23 @@ export interface FleetTeamProjection {
   readonly memberViews: FleetMemberView[]
   readonly events: FleetJournalEvent[]
   readonly hasMore: boolean
+}
+
+export interface FleetConversationProjection extends FleetTeamProjection {
+  readonly previousSequence?: number
+}
+
+export interface FleetMemberTracePage {
+  readonly runId: string
+  readonly member: string
+  readonly events: FleetTraceEvent[]
+  readonly hasMore: boolean
+  readonly targetSessionId?: string
+  readonly targetSequence?: number
+  readonly previous?: {
+    readonly segment: number
+    readonly beforeSeq: number
+  }
 }
 
 export interface FleetMemberProjection {
@@ -318,6 +336,12 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
       : undefined
     return typeof member === 'string' && member.length > 0 ? `member-status:${member}` : undefined
   }
+  if (event.type === 'member_session_rotated') {
+    const previous = typeof event.data === 'object' && event.data !== null
+      ? (event.data as Record<string, unknown>).previousSessionId
+      : undefined
+    return typeof previous === 'string' && previous.length > 0 ? `member-session:${previous}` : undefined
+  }
   return undefined
 }
 
@@ -337,7 +361,9 @@ function isProjectionActivity(event: StoredFleetEvent): boolean {
 function projectionReceiptMessageId(event: StoredFleetEvent): string | undefined {
   if (event.type !== 'coordination.inbox' || typeof event.data !== 'object' || event.data === null) return undefined
   const data = event.data as Record<string, unknown>
-  return data.type === 'inbox' && data.action === 'acknowledged' && typeof data.messageId === 'string'
+  return data.type === 'inbox'
+    && (data.action === 'delivered' || data.action === 'acknowledged')
+    && typeof data.messageId === 'string'
     ? data.messageId
     : undefined
 }
@@ -412,6 +438,24 @@ interface SessionPersistenceLike {
   list?(): Promise<SessionHeader[]>
   create?(meta: SessionHeader): Promise<void>
   append?(id: ReturnType<typeof SessionId>, events: readonly SessionEvent[]): Promise<void>
+}
+
+interface FleetSessionArchiveLike {
+  find(logicalId: string): Promise<{
+    readonly activeSessionId: string
+    readonly segments: readonly { readonly sessionId: string }[]
+  } | undefined>
+  readPage(logicalId: string, options: {
+    readonly cursor?: { readonly segment: number; readonly beforeSeq: number }
+    readonly limit?: number
+    readonly signal?: AbortSignal
+  }): Promise<{
+    readonly items: readonly {
+      readonly sessionId: string
+      readonly event: SessionEventLike
+    }[]
+    readonly previous?: { readonly segment: number; readonly beforeSeq: number }
+  }>
 }
 
 interface RunWaiter {
@@ -3378,6 +3422,71 @@ export class FleetRunService {
     }
   }
 
+  readConversationProjection(
+    runId: string,
+    conversationId: string,
+    beforeSequence: number,
+    limit: number,
+  ): FleetConversationProjection {
+    const record = this.requireRecord(runId)
+    const stored = this.storedEvents(record)
+    const memberBySession = new Map(record.members.map(member => [member.sessionId, member.name]))
+    for (const event of stored) {
+      if (event.type !== 'member_session_rotated') continue
+      const data = event.data as { readonly member?: unknown; readonly previousSessionId?: unknown; readonly sessionId?: unknown }
+      if (typeof data.member !== 'string') continue
+      if (typeof data.previousSessionId === 'string') memberBySession.set(data.previousSessionId, data.member)
+      if (typeof data.sessionId === 'string') memberBySession.set(data.sessionId, data.member)
+    }
+    const currentSessionByMember = new Map(record.members.map(member => [member.name, member.sessionId]))
+    const projectedConversation = (event: StoredFleetEvent): string | undefined => {
+      if (event.type !== 'coordination.message' || typeof event.data !== 'object' || event.data === null) return undefined
+      const coordination = event.data as { readonly message?: { readonly conversation?: unknown; readonly from?: unknown } }
+      const target = coordination.message?.conversation
+      const from = coordination.message?.from
+      if (typeof target !== 'string' || typeof from !== 'string' || !target.startsWith('@')) {
+        return typeof target === 'string' ? target : undefined
+      }
+      const recipient = target.slice(1)
+      const participants = [...new Set([from, recipient])]
+      const memberNames = [...new Set(participants.flatMap(sessionId => {
+        const member = memberBySession.get(sessionId)
+        return member === undefined ? [] : [member]
+      }))]
+      const fleetUsers = participants.filter(sessionId => sessionId.startsWith('fleet-user:'))
+      if (participants.length === 2 && memberNames.length === 1 && fleetUsers.length === 1) {
+        const currentSession = currentSessionByMember.get(memberNames[0] ?? '')
+        return currentSession === undefined ? undefined : `@${currentSession}`
+      }
+      const stableParticipants = participants.map(sessionId => {
+        const member = memberBySession.get(sessionId)
+        return member === undefined ? sessionId : `member:${member}`
+      })
+      return `dm:${stableParticipants.toSorted().join(':')}`
+    }
+    const messages = stored.filter(event => event.sequence < beforeSequence
+      && projectedConversation(event) === conversationId)
+    const selectedMessages = messages.slice(-limit)
+    const selectedIds = new Set(selectedMessages.flatMap(event => {
+      if (typeof event.data !== 'object' || event.data === null) return []
+      const message = (event.data as { readonly message?: { readonly id?: unknown } }).message
+      return typeof message?.id === 'string' ? [message.id] : []
+    }))
+    const receipts = stored.filter(event => {
+      if (event.type !== 'coordination.inbox' || typeof event.data !== 'object' || event.data === null) return false
+      const messageId = (event.data as { readonly messageId?: unknown }).messageId
+      return typeof messageId === 'string' && selectedIds.has(messageId)
+    })
+    const events = [...selectedMessages, ...receipts].sort((left, right) => left.sequence - right.sequence)
+    return {
+      run: this.describeRecord(record),
+      memberViews: this.memberViews(runId),
+      events: events.map(event => this.journalEvent(event)),
+      hasMore: messages.length > selectedMessages.length,
+      ...(selectedMessages[0] === undefined ? {} : { previousSequence: selectedMessages[0].sequence }),
+    }
+  }
+
   async readResourcePreview(
     runId: string,
     resourceId: string,
@@ -3468,6 +3577,7 @@ export class FleetRunService {
         createdAt: new Date(event.time).toISOString(),
         scope: 'member' as const,
         member: member.name,
+        sessionId: member.sessionId,
         sourceSequence: event.seq,
         type: `session.${event.type}`,
         data: JSON.stringify(event.data),
@@ -3514,11 +3624,108 @@ export class FleetRunService {
         createdAt: new Date(event.time).toISOString(),
         scope: 'member' as const,
         member: member.name,
+        sessionId: member.sessionId,
         sourceSequence: event.seq,
         type: `session.${event.type}`,
         data: JSON.stringify(event.data),
       })),
       hasMore,
+    }
+  }
+
+  async readMemberTracePage(
+    runId: string,
+    memberName: string,
+    limit: number,
+    cursor?: { readonly segment: number; readonly beforeSeq: number },
+    signal?: AbortSignal,
+  ): Promise<FleetMemberTracePage> {
+    const record = this.requireRecord(runId)
+    const member = this.participants(record).find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
+    const archive = this.ctx.get('sessionArchive', false) as FleetSessionArchiveLike | undefined
+    const logicalId = this.memberArchiveId(record.id, member.name)
+    const timeline = archive === undefined ? undefined : await archive.find(logicalId)
+    if (archive === undefined || timeline === undefined) {
+      return this.readMemberTraceTail(record.id, member.name, limit)
+    }
+    const page = await archive.readPage(logicalId, {
+      limit,
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const items = page.items.filter(item => item.event.type !== 'assistant/chunk'
+      && item.event.type !== 'session/end-seed')
+    return {
+      runId: record.id,
+      member: member.name,
+      events: items.map(item => ({
+        sequence: item.event.seq,
+        createdAt: new Date(item.event.time).toISOString(),
+        scope: 'member',
+        member: member.name,
+        sessionId: item.sessionId,
+        sourceSequence: item.event.seq,
+        type: `session.${item.event.type}`,
+        data: JSON.stringify(item.event.data),
+      })),
+      hasMore: page.previous !== undefined,
+      ...(page.previous === undefined ? {} : { previous: page.previous }),
+    }
+  }
+
+  async readMemberSourceTrace(
+    runId: string,
+    memberName: string,
+    sourceSessionId: string,
+    contextMessageId: string,
+    limit: number,
+  ): Promise<FleetMemberTracePage> {
+    const record = this.requireRecord(runId)
+    const member = this.participants(record).find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
+    const memberSessions = new Set([member.sessionId])
+    for (const event of this.storedEvents(record)) {
+      if (event.type !== 'member_session_rotated' || typeof event.data !== 'object' || event.data === null) continue
+      const data = event.data as { readonly member?: unknown; readonly previousSessionId?: unknown; readonly sessionId?: unknown }
+      if (data.member !== member.name) continue
+      if (typeof data.previousSessionId === 'string') memberSessions.add(data.previousSessionId)
+      if (typeof data.sessionId === 'string') memberSessions.add(data.sessionId)
+    }
+    if (!memberSessions.has(sourceSessionId)) {
+      throw new Error(`Session ${sourceSessionId} does not belong to Fleet member ${memberName}`)
+    }
+    const live = this.ctx.agents.get(SessionId(sourceSessionId))
+    const events: readonly SessionEventLike[] = live === undefined
+      ? (await this.requirePersistence().inspect(SessionId(sourceSessionId))).events
+      : live.session.events
+    const targetIndex = events.findIndex(event => {
+      if (typeof event.data !== 'object' || event.data === null) return false
+      const data = event.data as { readonly id?: unknown; readonly message?: { readonly id?: unknown } }
+      return data.id === contextMessageId || data.message?.id === contextMessageId
+    })
+    if (targetIndex < 0) throw new Error(`Context message ${contextMessageId} was not found in Session ${sourceSessionId}`)
+    const before = Math.floor((limit - 1) / 2)
+    const start = Math.max(0, targetIndex - before)
+    const selected = events.slice(start, Math.min(events.length, start + limit))
+      .filter(event => event.type !== 'assistant/chunk' && event.type !== 'session/end-seed')
+    const target = events[targetIndex]
+    return {
+      runId: record.id,
+      member: member.name,
+      events: selected.map(event => ({
+        sequence: event.seq,
+        createdAt: new Date(event.time).toISOString(),
+        scope: 'member',
+        member: member.name,
+        sessionId: sourceSessionId,
+        sourceSequence: event.seq,
+        type: `session.${event.type}`,
+        data: JSON.stringify(event.data),
+      })),
+      hasMore: start > 0 || start + limit < events.length,
+      targetSessionId: sourceSessionId,
+      ...(target === undefined ? {} : { targetSequence: target.seq }),
     }
   }
 

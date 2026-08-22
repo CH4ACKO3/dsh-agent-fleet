@@ -130,6 +130,15 @@ describe('Fleet Web panel source', () => {
           },
           {
             sequence: 6,
+            createdAt: '2026-08-21T10:04:01.000Z',
+            type: 'coordination.inbox',
+            data: {
+              type: 'inbox', action: 'delivered', agentId: 'member-session', messageId: 'message-user',
+              contextMessageId: 'context-message-user',
+            },
+          },
+          {
+            sequence: 7,
             createdAt: '2026-08-21T10:05:00.000Z',
             type: 'coordination.message',
             data: {
@@ -141,7 +150,7 @@ describe('Fleet Web panel source', () => {
             },
           },
           {
-            sequence: 7,
+            sequence: 8,
             createdAt: '2026-08-21T10:05:30.000Z',
             type: 'coordination.inbox',
             data: {
@@ -149,7 +158,7 @@ describe('Fleet Web panel source', () => {
             },
           },
           {
-            sequence: 8,
+            sequence: 9,
             createdAt: '2026-08-21T10:05:45.000Z',
             type: 'coordination.message',
             data: {
@@ -161,7 +170,16 @@ describe('Fleet Web panel source', () => {
             },
           },
           {
-            sequence: 9,
+            sequence: 10,
+            createdAt: '2026-08-21T10:05:46.000Z',
+            type: 'coordination.inbox',
+            data: {
+              type: 'inbox', action: 'delivered', agentId: 'member-session', messageId: 'message-unread',
+              contextMessageId: 'context-message-unread',
+            },
+          },
+          {
+            sequence: 11,
             createdAt: '2026-08-21T10:06:00.000Z',
             type: 'member_status.updated',
             data: {
@@ -271,11 +289,17 @@ describe('Fleet Web panel source', () => {
       }),
       expect.objectContaining({
         id: 'message-user', conversationId: '@member-session', sender: expect.objectContaining({ operator: true }),
-        receipt: { visibleMemberIds: ['builder'], readMemberIds: ['builder'], unreadMemberIds: [] },
+        receipt: {
+          visibleMemberIds: ['builder'], readMemberIds: ['builder'], unreadMemberIds: [],
+          sources: [{ memberId: 'builder', sessionId: 'member-session', contextMessageId: 'context-message-user' }],
+        },
       }),
       expect.objectContaining({
         id: 'message-unread', conversationId: '@member-session',
-        receipt: { visibleMemberIds: ['builder'], readMemberIds: [], unreadMemberIds: ['builder'] },
+        receipt: {
+          visibleMemberIds: ['builder'], readMemberIds: [], unreadMemberIds: ['builder'],
+          sources: [{ memberId: 'builder', sessionId: 'member-session', contextMessageId: 'context-message-unread' }],
+        },
       }),
       expect.objectContaining({ id: 'message-reply', conversationId: '@member-session', senderId: 'builder' }),
     ]))
@@ -521,8 +545,8 @@ describe('Fleet Web panel source', () => {
     await source.refresh()
 
     const team = source.getSnapshot().team
-    const memberDirectId = 'dm:builder-session:reviewer-session'
-    const assistantDirectId = 'dm:assistant-session:builder-session'
+    const memberDirectId = 'dm:member:builder:member:reviewer'
+    const assistantDirectId = 'dm:assistant-session:member:builder'
     expect(team?.conversations).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: '@builder-session', peerId: 'builder' }),
       expect.objectContaining({ id: '@reviewer-session', peerId: 'reviewer' }),
@@ -681,6 +705,81 @@ describe('Fleet Web panel source', () => {
     source.dispose()
   })
 
+  it('loads an older conversation page without retaining it in the live Team snapshot', async () => {
+    const run = {
+      id: 'team-1', name: 'Paged Team', projectRoot: '/workspace/fleet', status: 'running',
+      startedAt: '2026-08-21T10:00:00.000Z',
+      members: [{ name: 'builder', displayName: 'Avery', role: 'Engineer', sessionId: 'member-new', status: 'idle' }],
+      assistants: [],
+    }
+    const message = (sequence: number, id: string, from = 'member-old') => ({
+      sequence,
+      createdAt: '2026-08-21T10:00:00.000Z',
+      type: 'coordination.message',
+      data: {
+        type: 'message',
+        message: { id, conversation: '#general', from, text: id, mentions: [], resources: [] },
+      },
+    })
+    const rotation = {
+      sequence: 90,
+      createdAt: '2026-08-21T10:00:00.000Z',
+      type: 'member_session_rotated',
+      data: { member: 'builder', previousSessionId: 'member-old', sessionId: 'member-new' },
+    }
+    const remote = {
+      list: async () => ok([run]),
+      project: async input => {
+        const view = typeof input === 'object' && input !== null && 'view' in input
+          ? (input as { readonly view?: string }).view
+          : undefined
+        return ok(view === 'conversation'
+          ? {
+              run,
+              memberViews: [{ id: 'builder', name: 'Avery', role: 'Engineer', contacts: { members: '*', channels: '*' } }],
+              events: [
+                message(4, 'old-message', 'fleet-user:team-1'),
+                {
+                  sequence: 5,
+                  createdAt: '2026-08-21T10:00:01.000Z',
+                  type: 'coordination.inbox',
+                  data: {
+                    type: 'inbox', action: 'delivered', agentId: 'member-old', messageId: 'old-message',
+                    contextMessageId: 'context-old',
+                  },
+                },
+              ],
+              hasMore: false,
+              previousSequence: 4,
+            }
+          : {
+              run,
+              memberViews: [{ id: 'builder', name: 'Avery', role: 'Engineer', contacts: { members: '*', channels: '*' } }],
+              events: [rotation, message(100, 'recent-message', 'member-new')],
+              hasMore: false,
+            })
+      },
+      send: async () => ok({}), member: async () => ok({}), control: async () => ok({}),
+      upload: async () => ok({}), uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const source = createFleetWebPanelSource(() => Promise.resolve(remote))
+
+    await source.refresh()
+    const page = await source.loadConversationMessages('team-1', '#general', 100)
+
+    expect(page.messages).toEqual([
+      expect.objectContaining({
+        id: 'old-message', senderId: 'operator', sequence: 4,
+        receipt: expect.objectContaining({
+          sources: [{ memberId: 'builder', sessionId: 'member-old', contextMessageId: 'context-old' }],
+        }),
+      }),
+    ])
+    expect(source.getSnapshot().team?.messages.map(item => item.id)).toEqual(['recent-message'])
+    source.dispose()
+  })
+
   it('requests a tail trace from before sequence zero so the first Session event is visible', async () => {
     const requests: unknown[] = []
     const remote = {
@@ -704,5 +803,55 @@ describe('Fleet Web panel source', () => {
     }])
     expect(trace.events.map(event => event.sequence)).toEqual([0])
     source.dispose()
+  })
+
+  it('loads cold trace cursors and redirects a receipt source to its archived Session event', async () => {
+    const requests: unknown[] = []
+    const remote = {
+      list: async () => ok([]),
+      project: async input => {
+        requests.push(input)
+        const source = typeof input === 'object' && input !== null && 'sourceSessionId' in input
+        return ok(source
+          ? {
+              events: [{
+                sequence: 12,
+                sessionId: 'old-session',
+                createdAt: '2026-08-21T10:00:00.000Z',
+                type: 'session.user/message',
+                data: '{}',
+              }],
+              hasMore: false,
+              targetSessionId: 'old-session',
+              targetSequence: 12,
+            }
+          : {
+              events: [],
+              hasMore: true,
+              previous: { segment: 1, beforeSeq: 40 },
+            })
+      },
+      send: async () => ok({}), member: async () => ok({}), control: async () => ok({}),
+      upload: async () => ok({}), uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const panel = createFleetWebPanelSource(() => Promise.resolve(remote))
+
+    const cold = await panel.loadMemberTrace('team-1', 'builder', undefined, {
+      cursor: { segment: 1, beforeSeq: 80 },
+    })
+    const redirected = await panel.loadMemberTrace('team-1', 'builder', undefined, {
+      source: { memberId: 'builder', sessionId: 'old-session', contextMessageId: 'message-old' },
+    })
+
+    expect(cold.previous).toEqual({ segment: 1, beforeSeq: 40 })
+    expect(redirected.events).toEqual([expect.objectContaining({
+      sessionId: 'old-session', sequence: 12, target: true,
+    })])
+    expect(requests).toEqual([
+      expect.objectContaining({ archiveCursor: { segment: 1, beforeSeq: 80 }, tail: true }),
+      expect.objectContaining({ sourceSessionId: 'old-session', contextMessageId: 'message-old' }),
+    ])
+    panel.dispose()
   })
 })

@@ -1,9 +1,14 @@
 import type { CSSProperties, ReactElement, ReactNode } from 'react'
-import { Fragment } from 'react'
+import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
-import { HoverHint } from 'dsh-hover-hint'
+import { HoverHint, type HoverHintProps } from 'dsh-hover-hint'
 
-export const FleetInfoHint = HoverHint
+export function FleetInfoHint(props: HoverHintProps): ReactElement {
+  const Component = typeof HoverHint === 'function' ? HoverHint : undefined
+  return Component === undefined
+    ? jsx(Fragment, { children: props.triggerContent })
+    : jsx(Component, props)
+}
 
 const RUNTIME_CHAT_STYLE_ID = 'dsh-agent-fleet-runtime-chat'
 
@@ -157,7 +162,9 @@ const runtimeChatStyles = `
 
 .dsh-fleet-chat-message-name {
   min-width: 0;
+  max-width: 45%;
   color: var(--dsw-alias-label-primary);
+  flex: none;
   text-overflow: ellipsis;
   white-space: nowrap;
   font: var(--dsw-font-s-strong-14);
@@ -176,86 +183,152 @@ const runtimeChatStyles = `
 
 .dsh-fleet-chat-message-role {
   min-width: 0;
+  flex: 0 1 auto;
   text-overflow: ellipsis;
   white-space: nowrap;
   overflow: hidden;
 }
 
 .dsh-fleet-chat-message-time {
-  margin-left: auto;
+  margin-left: 2px;
 }
 
 .dsh-fleet-chat-message-actions {
   align-items: center;
   gap: 4px;
+  margin-left: auto;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease-out;
   display: flex;
 }
 
-.dsh-fleet-message-receipt {
-  flex: none;
-  align-items: center;
-  display: inline-flex;
+.dsh-fleet-chat-message-actions:empty {
+  display: none;
 }
 
-.dsh-fleet-message-receipt .dsh-hover-hint-trigger {
-  width: 18px;
-  height: 18px;
+.dsh-fleet-message-receipt {
+  flex: none;
+  align-self: center;
+  align-items: center;
+  display: inline-flex;
+  position: relative;
+  transform: translateY(1px);
+}
+
+.dsh-fleet-message-receipt-trigger {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  color: inherit;
   cursor: pointer;
+  background: transparent;
+  border: 0;
   border-radius: 50%;
+  place-items: center;
   padding: 2px;
+  display: grid;
+  position: relative;
+}
+
+.dsh-fleet-message-receipt-trigger:hover,
+.dsh-fleet-message-receipt-trigger[aria-expanded="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-message-receipt-trigger:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-message-receipt-trigger::after {
+  content: attr(data-summary);
+  z-index: 5;
+  width: max-content;
+  max-width: min(220px, calc(100vw - 24px));
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  box-shadow: var(--dsw-shadow-lv1);
+  opacity: 0;
+  padding: 5px 8px;
+  pointer-events: none;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  transition: opacity 100ms ease-out;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+}
+
+.dsh-fleet-message-receipt-trigger:hover:not([aria-expanded="true"])::after,
+.dsh-fleet-message-receipt-trigger:focus-visible:not([aria-expanded="true"])::after {
+  opacity: 1;
+  transition-delay: 320ms;
+}
+
+.dsh-fleet-message-receipt-indicator {
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  color: color-mix(in srgb, var(--dsw-alias-label-secondary) 84%, transparent);
+  border: 1.25px solid currentColor;
+  border-radius: 50%;
   place-items: center;
   display: grid;
 }
 
-.dsh-fleet-message-receipt .dsh-hover-hint-trigger:hover,
-.dsh-fleet-message-receipt .dsh-hover-hint[data-pinned="true"] .dsh-hover-hint-trigger {
-  background: var(--dsw-alias-interactive-bg-hover);
-  text-decoration: none;
-}
-
 .dsh-fleet-message-receipt-pie {
-  box-sizing: border-box;
-  width: 13px;
-  height: 13px;
+  width: 8px;
+  height: 8px;
   background: conic-gradient(
-    var(--dsw-alias-state-business-primary) var(--dsh-fleet-read-angle, 0deg),
-    color-mix(in srgb, var(--dsw-alias-label-secondary) 22%, transparent) 0
+    currentColor var(--dsh-fleet-read-angle, 0deg),
+    transparent 0
   );
-  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 18%, transparent);
   border-radius: 50%;
-  transition: opacity 100ms ease-out;
   display: block;
 }
 
-.dsh-fleet-message-receipt .dsh-hover-hint-trigger-ring {
-  width: 16px;
-  height: 16px;
-  inset: 1px;
-  z-index: 1;
+.dsh-fleet-message-receipt-popover {
+  box-sizing: border-box;
+  width: min(430px, calc(100vw - 24px));
+  max-height: min(360px, calc(100vh - 24px));
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgb(24 39 57 / 18%), 0 2px 8px rgb(24 39 57 / 8%);
+  margin: 0;
+  padding: 12px;
+  position: fixed;
+  inset: auto;
+  overflow: auto;
+}
+
+.dsh-fleet-message-receipt-popover::backdrop {
   background: transparent;
 }
 
-.dsh-fleet-message-receipt .dsh-hover-hint[data-phase="charging"] .dsh-fleet-message-receipt-pie,
-.dsh-fleet-message-receipt .dsh-hover-hint[data-phase="draining"] .dsh-fleet-message-receipt-pie {
-  opacity: 0;
+.dsh-fleet-message-receipt-columns {
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: grid;
 }
 
-.dsh-fleet-message-receipt-summary {
-  margin: 0 0 12px;
-  color: var(--dsw-alias-label-primary);
-  font-size: 13px;
-  line-height: 20px;
+.dsh-fleet-message-receipt-column {
+  min-width: 0;
+  padding-inline: 3px 12px;
 }
 
-.dsh-fleet-message-receipt-section + .dsh-fleet-message-receipt-section {
-  margin-top: 14px;
+.dsh-fleet-message-receipt-column + .dsh-fleet-message-receipt-column {
+  border-left: 1px solid var(--dsw-alias-border-l3);
+  padding-inline: 12px 3px;
 }
 
 .dsh-fleet-message-receipt-heading {
-  margin: 0 0 6px;
+  margin: 0 0 7px;
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xs-strong-13, var(--dsw-font-xs-13));
   font-size: 12px;
@@ -268,36 +341,83 @@ const runtimeChatStyles = `
   list-style: none;
 }
 
+.dsh-fleet-message-receipt-member-seat + .dsh-fleet-message-receipt-member-seat {
+  margin-top: 3px;
+}
+
+.dsh-fleet-message-receipt-member-seat {
+  align-items: center;
+  gap: 4px;
+  display: flex;
+}
+
 .dsh-fleet-message-receipt-member {
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
+  min-height: 38px;
   align-items: center;
   gap: 8px;
-  padding-block: 4px;
+  padding: 4px;
   display: flex;
 }
 
 .dsh-fleet-message-receipt-member-copy {
   min-width: 0;
   flex: 1;
-  line-height: 17px;
+  text-align: left;
 }
 
 .dsh-fleet-message-receipt-member-name,
 .dsh-fleet-message-receipt-member-role {
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  overflow: hidden;
   display: block;
 }
 
 .dsh-fleet-message-receipt-member-name {
   color: var(--dsw-alias-label-primary);
-  font-weight: 550;
+  font: var(--dsw-font-xs-strong-13, var(--dsw-font-xs-13));
+  font-size: 12px;
+  line-height: 17px;
 }
 
-.dsh-fleet-message-receipt-member-role {
-  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
-  font-size: 11px;
+.dsh-fleet-message-receipt-member-role,
+.dsh-fleet-message-receipt-empty {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.dsh-fleet-message-receipt-empty {
+  padding: 5px 4px 7px;
+}
+
+.dsh-fleet-message-receipt-source {
+  color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  flex: none;
+  padding: 4px 5px;
+  font: var(--dsw-font-xxs-12, inherit);
+}
+
+.dsh-fleet-message-receipt-source:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-message-receipt-check {
+  width: 8px;
+  height: 8px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  display: block;
 }
 
 .dsh-fleet-chat-message:hover .dsh-fleet-chat-message-actions,
@@ -550,6 +670,16 @@ export interface FleetChatMessageProps {
 export interface FleetChatReadReceiptData {
   readonly readMembers: readonly FleetChatMember[]
   readonly unreadMembers: readonly FleetChatMember[]
+  readonly sources?: readonly FleetChatReceiptSource[]
+  readonly renderMember?: (member: FleetChatMember, source?: FleetChatReceiptSource) => ReactNode
+  /** Reserved for the future context-jump affordance. */
+  readonly onOpenSource?: (source: FleetChatReceiptSource) => void
+}
+
+export interface FleetChatReceiptSource {
+  readonly memberId: string
+  readonly sessionId: string
+  readonly contextMessageId: string
 }
 
 export interface FleetChatImageBlock {
@@ -749,6 +879,7 @@ export function FleetPresenceLabel({ presence, label = presenceLabel(presence) }
         ? jsx(FleetInfoHint, {
             label: '查看“状态待同步”的说明',
             title: '状态待同步',
+            seenMarker: 'fleet.presence.unknown',
             triggerContent: label,
             children: jsxs(Fragment, {
               children: [
@@ -784,61 +915,159 @@ export function FleetPresenceLabel({ presence, label = presenceLabel(presence) }
   })
 }
 
-function FleetReceiptMembers({ members }: { readonly members: readonly FleetChatMember[] }): ReactElement {
+function FleetReceiptMemberList({ members, sources, renderMember, onOpenSource }: {
+  readonly members: readonly FleetChatMember[]
+  readonly sources?: readonly FleetChatReceiptSource[]
+  readonly renderMember?: (member: FleetChatMember, source?: FleetChatReceiptSource) => ReactNode
+  readonly onOpenSource?: (source: FleetChatReceiptSource) => void
+}): ReactElement {
   return jsx('ul', {
     className: 'dsh-fleet-message-receipt-members',
-    children: members.map(member => jsxs('li', {
-      className: 'dsh-fleet-message-receipt-member',
-      children: [
-        jsx(FleetChatAvatar, { member, size: 24, showPresence: false }),
-        jsxs('span', {
-          className: 'dsh-fleet-message-receipt-member-copy',
+    children: members.length === 0
+      ? jsx('li', { className: 'dsh-fleet-message-receipt-empty', children: '暂无' })
+      : members.map(member => {
+        const source = sources?.find(candidate => candidate.memberId === member.id)
+        return jsx('li', {
+          className: 'dsh-fleet-message-receipt-member-seat',
+          ...(source === undefined ? {} : {
+            'data-source-session-id': source.sessionId,
+            'data-source-message-id': source.contextMessageId,
+          }),
           children: [
-            jsx('span', { className: 'dsh-fleet-message-receipt-member-name', children: member.name }),
-            jsx('span', { className: 'dsh-fleet-message-receipt-member-role', children: member.role }),
+            renderMember?.(member, source) ?? jsxs('div', {
+              className: 'dsh-fleet-message-receipt-member',
+              children: [
+                jsx(FleetChatAvatar, { member, size: 28, showPresence: false }),
+                jsxs('span', {
+                  className: 'dsh-fleet-message-receipt-member-copy',
+                  children: [
+                    jsx('span', { className: 'dsh-fleet-message-receipt-member-name', children: member.name }),
+                    jsx('span', { className: 'dsh-fleet-message-receipt-member-role', children: member.role }),
+                  ],
+                }),
+              ],
+            }),
+            source !== undefined && onOpenSource !== undefined && jsx('button', {
+              type: 'button',
+              className: 'dsh-fleet-message-receipt-source',
+              onClick: () => { onOpenSource(source) },
+              children: '查看上下文',
+            }),
           ],
-        }),
-      ],
-    }, member.id)),
+        }, member.id)
+      }),
   })
 }
 
-export function FleetChatReadReceipt({ readMembers, unreadMembers }: FleetChatReadReceiptData): ReactElement | null {
+export function FleetChatReadReceipt({ readMembers, unreadMembers, sources, renderMember, onOpenSource }: FleetChatReadReceiptData): ReactElement | null {
+  const popover = useRef<HTMLElement>(null)
+  const popoverId = useId()
+  const [open, setOpen] = useState(false)
   const total = readMembers.length + unreadMembers.length
+
+  useEffect(() => {
+    const node = popover.current
+    if (node === null) return
+    const syncOpen = (): void => { setOpen(node.matches(':popover-open')) }
+    const closeOnViewportMove = (): void => {
+      if (node.matches(':popover-open')) node.hidePopover()
+    }
+    node.addEventListener('toggle', syncOpen)
+    window.addEventListener('resize', closeOnViewportMove)
+    document.addEventListener('scroll', closeOnViewportMove, true)
+    return () => {
+      node.removeEventListener('toggle', syncOpen)
+      window.removeEventListener('resize', closeOnViewportMove)
+      document.removeEventListener('scroll', closeOnViewportMove, true)
+    }
+  }, [])
+
   if (total === 0) return null
   const angle = `${String(Math.round(readMembers.length / total * 360))}deg`
-  const label = `已读 ${String(readMembers.length)}/${String(total)}，查看成员明细`
-  return jsx('span', {
+  const complete = unreadMembers.length === 0
+  const summary = `${String(readMembers.length)} 个已读，${String(unreadMembers.length)} 个未读`
+  const toggleAt = (anchorElement: HTMLElement): void => {
+    const node = popover.current
+    if (node === null) return
+    if (node.matches(':popover-open')) {
+      node.hidePopover()
+      return
+    }
+    const anchor = anchorElement.getBoundingClientRect()
+    node.style.visibility = 'hidden'
+    node.showPopover()
+    const bounds = node.getBoundingClientRect()
+    const gutter = 12
+    const gap = 7
+    const left = Math.max(gutter, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - gutter))
+    const below = anchor.bottom + gap
+    const top = below + bounds.height <= window.innerHeight - gutter
+      ? below
+      : Math.max(gutter, anchor.top - bounds.height - gap)
+    node.style.left = `${Math.round(left)}px`
+    node.style.top = `${Math.round(top)}px`
+    node.style.visibility = ''
+  }
+  return jsxs('span', {
     className: 'dsh-fleet-message-receipt',
     style: { '--dsh-fleet-read-angle': angle } as CSSProperties,
-    children: jsx(FleetInfoHint, {
-      label,
-      title: '消息已读情况',
-      triggerContent: jsx('span', { className: 'dsh-fleet-message-receipt-pie', 'aria-hidden': 'true' }),
-      footer: '成员主动读取消息，或在收到完整消息后作出回应，才会计为已读。',
-      children: jsxs(Fragment, {
-        children: [
-          jsx('p', {
-            className: 'dsh-fleet-message-receipt-summary',
-            children: `${String(readMembers.length)} 位已读 · ${String(unreadMembers.length)} 位未读`,
-          }),
-          readMembers.length > 0 && jsxs('section', {
-            className: 'dsh-fleet-message-receipt-section',
-            children: [
-              jsx('h4', { className: 'dsh-fleet-message-receipt-heading', children: `已读 · ${String(readMembers.length)}` }),
-              jsx(FleetReceiptMembers, { members: readMembers }),
-            ],
-          }),
-          unreadMembers.length > 0 && jsxs('section', {
-            className: 'dsh-fleet-message-receipt-section',
-            children: [
-              jsx('h4', { className: 'dsh-fleet-message-receipt-heading', children: `未读 · ${String(unreadMembers.length)}` }),
-              jsx(FleetReceiptMembers, { members: unreadMembers }),
-            ],
-          }),
-        ],
+    children: [
+      jsx('button', {
+        type: 'button',
+        className: 'dsh-fleet-message-receipt-trigger',
+        'data-summary': summary,
+        'aria-label': `${summary}，查看成员明细`,
+        'aria-haspopup': 'dialog',
+        'aria-expanded': open ? 'true' : 'false',
+        'aria-controls': popoverId,
+        onClick: (event: { readonly currentTarget: HTMLElement }) => { toggleAt(event.currentTarget) },
+        children: jsx('span', {
+          className: 'dsh-fleet-message-receipt-indicator',
+          'data-complete': complete ? 'true' : 'false',
+          'aria-hidden': 'true',
+          children: complete
+            ? jsx('svg', {
+                className: 'dsh-fleet-message-receipt-check',
+                viewBox: '0 0 12 12',
+                children: jsx('polyline', { points: '2.8 6.2 5.1 8.35 9.4 3.7' }),
+              })
+            : jsx('span', { className: 'dsh-fleet-message-receipt-pie' }),
+        }),
       }),
-    }),
+      jsx('div', {
+        ref: popover,
+        id: popoverId,
+        popover: 'auto',
+        className: 'dsh-fleet-message-receipt-popover',
+        role: 'dialog',
+        'aria-label': '消息已读情况',
+        children: jsxs('div', {
+          className: 'dsh-fleet-message-receipt-columns',
+          children: [
+            jsxs('section', {
+              className: 'dsh-fleet-message-receipt-column',
+              children: [
+                jsx('h3', {
+                  className: 'dsh-fleet-message-receipt-heading',
+                  children: `已读 · ${String(readMembers.length)}`,
+                }),
+                jsx(FleetReceiptMemberList, { members: readMembers, sources, renderMember, onOpenSource }),
+              ],
+            }),
+            jsxs('section', {
+              className: 'dsh-fleet-message-receipt-column',
+              children: [
+                jsx('h3', {
+                  className: 'dsh-fleet-message-receipt-heading',
+                  children: `未读 · ${String(unreadMembers.length)}`,
+                }),
+                jsx(FleetReceiptMemberList, { members: unreadMembers, sources, renderMember, onOpenSource }),
+              ],
+            }),
+          ],
+        }),
+      }),
+    ],
   })
 }
 

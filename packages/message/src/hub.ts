@@ -160,7 +160,7 @@ export class MessageHub {
       } else if (event.type === 'pin') {
         if (event.action === 'unpinned') this.pins.delete(event.pin.messageId)
         else this.pins.set(event.pin.messageId, snapshot(event.pin))
-      } else {
+      } else if (event.type === 'inbox' && event.action === 'acknowledged') {
         let acknowledged = this.acknowledgedByAgent.get(event.agentId)
         if (acknowledged === undefined) {
           acknowledged = new Set()
@@ -1335,6 +1335,13 @@ export class MessageHub {
       target.steer(input)
     } else if (wake) target.followup(input)
     else target.inject(input)
+    this.emit({
+      type: 'inbox',
+      action: 'delivered',
+      agentId: target.id,
+      messageId: message.id,
+      contextMessageId: input.id,
+    })
   }
 
   private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
@@ -1352,9 +1359,25 @@ export class MessageHub {
     const inbox = target.inbox
     if (inbox !== undefined && typeof inbox.replace === 'function') {
       const pending = this.findPendingChannelNotice(target, message.conversation)
-      if (pending !== undefined && inbox.replace(pending.id, { ...input, id: pending.id })) return
+      if (pending !== undefined && inbox.replace(pending.id, { ...input, id: pending.id })) {
+        this.emit({
+          type: 'inbox',
+          action: 'delivered',
+          agentId: target.id,
+          messageId: message.id,
+          contextMessageId: pending.id,
+        })
+        return
+      }
     }
     target.inject(input)
+    this.emit({
+      type: 'inbox',
+      action: 'delivered',
+      agentId: target.id,
+      messageId: message.id,
+      contextMessageId: input.id,
+    })
   }
 
   private findPendingChannelNotice(target: MessageAgent, conversation: FleetTarget): ReturnType<typeof createUserMessage> | undefined {

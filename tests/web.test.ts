@@ -16,6 +16,8 @@ describe('FleetWebRemote', () => {
       readMemberProjection: vi.fn(() => ({ run: { id: 'team-one' }, view: { id: 'lead' }, events: [], hasMore: false })),
       readMemberTrace: vi.fn(() => ({ run: { id: 'team-one' }, member: 'lead', events: [], hasMore: false })),
       readMemberTraceTail: vi.fn(() => ({ run: { id: 'team-one' }, member: 'lead', events: [], hasMore: false })),
+      readMemberTracePage: vi.fn(() => ({ run: { id: 'team-one' }, member: 'lead', events: [], hasMore: false })),
+      readConversationProjection: vi.fn(() => ({ run: { id: 'team-one' }, memberViews: [], events: [], hasMore: false })),
       exportConfiguration: vi.fn(() => ({ core: { name: 'Team One', members: [] }, modules: {} })),
       readResourcePreview: vi.fn(() => Promise.resolve({
         id: 'plan', kind: 'markdown', body: '# Plan', mediaType: 'text/markdown', history: [], historyTruncated: false,
@@ -34,6 +36,8 @@ describe('FleetWebRemote', () => {
       .toMatchObject({ member: 'lead', events: [] })
     expect(remote.project({ teamId: 'team-one', view: 'trace', member: 'lead', tail: true, limit: 80 }, signal))
       .toMatchObject({ member: 'lead', events: [] })
+    expect(remote.project({ teamId: 'team-one', view: 'conversation', conversation: '#general', beforeSequence: 40 }, signal))
+      .toMatchObject({ run: { id: 'team-one' }, events: [] })
     expect(remote.project({ teamId: 'team-one', view: 'configuration' }, signal))
       .toMatchObject({ core: { name: 'Team One' } })
     await expect(remote.project({ teamId: 'team-one', view: 'resource', resource: 'plan' }, signal))
@@ -42,7 +46,8 @@ describe('FleetWebRemote', () => {
     expect(runs.readWebTeamProjection).toHaveBeenCalledWith('team-one', 4, 20)
     expect(runs.readMemberProjection).toHaveBeenCalledWith('team-one', 'lead', 0, 200)
     expect(runs.readMemberTrace).toHaveBeenCalledWith('team-one', 'lead', -1, 200)
-    expect(runs.readMemberTraceTail).toHaveBeenCalledWith('team-one', 'lead', 80)
+    expect(runs.readMemberTracePage).toHaveBeenCalledWith('team-one', 'lead', 80, undefined, signal)
+    expect(runs.readConversationProjection).toHaveBeenCalledWith('team-one', '#general', 40, 200)
     expect(runs.exportConfiguration).toHaveBeenCalledWith('team-one')
     expect(runs.readResourcePreview).toHaveBeenNthCalledWith(1, 'team-one', 'plan', signal, undefined)
     expect(runs.readResourcePreview).toHaveBeenNthCalledWith(2, 'team-one', 'plan', signal, 'rev-one')

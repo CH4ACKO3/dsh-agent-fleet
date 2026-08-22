@@ -112,8 +112,21 @@ describe('MessageHub', () => {
       text: 'Please confirm the interface boundary.',
       delivery: 'quiet',
     })
+    expect(events).toContainEqual({
+      type: 'inbox',
+      action: 'delivered',
+      agentId: reviewer.id,
+      messageId: direct.messageId,
+      contextMessageId: reviewer.inbox.nextStep[0]?.id,
+    })
     expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'inbox', agentId: reviewer.id, messageId: direct.messageId,
+      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: direct.messageId,
+    }))
+    const restored = setup()
+    restored.hub.restore(events)
+    expect(restored.hub.inbox(restored.reviewer)).toContainEqual(expect.objectContaining({
+      acknowledged: false,
+      message: expect.objectContaining({ id: direct.messageId }),
     }))
 
     hub.send(reviewer, {
@@ -131,7 +144,7 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'inbox', agentId: qa.id, messageId: channel.messageId,
+      type: 'inbox', action: 'acknowledged', agentId: qa.id, messageId: channel.messageId,
     }))
     hub.read(qa, { conversation: '#general' })
     expect(events).toContainEqual({

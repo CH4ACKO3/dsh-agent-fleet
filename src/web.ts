@@ -23,12 +23,17 @@ import type { FleetSetupService } from './setup.js'
 
 export interface FleetWebProjectInput {
   readonly teamId: string
-  readonly view?: 'team' | 'member' | 'trace' | 'resource' | 'configuration'
+  readonly view?: 'team' | 'member' | 'trace' | 'conversation' | 'resource' | 'configuration'
   readonly member?: string
+  readonly conversation?: string
   readonly resource?: string
   readonly revision?: string
   readonly tail?: boolean
   readonly afterSequence?: number
+  readonly beforeSequence?: number
+  readonly archiveCursor?: { readonly segment: number; readonly beforeSeq: number }
+  readonly sourceSessionId?: string
+  readonly contextMessageId?: string
   readonly limit?: number
 }
 
@@ -145,9 +150,28 @@ export class FleetWebRemote extends TypertRemoteService {
     if (input.view === 'configuration') return this.runs.exportConfiguration(teamId)
     if (input.view === 'trace') {
       const member = required(input.member, 'member')
-      return input.tail === true
-        ? this.runs.readMemberTraceTail(teamId, member, limit)
+      if (input.sourceSessionId !== undefined || input.contextMessageId !== undefined) {
+        return this.runs.readMemberSourceTrace(
+          teamId,
+          member,
+          required(input.sourceSessionId, 'sourceSessionId'),
+          required(input.contextMessageId, 'contextMessageId'),
+          limit,
+        )
+      }
+      return input.tail === true || input.archiveCursor !== undefined
+        ? this.runs.readMemberTracePage(teamId, member, limit, input.archiveCursor, signal)
         : this.runs.readMemberTrace(teamId, member, after, limit)
+    }
+    if (input.view === 'conversation') {
+      const before = input.beforeSequence ?? Number.MAX_SAFE_INTEGER
+      if (!Number.isSafeInteger(before) || before < 1) throw new Error('beforeSequence must be a positive safe integer')
+      return this.runs.readConversationProjection(
+        teamId,
+        required(input.conversation, 'conversation'),
+        before,
+        limit,
+      )
     }
     if (input.view === 'member') return this.runs.readMemberProjection(teamId, required(input.member, 'member'), after, limit)
     if (input.view === undefined || input.view === 'team') return this.runs.readWebTeamProjection(teamId, after, limit)

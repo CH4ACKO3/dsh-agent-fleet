@@ -36,6 +36,7 @@ import {
   parseFieldPresetImport,
 } from './field-presets.js'
 import { isChineseLocale } from './locale.js'
+import { FleetMark } from './fleet-mark.js'
 import { FULL_TEAM_TEMPLATES } from './team-templates.generated.js'
 import {
   FLEET_MESSAGE_CONFIGURATION_MODULE,
@@ -1981,31 +1982,6 @@ function floatingMenuPosition(anchor: DOMRect, preferredWidth: number, preferred
     width,
     maxHeight,
   }
-}
-
-function FleetMark(): ReactElement {
-  return jsxs('svg', {
-    width: 16,
-    height: 16,
-    viewBox: '0 0 16 16',
-    fill: 'none',
-    'aria-hidden': 'true',
-    children: [
-      jsx('path', {
-        d: 'M4 4.25 8 2l4 2.25v4.5L8 11 4 8.75v-4.5Z',
-        stroke: 'currentColor',
-        strokeWidth: 1.2,
-        strokeLinejoin: 'round',
-      }),
-      jsx('path', {
-        d: 'm4 8.75-2 1.1v2.1L5.5 14 8 12.6l2.5 1.4 3.5-2.05v-2.1l-2-1.1',
-        stroke: 'currentColor',
-        strokeWidth: 1.2,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-      }),
-    ],
-  })
 }
 
 function ChevronDown(): ReactElement {
@@ -5785,8 +5761,8 @@ export function withFleetComposerActivation(
             workspacePickerOpen: false,
             onRequestWorkspace: undefined,
             placeholder: isChineseLocale()
-              ? '询问 Fleet 助理关于团队插件的问题'
-              : 'Ask Fleet Help about the Team plugin',
+              ? '询问 Agent Fleet 关于团队插件的问题'
+              : 'Ask Agent Fleet about the Team plugin',
           } : {}),
           inputActions: decoratedActions,
           keyboard: decoratedKeyboard,
@@ -5822,6 +5798,8 @@ export const name = 'dsh-agent-fleet'
 export {
   FleetMetaAssistantHeaderButton,
   FleetMetaAssistantPinnedRow,
+  withFleetGlobalConversationHeader,
+  withFleetGlobalConversationView,
   withFleetMetaConversationRoot,
   withFleetMetaWorkspaceBrowser,
 } from './meta-assistant.js'
@@ -5839,6 +5817,7 @@ export {
 export type {
   FleetPanelActivity,
   FleetPanelConversation,
+  FleetPanelConversationPage,
   FleetPanelHomeOwner,
   FleetPanelMember,
   FleetPanelMessage,
@@ -5846,6 +5825,7 @@ export type {
   FleetPanelMessageOwner,
   FleetPanelMemberTrace,
   FleetPanelMemberTraceEvent,
+  FleetPanelMemberTraceRequest,
   FleetPanelPaneOwner,
   FleetPanelRenderSlot,
   FleetPanelResource,
@@ -5896,6 +5876,7 @@ export type {
   FleetChatNoticeProps,
   FleetChatResourceBlock,
   FleetChatReadReceiptData,
+  FleetChatReceiptSource,
   FleetConversationHeaderProps,
   FleetConversationKind,
   FleetMessageDeliveryState,

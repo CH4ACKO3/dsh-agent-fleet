@@ -1,6 +1,6 @@
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { FleetWebClient } from '@dsh-agent-fleet/core/web'
-import type { FleetChatContentBlock, FleetChatMember } from './runtime-chat.js'
+import type { FleetChatContentBlock, FleetChatMember, FleetChatReceiptSource } from './runtime-chat.js'
 import { encodeFleetFile } from './web-client.js'
 import {
   type FleetPanelActivity,
@@ -105,6 +105,7 @@ interface WireMemberView {
 
 interface WireEvent {
   readonly sequence: number
+  readonly sessionId?: string
   readonly createdAt: string
   readonly type: string
   readonly data: unknown
@@ -115,11 +116,15 @@ interface WireProjection {
   readonly memberViews: readonly WireMemberView[]
   readonly events: readonly WireEvent[]
   readonly hasMore: boolean
+  readonly previousSequence?: number
 }
 
 interface WireTraceProjection {
   readonly events: readonly WireEvent[]
   readonly hasMore: boolean
+  readonly previous?: { readonly segment: number; readonly beforeSeq: number }
+  readonly targetSessionId?: string
+  readonly targetSequence?: number
 }
 
 interface ProjectionCache {
@@ -188,6 +193,7 @@ function wireProjection(value: unknown): WireProjection {
     memberViews: value.memberViews as unknown as readonly WireMemberView[],
     events: value.events as unknown as readonly WireEvent[],
     hasMore: value.hasMore,
+    ...(typeof value.previousSequence === 'number' ? { previousSequence: value.previousSequence } : {}),
   }
 }
 
@@ -271,13 +277,17 @@ function stateEventKey(event: WireEvent): string | undefined {
     const member = string(asRecord(event.data)?.member)
     return member === undefined ? undefined : `member-status:${member}`
   }
+  if (event.type === 'member_session_rotated') {
+    const previous = string(asRecord(event.data)?.previousSessionId)
+    return previous === undefined ? undefined : `member-session:${previous}`
+  }
   return undefined
 }
 
 function receiptMessageId(event: WireEvent): string | undefined {
   if (event.type !== 'coordination.inbox') return undefined
   const data = asRecord(event.data)
-  return data?.type === 'inbox' && data.action === 'acknowledged'
+  return data?.type === 'inbox' && (data.action === 'delivered' || data.action === 'acknowledged')
     ? string(data.messageId)
     : undefined
 }
@@ -325,6 +335,13 @@ function traceProjection(value: unknown): WireTraceProjection {
   return {
     events: value.events as unknown as readonly WireEvent[],
     hasMore: value.hasMore,
+    ...(isRecord(value.previous)
+      && typeof value.previous.segment === 'number'
+      && typeof value.previous.beforeSeq === 'number'
+      ? { previous: { segment: value.previous.segment, beforeSeq: value.previous.beforeSeq } }
+      : {}),
+    ...(typeof value.targetSessionId === 'string' ? { targetSessionId: value.targetSessionId } : {}),
+    ...(typeof value.targetSequence === 'number' ? { targetSequence: value.targetSequence } : {}),
   }
 }
 
@@ -529,6 +546,17 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     const projected = members[index]
     return projected === undefined ? [] : [[member.sessionId, projected] as const]
   }))
+  for (const event of cache.events) {
+    if (event.type !== 'member_session_rotated') continue
+    const data = asRecord(event.data)
+    const memberId = string(data?.member)
+    const projected = memberId === undefined ? undefined : members.find(member => member.id === memberId)
+    if (projected === undefined) continue
+    const previousSessionId = string(data?.previousSessionId)
+    const sessionId = string(data?.sessionId)
+    if (previousSessionId !== undefined) membersBySession.set(previousSessionId, projected)
+    if (sessionId !== undefined) membersBySession.set(sessionId, projected)
+  }
   const assistantsBySession = new Map((cache.run.assistants ?? []).map(assistant => [assistant.sessionId, assistant]))
   const channels = new Map<string, FleetPanelConversation>()
   const meetings = new Map<string, FleetPanelConversation>()
@@ -539,7 +567,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const rawMessages: Array<{ readonly event: WireEvent; readonly message: Readonly<Record<string, unknown>> }> = []
   const channelVisibleSessions = new Map<string, readonly string[]>()
   const meetingParticipants = new Map<string, readonly string[]>()
-  const acknowledgedSessionsByMessage = new Map<string, Set<string>>()
+  const acknowledgedMembersByMessage = new Map<string, Set<string>>()
+  const contextSourcesByMessage = new Map<string, Map<string, FleetChatReceiptSource>>()
 
   for (const event of cache.events) {
     if (event.type === 'workspace.assigned') {
@@ -615,10 +644,20 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const data = asRecord(event.data)
       const messageId = string(data?.messageId)
       const agentId = string(data?.agentId)
-      if (data?.type !== 'inbox' || data.action !== 'acknowledged' || messageId === undefined || agentId === undefined) continue
-      const readers = acknowledgedSessionsByMessage.get(messageId) ?? new Set<string>()
-      readers.add(agentId)
-      acknowledgedSessionsByMessage.set(messageId, readers)
+      if (data?.type !== 'inbox' || messageId === undefined || agentId === undefined) continue
+      const member = membersBySession.get(agentId)
+      if (member === undefined) continue
+      if (data.action === 'delivered') {
+        const contextMessageId = string(data.contextMessageId)
+        if (contextMessageId === undefined) continue
+        const sources = contextSourcesByMessage.get(messageId) ?? new Map<string, FleetChatReceiptSource>()
+        sources.set(member.id, { memberId: member.id, sessionId: agentId, contextMessageId })
+        contextSourcesByMessage.set(messageId, sources)
+      } else if (data.action === 'acknowledged') {
+        const readers = acknowledgedMembersByMessage.get(messageId) ?? new Set<string>()
+        readers.add(member.id)
+        acknowledgedMembersByMessage.set(messageId, readers)
+      }
       continue
     }
     if (event.type === 'resource.resource_added') {
@@ -699,12 +738,20 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     if (target.startsWith('@')) {
       const recipient = target.slice(1)
       const participants = [...new Set([from, recipient])]
-      const formal = participants.filter(participant => membersBySession.has(participant))
+      const formal = [...new Map(participants.flatMap(participant => {
+        const member = membersBySession.get(participant)
+        return member === undefined ? [] : [[member.id, member] as const]
+      })).values()]
       const fleetUsers = participants.filter(isFleetUser)
       if (participants.length === 2 && formal.length === 1 && fleetUsers.length === 1) {
-        conversationId = `@${formal[0]}`
+        const currentSession = cache.run.members.find(member => member.name === formal[0]?.id)?.sessionId
+        conversationId = `@${currentSession ?? recipient}`
       } else {
-        conversationId = `dm:${participants.toSorted().join(':')}`
+        const stableParticipants = participants.map(participant => {
+          const member = membersBySession.get(participant)
+          return member === undefined ? participant : `member:${member.id}`
+        })
+        conversationId = `dm:${stableParticipants.toSorted().join(':')}`
         if (!channels.has(conversationId)) {
           const labels = participants.map(participant => senderFace(participant).name)
           const participantIds = participants.flatMap(participant => {
@@ -720,7 +767,12 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
           })
         }
       }
-      directParticipants.set(conversationId, participants)
+      directParticipants.set(conversationId, participants.map(participant => {
+        const member = membersBySession.get(participant)
+        return member === undefined
+          ? participant
+          : cache.run.members.find(candidate => candidate.name === member.id)?.sessionId ?? participant
+      }))
       if (conversationId.startsWith('dm:')) privateMessageSequences.add(event.sequence)
     } else if (target.startsWith('#') && !channels.has(target)) {
       channels.set(target, { id: target, kind: 'channel', name: target.slice(1), topic: '团队频道' })
@@ -749,9 +801,15 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       })
     }
     const sender = senderFace(from, string(message.fromName))
+    const senderMember = membersBySession.get(from)
+    const directRecipientMember = target.startsWith('@') ? membersBySession.get(target.slice(1)) : undefined
     const visibleSessions = cache.run.members.flatMap(runMember => {
-      if (runMember.sessionId === from) return []
-      if (target.startsWith('@')) return target.slice(1) === runMember.sessionId ? [runMember.sessionId] : []
+      if (runMember.sessionId === from || senderMember?.id === runMember.name) return []
+      if (target.startsWith('@')) {
+        return target.slice(1) === runMember.sessionId || directRecipientMember?.id === runMember.name
+          ? [runMember.sessionId]
+          : []
+      }
       if (target.startsWith('meeting:')) {
         return meetingParticipants.get(target)?.includes(runMember.sessionId) === true ? [runMember.sessionId] : []
       }
@@ -762,18 +820,24 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const contacts = views.get(runMember.name)?.contacts?.channels
       return contacts === '*' || contacts?.includes(channel) === true ? [runMember.sessionId] : []
     })
-    const readSessions = acknowledgedSessionsByMessage.get(id) ?? new Set<string>()
+    const readMembers = acknowledgedMembersByMessage.get(id) ?? new Set<string>()
     const visibleMemberIds = visibleSessions.flatMap(sessionId => {
       const member = membersBySession.get(sessionId)
       return member === undefined ? [] : [member.id]
     })
     const readMemberIds = visibleSessions.flatMap(sessionId => {
       const member = membersBySession.get(sessionId)
-      return member !== undefined && readSessions.has(sessionId) ? [member.id] : []
+      return member !== undefined && readMembers.has(member.id) ? [member.id] : []
     })
     const readMemberIdSet = new Set(readMemberIds)
+    const sources = visibleSessions.flatMap(sessionId => {
+      const member = membersBySession.get(sessionId)
+      const source = member === undefined ? undefined : contextSourcesByMessage.get(id)?.get(member.id)
+      return source === undefined ? [] : [source]
+    })
     return [{
       id,
+      sequence: event.sequence,
       conversationId,
       senderId: sender.id,
       sender,
@@ -784,6 +848,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
           visibleMemberIds,
           readMemberIds,
           unreadMemberIds: visibleMemberIds.filter(memberId => !readMemberIdSet.has(memberId)),
+          ...(sources.length === 0 ? {} : { sources }),
         },
       }),
     }]
@@ -1012,13 +1077,18 @@ export function createFleetWebPanelSource(
       }, `loading:${dataSignature}`)
       return refresh()
     },
-    loadMemberTrace: async (teamId, memberId, signal) => {
+    loadMemberTrace: async (teamId, memberId, signal, request) => {
       const client = await getClient(signal)
       const page = traceProjection(unwrap(await client.project({
         teamId,
         view: 'trace',
         member: memberId,
-        tail: true,
+        ...(request?.source === undefined
+          ? { tail: true, ...(request?.cursor === undefined ? {} : { archiveCursor: request.cursor }) }
+          : {
+              sourceSessionId: request.source.sessionId,
+              contextMessageId: request.source.contextMessageId,
+            }),
         afterSequence: -1,
         limit: MAX_MEMBER_TRACE_EVENTS,
       }, signal)))
@@ -1028,12 +1098,48 @@ export function createFleetWebPanelSource(
       return {
         events: recent.map(event => ({
           sequence: event.sequence,
+          ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
           createdAt: event.createdAt,
           type: event.type,
           data: typeof event.data === 'string' ? event.data : JSON.stringify(event.data),
+          target: page.targetSequence === event.sequence
+            && (page.targetSessionId === undefined || page.targetSessionId === event.sessionId),
         })),
         truncated: page.hasMore || page.events.length > recent.length,
+        ...(page.previous === undefined ? {} : { previous: page.previous }),
       } satisfies FleetPanelMemberTrace
+    },
+    loadConversationMessages: async (teamId, conversationId, beforeSequence, signal) => {
+      const client = await getClient(signal ?? lifetime.signal)
+      const page = wireProjection(unwrap(await client.project({
+        teamId,
+        view: 'conversation',
+        conversation: conversationId,
+        beforeSequence,
+        limit: 100,
+      }, signal ?? lifetime.signal)))
+      const current = projections.get(teamId) ?? await loadProjection(client, teamId)
+      const known = new Set<number>()
+      const events = [...current.events, ...page.events].filter(event => {
+        if (known.has(event.sequence)) return false
+        known.add(event.sequence)
+        return true
+      }).toSorted((left, right) => left.sequence - right.sequence)
+      const pageMessageSequences = new Set(page.events
+        .filter(event => event.type === 'coordination.message')
+        .map(event => event.sequence))
+      const projected = projectTeam({
+        run: page.run,
+        memberViews: page.memberViews,
+        events,
+        lastSequence: current.lastSequence,
+      })
+      return {
+        messages: projected.messages.filter(message => message.sequence !== undefined
+          && pageMessageSequences.has(message.sequence)),
+        hasMore: page.hasMore,
+        ...(page.previousSequence === undefined ? {} : { previousSequence: page.previousSequence }),
+      }
     },
     loadResource: async (teamId, resourceId, signal, revisionId) => {
       const client = await getClient(signal ?? lifetime.signal)
