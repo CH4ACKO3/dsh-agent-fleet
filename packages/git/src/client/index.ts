@@ -12,6 +12,7 @@ import type {
   ComponentType,
   ChangeEvent,
   CSSProperties,
+  FocusEvent as ReactFocusEvent,
   KeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -415,13 +416,20 @@ function fileTypeVisual(path: string): FileTypeVisual {
     ?? { ...genericFile, title: extension === '' ? 'File' : `${extension.toUpperCase()} file` }
 }
 
+export function worktreeForMember(
+  member: FleetMemberFace,
+  worktrees: readonly FleetGitWorktree[],
+): FleetGitWorktree | undefined {
+  return worktrees.find(candidate => candidate.branch?.split('/').at(-1) === member.id)
+    ?? worktrees.find(candidate => fileName(candidate.path) === member.id)
+}
+
 function branchForMember(
   member: FleetMemberFace,
   worktrees: readonly FleetGitWorktree[],
   branches: readonly FleetGitBranch[],
 ): string | undefined {
-  const worktree = worktrees.find(candidate => candidate.branch?.split('/').at(-1) === member.id)
-    ?? worktrees.find(candidate => fileName(candidate.path) === member.id)
+  const worktree = worktreeForMember(member, worktrees)
   return worktree?.branch ?? branches.find(branch => !branch.remote && branch.name.split('/').at(-1) === member.id)?.name
 }
 
@@ -466,7 +474,7 @@ function FileTypeIcon({ path }: { readonly path: string }): ReactElement {
 }
 
 function Icon({ name, size = 18 }: {
-  readonly name: 'git' | 'refresh' | 'fetch' | 'chevron' | 'close' | 'branch' | 'stash' | 'check' | 'search'
+  readonly name: 'git' | 'refresh' | 'back' | 'fetch' | 'chevron' | 'close' | 'branch' | 'stash' | 'check' | 'search'
   readonly size?: number
 }): ReactElement {
   const common = {
@@ -483,6 +491,10 @@ function Icon({ name, size = 18 }: {
   if (name === 'refresh') return jsx('svg', {
     ...common,
     children: jsx('path', { d: 'M15.6 6.5A6.2 6.2 0 1 0 16 12m-.4-5.5V3m0 3.5h-3.5' }),
+  })
+  if (name === 'back') return jsx('svg', {
+    ...common,
+    children: jsx('path', { d: 'm8.25 5-5 5 5 5M3.5 10h13' }),
   })
   if (name === 'fetch') return jsxs('svg', {
     ...common,
@@ -645,11 +657,13 @@ function memberPresenceLabel(member: FleetMemberFace): string {
   return labels[memberPresence(member) ?? 'offline']
 }
 
-function GitMemberRow({ member, location, teamId, showDetails }: {
+function GitMemberRow({ member, location, teamId, selected, showDetails, onSelect }: {
   readonly member: FleetMemberFace
   readonly location: string
   readonly teamId: string
+  readonly selected: boolean
   readonly showDetails: (memberId: string) => void
+  readonly onSelect: (memberId: string) => void
 }): ReactElement {
   const popover = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
@@ -658,10 +672,7 @@ function GitMemberRow({ member, location, teamId, showDetails }: {
     const node = popover.current
     if (node === null) return
     const syncOpen = (): void => {
-      const nextOpen = node.matches(':popover-open')
-      setOpen(nextOpen)
-      if (nextOpen) publishMemberEmphasis(teamId, 'selected', member.id)
-      else clearMemberEmphasis(teamId, 'selected', member.id)
+      setOpen(node.matches(':popover-open'))
     }
     const closeOnViewportMove = (event: Event): void => {
       if (event.target instanceof Node && node.contains(event.target)) return
@@ -675,17 +686,18 @@ function GitMemberRow({ member, location, teamId, showDetails }: {
       window.removeEventListener('resize', closeOnViewportMove)
       document.removeEventListener('scroll', closeOnViewportMove, true)
       clearMemberEmphasis(teamId, 'hovered', member.id)
-      clearMemberEmphasis(teamId, 'selected', member.id)
     }
   }, [member.id, teamId])
 
-  const togglePopover = (anchor: Element): void => {
+  useEffect(() => {
+    if (selected) publishMemberEmphasis(teamId, 'selected', member.id)
+    else clearMemberEmphasis(teamId, 'selected', member.id)
+    return () => { clearMemberEmphasis(teamId, 'selected', member.id) }
+  }, [member.id, selected, teamId])
+
+  const showPopover = (anchor: Element): void => {
     const node = popover.current
-    if (node === null) return
-    if (node.matches(':popover-open')) {
-      node.hidePopover()
-      return
-    }
+    if (node === null || node.matches(':popover-open')) return
     const bounds = anchor.getBoundingClientRect()
     node.style.visibility = 'hidden'
     node.showPopover()
@@ -696,22 +708,40 @@ function GitMemberRow({ member, location, teamId, showDetails }: {
     node.style.top = `${String(Math.round(Math.max(gutter, Math.min(bounds.top, window.innerHeight - popoverBounds.height - gutter))))}px`
     node.style.visibility = ''
   }
+  const hidePopover = (): void => {
+    const node = popover.current
+    if (node?.matches(':popover-open') === true) node.hidePopover()
+  }
   const presence = memberPresence(member)
   return jsxs('div', {
     className: 'dsh-fleet-git-member-anchor',
-    onMouseEnter: () => { publishMemberEmphasis(teamId, 'hovered', member.id) },
-    onMouseLeave: () => { clearMemberEmphasis(teamId, 'hovered', member.id) },
+    onMouseLeave: () => {
+      hidePopover()
+      clearMemberEmphasis(teamId, 'hovered', member.id)
+    },
     children: [
       jsxs('button', {
         type: 'button',
         className: 'dsh-fleet-git-member-row',
-        'data-selected': open ? 'true' : undefined,
+        'data-selected': selected ? 'true' : undefined,
         'aria-haspopup': 'dialog',
         'aria-expanded': open ? 'true' : 'false',
-        'aria-label': `查看 ${member.name} 的成员信息`,
-        onFocus: () => { publishMemberEmphasis(teamId, 'hovered', member.id) },
-        onBlur: () => { clearMemberEmphasis(teamId, 'hovered', member.id) },
-        onClick: (event: ReactMouseEvent<HTMLButtonElement>) => { togglePopover(event.currentTarget) },
+        'aria-pressed': selected,
+        'aria-label': selected ? `返回团队工作区；当前为 ${member.name} 的工作区` : `切换到 ${member.name} 的工作区`,
+        onMouseEnter: (event: ReactMouseEvent<HTMLButtonElement>) => {
+          publishMemberEmphasis(teamId, 'hovered', member.id)
+          showPopover(event.currentTarget)
+        },
+        onFocus: (event: ReactFocusEvent<HTMLButtonElement>) => {
+          publishMemberEmphasis(teamId, 'hovered', member.id)
+          showPopover(event.currentTarget)
+        },
+        onBlur: (event: ReactFocusEvent<HTMLButtonElement>) => {
+          if (event.relatedTarget instanceof Node && popover.current?.contains(event.relatedTarget) === true) return
+          hidePopover()
+          clearMemberEmphasis(teamId, 'hovered', member.id)
+        },
+        onClick: () => { onSelect(member.id) },
         children: [
           jsx('span', { className: 'dsh-fleet-git-member-dot', style: { background: member.color } }),
           jsxs('span', {
@@ -790,22 +820,35 @@ function GitMemberRow({ member, location, teamId, showDetails }: {
 function GitSidebar(owner: FleetPaneOwner): ReactElement {
   const root = repositoryRoot(owner)
   const teamId = owner.snapshot.teamId
-  const state = useGitState(root, teamId)
+  const [selectedMemberId, setSelectedMemberId] = useState<string>()
+  const teamState = useGitState(root, teamId)
   useGitRefresh(root, teamId)
+  const members = [...owner.snapshot.members, ...(owner.snapshot.assistants ?? [])]
+  const teamWorktrees = teamState.snapshot?.status.worktrees ?? []
+  const selectedMember = members.find(member => member.id === selectedMemberId)
+  const selectedWorktree = selectedMember === undefined ? undefined : worktreeForMember(selectedMember, teamWorktrees)
+  const statusRoot = selectedWorktree?.path ?? root
+  const state = useGitState(statusRoot, teamId)
+  useGitRefresh(statusRoot === root ? undefined : statusRoot, teamId)
+  useEffect(() => { setSelectedMemberId(undefined) }, [root, teamId])
   const status = state.snapshot?.status
   const staged = status?.changes.filter(change => change.index !== ' ' && change.index !== '?') ?? []
   const working = status?.changes.filter(change => change.worktree !== ' ' || change.index === '?') ?? []
-  const worktrees = status?.worktrees ?? []
+  const worktrees = teamWorktrees
   const stashes = state.snapshot?.stashes ?? []
-  const members = [...owner.snapshot.members, ...(owner.snapshot.assistants ?? [])]
   const actorRow = (member: FleetMemberFace): ReactElement => {
-    const branch = branchForMember(member, worktrees, state.snapshot?.branches ?? [])
-    const location = branch ?? (status?.branch === undefined ? '尚无分支' : `主工作树 · ${status.branch}`)
+    const memberWorktree = worktreeForMember(member, worktrees)
+    const branch = branchForMember(member, worktrees, teamState.snapshot?.branches ?? [])
+    const location = memberWorktree === undefined
+      ? branch ?? (teamState.snapshot?.status.branch === undefined ? '尚无工作树' : `主工作树 · ${teamState.snapshot.status.branch}`)
+      : `${memberWorktree.path === root ? '主工作树' : fileName(memberWorktree.path)} · ${branch ?? 'Detached HEAD'}`
     return jsx(GitMemberRow, {
       member,
       location,
-      teamId: owner.snapshot.teamId,
+      teamId,
+      selected: selectedMemberId === member.id,
       showDetails: owner.showMemberDetails,
+      onSelect: (memberId: string) => { setSelectedMemberId(current => current === memberId ? undefined : memberId) },
     }, member.id)
   }
   return jsxs('div', {
@@ -822,24 +865,32 @@ function GitSidebar(owner: FleetPaneOwner): ReactElement {
                 className: 'dsh-fleet-git-repository-copy',
                 children: [
                   jsx('strong', {
-                    title: root === undefined ? undefined : status?.root ?? root,
+                    title: statusRoot === undefined ? undefined : status?.root ?? statusRoot,
                     children: root === undefined
                       ? localizedLabel('未挂载工作区', 'No workspace mounted')
-                      : localizedLabel('团队工作区', 'Team workspace'),
+                      : selectedMember === undefined
+                        ? localizedLabel('团队工作区', 'Team workspace')
+                        : localizedLabel(`${selectedMember.name} 的工作区`, `${selectedMember.name}'s workspace`),
                   }),
                   root !== undefined && jsx('span', {
                     children: state.notRepository === true ? '当前工作区未初始化 Git' : status?.branch ?? 'Detached HEAD',
                   }),
                 ],
               }),
-              root !== undefined && jsx('button', {
+              statusRoot !== undefined && jsx('button', {
                 type: 'button',
                 className: 'dsh-fleet-git-icon-button',
-                'aria-label': '刷新 Git 状态',
-                title: '刷新',
-                disabled: state.loading,
-                onClick: () => { void refresh(root, teamId) },
-                children: jsx(Icon, { name: 'refresh', size: 15 }),
+                'aria-label': selectedMember === undefined
+                  ? localizedLabel('刷新 Git 状态', 'Refresh Git status')
+                  : localizedLabel('返回团队工作区', 'Return to team workspace'),
+                title: selectedMember === undefined
+                  ? localizedLabel('刷新', 'Refresh')
+                  : localizedLabel('返回团队工作区', 'Return to team workspace'),
+                disabled: selectedMember === undefined && state.loading,
+                onClick: selectedMember === undefined
+                  ? () => { void refresh(statusRoot, teamId) }
+                  : () => { setSelectedMemberId(undefined) },
+                children: jsx(Icon, { name: selectedMember === undefined ? 'refresh' : 'back', size: 15 }),
               }),
             ],
           }),
@@ -864,14 +915,14 @@ function GitSidebar(owner: FleetPaneOwner): ReactElement {
                         title: '暂存的更改', count: staged.length,
                         children: staged.length === 0
                           ? jsx('div', { className: 'dsh-fleet-git-section-empty', children: '没有暂存的更改' })
-                          : staged.map(change => jsx(ChangeRow, { root, teamId, path: change.path, code: change.index, staged: true }, `i:${change.path}`)),
+                          : staged.map(change => jsx(ChangeRow, { root: statusRoot, teamId, path: change.path, code: change.index, staged: true }, `i:${change.path}`)),
                       }),
                       jsx(Section, {
                         title: '更改', count: working.length,
                         children: working.length === 0
                           ? jsx('div', { className: 'dsh-fleet-git-section-empty', children: '工作树是干净的' })
                           : working.map(change => jsx(ChangeRow, {
-                              root, teamId, path: change.path, code: change.index === '?' ? '?' : change.worktree, staged: false,
+                              root: statusRoot, teamId, path: change.path, code: change.index === '?' ? '?' : change.worktree, staged: false,
                             }, `w:${change.path}`)),
                       }),
                       stashes.length > 0 && jsx(Section, {
@@ -1264,16 +1315,18 @@ interface CommitDetailsState {
   readonly error?: string
 }
 
-function ColumnResizeHandle({ label, width, min, max, onChange, onResizeStart, onResizeEnd }: {
+function ColumnResizeHandle({ label, width, min, max, side = 'right', onChange, onResizeStart, onResizeEnd }: {
   readonly label: string
   readonly width: number
   readonly min: number
   readonly max: number
+  readonly side?: 'left' | 'right'
   readonly onChange: (width: number, delta: number) => void
   readonly onResizeStart?: () => void
   readonly onResizeEnd?: () => void
 }): ReactElement {
   const drag = useRef<{ readonly pointerId: number; readonly startX: number; readonly startWidth: number }>()
+  const direction = side === 'left' ? -1 : 1
   const resize = (value: number, origin: number): void => {
     const next = Math.max(min, Math.min(max, value))
     onChange(next, next - origin)
@@ -1286,6 +1339,7 @@ function ColumnResizeHandle({ label, width, min, max, onChange, onResizeStart, o
   }
   return jsx('span', {
     className: 'dsh-fleet-git-column-resizer',
+    'data-side': side,
     role: 'separator',
     tabIndex: 0,
     'aria-label': label,
@@ -1301,14 +1355,14 @@ function ColumnResizeHandle({ label, width, min, max, onChange, onResizeStart, o
     },
     onPointerMove: (event: ReactPointerEvent<HTMLSpanElement>) => {
       const current = drag.current
-      if (current?.pointerId === event.pointerId) resize(current.startWidth + event.clientX - current.startX, current.startWidth)
+      if (current?.pointerId === event.pointerId) resize(current.startWidth + direction * (event.clientX - current.startX), current.startWidth)
     },
     onPointerUp: stop,
     onPointerCancel: stop,
     onKeyDown: (event: KeyboardEvent<HTMLSpanElement>) => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
       event.preventDefault()
-      resize(width + (event.key === 'ArrowRight' ? 8 : -8), width)
+      resize(width + direction * (event.key === 'ArrowRight' ? 8 : -8), width)
     },
   })
 }
@@ -1519,6 +1573,11 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
                 jsxs('span', {
                   className: 'dsh-fleet-git-resizable-header',
                   children: [
+                    jsx(ColumnResizeHandle, {
+                      label: '调整描述与日期列分界', width: columnWidths.date, min: 112, max: 240, side: 'left',
+                      onResizeStart: () => { setTableWidth(table.current?.getBoundingClientRect().width) },
+                      onChange: (date: number) => { setColumnWidths(current => ({ ...current, date })) },
+                    }),
                     jsx('button', {
                       type: 'button',
                       className: 'dsh-fleet-git-header-toggle',
@@ -2116,7 +2175,7 @@ const styles = `
 .dsh-fleet-git-graph-header>.dsh-fleet-git-resizable-header{height:100%;position:relative;display:flex;align-items:center;overflow:visible}
 .dsh-fleet-git-header-toggle{appearance:none;min-width:0;height:24px;color:inherit;background:transparent;border:0;border-radius:5px;padding:0;font:inherit;text-align:left;cursor:pointer}.dsh-fleet-git-header-toggle:hover{color:var(--dsw-alias-label-primary);text-decoration:underline;text-underline-offset:2px}.dsh-fleet-git-header-toggle:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .dsh-fleet-git-header-toggle[aria-pressed="true"]{color:var(--dsw-alias-state-business-primary);font-weight:700}
-.dsh-fleet-git-column-resizer{z-index:3;width:7px;height:100%;position:absolute;top:0;right:-4px;cursor:col-resize;touch-action:none}.dsh-fleet-git-column-resizer::after{content:"";width:1px;height:100%;position:absolute;top:0;left:3px;background:transparent}.dsh-fleet-git-column-resizer:hover::after,.dsh-fleet-git-column-resizer:focus-visible::after,.dsh-fleet-git-column-resizer:active::after{background:var(--dsw-alias-state-business-primary)}.dsh-fleet-git-column-resizer:focus-visible{outline:none}
+.dsh-fleet-git-column-resizer{z-index:3;width:7px;height:100%;position:absolute;top:0;right:-4px;cursor:col-resize;touch-action:none}.dsh-fleet-git-column-resizer[data-side="left"]{right:auto;left:-4px}.dsh-fleet-git-column-resizer::after{content:"";width:1px;height:100%;position:absolute;top:0;left:3px;background:transparent}.dsh-fleet-git-column-resizer:hover::after,.dsh-fleet-git-column-resizer:focus-visible::after,.dsh-fleet-git-column-resizer:active::after{background:var(--dsw-alias-state-business-primary)}.dsh-fleet-git-column-resizer:focus-visible{outline:none}
 .dsh-fleet-git-commit-row{height:${String(GRAPH_ROW_HEIGHT)}px;border-bottom:1px solid color-mix(in srgb,var(--dsw-alias-label-caption) 11%,transparent);cursor:pointer}
 .dsh-fleet-git-commit-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dsh-fleet-git-commit-row[aria-expanded="true"]{background:color-mix(in srgb,var(--dsw-alias-label-caption) 14%,transparent)}

@@ -7,6 +7,7 @@ import {
   gitRefKind,
   layoutGitGraph,
   locateGitGraphMembers,
+  worktreeForMember,
 } from '../src/client/index.js'
 
 const commit = (hash: string, parents: readonly string[]) => ({
@@ -143,6 +144,16 @@ describe('layoutGitGraph', () => {
       { id: 'developer', branch: 'main', head: 'main-head' },
       { id: 'reviewer', branch: 'fleet/team/reviewer', head: 'review-head' },
     ])
+  })
+
+  it('resolves a member worktree by branch identity before its directory name', () => {
+    const member = { id: 'reviewer', name: 'Avery', role: 'Reviewer', color: '#318b78' }
+    const worktrees = [
+      { path: '/workspace/reviewer', head: 'unrelated', branch: 'feature/unrelated', detached: false },
+      { path: '/workspace/custom', head: 'review-head', branch: 'fleet/team/reviewer', detached: false },
+    ]
+
+    expect(worktreeForMember(member, worktrees)?.path).toBe('/workspace/custom')
   })
 
   it('searches branch names and detailed branch metadata', () => {

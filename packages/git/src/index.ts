@@ -1,12 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { resolve } from 'node:path'
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry/types'
 import type {} from '@deepseek-ai/dsh-typert-registry'
 import type { FleetRunService } from 'dsh-agent-fleet'
 
-import { FleetGit, FleetGitNotRepositoryError, installGitTools } from './git.js'
+import { FleetGit, FleetGitNotRepositoryError, installGitTools, type FleetGitScope } from './git.js'
+import { terminalGitCommands, terminalGitPolicy, type FleetTerminalGitCommand } from './terminal.js'
 
 import {
   FLEET_GIT_WEB_INVOCATIONS,
@@ -18,18 +19,25 @@ import {
 
 export * from './contract.js'
 export * from './git.js'
+export * from './terminal.js'
 
 export const name = '@ch4acko3/dsh-agent-fleet-git'
 export const inject = ['fleetAuthorization'] as const
 
 export const FLEET_GIT_PERMISSIONS = [
-  { id: 'inspect', description: 'Inspect Git operation scope.' },
-  { id: 'scope-check', description: 'Check a proposed terminal Git operation against its allowed scope.' },
+  { id: 'inspect', description: 'Inspect Git state and run read-only terminal Git commands.' },
+  { id: 'scope-check', description: 'Run local Git mutations inside the member workspace and branch scope.' },
+  { id: 'history-rewrite', description: 'Rewrite or remove local Git history and references.' },
+  { id: 'publish', description: 'Push Git references to a remote.' },
+  { id: 'repository-manage', description: 'Change repository configuration, remotes, or branch scope.' },
   { id: 'worktree-create', description: 'Create a member Git worktree.' },
   { id: 'worktree-manage', description: 'Create a Git worktree for another member.' },
 ] as const
 
 const ATTRIBUTION_NAMESPACE = 'git-attribution'
+const COMMIT_PRODUCING_GIT_COMMANDS = new Set([
+  'am', 'cherry-pick', 'commit', 'merge', 'pull', 'rebase', 'revert',
+])
 
 export class FleetGitAttributionStore {
   private readonly teams = new Map<string, Map<string, string>>()
@@ -74,56 +82,124 @@ export class FleetGitAttributionStore {
   }
 }
 
-function textField(value: unknown, key: string): string | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const field = (value as Record<string, unknown>)[key]
-  return typeof field === 'string' && field.trim().length > 0 ? field : undefined
+function inside(root: string, path: string): boolean {
+  const boundary = relative(resolve(root), resolve(path))
+  return boundary === '' || (boundary !== '..' && !boundary.startsWith(`..${sep}`) && !isAbsolute(boundary))
 }
 
-function terminalCommitCwd(exec: Readonly<ToolExecution>): string | undefined {
-  if (exec.agent === undefined || !['bash', 'exec_command'].includes(exec.name)) return undefined
-  const command = textField(exec.arguments, 'command') ?? textField(exec.arguments, 'cmd') ?? textField(exec.arguments, 'script')
-  if (command === undefined) return undefined
-  let cwd = textField(exec.arguments, 'cwd') ?? textField(exec.arguments, 'workdir') ?? exec.agent.session.header.cwd
-  for (const segment of command.split(/(?:&&|\|\||;|\n)/u).map(value => value.trim()).filter(Boolean)) {
-    const changeDirectory = segment.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))$/u)
-    if (changeDirectory !== null) {
-      const path = changeDirectory[1] ?? changeDirectory[2] ?? changeDirectory[3]
-      if (path !== undefined) cwd = resolve(cwd ?? process.cwd(), path)
+const OPTION_VALUE = new Set([
+  '-b', '--branch', '--depth', '--filter', '-o', '--origin', '--reference', '--reference-if-able',
+  '--separate-git-dir', '--upload-pack', '-u', '--upload-pack', '--config', '-c', '--repo',
+])
+
+function operands(args: readonly string[]): string[] {
+  const result: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index] as string
+    if (value === '--') {
+      result.push(...args.slice(index + 1))
+      break
+    }
+    if (OPTION_VALUE.has(value)) {
+      index += 1
       continue
     }
-    if (!/^(?:(?:env|command)\s+[^;&|]*?\s+)?git(?:\s|$)[^;&|]*\bcommit(?:\s|$)/u.test(segment)) continue
-    const gitDirectory = segment.match(/\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))/u)
-    const path = gitDirectory?.[1] ?? gitDirectory?.[2] ?? gitDirectory?.[3]
-    if (path !== undefined) cwd = resolve(cwd ?? process.cwd(), path)
-    return cwd
+    if (!value.startsWith('-')) result.push(value)
   }
-  return undefined
+  return result
 }
 
-export function installGitAttributionTracking(
+function setupTarget(command: FleetTerminalGitCommand): string {
+  const values = operands(command.args)
+  if (command.verb === 'init') return resolve(command.cwd, values[0] ?? '.')
+  const source = values[0]
+  const destination = values[1]
+  if (destination !== undefined) return resolve(command.cwd, destination)
+  if (source === undefined) return command.cwd
+  const name = basename(source.replace(/\/$/u, '')).replace(/\.git$/u, '')
+  return resolve(command.cwd, name || '.')
+}
+
+function refBranch(value: string): string {
+  return value.replace(/^\+/u, '').replace(/^refs\/heads\//u, '')
+}
+
+function requireScopedPush(command: FleetTerminalGitCommand, scope: FleetGitScope): void {
+  const branch = scope.boundBranch ?? scope.branch
+  if (branch === undefined) return
+  if (command.args.some(value => ['--all', '--mirror'].includes(value))) {
+    throw new Error(`Fleet Git push is limited to branch ${branch}`)
+  }
+  const values = operands(command.args)
+  for (const refspec of values.slice(1)) {
+    const [source = '', destination] = refspec.split(':', 2)
+    if (source.length > 0 && source !== 'HEAD' && refBranch(source) !== branch) {
+      throw new Error(`Fleet Git push source ${source} is outside branch ${branch}`)
+    }
+    if (destination !== undefined && destination.length > 0 && refBranch(destination) !== branch) {
+      throw new Error(`Fleet Git push destination ${destination} is outside branch ${branch}`)
+    }
+  }
+}
+
+export function installGitTerminalPolicy(
   ctx: Context,
   store: FleetGitAttributionStore,
 ): () => void {
   return ctx.on('tools/execute', async (exec, next): Promise<ToolExecutionResult> => {
-    const cwd = terminalCommitCwd(exec)
+    const commands = terminalGitCommands(exec)
+    if (commands.length === 0) return next()
     const actor = exec.agent === undefined ? undefined : ctx.fleetAuthorization.actorForAgent(String(exec.agent.id))
-    if (cwd === undefined || actor === undefined || (actor.subject.kind !== 'member' && actor.subject.kind !== 'assistant')) return next()
-    let fleetGit: FleetGit
-    let before: string | undefined
-    try {
-      fleetGit = new FleetGit(cwd)
-      before = fleetGit.status(cwd).head
-    } catch {
-      return next()
+    if (actor === undefined || (actor.subject.kind !== 'member' && actor.subject.kind !== 'assistant')) return next()
+    const team = ctx.fleetRuns.status(actor.teamId)
+    const workspace = exec.agent?.session.header.cwd ?? team.projectRoot
+    const trackers = new Map<string, { readonly git: FleetGit; readonly cwd: string; readonly marker: string | undefined }>()
+    for (const command of commands) {
+      const policy = terminalGitPolicy(command)
+      if (command.repositoryOverride) {
+        throw new Error('Fleet Git terminal policy does not allow --git-dir or --work-tree; use git -C inside the Team workspace')
+      }
+      if (policy.directWorktreeMutation) {
+        throw new Error('Use fleet_git create_worktree so Fleet can bind the worktree to its member')
+      }
+      if (command.verb === 'init' || command.verb === 'clone') {
+        const target = setupTarget(command)
+        if (!inside(team.projectRoot, target) || !inside(workspace, target)) {
+          throw new Error(`Fleet Git ${command.verb} target is outside the member workspace: ${target}`)
+        }
+        ctx.fleetAuthorization.require({
+          teamId: actor.teamId,
+          subject: actor.subject,
+          action: 'git.repository-manage',
+          resource: { kind: 'git-repository', id: target },
+        })
+        continue
+      }
+      const fleetGit = new FleetGit(team.projectRoot, undefined, actor.teamId)
+      const repository = fleetGit.root
+      const scope = fleetGit.scope(
+        actor.subject.id,
+        command.cwd,
+        [{ path: workspace, access: 'write' }],
+        policy.intent,
+      )
+      for (const action of new Set(policy.actions)) ctx.fleetAuthorization.require({
+        teamId: actor.teamId,
+        subject: actor.subject,
+        action,
+        resource: { kind: 'git-repository', id: repository },
+      })
+      if (command.verb === 'push') requireScopedPush(command, scope)
+      if (COMMIT_PRODUCING_GIT_COMMANDS.has(command.verb) && !trackers.has(command.cwd)) {
+        trackers.set(command.cwd, { git: fleetGit, cwd: command.cwd, marker: fleetGit.reflogMarker(command.cwd) })
+      }
     }
     const result = await next()
     if (result.isError) return result
-    try {
-      const after = fleetGit.status(cwd).head
-      if (after !== undefined && after !== before) store.record(
+    for (const tracker of trackers.values()) try {
+      store.record(
         actor.teamId,
-        fleetGit.commitsSince(cwd, before, after),
+        tracker.git.attributedCommitsSinceReflog(tracker.cwd, tracker.marker),
         actor.subject.id,
       )
     } catch {}
@@ -224,7 +300,7 @@ export function apply(ctx: Context): void {
   ctx.inject(['fleetRuns', 'fleetAuthorization', 'tools'], scope => {
     const attributions = new FleetGitAttributionStore(scope.fleetRuns)
     scope.provide('fleetGitAttributions', attributions)
-    return installGitAttributionTracking(scope, attributions)
+    return installGitTerminalPolicy(scope, attributions)
   })
   ctx.inject(['typert', 'fleetGitAttributions'], scope => {
     new FleetGitWebRemote(scope, scope.fleetGitAttributions)

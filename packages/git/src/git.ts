@@ -186,6 +186,13 @@ function gitSucceeds(cwd: string, args: readonly string[]): boolean {
   return spawnSync('git', ['-C', cwd, ...args], { stdio: 'ignore' }).status === 0
 }
 
+function reflogCreatesCommit(subject: string): boolean {
+  if (/^commit(?: \([^)]*\))?:/u.test(subject)) return true
+  if (/^(?:am|cherry-pick|revert):/u.test(subject)) return true
+  if (/^rebase \((?:edit|fixup|pick|reword|squash)\):/u.test(subject)) return true
+  return /^(?:merge|pull)(?: .*?)?:/u.test(subject) && !/Fast-forward/iu.test(subject)
+}
+
 function inside(root: string, path: string): boolean {
   const boundary = relative(root, path)
   return boundary === '' || (boundary !== '..' && !boundary.startsWith(`..${sep}`) && !isAbsolute(boundary))
@@ -502,9 +509,21 @@ export class FleetGit {
     git(cwd, ['fetch', '--all', '--prune'])
   }
 
-  commitsSince(cwd: string, before: string | undefined, after: string): string[] {
-    if (before === undefined) return [after]
-    return git(cwd, ['rev-list', '--reverse', after, `^${before}`], true).split('\n').filter(Boolean)
+  reflogMarker(cwd: string): string | undefined {
+    return git(cwd, ['reflog', 'show', '-n', '1', '--format=%H%x00%gs%x00%ct'], true) || undefined
+  }
+
+  attributedCommitsSinceReflog(cwd: string, marker: string | undefined): string[] {
+    const commits: string[] = []
+    const seen = new Set<string>()
+    for (const record of git(cwd, ['reflog', 'show', '-n', '4096', '--format=%H%x00%gs%x00%ct'], true).split('\n')) {
+      if (record.length === 0 || record === marker) break
+      const [hash = '', subject = ''] = record.split('\0')
+      if (hash.length === 0 || seen.has(hash) || !reflogCreatesCommit(subject)) continue
+      seen.add(hash)
+      commits.push(hash)
+    }
+    return commits.reverse()
   }
 
   worktree(member: string): FleetGitWorktree | undefined {

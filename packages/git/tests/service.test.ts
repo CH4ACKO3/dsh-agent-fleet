@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { FleetGit, installGitTools, type FleetGitEvent } from '../src/git.js'
-import { FleetGitAttributionStore, installGitAttributionTracking } from '../src/index.js'
+import { FleetGitAttributionStore, installGitTerminalPolicy } from '../src/index.js'
+import { terminalGitCommands, terminalGitPolicy } from '../src/terminal.js'
 
 const roots: string[] = []
 
@@ -41,14 +42,17 @@ describe('FleetGit', () => {
       writeExtensionState: (teamId: string, namespace: string, value: unknown) => { states.set(`${teamId}:${namespace}`, value) },
     }
     const store = new FleetGitAttributionStore(runs as never)
+    const actions: string[] = []
     let listener: ((exec: never, next: () => Promise<never>) => Promise<never>) | undefined
     const context = {
       fleetAuthorization: {
         actorForAgent: () => ({ teamId: 'team-1', subject: { kind: 'member', id: 'builder' } }),
+        require: (input: { readonly action: string }) => { actions.push(input.action) },
       },
+      fleetRuns: { status: () => ({ projectRoot: root }) },
       on: (_event: string, callback: typeof listener) => { listener = callback; return () => {} },
     } as unknown as Context
-    installGitAttributionTracking(context, store)
+    installGitTerminalPolicy(context, store)
     writeFileSync(join(root, 'README.md'), '# Fleet\n')
 
     await listener?.({
@@ -61,8 +65,149 @@ describe('FleetGit', () => {
     })
 
     const hash = new FleetGit(root).status().head as string
+    expect(actions).toEqual(['git.scope-check', 'git.scope-check'])
     expect(store.select('team-1', [hash])).toEqual({ [hash]: 'builder' })
     expect(new FleetGitAttributionStore(runs as never).select('team-1', [hash])).toEqual({ [hash]: 'builder' })
+  })
+
+  it('attributes common rewritten and merged commits without claiming fast-forwarded history', async () => {
+    const root = repository()
+    writeFileSync(join(root, 'README.md'), '# Fleet\n')
+    commit(root, 'Initialize', ['README.md'])
+    const main = execFileSync('git', ['-C', root, 'branch', '--show-current'], { encoding: 'utf8' }).trim()
+    const states = new Map<string, unknown>()
+    const store = new FleetGitAttributionStore({
+      readExtensionState: (teamId: string, namespace: string) => states.get(`${teamId}:${namespace}`),
+      writeExtensionState: (teamId: string, namespace: string, value: unknown) => { states.set(`${teamId}:${namespace}`, value) },
+    } as never)
+    let listener: ((exec: never, next: () => Promise<never>) => Promise<never>) | undefined
+    const context = {
+      fleetAuthorization: {
+        actorForAgent: () => ({ teamId: 'team-1', subject: { kind: 'member', id: 'builder' } }),
+        require: () => {},
+      },
+      fleetRuns: { status: () => ({ projectRoot: root }) },
+      on: (_event: string, callback: typeof listener) => { listener = callback; return () => {} },
+    } as unknown as Context
+    installGitTerminalPolicy(context, store)
+    const run = async (command: string, operation: () => void): Promise<void> => {
+      await listener?.({
+        name: 'bash', arguments: { command },
+        agent: { id: 'agent-1', session: { header: { cwd: root } } },
+      } as never, async () => {
+        operation()
+        return { isError: false, value: null, content: [] } as never
+      })
+    }
+
+    execFileSync('git', ['-C', root, 'checkout', '-qb', 'fast-forward'])
+    writeFileSync(join(root, 'fast-forward.txt'), 'upstream\n')
+    commit(root, 'Upstream', ['fast-forward.txt'])
+    const upstream = new FleetGit(root).status().head as string
+    execFileSync('git', ['-C', root, 'checkout', '-q', main])
+    await run('git merge --ff-only fast-forward', () => {
+      execFileSync('git', ['-C', root, 'merge', '--ff-only', 'fast-forward'])
+    })
+    expect(store.select('team-1', [upstream])).toEqual({})
+
+    execFileSync('git', ['-C', root, 'checkout', '-qb', 'topic'])
+    writeFileSync(join(root, 'topic.txt'), 'topic\n')
+    commit(root, 'Topic', ['topic.txt'])
+    const topic = new FleetGit(root).status().head as string
+    execFileSync('git', ['-C', root, 'checkout', '-q', main])
+    writeFileSync(join(root, 'main.txt'), 'main\n')
+    commit(root, 'Main', ['main.txt'])
+    await run('git merge --no-ff topic -m "Merge topic"', () => {
+      execFileSync('git', ['-C', root, '-c', 'user.name=Fleet Test', '-c', 'user.email=fleet@example.com', 'merge', '--no-ff', '-m', 'Merge topic', 'topic'])
+    })
+    const merge = new FleetGit(root).status().head as string
+    expect(store.select('team-1', [topic, merge])).toEqual({ [merge]: 'builder' })
+
+    execFileSync('git', ['-C', root, 'checkout', '-qb', 'to-pick'])
+    writeFileSync(join(root, 'pick.txt'), 'pick\n')
+    commit(root, 'Pick me', ['pick.txt'])
+    const source = new FleetGit(root).status().head as string
+    execFileSync('git', ['-C', root, 'checkout', '-q', main])
+    await run(`git cherry-pick ${source}`, () => {
+      execFileSync('git', ['-C', root, '-c', 'user.name=Fleet Test', '-c', 'user.email=fleet@example.com', 'cherry-pick', source])
+    })
+    const picked = new FleetGit(root).status().head as string
+    expect(store.select('team-1', [source, picked])).toEqual({ [picked]: 'builder' })
+
+    execFileSync('git', ['-C', root, 'checkout', '-qb', 'to-rebase'])
+    writeFileSync(join(root, 'rebase.txt'), 'rebase\n')
+    commit(root, 'Rebase me', ['rebase.txt'])
+    const original = new FleetGit(root).status().head as string
+    execFileSync('git', ['-C', root, 'checkout', '-q', main])
+    writeFileSync(join(root, 'base.txt'), 'base\n')
+    commit(root, 'Advance base', ['base.txt'])
+    execFileSync('git', ['-C', root, 'checkout', '-q', 'to-rebase'])
+    await run(`git rebase ${main}`, () => {
+      execFileSync('git', ['-C', root, '-c', 'user.name=Fleet Test', '-c', 'user.email=fleet@example.com', 'rebase', main])
+    })
+    const rebased = new FleetGit(root).status().head as string
+    expect(rebased).not.toBe(original)
+    expect(store.select('team-1', [original, rebased])).toEqual({ [rebased]: 'builder' })
+  })
+
+  it('classifies ordinary terminal Git without changing the command interface', () => {
+    const parse = (command: string) => terminalGitCommands({
+      name: 'bash', arguments: { command },
+      agent: { id: 'agent-1', session: { header: { cwd: '/workspace' } } },
+    } as never).map(terminalGitPolicy)
+
+    expect(parse('git status')[0]).toMatchObject({ actions: ['git.inspect'], intent: 'read' })
+    expect(parse('git commit -m "safe; message"')[0]).toMatchObject({ actions: ['git.scope-check'], intent: 'write' })
+    expect(parse('git commit --amend --no-edit')[0]?.actions).toEqual(['git.scope-check', 'git.history-rewrite'])
+    expect(parse('git push origin HEAD')[0]?.actions).toEqual(['git.scope-check', 'git.publish'])
+    expect(parse('git push --force origin HEAD')[0]?.actions).toEqual(['git.scope-check', 'git.publish', 'git.history-rewrite'])
+    expect(parse('git remote set-url origin example.invalid/repo.git')[0]?.actions).toEqual(['git.scope-check', 'git.repository-manage'])
+    expect(parse('git worktree add /tmp/review main')[0]?.directWorktreeMutation).toBe(true)
+  })
+
+  it('blocks denied terminal Git before execution and keeps pushes on the scoped branch', async () => {
+    const root = repository()
+    writeFileSync(join(root, 'README.md'), '# Fleet\n')
+    commit(root, 'Initialize', ['README.md'])
+    const branch = new FleetGit(root).status().branch as string
+    let listener: ((exec: never, next: () => Promise<never>) => Promise<never>) | undefined
+    let executed = false
+    const denied: string[] = []
+    const context = {
+      fleetAuthorization: {
+        actorForAgent: () => ({ teamId: 'team-1', subject: { kind: 'member', id: 'builder' } }),
+        require: (input: { readonly action: string }) => {
+          if (input.action === 'git.publish') {
+            denied.push(input.action)
+            throw new Error('publish denied')
+          }
+        },
+      },
+      fleetRuns: { status: () => ({ projectRoot: root }) },
+      on: (_event: string, callback: typeof listener) => { listener = callback; return () => {} },
+    } as unknown as Context
+    installGitTerminalPolicy(context, new FleetGitAttributionStore({
+      readExtensionState: () => undefined,
+      writeExtensionState: () => {},
+    } as never))
+    const next = async () => {
+      executed = true
+      return { isError: false, value: null, content: [] } as never
+    }
+
+    await expect(listener?.({
+      name: 'bash', arguments: { command: `git push origin ${branch}` },
+      agent: { id: 'agent-1', session: { header: { cwd: root } } },
+    } as never, next)).rejects.toThrow('publish denied')
+    expect(executed).toBe(false)
+    expect(denied).toEqual(['git.publish'])
+
+    context.fleetAuthorization.require = () => {}
+    await expect(listener?.({
+      name: 'bash', arguments: { command: 'git push origin other:other' },
+      agent: { id: 'agent-1', session: { header: { cwd: root } } },
+    } as never, next)).rejects.toThrow(`outside branch ${branch}`)
+    expect(executed).toBe(false)
   })
 
   it('does not expose fleet_git without an explicit Git action', () => {

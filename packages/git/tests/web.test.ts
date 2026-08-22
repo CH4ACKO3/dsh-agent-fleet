@@ -29,7 +29,8 @@ function repository(): string {
 describe('FleetGitWebRemote', () => {
   it('publishes the Git capability namespace used by dynamic permission groups', () => {
     expect(FLEET_GIT_PERMISSIONS.map(permission => permission.id)).toEqual([
-      'inspect', 'scope-check', 'worktree-create', 'worktree-manage',
+      'inspect', 'scope-check', 'history-rewrite', 'publish', 'repository-manage',
+      'worktree-create', 'worktree-manage',
     ])
   })
 
@@ -40,7 +41,8 @@ describe('FleetGitWebRemote', () => {
     ctx.provide('fleetAuthorization', access)
     await Promise.resolve()
     expect(access.actionIds()).toEqual(expect.arrayContaining([
-      'git.inspect', 'git.scope-check', 'git.worktree-create', 'git.worktree-manage',
+      'git.inspect', 'git.scope-check', 'git.history-rewrite', 'git.publish', 'git.repository-manage',
+      'git.worktree-create', 'git.worktree-manage',
     ]))
     expect(access.resourceKindIds()).toContain('git-repository')
     const namespace = access.namespaces().find(candidate => candidate.namespace === 'git')
