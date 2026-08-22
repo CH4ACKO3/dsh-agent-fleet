@@ -1,4 +1,4 @@
-import type { FleetGitDiff, FleetGitSnapshot } from './git.js'
+import type { FleetGitCommitDetails, FleetGitDiff, FleetGitSnapshot } from './git.js'
 import type { InvocationDescriptor, RemoteResult, TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
 
@@ -13,9 +13,15 @@ export interface FleetGitDiffInput {
   readonly staged?: boolean
 }
 
+export interface FleetGitCommitInput {
+  readonly root: string
+  readonly hash: string
+}
+
 export interface FleetGitWebClient {
   snapshot(input: FleetGitSnapshotInput, signal?: AbortSignal): Promise<RemoteResult<FleetGitSnapshot>>
   diff(input: FleetGitDiffInput, signal?: AbortSignal): Promise<RemoteResult<FleetGitDiff>>
+  commit(input: FleetGitCommitInput, signal?: AbortSignal): Promise<RemoteResult<FleetGitCommitDetails>>
 }
 
 const JSON_CODEC = {
@@ -37,7 +43,7 @@ function invocation(method: string): InvocationDescriptor {
   }
 }
 
-export const FLEET_GIT_WEB_INVOCATIONS = [invocation('snapshot'), invocation('diff')] as const
+export const FLEET_GIT_WEB_INVOCATIONS = [invocation('snapshot'), invocation('diff'), invocation('commit')] as const
 
 export const FLEET_GIT_WEB_REMOTE: TypertRemoteContribution = {
   package: '@ch4acko3/dsh-agent-fleet-git/web',

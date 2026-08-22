@@ -9,6 +9,7 @@ import type { FleetGitEvent } from './git.js'
 
 import {
   FLEET_GIT_WEB_INVOCATIONS,
+  type FleetGitCommitInput,
   type FleetGitDiffInput,
   type FleetGitSnapshotInput,
 } from './contract.js'
@@ -73,6 +74,13 @@ export class FleetGitWebRemote extends TypertRemoteService {
     const root = required(input.root, 'root')
     const path = required(input.path, 'path')
     return new FleetGit(root).diff(root, path, input.staged ?? false)
+  }
+
+  commit(input: FleetGitCommitInput, signal: AbortSignal) {
+    signal.throwIfAborted()
+    const root = required(input.root, 'root')
+    const hash = required(input.hash, 'hash')
+    return new FleetGit(root).commit(root, hash)
   }
 }
 

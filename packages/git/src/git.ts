@@ -39,6 +39,23 @@ export interface FleetGitCommit {
   readonly decorations: readonly string[]
 }
 
+export interface FleetGitCommitFile {
+  readonly path: string
+  readonly oldPath?: string
+  readonly status: string
+  readonly additions?: number
+  readonly deletions?: number
+  readonly binary: boolean
+}
+
+export interface FleetGitCommitDetails extends FleetGitCommit {
+  readonly committerName: string
+  readonly committerEmail: string
+  readonly committedAt: string
+  readonly body: string
+  readonly files: readonly FleetGitCommitFile[]
+}
+
 export interface FleetGitDiff {
   readonly path?: string
   readonly staged: boolean
@@ -212,6 +229,48 @@ function parseCommits(output: string): FleetGitCommit[] {
   })
 }
 
+function parseCommitFiles(nameStatusOutput: string, numstatOutput: string): FleetGitCommitFile[] {
+  const stats = new Map<string, { readonly additions?: number; readonly deletions?: number; readonly binary: boolean }>()
+  const numstatRecords = numstatOutput.split('\0')
+  for (let index = 0; index < numstatRecords.length; index += 1) {
+    const record = numstatRecords[index] ?? ''
+    if (record.length === 0) continue
+    const [additionsValue = '', deletionsValue = '', recordPath = ''] = record.split('\t')
+    let path = recordPath
+    if (path.length === 0) {
+      path = numstatRecords[index + 2] ?? ''
+      index += 2
+    }
+    if (path.length === 0) continue
+    const binary = additionsValue === '-' || deletionsValue === '-'
+    stats.set(path, {
+      ...(binary ? {} : { additions: Number(additionsValue), deletions: Number(deletionsValue) }),
+      binary,
+    })
+  }
+
+  const records = nameStatusOutput.split('\0')
+  const files: FleetGitCommitFile[] = []
+  for (let index = 0; index < records.length;) {
+    const statusValue = records[index++] ?? ''
+    if (statusValue.length === 0) continue
+    const firstPath = records[index++] ?? ''
+    const renamed = statusValue.startsWith('R') || statusValue.startsWith('C')
+    const path = renamed ? records[index++] ?? '' : firstPath
+    if (path.length === 0) continue
+    const stat = stats.get(path)
+    files.push({
+      path,
+      ...(renamed ? { oldPath: firstPath } : {}),
+      status: statusValue[0] ?? statusValue,
+      ...(stat?.additions === undefined ? {} : { additions: stat.additions }),
+      ...(stat?.deletions === undefined ? {} : { deletions: stat.deletions }),
+      binary: stat?.binary ?? false,
+    })
+  }
+  return files
+}
+
 export class FleetGit {
   constructor(
     readonly projectRoot: string,
@@ -328,6 +387,34 @@ export class FleetGit {
       '-z',
       '--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%D%x1f%s',
     ]))
+  }
+
+  commit(cwd = this.projectRoot, hash: string): FleetGitCommitDetails {
+    if (!/^[0-9a-f]{7,64}$/iu.test(hash)) throw new Error('Git commit hash is invalid')
+    const metadata = gitOutput(cwd, [
+      'show', '-s', '--no-show-signature',
+      '--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b',
+      hash,
+    ]).trimEnd()
+    const [fullHash = '', parents = '', authorName = '', authorEmail = '', authoredAt = '', committerName = '', committerEmail = '', committedAt = '', decorations = '', subject = '', body = ''] = metadata.split('\x1f')
+    const nameStatus = gitOutput(cwd, ['diff-tree', '--root', '--no-commit-id', '--name-status', '-z', '-r', '--find-renames', fullHash])
+    const numstat = gitOutput(cwd, ['diff-tree', '--root', '--no-commit-id', '--numstat', '-z', '-r', '--find-renames', fullHash])
+    return {
+      hash: fullHash,
+      parents: parents.length === 0 ? [] : parents.split(' '),
+      authorName,
+      authorEmail,
+      authoredAt,
+      committerName,
+      committerEmail,
+      committedAt,
+      subject,
+      body: body.trim(),
+      decorations: decorations.length === 0
+        ? []
+        : decorations.split(', ').map(value => value.replace(/^HEAD -> /, '')).filter(Boolean),
+      files: parseCommitFiles(nameStatus, numstat),
+    }
   }
 
   diff(cwd = this.projectRoot, path?: string, staged = false, maxBytes = 512 * 1024): FleetGitDiff {

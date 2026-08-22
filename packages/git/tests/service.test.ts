@@ -96,6 +96,10 @@ describe('FleetGit', () => {
     const snapshot = fleetGit.snapshot(root, 10)
     expect(snapshot.commits).toHaveLength(1)
     expect(snapshot.commits[0]).toMatchObject({ subject: 'Initialize Fleet project', parents: [] })
+    expect(fleetGit.commit(root, snapshot.commits[0]?.hash ?? '')).toMatchObject({
+      subject: 'Initialize Fleet project',
+      files: [{ path: 'README.md', status: 'A', additions: 1, deletions: 0, binary: false }],
+    })
     expect(snapshot.branches).toContainEqual(expect.objectContaining({ current: true, remote: false }))
     expect(snapshot.status.changes).toContainEqual(expect.objectContaining({ path: 'README.md', index: ' ', worktree: 'M' }))
     expect(fleetGit.diff(root, 'README.md')).toMatchObject({ path: 'README.md', staged: false, truncated: false })

@@ -77,6 +77,11 @@ describe('FleetGitWebRemote', () => {
       status: { root: realpathSync(root), changes: [expect.objectContaining({ path: 'README.md', worktree: 'M' })] },
       commits: [expect.objectContaining({ subject: 'Initial commit' })],
     })
+    const hash = remote.snapshot({ root, limit: 20 }, signal).commits[0]?.hash ?? ''
+    expect(remote.commit({ root, hash }, signal)).toMatchObject({
+      hash,
+      files: [{ path: 'README.md', additions: 1, deletions: 0 }],
+    })
     expect(remote.diff({ root, path: 'README.md' }, signal)).toMatchObject({ staged: false, truncated: false })
     expect(FLEET_GIT_WEB_REMOTE.descriptors.every(descriptor =>
       descriptor.result.mode === 'strict'
