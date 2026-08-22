@@ -816,6 +816,9 @@ describe('FleetRunService', () => {
       'fleet_messages',
       'fleet_wait',
       'fleet_tools',
+      'fleet_task',
+      'fleet_schedule',
+      'fleet_calendar',
     ])
     const discovery = register.mock.calls[4]?.[0] as {
       execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown>
@@ -827,6 +830,9 @@ describe('FleetRunService', () => {
       'fleet_messages',
       'fleet_wait',
       'fleet_tools',
+      'fleet_task',
+      'fleet_schedule',
+      'fleet_calendar',
       'fleet_channel',
       'fleet_vote',
       'fleet_meeting',

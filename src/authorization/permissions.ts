@@ -54,11 +54,16 @@ const EMPTY_STATE: FleetPermissionState = { version: 1, groups: {} }
 export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
   {
     id: 'observer', name: 'Observer', parents: [], preset: true,
-    toolGroups: ['messages', 'status', 'resources'], actions: [],
+    toolGroups: ['messages', 'status', 'resources'],
+    actions: ['task.read', 'schedule.read', 'calendar.read', 'calendar.rsvp'],
   },
   {
     id: 'member', name: 'Collaborator', parents: ['observer'], preset: true,
-    toolGroups: ['coordination'], actions: [],
+    toolGroups: ['coordination'], actions: [
+      'task.create', 'task.update', 'task.comment', 'task.progress',
+      'schedule.create', 'schedule.update',
+      'calendar.create', 'calendar.update',
+    ],
   },
   {
     id: 'researcher', name: 'Researcher', parents: ['member'], preset: true,
@@ -66,7 +71,10 @@ export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
   },
   {
     id: 'facilitator', name: 'Facilitator', parents: ['member'], preset: true,
-    toolGroups: [], actions: ['channel.manage', 'meeting.manage', 'vote.create'],
+    toolGroups: [], actions: [
+      'channel.manage', 'meeting.manage', 'vote.create',
+      'task.manage', 'schedule.manage', 'calendar.manage',
+    ],
   },
   {
     id: 'maintainer', name: 'Maintainer', parents: ['researcher', 'facilitator'], preset: true,
@@ -111,8 +119,11 @@ function sameValues(left: readonly string[], right: readonly string[]): boolean 
 function nativeAssignment(member: FleetMemberView): FleetMemberAccess {
   for (const groups of NATIVE_PRESET_COMBINATIONS) {
     const authorization = presetAuthorization(groups)
+    const nativeActions = authorization.actions.filter(action =>
+      (FLEET_MEMBER_PERMISSIONS as readonly string[]).includes(action),
+    )
     if (sameValues(member.toolGroups, authorization.toolGroups)
-      && sameValues(member.permissions, authorization.actions)) {
+      && sameValues(member.permissions, nativeActions)) {
       return { groups: [...groups], grants: [], denies: [], toolGroups: [], denyToolGroups: [] }
     }
   }
