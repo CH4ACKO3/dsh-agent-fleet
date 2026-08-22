@@ -127,7 +127,7 @@ describe('FleetAccessService', () => {
       teamId: 'team-1', subject, action: 'resource.write',
       resource: { kind: 'file', id: '/project/one/src/generated/client.ts' },
     }, true)).toBe(false)
-    const persisted = stored.get('team-1:access') as FleetAccessState
+    const persisted = stored.get('team-1:authorization-access') as FleetAccessState
     expect(persisted.rules.find(rule => rule.id === 'personal-generated-deny')?.principal)
       .toEqual({ kind: 'group', id: fleetPrivateGroupId('alice') })
   })
@@ -169,11 +169,11 @@ describe('FleetAccessService', () => {
       resource: { kind: 'file', id: '/project/old/.fleet/team-1/notes' },
       scope: 'tree', effect: 'allow', levels: ['write'],
     })
-    const persisted = first.stored.get('team-1:access') as FleetAccessState
+    const persisted = first.stored.get('team-1:authorization-access') as FleetAccessState
     expect(persisted.rules[0]?.resource.id).toBe('workspace:src')
     expect(persisted.rules[1]?.resource.id).toBe('team:notes')
 
-    first.stored.set('team-2:access', structuredClone(persisted))
+    first.stored.set('team-2:authorization-access', structuredClone(persisted))
     const restored = new FleetAccessService(first.runs, first.groups)
     expect(restored.authorize({
       teamId: 'team-2', subject, action: 'resource.read',
@@ -220,7 +220,7 @@ describe('FleetAccessService', () => {
 
   it('fails closed when persisted Access state is malformed', () => {
     const { runs, stored } = fixture()
-    stored.set('team-1:access', { version: 1, modes: [], rules: [{ id: 'broken' }] })
+    stored.set('team-1:authorization-access', { version: 1, modes: [], rules: [{ id: 'broken' }] })
     expect(() => new FleetAccessService(runs, new FleetGroupService(runs)).state('team-1')).toThrow(/resource/)
   })
 

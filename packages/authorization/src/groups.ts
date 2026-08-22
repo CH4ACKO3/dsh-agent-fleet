@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type { FleetRunService } from 'dsh-agent-fleet'
 
-export const FLEET_GROUPS_STATE_NAMESPACE = 'groups'
+export const FLEET_GROUPS_STATE_NAMESPACE = 'authorization-groups'
 export const FLEET_GROUPS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/groups'
 
 export interface FleetAuthorizationGroup {

@@ -20,6 +20,7 @@ import {
 } from './groups.js'
 
 export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/permissions'
+export const FLEET_PERMISSIONS_STATE_NAMESPACE = 'authorization-permissions'
 
 export interface FleetPermissionAssignment {
   readonly grants: readonly string[]
@@ -185,7 +186,7 @@ export class FleetPermissionService implements FleetActionPolicy {
   state(teamId: string): FleetPermissionState {
     let state = this.states.get(teamId)
     if (state === undefined) {
-      const persisted = this.runs.readExtensionState(teamId, 'permissions')
+      const persisted = this.runs.readExtensionState(teamId, FLEET_PERMISSIONS_STATE_NAMESPACE)
       const configured = persisted === undefined ? this.configurationState(teamId) : undefined
       state = persisted !== undefined
         ? parseState(persisted)
@@ -369,7 +370,7 @@ export class FleetPermissionService implements FleetActionPolicy {
 
   private save(teamId: string, state: FleetPermissionState): void {
     this.states.set(teamId, cloneState(state))
-    this.runs.writeExtensionState(teamId, 'permissions', asJson(state))
+    this.runs.writeExtensionState(teamId, FLEET_PERMISSIONS_STATE_NAMESPACE, asJson(state))
   }
 }
 

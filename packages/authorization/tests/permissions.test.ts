@@ -53,7 +53,13 @@ function fixture(
   const groups = new FleetGroupService(runs)
   const permissions = new FleetPermissionService(runs, authorization, groups)
   authorization.installActionPolicy(permissions)
-  return { authorization, groups, permissions, runs, stored: () => values.get('team-1:permissions') }
+  return {
+    authorization,
+    groups,
+    permissions,
+    runs,
+    stored: () => values.get('team-1:authorization-permissions'),
+  }
 }
 
 describe('FleetPermissionService', () => {

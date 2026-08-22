@@ -14,7 +14,7 @@ import type {
 } from 'dsh-agent-fleet'
 import { fleetPrivateGroupId, isFleetPrivateGroupId, type FleetGroupService } from './groups.js'
 
-export const FLEET_ACCESS_STATE_NAMESPACE = 'access'
+export const FLEET_ACCESS_STATE_NAMESPACE = 'authorization-access'
 
 export const FLEET_ACCESS_LEVELS = ['read', 'write', 'use', 'manage'] as const
 export type FleetAccessLevel = typeof FLEET_ACCESS_LEVELS[number]

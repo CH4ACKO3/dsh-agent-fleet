@@ -28,8 +28,8 @@
     "build": "pnpm run build:client && pnpm run build:host",
     "build:client": "tsdown --config-loader unrun && tsc -p tsconfig.client.build.json",
     "build:host": "tsc -p tsconfig.json",
-    "typecheck": "pnpm --filter dsh-agent-fleet build:host && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "pnpm --filter dsh-agent-fleet build:host && vitest run"
+    "typecheck": "pnpm --filter dsh-agent-fleet build:host && pnpm --filter @ch4acko3/dsh-agent-fleet-authorization build && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "pnpm --filter dsh-agent-fleet build:host && pnpm --filter @ch4acko3/dsh-agent-fleet-authorization build && vitest run"
   },
   "dsh": {
     "plugin": {

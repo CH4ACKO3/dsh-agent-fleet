@@ -34,6 +34,6 @@ describe('FleetGroupService', () => {
     const restored = new FleetGroupService(first.runs)
     expect(restored.groups('team-1')).toContainEqual(expect.objectContaining({ id: 'frontend' }))
     expect(restored.expanded('team-1', 'alice')).toEqual(expect.arrayContaining(['frontend', 'member', 'observer']))
-    expect(first.stored.has('team-1:groups')).toBe(true)
+    expect(first.stored.has('team-1:authorization-groups')).toBe(true)
   })
 })
