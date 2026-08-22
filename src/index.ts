@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import * as Core from '@dsh-agent-fleet/core'
 import * as Message from '@dsh-agent-fleet/message'
 import * as Resources from '@dsh-agent-fleet/resources'
+import * as Authorization from './authorization/index.js'
 import { FleetArchiveRegistry } from './archive.js'
 import { FleetAssistantRuntime } from './assistant.js'
 import { FleetAuthorizationService } from './authorization.js'
@@ -13,7 +14,8 @@ import { FleetRunService, installRunTools } from './run.js'
 import { FleetSetupService, installSetupTool } from './setup.js'
 import { FLEET_WEB_LOCAL, FleetWebRemote } from './web.js'
 
-export { Core, Message, Resources }
+export { Authorization, Core, Message, Resources }
+export * from './authorization/index.js'
 export * from './authorization.js'
 export * from './assistant.js'
 export * from './archive.js'
@@ -70,6 +72,7 @@ export function apply(ctx: Context): void {
       service.close()
     }, 'fleetRuns.close()')
   })
+  Authorization.apply(ctx)
   ctx.inject(['fleetRuns', 'fleetSetups', 'typert', 'agents'], (scope) => {
     new FleetWebRemote(scope, scope.fleetRuns, scope.fleetSetups)
     return scope.typert.register(FLEET_WEB_LOCAL)

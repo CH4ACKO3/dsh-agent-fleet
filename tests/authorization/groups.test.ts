@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { FleetRunService } from 'dsh-agent-fleet'
-import { FleetGroupService, fleetPrivateGroupId } from '../src/groups.js'
+import { FleetGroupService, fleetPrivateGroupId } from '../../src/authorization/groups.js'
 
 function fixture() {
   const stored = new Map<string, unknown>()

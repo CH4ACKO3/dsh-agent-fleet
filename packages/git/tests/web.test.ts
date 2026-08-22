@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FleetAuthorizationService } from 'dsh-agent-fleet'
 import type { FleetRunService } from 'dsh-agent-fleet'
-import { FleetAccessService, FleetGroupService } from '@ch4acko3/dsh-agent-fleet-authorization'
+import { FleetAccessService, FleetGroupService } from 'dsh-agent-fleet'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
 import { FLEET_GIT_PERMISSIONS, FleetGitWebRemote, apply } from '../src/index.js'

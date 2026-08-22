@@ -8,8 +8,8 @@ import {
   type FleetRunService,
 } from 'dsh-agent-fleet'
 
-import { FleetAccessService, applyAccess, type FleetAccessState } from '../src/access.js'
-import { FleetGroupService, fleetPrivateGroupId } from '../src/groups.js'
+import { FleetAccessService, applyAccess, type FleetAccessState } from '../../src/authorization/access.js'
+import { FleetGroupService, fleetPrivateGroupId } from '../../src/authorization/groups.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',

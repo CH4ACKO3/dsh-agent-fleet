@@ -8,10 +8,10 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type {
   FleetAuthorizationInput,
   FleetAuthorizationService,
-  FleetMemberView,
   FleetResourcePolicy,
-  FleetRunService,
-} from 'dsh-agent-fleet'
+} from '../authorization.js'
+import type { FleetMemberView } from '../member-view.js'
+import type { FleetRunService } from '../run.js'
 import { fleetPrivateGroupId, isFleetPrivateGroupId, type FleetGroupService } from './groups.js'
 
 export const FLEET_ACCESS_STATE_NAMESPACE = 'authorization-access'

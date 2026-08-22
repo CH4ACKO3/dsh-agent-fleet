@@ -10,12 +10,12 @@ import {
   FLEET_PERMISSION_PRESETS,
   FleetPermissionService,
   parseFleetPermissionConfiguration,
-} from '../src/permissions.js'
+} from '../../src/authorization/permissions.js'
 import {
   FLEET_GROUPS_CONFIGURATION_MODULE,
   FleetGroupService,
   fleetPrivateGroupId,
-} from '../src/groups.js'
+} from '../../src/authorization/groups.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',

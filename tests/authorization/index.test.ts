@@ -12,9 +12,9 @@ import {
   FleetGroupService,
   FleetPermissionService,
   apply,
-} from '../src/index.js'
+} from '../../src/authorization/index.js'
 
-describe('Agent Fleet Authorization plugin', () => {
+describe('Agent Fleet Authorization module', () => {
   it('installs Permissions and Access together', async () => {
     const ctx = new Context()
     const authorization = new FleetAuthorizationService()

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Keep `dsh-agent-fleet` useful without optional plugins, but limit it to the Team runtime and safe defaults. Optional plugins own advanced policy authoring and productivity features.
+Keep `dsh-agent-fleet` useful with a small default surface while shipping its native Team capabilities in one installation. Built-in modules own advanced policy authoring; external integrations remain optional plugins.
 
 The base plugin owns enforcement. Enhancers may refine policy, but the base plugin must still start, collaborate, persist, resume, archive, and enforce static permissions without them.
 
@@ -24,7 +24,7 @@ The resource directory is the only built-in Team file convention. Its location d
 
 Fleet's private runtime records must not remain inside this member-writable directory. Team records, journals, revisions, extension state, and import staging move to Fleet/DSH-owned storage. `<projectRoot>/.fleet/<teamId>/` contains that Team's shared work product only.
 
-The base does not depend on Permissions, Access, Git, Documents, Tasks, Calendar, or Schedule plugins.
+The base includes Permissions and Access. It does not depend on Git or other external integrations. Documents, Tasks, Calendar, and Schedule remain temporarily removed pending their built-in reintroduction.
 
 ## Unified authorization
 
@@ -41,7 +41,7 @@ authorize({
 require(input): void
 ```
 
-`FleetAuthorizationService` replaces the current action-only `FleetAccessService`. It registers namespaced actions and resource kinds, resolves the static baseline or the installed provider for each side of the decision, and returns the final result. Permissions is authoritative for the action side when installed; otherwise Core uses the static baseline. Access is authoritative for registered resource instances when installed; otherwise Core uses its built-in resource relations. Unknown actions and unknown resource kinds are denied.
+`FleetAuthorizationService` replaces the current action-only `FleetAccessService`. It registers namespaced actions and resource kinds, combines Team defaults with the built-in Permissions and Access policies, and returns the final result. Unknown actions and unknown resource kinds are denied.
 
 The decision is:
 
@@ -83,14 +83,14 @@ Legacy migration is owned by the main refactor. Existing `plan.md` and `checklis
 
 Optional-plugin owners should avoid editing `src/run.ts`, `src/collaboration.ts`, and the base resource implementation until the main refactor lands. Prefer new package-local code and narrowly scoped public interfaces.
 
-## Handoff: Permissions plugin
+## Built-in Permissions module
 
-Owner scope: the Permissions module in `packages/authorization`.
+Owner scope: `src/authorization/permissions.ts`.
 
 Deliver:
 
 - Dynamic permission groups, inheritance, direct grants/denies, presets, and OP/DEOP.
-- An action-policy provider installed into Core's authorization service.
+- The action-policy provider installed by the root Fleet plugin.
 - Runtime refresh of installed tool groups and effective actions.
 - Persistence per Team through extension state and Team archive participation.
 - Downstream namespaced actions registered through Core.
@@ -106,17 +106,17 @@ Do not implement:
 
 Acceptance:
 
-- Removing the plugin restores the member's static base tool groups and permissions unchanged.
-- Installing or removing it never changes a DSH Session workspace or sandbox mode.
+- A Team with no advanced rules preserves the member's configured tool groups and permissions.
+- Permission changes never change a DSH Session workspace or sandbox mode.
 - A granted action still fails when Core's resource decision rejects the concrete target.
 
-## Handoff: Access plugin
+## Built-in Access module
 
-Suggested package: `@dsh-agent-fleet/access`.
+Owner scope: `src/authorization/access.ts`.
 
 Deliver:
 
-- A resource-policy provider installed into Core's authorization service.
+- The resource-policy provider installed by the root Fleet plugin.
 - Resource kinds for `workspace`, `file`, `dataset`, `secret`, and `conversation`, registered through Core as their features are implemented.
 - Initial access levels `read`, `write`, `use`, and `manage`.
 - Multiple attached workspaces/resources per member as an enhancement over the base primary workspace.
@@ -136,7 +136,7 @@ Constraints:
 
 Acceptance:
 
-- With the plugin absent, base single-workspace and shared-directory behavior remains safe and usable.
+- With no explicit Access rules, base single-workspace and shared-directory behavior remains safe and usable.
 - A member with every tool Permission but no matching resource Access cannot read/use that managed resource.
 
 ## Handoff: Documents plugin
@@ -180,8 +180,7 @@ Owner scope: `packages/git`.
 Deliver after the base and Access interfaces settle:
 
 - Continue owning repository inspection, scope checks, Worktree creation/management, and branch binding.
-- Use the base primary workspace when Access is absent.
-- Use Access workspace grants when Access is installed, without treating them as a replacement for the DSH sandbox.
+- Use the base primary workspace and built-in Access grants without treating them as a replacement for the DSH sandbox.
 - Register all Git actions and repository/worktree resource kinds through Core authorization; no Git permission remains hard-coded as base business behavior.
 - Preserve independent archive state where required.
 
@@ -189,12 +188,18 @@ Deliver after the base and Access interfaces settle:
 
 The base UI keeps Team selection, conversations/meetings, members, the generic shared-directory browser, activity, lifecycle controls, setup, and runtime visibility.
 
-Optional plugins contribute their own panels/editors through existing slots:
+Built-in modules contribute their panels/editors through existing slots:
 
 - Permissions: roles, grants/denies, OP.
 - Access: keycard, workspace/resource/secret grants.
+
+Other native modules contribute their surfaces when enabled:
+
 - Documents: versions and comments.
 - Tasks/Calendar/Schedule: their productivity views.
+
+External plugins contribute only their integration surfaces:
+
 - Git: repository and Worktree views.
 
 The base UI must not render nonfunctional placeholders for absent plugins.

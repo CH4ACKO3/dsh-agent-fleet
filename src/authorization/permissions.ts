@@ -6,20 +6,22 @@ import {
   FLEET_MEMBER_PERMISSIONS,
   FLEET_MEMBER_TOOL_GROUP_ACTIONS,
   FLEET_MEMBER_TOOL_GROUPS,
-  type FleetActionPolicyInput,
-  type FleetActionPolicy,
-  type FleetAuthorizationService,
-  type FleetEffectiveAuthorization,
   type FleetMemberView,
-  type FleetRunService,
-} from 'dsh-agent-fleet'
+} from '../member-view.js'
+import type {
+  FleetActionPolicyInput,
+  FleetActionPolicy,
+  FleetAuthorizationService,
+  FleetEffectiveAuthorization,
+} from '../authorization.js'
+import type { FleetRunService } from '../run.js'
 import {
   fleetPrivateGroupId,
   type FleetAuthorizationGroup,
   type FleetGroupService,
 } from './groups.js'
 
-export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/permissions'
+export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = 'dsh-agent-fleet/authorization/permissions'
 export const FLEET_PERMISSIONS_STATE_NAMESPACE = 'authorization-permissions'
 
 export interface FleetPermissionAssignment {

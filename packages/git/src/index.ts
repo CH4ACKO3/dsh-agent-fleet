@@ -4,7 +4,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry/types'
 import type {} from '@deepseek-ai/dsh-typert-registry'
-import type {} from '@ch4acko3/dsh-agent-fleet-authorization'
 import type {} from 'dsh-agent-fleet'
 
 import { FleetGit, installGitTools } from './git.js'

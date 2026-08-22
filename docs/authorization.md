@@ -1,8 +1,8 @@
 # Agent Fleet Authorization
 
-Optional authorization management for `dsh-agent-fleet`. Fleet continues to work without this package by using static member actions, Team membership, workspace boundaries, and each feature plugin's safe defaults.
+Built-in authorization management for `dsh-agent-fleet`. Simple Team configurations use their member defaults directly; advanced policies add groups, explicit action rules, and resource keycards without installing another plugin.
 
-The package contains three deliberately separate modules behind one installation:
+The root plugin loads three deliberately separate modules:
 
 - **Groups** owns shared groups, inheritance, and member membership. Every member also has an implicit private group such as `member:alice`, following the Unix primary/supplementary-group model.
 - **Permissions** assigns actions, Tool Groups, denies, and OP to groups through `fleet_permission`. A member-specific assignment is stored on that member's private group.

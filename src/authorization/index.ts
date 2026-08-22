@@ -8,8 +8,6 @@ export * from './access.js'
 export * from './groups.js'
 export * from './permissions.js'
 
-export const name = '@ch4acko3/dsh-agent-fleet-authorization'
-
 export function apply(ctx: Context): void {
   applyGroups(ctx)
   applyPermissions(ctx)

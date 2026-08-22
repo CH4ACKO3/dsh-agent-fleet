@@ -2,7 +2,7 @@
 
 Agent development collaboration components for DeepSeek Harness.
 
-Core, Message, and Resources provide the runtime components. The root bundle also adds persistent
+Core, Message, Resources, and Authorization provide the runtime components. The root bundle also adds persistent
 Team workflows and trace inspection. UI adds the embedded Team entry and startup configuration
 surface to the native DSH Web new-session view.
 
@@ -15,6 +15,7 @@ Install it as a DSH profile layer with `dsh plugin --profile <profile> add dsh-a
 - `core` — registration, flat member lifecycle, control, and unified authorization.
 - `resources` — Team resource-directory files, file/binary references, and advisory work paths.
 - `message` — Fleet-scoped direct messages, Channels, Meetings, Votes, and shared Channel state.
+- `authorization` — built-in groups, action permissions, and resource keycards using Core's single authorization path.
 - `ui` — embedded Team entry and startup configuration surface for DSH Web.
 
 ## Team workflows

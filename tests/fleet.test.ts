@@ -34,17 +34,25 @@ class FakeAgent implements RuntimeAgent, MessageAgent {
 }
 
 describe('dsh-agent-fleet', () => {
-  it('installs Core globally and leaves Team collaboration tools team-scoped', () => {
+  it('installs Core and the built-in Authorization modules', () => {
     const installed: string[] = []
+    const injections: string[][] = []
     const ctx = {
       plugin(plugin: { name?: string }) {
         installed.push(plugin.name ?? '')
       },
-      inject() {},
+      inject(dependencies: readonly string[]) {
+        injections.push([...dependencies])
+      },
     } as unknown as Context
 
     apply(ctx)
     expect(installed).toEqual(['dsh-agent-fleet-core'])
+    expect(injections).toEqual(expect.arrayContaining([
+      ['fleetRuns', 'fleetConfiguration'],
+      ['fleetAuthorization', 'fleetRuns', 'fleetConfiguration', 'fleetGroups'],
+      ['fleetAuthorization', 'fleetRuns', 'fleetGroups'],
+    ]))
   })
 
   it('uses a Core Fleet name to address a Message recipient', () => {
