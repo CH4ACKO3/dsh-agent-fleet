@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { FleetAuthorizationService } from '../src/authorization.js'
+import { FleetCollaborationService } from '../src/collaboration.js'
 import type { FleetMemberView } from '../src/member-view.js'
 
 const member: FleetMemberView = {
@@ -142,5 +143,38 @@ describe('FleetAuthorizationService', () => {
       teamId: 'team-1', subject: { kind: 'member', id: 'alice' },
     })
     expect(access.actorForAgent('ordinary-session')).toBeUndefined()
+  })
+
+  it('defers tool visibility refresh until a running Agent becomes idle', () => {
+    const access = new FleetAuthorizationService()
+    const agent = { id: 'session-1', status: 'running' }
+    let statusListener: ((payload: { readonly agent: { readonly id: string }; readonly status: string }) => void) | undefined
+    const collaboration = new FleetCollaborationService({
+      agents: { get: () => agent },
+      fs: { contains: () => true },
+      on: (event: string, listener: typeof statusListener) => {
+        if (event === 'agent/status') statusListener = listener
+        return () => {}
+      },
+    } as never, access)
+    const team = collaboration.open({
+      id: 'team-1',
+      memberViews: [member],
+      projectRoot: '/workspace',
+      sharedDirectory: '/workspace/.fleet/team-1',
+      onCoordination: () => {},
+      onResource: () => {},
+      onMemberStatus: () => {},
+    })
+    team.attachMember(agent.id, member)
+    const refresh = vi.spyOn(team, 'refreshAccess')
+
+    access.changed({ teamId: 'team-1', members: ['alice'] })
+    expect(refresh).not.toHaveBeenCalled()
+    agent.status = 'idle'
+    statusListener?.({ agent, status: 'idle' })
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(refresh).toHaveBeenCalledWith('alice')
+    collaboration.close()
   })
 })

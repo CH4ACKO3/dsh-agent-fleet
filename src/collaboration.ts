@@ -70,17 +70,47 @@ export interface OpenFleetCollaborationTeamInput {
 
 export class FleetCollaborationService {
   private readonly teams = new Map<string, FleetCollaborationTeam>()
+  private readonly pendingAccessRefresh = new Map<string, Set<string>>()
   private readonly stopAccess: () => void
+  private readonly stopStatus: () => void
 
   constructor(private readonly ctx: Context, private readonly authorization: FleetAuthorizationService) {
-    this.stopAccess = authorization.onChange(change => this.refreshAccess(change))
+    this.stopAccess = authorization.onChange(change => this.scheduleAccessRefresh(change))
+    this.stopStatus = ctx.on('agent/status', ({ agent, status }) => {
+      if (status !== 'idle') return
+      this.flushAccessRefresh(String(agent.id))
+    })
   }
 
-  private refreshAccess(change: FleetAuthorizationChange): void {
+  private scheduleAccessRefresh(change: FleetAuthorizationChange): void {
     for (const [teamId, team] of this.teams) {
       if (change.teamId !== undefined && change.teamId !== teamId) continue
-      if (change.members === undefined || change.members.length === 0) team.refreshAccess()
-      else for (const member of change.members) team.refreshAccess(member)
+      const members = change.members === undefined || change.members.length === 0
+        ? [...team.memberIdsByName.keys()]
+        : change.members
+      for (const member of members) {
+        const agentId = team.memberIdsByName.get(member)
+        if (agentId !== undefined && this.ctx.agents.get(SessionId(agentId))?.status === 'idle') {
+          team.refreshAccess(member)
+          continue
+        }
+        let pending = this.pendingAccessRefresh.get(teamId)
+        if (pending === undefined) {
+          pending = new Set()
+          this.pendingAccessRefresh.set(teamId, pending)
+        }
+        pending.add(member)
+      }
+    }
+  }
+
+  private flushAccessRefresh(agentId: string): void {
+    for (const [teamId, pending] of this.pendingAccessRefresh) {
+      const team = this.teams.get(teamId)
+      const member = team?.memberNamesById.get(agentId)
+      if (team === undefined || member === undefined || !pending.delete(member)) continue
+      team.refreshAccess(member)
+      if (pending.size === 0) this.pendingAccessRefresh.delete(teamId)
     }
   }
 
@@ -185,6 +215,20 @@ export class FleetCollaborationService {
       const effective = this.authorization.resolve(input.id, view)
       const tools = new Set(effective.toolGroups)
       const permissions = new Set(effective.actions)
+      const authorize = (
+        agentId: string,
+        action: string,
+        resource?: { readonly kind: string; readonly id: string },
+      ): boolean => {
+        const actor = memberNamesById.get(agentId)
+        if (actor === undefined) return false
+        return this.authorization.authorize({
+          teamId: input.id,
+          subject: { kind: defaultVoterNames.has(actor) ? 'member' : 'assistant', id: actor },
+          action,
+          resource: resource ?? { kind: 'team', id: input.id },
+        })
+      }
       const messagePermissions = new Set<FleetMessagePermission>(
         effective.actions.filter((permission): permission is FleetMessagePermission =>
           permission === 'channel.manage' || permission === 'meeting.manage' || permission === 'vote.create'),
@@ -201,39 +245,38 @@ export class FleetCollaborationService {
             messages: false,
             coordination: true,
             permissions: messagePermissions,
+            authorize,
           })
         }
         if (group === 'resources') {
           return installResourceTools(ctx, resources, {
             projectRoot: input.projectRoot,
             sharedDirectory: input.sharedDirectory,
-            canRead: (agentId, kind, id) => this.authorization.authorize({
-              teamId: input.id,
-              subject: { kind: 'member', id: memberNamesById.get(agentId) ?? agentId },
-              action: kind === 'work' ? 'work.read' : 'resource.read',
-              resource: kind === 'work'
-                ? { kind: 'team', id: input.id }
+            canRead: (agentId, kind, id) => authorize(
+              agentId,
+              kind === 'work' ? 'work.read' : 'resource.read',
+              kind === 'work'
+                ? undefined
                 : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
-            }),
-            canWrite: (agentId, kind, id) => this.authorization.authorize({
-              teamId: input.id,
-              subject: { kind: 'member', id: memberNamesById.get(agentId) ?? agentId },
-              action: kind === 'work' ? 'work.claim' : 'resource.write',
-              resource: kind === 'work'
-                ? { kind: 'team', id: input.id }
+            ),
+            canWrite: (agentId, kind, id) => authorize(
+              agentId,
+              kind === 'work' ? 'work.claim' : 'resource.write',
+              kind === 'work'
+                ? undefined
                 : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
-            }),
+            ),
             resourceWrite: permissions.has('resource.write'),
           })
         }
       }
       try {
         if (tools.has('messages')) {
-          add(installMessageTools(ctx, messages, { messages: true, coordination: false }))
+          add(installMessageTools(ctx, messages, { messages: true, coordination: false, authorize }))
           loaded.add('messages')
         }
         if (tools.has('status')) {
-          add(installCollaborationTools(ctx, memberStatuses))
+          add(installCollaborationTools(ctx, memberStatuses, { authorize }))
           loaded.add('status')
         }
         add(installFleetToolDiscovery(ctx, {
@@ -395,11 +438,14 @@ export class FleetCollaborationService {
   closeTeam(id: string): void {
     this.teams.get(id)?.close()
     this.teams.delete(id)
+    this.pendingAccessRefresh.delete(id)
   }
 
   close(): void {
     for (const team of this.teams.values()) team.close()
     this.teams.clear()
+    this.pendingAccessRefresh.clear()
+    this.stopStatus()
     this.stopAccess()
   }
 }
