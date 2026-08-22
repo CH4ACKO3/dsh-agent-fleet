@@ -56,7 +56,9 @@ describe('FleetGit', () => {
       permissions: new Set(['git.inspect', 'git.scope-check']),
     })
 
-    expect(registered[0]?.parameters.properties.action?.enum).toEqual(['scope', 'check'])
+    expect(registered[0]?.parameters.properties.action?.enum).toEqual([
+      'scope', 'context', 'compare', 'conflicts', 'handoff', 'check',
+    ])
   })
 
   it('rechecks Fleet authorization at execution time', async () => {
@@ -173,6 +175,71 @@ describe('FleetGit', () => {
       worktree: realpathSync(worktree.path),
       boundBranch: 'fleet/team/reviewer',
       branch: 'fleet/team/reviewer',
+    })
+  })
+
+  it('provides peer context, comparisons, and a structured handoff across member worktrees', () => {
+    const root = repository()
+    const fleetGit = new FleetGit(root)
+    writeFileSync(join(root, 'README.md'), '# Fleet\n')
+    commit(root, 'Initialize Fleet project', ['README.md'])
+    const reviewer = fleetGit.createWorktree('reviewer')
+
+    writeFileSync(join(root, 'lead.txt'), 'lead work\n')
+    commit(root, 'Implement lead work', ['lead.txt'])
+    writeFileSync(join(reviewer.path, 'review.txt'), 'review work\n')
+    commit(reviewer.path, 'Implement review work', ['review.txt'])
+
+    const context = fleetGit.context('lead', root)
+    expect(context).toMatchObject({
+      member: 'lead',
+      changes: [],
+      peers: [{ member: 'reviewer', path: realpathSync(reviewer.path), branch: 'fleet/team/reviewer' }],
+    })
+    expect(context.recentCommits[0]).toMatchObject({ subject: 'Implement lead work' })
+    expect(fleetGit.compare('lead', 'reviewer', root)).toMatchObject({
+      member: 'lead',
+      target: 'reviewer',
+      ahead: 1,
+      behind: 1,
+      currentCommits: [expect.objectContaining({ subject: 'Implement lead work' })],
+      targetCommits: [expect.objectContaining({ subject: 'Implement review work' })],
+      currentFiles: [{ path: 'lead.txt', additions: 1, deletions: 0, binary: false }],
+      targetFiles: [{ path: 'review.txt', additions: 1, deletions: 0, binary: false }],
+    })
+    expect(fleetGit.conflicts('lead', 'reviewer', root)).toMatchObject({
+      mergeable: true,
+      overlappingPaths: [],
+      conflictingPaths: [],
+    })
+    expect(fleetGit.handoff('lead', 'reviewer', root, { notes: 'Ready for review.', tests: 'pnpm test passed' })).toMatchObject({
+      from: 'lead',
+      to: 'reviewer',
+      dirty: false,
+      uncommitted: [],
+      commits: [expect.objectContaining({ subject: 'Implement lead work' })],
+      files: [{ path: 'lead.txt', additions: 1, deletions: 0, binary: false }],
+      notes: 'Ready for review.',
+      tests: 'pnpm test passed',
+    })
+  })
+
+  it('distinguishes overlapping work from an actual merge conflict', () => {
+    const root = repository()
+    const fleetGit = new FleetGit(root)
+    writeFileSync(join(root, 'README.md'), 'base\n')
+    commit(root, 'Initialize Fleet project', ['README.md'])
+    const reviewer = fleetGit.createWorktree('reviewer')
+
+    writeFileSync(join(root, 'README.md'), 'lead\n')
+    commit(root, 'Change from lead', ['README.md'])
+    writeFileSync(join(reviewer.path, 'README.md'), 'reviewer\n')
+    commit(reviewer.path, 'Change from reviewer', ['README.md'])
+
+    expect(fleetGit.conflicts('lead', 'reviewer', root)).toMatchObject({
+      mergeable: false,
+      overlappingPaths: ['README.md'],
+      conflictingPaths: ['README.md'],
     })
   })
 })

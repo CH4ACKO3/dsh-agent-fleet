@@ -53,6 +53,72 @@ export interface FleetGitSnapshot {
   readonly commits: readonly FleetGitCommit[]
 }
 
+export interface FleetGitFileDelta {
+  readonly path: string
+  readonly additions: number
+  readonly deletions: number
+  readonly binary: boolean
+}
+
+export interface FleetGitPeerLocation {
+  readonly member: string
+  readonly path: string
+  readonly head: string
+  readonly branch?: string
+}
+
+export interface FleetGitContext {
+  readonly member: string
+  readonly root: string
+  readonly branch?: string
+  readonly head?: string
+  readonly upstream?: string
+  readonly ahead: number
+  readonly behind: number
+  readonly changes: readonly FleetGitChange[]
+  readonly peers: readonly FleetGitPeerLocation[]
+  readonly recentCommits: readonly FleetGitCommit[]
+}
+
+export interface FleetGitComparison {
+  readonly member: string
+  readonly target: string
+  readonly currentHead: string
+  readonly targetHead: string
+  readonly mergeBase: string
+  /** Commits present on the caller's side but not the target's side. */
+  readonly ahead: number
+  /** Commits present on the target's side but not the caller's side. */
+  readonly behind: number
+  readonly currentCommits: readonly FleetGitCommit[]
+  readonly targetCommits: readonly FleetGitCommit[]
+  readonly currentFiles: readonly FleetGitFileDelta[]
+  readonly targetFiles: readonly FleetGitFileDelta[]
+}
+
+export interface FleetGitConflictReport {
+  readonly member: string
+  readonly target: string
+  readonly mergeBase: string
+  readonly mergeable: boolean
+  readonly overlappingPaths: readonly string[]
+  readonly conflictingPaths: readonly string[]
+}
+
+export interface FleetGitHandoff {
+  readonly from: string
+  readonly to: string
+  readonly branch?: string
+  readonly head: string
+  readonly base: string
+  readonly dirty: boolean
+  readonly uncommitted: readonly FleetGitChange[]
+  readonly commits: readonly FleetGitCommit[]
+  readonly files: readonly FleetGitFileDelta[]
+  readonly notes?: string
+  readonly tests?: string
+}
+
 export interface FleetGitStatus {
   readonly root: string
   readonly branch?: string
@@ -230,6 +296,24 @@ function parseCommits(output: string): FleetGitCommit[] {
   })
 }
 
+function parseCountPair(output: string): { readonly ahead: number; readonly behind: number } {
+  const [ahead = '0', behind = '0'] = output.trim().split(/\s+/u)
+  return { ahead: Number(ahead), behind: Number(behind) }
+}
+
+function parseNumstat(output: string): FleetGitFileDelta[] {
+  return output.split('\0').filter(Boolean).map(record => {
+    const [added = '0', deleted = '0', ...pathParts] = record.split('\t')
+    const binary = added === '-' || deleted === '-'
+    return {
+      path: pathParts.join('\t'),
+      additions: binary ? 0 : Number(added),
+      deletions: binary ? 0 : Number(deleted),
+      binary,
+    }
+  })
+}
+
 export class FleetGit {
   constructor(
     readonly projectRoot: string,
@@ -319,7 +403,9 @@ export class FleetGit {
       root,
       ...(branch.length === 0 ? {} : { branch }),
       ...(head.length === 0 ? {} : { head }),
-      changes: parseChanges(gitOutput(cwd, ['status', '--porcelain=v1', '-z'])),
+      changes: parseChanges(gitOutput(cwd, [
+        'status', '--porcelain=v1', '-z', '--', `:(top,exclude).fleet/worktrees/${this.namespace}/**`,
+      ])),
       worktrees: parseWorktrees(git(cwd, ['worktree', 'list', '--porcelain'])),
     }
   }
@@ -346,6 +432,135 @@ export class FleetGit {
       '-z',
       '--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%D%x1f%s',
     ]))
+  }
+
+  private logRange(cwd: string, range: string, limit = 20): FleetGitCommit[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Git comparison limit must be from 1 through 100')
+    return parseCommits(gitOutput(cwd, [
+      'log',
+      '--topo-order',
+      '--date-order',
+      `--max-count=${String(limit)}`,
+      '-z',
+      '--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%D%x1f%s',
+      range,
+    ]))
+  }
+
+  private memberRef(member: string): string {
+    const worktree = this.worktree(member)
+    if (worktree !== undefined) return worktree.head
+    const branch = `refs/heads/fleet/${this.namespace}/${member}`
+    if (gitSucceeds(this.root, ['show-ref', '--verify', '--quiet', branch])) return branch
+    throw new Error(`Fleet member ${member} has no Git worktree or branch`)
+  }
+
+  private fileDelta(base: string, head: string, cwd = this.projectRoot): FleetGitFileDelta[] {
+    return parseNumstat(gitOutput(cwd, ['diff', '--numstat', '-z', '--no-renames', `${base}..${head}`]))
+  }
+
+  private memberWorktrees(): FleetGitPeerLocation[] {
+    const parent = canonical(join(this.projectRoot, '.fleet', 'worktrees', this.namespace))
+    return this.status().worktrees.flatMap(worktree => {
+      const path = canonical(worktree.path)
+      if (canonical(dirname(path)) !== parent) return []
+      return [{
+        member: basename(path),
+        path,
+        head: worktree.head,
+        ...(worktree.branch === undefined ? {} : { branch: worktree.branch }),
+      }]
+    })
+  }
+
+  context(member: string, cwd = this.projectRoot, limit = 10): FleetGitContext {
+    const status = this.status(cwd)
+    const upstream = git(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], true) || undefined
+    const counts = upstream === undefined || status.head === undefined
+      ? { ahead: 0, behind: 0 }
+      : parseCountPair(git(cwd, ['rev-list', '--left-right', '--count', `HEAD...${upstream}`]))
+    return {
+      member,
+      root: status.root,
+      ...(status.branch === undefined ? {} : { branch: status.branch }),
+      ...(status.head === undefined ? {} : { head: status.head }),
+      ...(upstream === undefined ? {} : { upstream }),
+      ...counts,
+      changes: status.changes,
+      peers: this.memberWorktrees().filter(peer => peer.member !== member),
+      recentCommits: status.head === undefined ? [] : this.logRange(cwd, status.head, limit),
+    }
+  }
+
+  compare(member: string, target: string, cwd = this.projectRoot, limit = 20): FleetGitComparison {
+    const currentHead = git(cwd, ['rev-parse', '--verify', 'HEAD'])
+    const targetHead = git(cwd, ['rev-parse', '--verify', this.memberRef(target)])
+    const mergeBase = git(cwd, ['merge-base', currentHead, targetHead])
+    const counts = parseCountPair(git(cwd, ['rev-list', '--left-right', '--count', `${currentHead}...${targetHead}`]))
+    return {
+      member,
+      target,
+      currentHead,
+      targetHead,
+      mergeBase,
+      ...counts,
+      currentCommits: this.logRange(cwd, `${mergeBase}..${currentHead}`, limit),
+      targetCommits: this.logRange(cwd, `${mergeBase}..${targetHead}`, limit),
+      currentFiles: this.fileDelta(mergeBase, currentHead, cwd),
+      targetFiles: this.fileDelta(mergeBase, targetHead, cwd),
+    }
+  }
+
+  conflicts(member: string, target: string, cwd = this.projectRoot): FleetGitConflictReport {
+    const comparison = this.compare(member, target, cwd, 20)
+    const currentPaths = new Set([
+      ...comparison.currentFiles.map(file => file.path),
+      ...this.status(cwd).changes.map(change => change.path),
+    ])
+    const targetPaths = new Set(comparison.targetFiles.map(file => file.path))
+    const overlappingPaths = [...currentPaths].filter(path => targetPaths.has(path)).sort()
+    const merged = spawnSync('git', ['-C', cwd, 'merge-tree', '--write-tree', comparison.currentHead, comparison.targetHead], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    if (merged.status !== 0 && merged.status !== 1) {
+      throw new Error(String(merged.stderr || merged.error?.message || 'git merge-tree failed').trim())
+    }
+    const conflictingPaths = [...new Set(String(merged.stdout).split('\n').flatMap(line => {
+      const match = /^\d{6} [0-9a-f]+ [123]\t(.+)$/u.exec(line)
+      return match?.[1] === undefined ? [] : [match[1]]
+    }))].sort()
+    return {
+      member,
+      target,
+      mergeBase: comparison.mergeBase,
+      mergeable: merged.status === 0,
+      overlappingPaths,
+      conflictingPaths,
+    }
+  }
+
+  handoff(
+    member: string,
+    target: string,
+    cwd = this.projectRoot,
+    input: { readonly notes?: string; readonly tests?: string; readonly limit?: number } = {},
+  ): FleetGitHandoff {
+    const comparison = this.compare(member, target, cwd, input.limit ?? 20)
+    const status = this.status(cwd)
+    return {
+      from: member,
+      to: target,
+      ...(status.branch === undefined ? {} : { branch: status.branch }),
+      head: comparison.currentHead,
+      base: comparison.mergeBase,
+      dirty: status.changes.length > 0,
+      uncommitted: status.changes,
+      commits: comparison.currentCommits,
+      files: comparison.currentFiles,
+      ...(input.notes?.trim() ? { notes: input.notes.trim() } : {}),
+      ...(input.tests?.trim() ? { tests: input.tests.trim() } : {}),
+    }
   }
 
   diff(cwd = this.projectRoot, path?: string, staged = false, maxBytes = 512 * 1024): FleetGitDiff {
@@ -419,8 +634,9 @@ const SCOPE_SCHEMA = {
 
 const RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
-    action: { type: 'string', required: true, enum: ['scope', 'check', 'create_worktree'] },
+    action: { type: 'string', required: true, enum: ['scope', 'check', 'context', 'compare', 'conflicts', 'handoff', 'create_worktree'] },
     scope: SCOPE_SCHEMA,
+    data: { type: 'object', additionalProperties: true },
     worktree: WORKTREE_SCHEMA,
   },
 } as const
@@ -432,23 +648,59 @@ function jsonOutput<const S extends ValueSchemaSpec>(schema: S): {
   return { schema, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] }
 }
 
+function commitOutput(commit: FleetGitCommit) {
+  return { ...commit, parents: [...commit.parents], decorations: [...commit.decorations] }
+}
+
+function contextOutput(context: FleetGitContext) {
+  return {
+    ...context,
+    changes: context.changes.map(change => ({ ...change })),
+    peers: context.peers.map(peer => ({ ...peer })),
+    recentCommits: context.recentCommits.map(commitOutput),
+  }
+}
+
+function comparisonOutput(comparison: FleetGitComparison) {
+  return {
+    ...comparison,
+    currentCommits: comparison.currentCommits.map(commitOutput),
+    targetCommits: comparison.targetCommits.map(commitOutput),
+    currentFiles: comparison.currentFiles.map(file => ({ ...file })),
+    targetFiles: comparison.targetFiles.map(file => ({ ...file })),
+  }
+}
+
+function handoffOutput(handoff: FleetGitHandoff) {
+  return {
+    ...handoff,
+    uncommitted: handoff.uncommitted.map(change => ({ ...change })),
+    commits: handoff.commits.map(commitOutput),
+    files: handoff.files.map(file => ({ ...file })),
+  }
+}
+
 export function installGitTools(ctx: Context, fleetGit: FleetGit, options: FleetGitToolOptions): () => void {
   const actions = [
-    ...(options.permissions.has('git.inspect') ? ['scope' as const] : []),
+    ...(options.permissions.has('git.inspect') ? ['scope' as const, 'context' as const, 'compare' as const, 'conflicts' as const, 'handoff' as const] : []),
     ...(options.permissions.has('git.scope-check') ? ['check' as const] : []),
     ...(options.permissions.has('git.worktree-create') ? ['create_worktree' as const] : []),
   ]
   if (actions.length === 0) return () => {}
   return ctx.tools.register(defineTool({
     name: 'fleet_git',
-    description: 'Inspect or check the permitted Git operation scope and create an isolated member worktree. Run ordinary Git commands with the terminal after checking scope.',
+    description: 'Read team-aware Git context, compare with a peer, detect overlap or merge conflicts, prepare a handoff, check terminal Git scope, or create a member worktree. Ordinary Git commands still run in the terminal.',
     parameters: {
       action: { type: 'string', required: true, enum: actions },
       member: { type: 'string', description: 'Member id for worktree creation; defaults to the caller.' },
+      target: { type: 'string', description: 'Peer member id required by compare, conflicts, and handoff.' },
       intent: { type: 'string', enum: ['read', 'write'], description: 'Proposed terminal operation intent; defaults to read.' },
       cwd: { type: 'string', description: 'Proposed Git working directory; defaults to the Agent session cwd.' },
       paths: { type: 'array', items: { type: 'string' }, description: 'Paths the proposed terminal operation will read or write.' },
       branch: { type: 'string', description: 'Branch the proposed terminal operation expects to modify.' },
+      limit: { type: 'number', description: 'Maximum commits returned by context, compare, or handoff; defaults to 10 or 20 and cannot exceed 100.' },
+      notes: { type: 'string', description: 'Optional concise handoff notes supplied by the caller.' },
+      tests: { type: 'string', description: 'Optional test evidence supplied by the caller for a handoff.' },
     },
     output: jsonOutput(RESULT_SCHEMA),
     execute(args, exec) {
@@ -478,6 +730,41 @@ export function installGitTools(ctx: Context, fleetGit: FleetGit, options: Fleet
           args.branch,
         )
         return Promise.resolve({ action: args.action, scope: { ...scope, paths: [...scope.paths] } })
+      }
+      if (args.action === 'context' || args.action === 'compare' || args.action === 'conflicts' || args.action === 'handoff') {
+        requireAction('git.inspect')
+        const cwd = args.cwd?.trim() || workspace
+        fleetGit.scope(caller, cwd, [{ path: workspace, access: 'write' }], 'read')
+        if (args.action === 'context') {
+          return Promise.resolve({ action: 'context' as const, data: contextOutput(fleetGit.context(caller, cwd, args.limit ?? 10)) })
+        }
+        const target = args.target?.trim() ?? ''
+        if (target.length === 0) throw new Error(`fleet_git ${args.action} requires target`)
+        if (target === caller) throw new Error(`fleet_git ${args.action} target must be another member`)
+        if (!options.hasMember(target)) throw new Error(`unknown Fleet member ${target}`)
+        if (args.action === 'compare') {
+          return Promise.resolve({ action: 'compare' as const, data: comparisonOutput(fleetGit.compare(caller, target, cwd, args.limit ?? 20)) })
+        }
+        if (args.action === 'conflicts') {
+          const conflicts = fleetGit.conflicts(caller, target, cwd)
+          return Promise.resolve({
+            action: 'conflicts' as const,
+            data: {
+              ...conflicts,
+              overlappingPaths: [...conflicts.overlappingPaths],
+              conflictingPaths: [...conflicts.conflictingPaths],
+            },
+          })
+        }
+        const handoffInput = {
+          ...(args.notes === undefined ? {} : { notes: args.notes }),
+          ...(args.tests === undefined ? {} : { tests: args.tests }),
+          ...(args.limit === undefined ? {} : { limit: args.limit }),
+        }
+        return Promise.resolve({
+          action: 'handoff' as const,
+          data: handoffOutput(fleetGit.handoff(caller, target, cwd, handoffInput)),
+        })
       }
       requireAction('git.worktree-create')
       const member = args.member?.trim() || caller
