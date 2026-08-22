@@ -3,25 +3,15 @@ export const FLEET_MEMBER_TOOL_GROUPS = [
   'coordination',
   'resources',
   'status',
-  'schedule',
-  'tasks',
-  'calendar',
-  'documents',
-  'git',
 ] as const
 
-export type FleetMemberToolGroup = typeof FLEET_MEMBER_TOOL_GROUPS[number]
+export type FleetMemberToolGroup = string
 
-export const FLEET_MEMBER_TOOL_GROUP_ACTIONS: Record<FleetMemberToolGroup, readonly string[]> = {
+export const FLEET_MEMBER_TOOL_GROUP_ACTIONS: Readonly<Record<string, readonly string[]>> = {
   messages: ['message.read', 'message.post'],
   coordination: ['meeting.join'],
   resources: ['resource.read', 'work.read', 'work.claim'],
   status: ['member-status.read', 'member-status.write'],
-  schedule: [],
-  tasks: [],
-  calendar: [],
-  documents: [],
-  git: [],
 }
 
 export const FLEET_MEMBER_PERMISSIONS = [
@@ -29,19 +19,11 @@ export const FLEET_MEMBER_PERMISSIONS = [
   'meeting.manage',
   'vote.create',
   'resource.write',
-  'schedule.create',
-  'task.manage',
-  'calendar.manage',
-  'document.write',
   'team.manage',
-  'workspace.manage',
-  'git.inspect',
-  'git.scope-check',
-  'git.worktree-create',
-  'git.worktree-manage',
 ] as const
 
-export type FleetMemberPermission = typeof FLEET_MEMBER_PERMISSIONS[number]
+/** Registered action id. Feature plugins own their namespaced actions. */
+export type FleetMemberPermission = string
 
 export interface FleetMemberContacts {
   readonly members: '*' | string[]

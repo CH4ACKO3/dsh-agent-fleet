@@ -58,20 +58,12 @@ export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
     toolGroups: [], permissions: ['resource.write'],
   },
   {
-    id: 'reviewer', name: 'Reviewer', parents: ['researcher'], preset: true,
-    toolGroups: ['git'], permissions: ['git.inspect', 'git.scope-check'],
-  },
-  {
-    id: 'builder', name: 'Builder', parents: ['reviewer'], preset: true,
-    toolGroups: [], permissions: ['git.worktree-create'],
-  },
-  {
     id: 'facilitator', name: 'Facilitator', parents: ['member'], preset: true,
     toolGroups: [], permissions: ['channel.manage', 'meeting.manage', 'vote.create'],
   },
   {
-    id: 'maintainer', name: 'Maintainer', parents: ['builder', 'facilitator'], preset: true,
-    toolGroups: [], permissions: ['team.manage', 'git.worktree-manage'],
+    id: 'maintainer', name: 'Maintainer', parents: ['researcher', 'facilitator'], preset: true,
+    toolGroups: [], permissions: ['team.manage'],
   },
   {
     id: 'op', name: 'OP', parents: [], preset: true, toolGroups: [], permissions: [], op: true,
@@ -82,10 +74,8 @@ const NATIVE_PRESET_COMBINATIONS: readonly (readonly string[])[] = [
   ['observer'],
   ['member'],
   ['researcher'],
-  ['reviewer'],
-  ['builder'],
   ['facilitator'],
-  ['builder', 'facilitator'],
+  ['researcher', 'facilitator'],
   ['maintainer'],
 ]
 

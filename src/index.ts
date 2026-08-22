@@ -35,8 +35,7 @@ export function apply(ctx: Context): void {
     const archives = new FleetArchiveRegistry()
     const authorization = new FleetAuthorizationService()
     const configuration = new FleetConfigurationRegistry()
-    const assistant = new FleetAssistantRuntime(group =>
-      group !== 'git' || scope.get('fleetGitIntegration', false) !== undefined)
+    const assistant = new FleetAssistantRuntime()
     const meta = new FleetMetaAssistantService(assistant)
     const collaboration = new FleetCollaborationService(scope, authorization)
     const service = new FleetRunService(scope, scope.fleetCore, collaboration, { archives, authorization, configuration })

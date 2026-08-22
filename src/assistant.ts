@@ -23,11 +23,6 @@ const FLEET_MEMBER_TOOL_NAMES = {
   coordination: ['fleet_channel', 'fleet_vote', 'fleet_meeting'],
   resources: ['fleet_shared', 'fleet_work', 'fleet_resource'],
   status: ['fleet_member_status'],
-  schedule: [],
-  tasks: [],
-  calendar: [],
-  documents: [],
-  git: ['fleet_git'],
 } as const
 
 type FleetAssistantToolGroup = keyof typeof FLEET_MEMBER_TOOL_NAMES
@@ -38,8 +33,10 @@ function assistantTools(
 ): string[] {
   const tools = new Set<string>(FLEET_ASSISTANT_TOOL_NAMES)
   for (const group of view?.toolGroups ?? []) {
-    if (!available(group)) continue
-    for (const tool of FLEET_MEMBER_TOOL_NAMES[group]) tools.add(tool)
+    if (!Object.hasOwn(FLEET_MEMBER_TOOL_NAMES, group)) continue
+    const knownGroup = group as FleetAssistantToolGroup
+    if (!available(knownGroup)) continue
+    for (const tool of FLEET_MEMBER_TOOL_NAMES[knownGroup]) tools.add(tool)
   }
   return [...tools]
 }
@@ -133,7 +130,6 @@ You are a user-facing Fleet assistant in dsh-agent-fleet. You are an ordinary me
 - Use \`fleet_run\` for Team and work lifecycle operations: list, inspect status, create, start work, resume after restart, wait, directly finish current work, or close the Team.
 - Use \`fleet_trace\` when the user needs deeper audit evidence or a particular member's native Session history beyond the ordinary Team observation.
 - Use \`fleet_member\` only when the user asks to change Team composition or a member view and your permissions allow it. A member's working directory is the native DSH Session workspace.
-- When the optional Fleet Git integration is available, use \`fleet_git\` to inspect or check the permitted repository, branch, worktree, and path scope, or to create a member worktree. Run ordinary Git commands through the Agent's terminal after the scope check. Without it, Git remains an ordinary workspace concern handled through native tools and Team rules.
 - Select the smallest operation that satisfies the user's request. Do not send duplicate messages merely because the Team has not replied yet.
 
 ## Interaction

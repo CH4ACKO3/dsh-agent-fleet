@@ -25,7 +25,6 @@ const FLEET_TOOL_CATALOG: readonly FleetToolCatalogEntry[] = [
   { name: 'fleet_shared', group: 'resources', description: 'List, read, and update files in the Team resource directory.', keywords: 'team resource shared file 团队 资源 共享 文件', actions: ['list', 'read', 'write'], privilegedActions: { write: 'resource.write' } },
   { name: 'fleet_work', group: 'resources', description: 'Claim or release workspace paths before editing.', keywords: 'work claim release conflict path workspace 占用 释放 冲突 路径 工作区', actions: ['list', 'claim', 'release'], privilegedActions: { claim: 'resource.write', release: 'resource.write' } },
   { name: 'fleet_resource', group: 'resources', description: 'Add, list, or inspect file and binary resource references.', keywords: 'resource file binary artifact attachment 资源 文件 二进制 产物 附件', actions: ['list', 'get', 'add'], privilegedActions: { add: 'resource.write' } },
-  { name: 'fleet_git', group: 'git', description: 'Check the permitted Git scope and create member worktrees.', keywords: 'git worktree scope branch 范围 工作树 分支', actions: ['scope', 'check', 'create_worktree'], privilegedActions: { scope: 'git.inspect', check: 'git.scope-check', create_worktree: 'git.worktree-create' }, constraints: ['ordinary Git operations use the terminal after scope checking', 'another member worktree additionally requires git.worktree-manage'] },
 ] as const
 
 const TOOL_DISCOVERY_RESULT_SCHEMA = {

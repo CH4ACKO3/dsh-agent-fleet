@@ -13,10 +13,10 @@ const alice: FleetMemberView = {
   contacts: { members: '*', channels: '*' },
 }
 
-const builder: FleetMemberView = {
-  id: 'builder', name: 'Blake', role: 'Engineer', prompt: '',
-  toolGroups: ['messages', 'status', 'resources', 'coordination', 'git'],
-  permissions: ['resource.write', 'git.inspect', 'git.scope-check', 'git.worktree-create'],
+const researcher: FleetMemberView = {
+  id: 'researcher', name: 'Blake', role: 'Researcher', prompt: '',
+  toolGroups: ['messages', 'status', 'resources', 'coordination'],
+  permissions: ['resource.write'],
   contacts: { members: '*', channels: '*' },
 }
 
@@ -41,10 +41,8 @@ describe('FleetPermissionService', () => {
       ['observer', 'Observer', []],
       ['member', 'Collaborator', ['observer']],
       ['researcher', 'Researcher', ['member']],
-      ['reviewer', 'Reviewer', ['researcher']],
-      ['builder', 'Builder', ['reviewer']],
       ['facilitator', 'Facilitator', ['member']],
-      ['maintainer', 'Maintainer', ['builder', 'facilitator']],
+      ['maintainer', 'Maintainer', ['researcher', 'facilitator']],
       ['op', 'OP', []],
     ])
   })
@@ -65,11 +63,11 @@ describe('FleetPermissionService', () => {
   })
 
   it('recognizes a native built-in profile as its optional permission group', () => {
-    const { access, permissions } = fixture({}, [builder])
-    expect(permissions.member('team-1', 'builder')?.groups).toEqual(['builder'])
-    expect(access.resolve('team-1', builder)).toEqual({
-      toolGroups: builder.toolGroups,
-      actions: expect.arrayContaining(builder.permissions),
+    const { access, permissions } = fixture({}, [researcher])
+    expect(permissions.member('team-1', 'researcher')?.groups).toEqual(['researcher'])
+    expect(access.resolve('team-1', researcher)).toEqual({
+      toolGroups: researcher.toolGroups,
+      actions: expect.arrayContaining(researcher.permissions),
       op: false,
     })
   })
@@ -92,34 +90,25 @@ describe('FleetPermissionService', () => {
   it('uses preset inheritance as a complete dynamic profile', () => {
     const { access, permissions, stored } = fixture()
     permissions.setMember('team-1', 'alice', {
-      groups: ['builder'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
+      groups: ['maintainer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
     })
     const effective = access.resolve('team-1', alice)
     expect(effective.toolGroups).toEqual(expect.arrayContaining([
-      'messages', 'status', 'resources', 'coordination', 'git',
+      'messages', 'status', 'resources', 'coordination',
     ]))
     expect(effective.actions).toEqual(expect.arrayContaining([
-      'resource.write', 'git.inspect', 'git.scope-check', 'git.worktree-create',
+      'resource.write', 'channel.manage', 'meeting.manage', 'vote.create', 'team.manage',
     ]))
-    expect(effective.actions).not.toContain('team.manage')
     expect(stored()).toBeDefined()
   })
 
-  it('keeps research and review roles below implementation authority', () => {
+  it('keeps research roles below Team management authority', () => {
     const { access, permissions } = fixture()
     permissions.setMember('team-1', 'alice', {
       groups: ['researcher'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
     })
     expect(access.resolve('team-1', alice)).toMatchObject({ actions: expect.arrayContaining(['resource.write']) })
-    expect(access.resolve('team-1', alice).toolGroups).not.toContain('git')
-
-    permissions.setMember('team-1', 'alice', {
-      groups: ['reviewer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
-    })
-    const reviewer = access.resolve('team-1', alice)
-    expect(reviewer.actions).toEqual(expect.arrayContaining(['resource.write', 'git.inspect', 'git.scope-check']))
-    expect(reviewer.actions).not.toContain('git.worktree-create')
-    expect(reviewer.toolGroups).toContain('git')
+    expect(access.resolve('team-1', alice).actions).not.toContain('team.manage')
   })
 
   it('supports OP, DEOP, and reset to the fixed profile', () => {

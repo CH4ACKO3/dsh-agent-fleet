@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { FleetAuthorizationService } from 'dsh-agent-fleet'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
-import { FLEET_GIT_PERMISSIONS, FleetGitIntegration, FleetGitWebRemote, apply } from '../src/index.js'
+import { FLEET_GIT_PERMISSIONS, FleetGitWebRemote, apply } from '../src/index.js'
 
 const roots: string[] = []
 
@@ -33,7 +33,7 @@ describe('FleetGitWebRemote', () => {
     ])
   })
 
-  it('registers that namespace with native Fleet access alone', async () => {
+  it('registers Fleet actions, resource defaults, and member tools', async () => {
     const ctx = new Context()
     const access = new FleetAuthorizationService()
     apply(ctx)
@@ -42,29 +42,9 @@ describe('FleetGitWebRemote', () => {
     expect(access.actionIds()).toEqual(expect.arrayContaining([
       'git.inspect', 'git.scope-check', 'git.worktree-create', 'git.worktree-manage',
     ]))
-  })
-
-  it('supplies fleet_git only through the optional integration provider', () => {
-    const root = repository()
-    const registered: Array<{ readonly name: string }> = []
-    const runtime = new FleetGitIntegration().open({
-      teamId: 'team-1',
-      projectRoot: root,
-      onEvent: () => {},
-    })
-    runtime.installTools({
-      tools: { register: (tool: { readonly name: string }) => { registered.push(tool) } },
-    } as unknown as Context, {
-      memberFor: () => 'developer',
-      hasMember: () => true,
-      hasPermission: () => true,
-      workspaceFor: () => root,
-      permissions: new Set([
-        'git.inspect', 'git.scope-check', 'git.worktree-create', 'git.worktree-manage',
-      ]),
-    })
-
-    expect(registered.map(tool => tool.name)).toEqual(['fleet_git'])
+    expect(access.resourceKindIds()).toContain('git-repository')
+    const namespace = access.namespaces().find(candidate => candidate.namespace === 'git')
+    expect(namespace?.installTools).toBeTypeOf('function')
   })
 
   it('exposes strict snapshot and diff invocations', () => {

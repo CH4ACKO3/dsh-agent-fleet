@@ -231,7 +231,7 @@ function fixture(): {
         role: 'lead',
         responsibilities: 'Coordinate the first round.',
         prompt: 'Coordinate the first round.',
-        toolGroups: ['messages', 'coordination', 'resources', 'status', 'schedule', 'tasks', 'calendar', 'documents', 'git'],
+        toolGroups: ['messages', 'coordination', 'resources', 'status', 'schedule', 'tasks', 'calendar', 'documents', 'external-service'],
         permissions: ['channel.manage', 'meeting.manage', 'vote.create', 'resource.write', 'schedule.create', 'task.manage', 'calendar.manage', 'document.write'],
         contacts: { members: '*', channels: ['main'] },
       },
@@ -242,7 +242,7 @@ function fixture(): {
         role: 'reviewer',
         responsibilities: 'Review independently.',
         prompt: 'Review independently.',
-        toolGroups: ['messages', 'coordination', 'resources', 'status', 'schedule', 'tasks', 'calendar', 'documents', 'git'],
+        toolGroups: ['messages', 'coordination', 'resources', 'status', 'schedule', 'tasks', 'calendar', 'documents', 'external-service'],
         permissions: ['meeting.manage', 'vote.create', 'resource.write', 'schedule.create', 'task.manage', 'calendar.manage', 'document.write'],
         contacts: { members: '*', channels: ['main'] },
       },
@@ -371,6 +371,10 @@ describe('FleetRunService', () => {
     const reviewer = runtime.get(reviewerMember?.sessionId ?? '')
     if (leadMember?.displayName === undefined || reviewerMember?.displayName === undefined
       || lead === undefined || reviewer === undefined) throw new Error('expected Fleet peers')
+    expect(service.authorizationBaseline().actorForAgent?.(leadMember.sessionId)).toEqual({
+      teamId: run.id,
+      subject: { kind: 'member', id: 'lead' },
+    })
 
     service.messageHub(run.id).send(lead, {
       to: `@${reviewerMember.displayName}`,

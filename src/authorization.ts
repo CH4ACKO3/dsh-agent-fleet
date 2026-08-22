@@ -26,6 +26,11 @@ export interface FleetAuthorizationInput {
   readonly resource?: FleetAuthorizationResource
 }
 
+export interface FleetAuthorizationActor {
+  readonly teamId: string
+  readonly subject: FleetAuthorizationSubject
+}
+
 export interface FleetEffectiveAuthorization {
   readonly toolGroups: readonly string[]
   readonly actions: readonly string[]
@@ -48,6 +53,7 @@ export interface FleetResourcePolicy {
 
 export interface FleetAuthorizationBaseline {
   resolveSubject(teamId: string, subject: FleetAuthorizationSubject): FleetMemberView | undefined
+  actorForAgent?(agentId: string): FleetAuthorizationActor | undefined
   authorizeAction?(input: FleetAuthorizationInput): boolean
   authorizeResource(input: FleetAuthorizationInput): boolean
 }
@@ -60,16 +66,31 @@ export interface FleetRegisteredAction {
 export interface FleetAuthorizationNamespace {
   readonly namespace: string
   readonly actions: readonly FleetRegisteredAction[]
+  /** Default local action ids used when no action-policy plugin replaces this member's profile. */
+  readonly defaultActions?: (input: {
+    readonly teamId: string
+    readonly member: FleetMemberView
+  }) => readonly string[]
+  /** Optional safe default for non-member subjects such as external integrations. */
+  readonly authorizeBaseline?: (input: FleetAuthorizationInput) => boolean
   /** Install for every member even when none of this namespace's actions are granted. */
   readonly alwaysVisible?: boolean
   readonly installTools?: (
     ctx: Context,
     input: {
       readonly teamId: string
+      readonly projectRoot: string
       readonly member: FleetMemberView
+      readonly hasMember: (member: string) => boolean
       readonly authorization: FleetEffectiveAuthorization
     },
   ) => (() => void) | void
+}
+
+export interface FleetAuthorizationResourceKind {
+  readonly kind: string
+  /** Feature-owned safe default used when no resource-policy plugin overrides it. */
+  readonly authorizeBaseline?: (input: FleetAuthorizationInput) => boolean
 }
 
 export interface FleetAuthorizationChange {
@@ -87,7 +108,9 @@ export class FleetAuthorizationService {
     ...FLEET_MEMBER_PERMISSIONS,
     ...Object.values(FLEET_MEMBER_TOOL_GROUP_ACTIONS).flat(),
   ])
-  private readonly resourceKinds = new Set<string>(['team', 'conversation', 'workspace', 'file', 'resource'])
+  private readonly resourceKinds = new Map<string, FleetAuthorizationResourceKind>(
+    ['team', 'conversation', 'workspace', 'file', 'resource'].map(kind => [kind, { kind }]),
+  )
   private actionPolicy: FleetActionPolicy | undefined
   private resourcePolicy: FleetResourcePolicy | undefined
   private baseline: FleetAuthorizationBaseline | undefined
@@ -112,14 +135,17 @@ export class FleetAuthorizationService {
     }
   }
 
-  registerResourceKind(kind: string): () => void {
-    const normalized = kind.trim()
+  registerResourceKind(input: string | FleetAuthorizationResourceKind): () => void {
+    const contribution = typeof input === 'string' ? { kind: input } : input
+    const normalized = contribution.kind.trim()
     if (!NAMESPACE.test(normalized)) throw new Error('Fleet resource kind must use lower-kebab-case')
     if (this.resourceKinds.has(normalized)) throw new Error(`Fleet resource kind ${normalized} is already registered`)
-    this.resourceKinds.add(normalized)
+    const registered = { ...contribution, kind: normalized }
+    this.resourceKinds.set(normalized, registered)
     this.changed({})
     return () => {
-      if (!this.resourceKinds.delete(normalized)) return
+      if (this.resourceKinds.get(normalized) !== registered) return
+      this.resourceKinds.delete(normalized)
       this.changed({})
     }
   }
@@ -152,11 +178,20 @@ export class FleetAuthorizationService {
   }
 
   resolve(teamId: string, member: FleetMemberView): FleetEffectiveAuthorization {
+    const contributed = this.namespaces().flatMap(contribution => {
+      const defaults = contribution.defaultActions?.({ teamId, member }) ?? []
+      const known = new Set(contribution.actions.map(action => action.id))
+      for (const action of defaults) {
+        if (!known.has(action)) throw new Error(`unknown default Fleet action ${contribution.namespace}.${action}`)
+      }
+      return defaults.map(action => `${contribution.namespace}.${action}`)
+    })
     const base: FleetEffectiveAuthorization = {
       toolGroups: [...member.toolGroups],
       actions: [...new Set([
         ...member.permissions,
-        ...member.toolGroups.flatMap(group => FLEET_MEMBER_TOOL_GROUP_ACTIONS[group]),
+        ...member.toolGroups.flatMap(group => FLEET_MEMBER_TOOL_GROUP_ACTIONS[group] ?? []),
+        ...contributed,
       ])],
       op: false,
     }
@@ -176,14 +211,22 @@ export class FleetAuthorizationService {
   authorize(input: FleetAuthorizationInput): boolean {
     if (!this.actionIds().includes(input.action)) return false
     const member = this.baseline?.resolveSubject(input.teamId, input.subject)
+    const contribution = this.contributions.get(input.action.slice(0, input.action.indexOf('.')))
     const actionAllowed = member === undefined
-      ? (this.baseline?.authorizeAction?.(input) ?? false)
+      ? (contribution?.authorizeBaseline?.(input) ?? this.baseline?.authorizeAction?.(input) ?? false)
       : this.resolve(input.teamId, member).actions.includes(input.action)
     if (!actionAllowed) return false
     if (input.resource === undefined) return true
-    if (!this.resourceKinds.has(input.resource.kind)) return false
-    const baseline = this.baseline?.authorizeResource(input) ?? false
+    const resourceKind = this.resourceKinds.get(input.resource.kind)
+    if (resourceKind === undefined) return false
+    const baseline = resourceKind.authorizeBaseline?.(input)
+      ?? this.baseline?.authorizeResource(input)
+      ?? false
     return this.resourcePolicy?.authorize(input, baseline) ?? baseline
+  }
+
+  actorForAgent(agentId: string): FleetAuthorizationActor | undefined {
+    return this.baseline?.actorForAgent?.(agentId)
   }
 
   require(input: FleetAuthorizationInput): void {
@@ -210,7 +253,7 @@ export class FleetAuthorizationService {
   }
 
   resourceKindIds(): string[] {
-    return [...this.resourceKinds]
+    return [...this.resourceKinds.keys()]
   }
 
   visible(contribution: FleetAuthorizationNamespace, authorization: FleetEffectiveAuthorization): boolean {

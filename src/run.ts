@@ -52,7 +52,7 @@ import type { FleetResource } from '@dsh-agent-fleet/resources'
 import { create as createTar, extract as extractTar } from 'tar'
 import { FleetArchiveRegistry } from './archive.js'
 import type { FleetArchiveRestoreReport, FleetArchiveTeam } from './archive.js'
-import type { FleetAuthorizationBaseline, FleetAuthorizationService } from './authorization.js'
+import type { FleetAuthorizationActor, FleetAuthorizationBaseline, FleetAuthorizationService } from './authorization.js'
 import type { FleetAssistantRuntime, FleetAssistantView } from './assistant.js'
 import type { FleetCollaborationService, FleetCollaborationTeam } from './collaboration.js'
 import {
@@ -794,12 +794,26 @@ function memberColor(member: Record<string, unknown>, label: string): string | u
 
 function memberToolGroups(value: unknown, label: string): FleetMemberToolGroup[] {
   if (value === undefined) return [...FLEET_MEMBER_TOOL_GROUPS]
-  return array(value, label).map((item, index) => choice(item, `${label}[${index}]`, FLEET_MEMBER_TOOL_GROUPS))
+  return array(value, label).map((item, index) => extensionName(item, `${label}[${index}]`))
 }
 
 function memberPermissions(value: unknown, label: string): FleetMemberPermission[] {
   if (value === undefined) return [...FLEET_MEMBER_PERMISSIONS]
-  return array(value, label).map((item, index) => choice(item, `${label}[${index}]`, FLEET_MEMBER_PERMISSIONS))
+  return array(value, label).map((item, index) => actionName(item, `${label}[${index}]`))
+}
+
+function extensionName(value: unknown, label: string): string {
+  const result = text(value, label)
+  if (!/^[a-z][a-z0-9-]*$/u.test(result)) throw new Error(`${label} must use lower-kebab-case`)
+  return result
+}
+
+function actionName(value: unknown, label: string): string {
+  const result = text(value, label)
+  if (!/^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/u.test(result)) {
+    throw new Error(`${label} must be a namespaced lower-kebab-case action`)
+  }
+  return result
 }
 
 function contactScope(value: unknown, label: string): '*' | string[] {
@@ -1156,6 +1170,23 @@ export class FleetRunService {
         if (record === undefined || (subject.kind !== 'member' && subject.kind !== 'assistant')) return undefined
         return this.memberViews(teamId).find(view => view.id === subject.id)
           ?? this.memberViewForAgent(teamId, subject.id)
+      },
+      actorForAgent: agentId => {
+        const actors: FleetAuthorizationActor[] = []
+        for (const record of this.records.values()) {
+          if (isTerminal(record.status)) continue
+          const member = record.members.find(candidate => candidate.sessionId === agentId)
+          if (member !== undefined) {
+            actors.push({ teamId: record.id, subject: { kind: 'member', id: member.name } })
+            continue
+          }
+          const assistant = record.assistants.find(candidate => candidate.sessionId === agentId)
+          if (assistant !== undefined) {
+            actors.push({ teamId: record.id, subject: { kind: 'assistant', id: assistant.view.id } })
+          }
+        }
+        if (actors.length > 1) throw new Error(`Agent ${agentId} belongs to more than one active Fleet Team`)
+        return actors[0]
       },
       authorizeAction: input => input.subject.kind === 'external'
         && input.subject.id === `fleet-user:${input.teamId}`
@@ -3910,7 +3941,6 @@ export class FleetRunService {
       sharedDirectory: `.fleet/${record.id}`,
       onCoordination: event => { this.recordCoordination(record.id, event) },
       onResource: event => { this.recordResource(record.id, event) },
-      onGit: event => { this.appendEvent(record.id, `git.${event.action}`, event) },
       onMemberStatus: event => {
         this.appendEvent(record.id, `member_status.${event.action}`, event)
       },
@@ -4288,8 +4318,8 @@ const MEMBER_VIEW_SCHEMA = {
     prompt: { type: 'string', required: true },
     provider: { type: 'string' },
     model: { type: 'string' },
-    toolGroups: { type: 'array', required: true, items: { type: 'string', enum: FLEET_MEMBER_TOOL_GROUPS } },
-    permissions: { type: 'array', required: true, items: { type: 'string', enum: FLEET_MEMBER_PERMISSIONS } },
+    toolGroups: { type: 'array', required: true, items: { type: 'string' } },
+    permissions: { type: 'array', required: true, items: { type: 'string' } },
     contacts: {
       type: 'object',
       required: true,
@@ -4684,8 +4714,8 @@ export function installRunTools(
       role: { type: 'string', description: 'Team role for a new assistant.' },
       responsibility: { type: 'string', description: 'Long-term responsibility for a new assistant.' },
       prompt: { type: 'string', description: 'Additional role instructions for a new assistant.' },
-      tool_groups: { type: 'array', items: { type: 'string', enum: FLEET_MEMBER_TOOL_GROUPS }, description: 'Fleet tool groups granted to a new assistant.' },
-      permissions: { type: 'array', items: { type: 'string', enum: FLEET_MEMBER_PERMISSIONS }, description: 'Fleet permissions granted to a new assistant.' },
+      tool_groups: { type: 'array', items: { type: 'string' }, description: 'Core Fleet tool groups granted to a new assistant.' },
+      permissions: { type: 'array', items: { type: 'string' }, description: 'Registered namespaced actions granted to a new assistant.' },
     },
     output: jsonOutput(ASSISTANT_RESULT_SCHEMA),
     async execute(args, exec) {

@@ -32,7 +32,6 @@ export interface FleetCollaborationTeam {
   readonly id: string
   readonly messages: MessageHub
   readonly resources: FleetResources
-  readonly git?: FleetGitTeamRuntime
   readonly memberStatuses: FleetMemberStatusBoard
   readonly memberViews: ReadonlyMap<string, FleetMemberView>
   readonly memberIdsByName: Map<string, string>
@@ -59,39 +58,6 @@ export interface FleetCollaborationTeam {
   close(): void
 }
 
-export interface FleetGitToolOptions {
-  readonly memberFor: (agentId: string) => string | undefined
-  readonly hasMember: (member: string) => boolean
-  readonly hasPermission: (agentId: string, permission: string) => boolean
-  readonly workspaceFor: (agentId: string) => string | undefined
-  readonly permissions: ReadonlySet<string>
-}
-
-export interface FleetGitEvent {
-  readonly action: 'worktree_created'
-  readonly member: string
-  readonly path: string
-  readonly branch: string
-}
-
-/** Optional Team-scoped Git capability supplied by dsh-agent-fleet-git. */
-export interface FleetGitTeamRuntime {
-  installTools(ctx: Context, options: FleetGitToolOptions): (() => void) | void
-  close?(): void
-}
-
-/**
- * Runtime extension point for the optional Git sub-plugin. The base Fleet does
- * not create worktrees or register fleet_git when no provider is installed.
- */
-export interface FleetGitIntegration {
-  open(input: {
-    readonly teamId: string
-    readonly projectRoot: string
-    readonly onEvent: (event: FleetGitEvent) => void
-  }): FleetGitTeamRuntime
-}
-
 export interface OpenFleetCollaborationTeamInput {
   readonly id: string
   readonly memberViews: readonly FleetMemberView[]
@@ -99,7 +65,6 @@ export interface OpenFleetCollaborationTeamInput {
   readonly sharedDirectory: string
   readonly onCoordination: (event: FleetCoordinationEvent) => void
   readonly onResource: (event: FleetResourceEvent) => void
-  readonly onGit: (event: FleetGitEvent) => void
   readonly onMemberStatus: (event: FleetMemberStatusEvent) => void
 }
 
@@ -193,12 +158,6 @@ export class FleetCollaborationService {
       },
     }
     const resources = new FleetResources(this.ctx.fs)
-    const gitIntegration = this.ctx.get('fleetGitIntegration', false) as FleetGitIntegration | undefined
-    const git = gitIntegration?.open({
-      teamId: input.id,
-      projectRoot: input.projectRoot,
-      onEvent: input.onGit,
-    })
     const memberStatuses = new FleetMemberStatusBoard(memberDirectory)
     const messages = new MessageHub(agentDirectory)
     const stops = [
@@ -224,7 +183,7 @@ export class FleetCollaborationService {
       const view = memberViews.get(member)
       if (view === undefined) throw new Error(`unknown Fleet member view ${member}`)
       const effective = this.authorization.resolve(input.id, view)
-      const tools = new Set(effective.toolGroups.filter(group => group !== 'git' || git !== undefined) as FleetMemberToolGroup[])
+      const tools = new Set(effective.toolGroups)
       const permissions = new Set(effective.actions)
       const messagePermissions = new Set<FleetMessagePermission>(
         effective.actions.filter((permission): permission is FleetMessagePermission =>
@@ -267,16 +226,6 @@ export class FleetCollaborationService {
             resourceWrite: permissions.has('resource.write'),
           })
         }
-        if (group === 'git') {
-          if (git === undefined) throw new Error('Fleet Git capability is not installed')
-          return git.installTools(ctx, {
-            memberFor: agentId => memberNamesById.get(agentId),
-            hasMember: candidate => memberViews.has(candidate),
-            hasPermission,
-            workspaceFor: () => input.projectRoot,
-            permissions,
-          })
-        }
       }
       try {
         if (tools.has('messages')) {
@@ -295,7 +244,13 @@ export class FleetCollaborationService {
         }))
         for (const namespace of this.authorization.namespaces()) {
           if (!this.authorization.visible(namespace, effective)) continue
-          add(namespace.installTools?.(ctx, { teamId: input.id, member: view, authorization: effective }))
+          add(namespace.installTools?.(ctx, {
+            teamId: input.id,
+            projectRoot: input.projectRoot,
+            member: view,
+            hasMember: candidate => memberViews.has(candidate),
+            authorization: effective,
+          }))
         }
         if (!exposeHostFleetTools) {
           add(ctx.tools.restrict({
@@ -327,7 +282,6 @@ export class FleetCollaborationService {
       id: input.id,
       messages,
       resources,
-      ...(git === undefined ? {} : { git }),
       memberStatuses,
       memberViews,
       memberIdsByName,
@@ -408,7 +362,6 @@ export class FleetCollaborationService {
           binding.stop()
         }
         for (const stop of stops) stop()
-        git?.close?.()
         messages.close()
         resources.reset()
       },
@@ -448,11 +401,5 @@ export class FleetCollaborationService {
     for (const team of this.teams.values()) team.close()
     this.teams.clear()
     this.stopAccess()
-  }
-}
-
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    fleetGitIntegration: FleetGitIntegration
   }
 }

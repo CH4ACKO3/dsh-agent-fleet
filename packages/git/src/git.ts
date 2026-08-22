@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
@@ -83,6 +84,23 @@ export interface FleetGitEvent {
   readonly member: string
   readonly path: string
   readonly branch: string
+}
+
+export interface FleetGitAuthorization {
+  require(input: {
+    readonly teamId: string
+    readonly subject: { readonly kind: 'member'; readonly id: string }
+    readonly action: string
+    readonly resource: { readonly kind: 'git-repository'; readonly id: string }
+  }): void
+}
+
+export interface FleetGitToolOptions {
+  readonly teamId: string
+  readonly member: string
+  readonly hasMember: (member: string) => boolean
+  readonly authorization: FleetGitAuthorization
+  readonly permissions: ReadonlySet<string>
 }
 
 function git(cwd: string, args: readonly string[], allowFailure = false): string {
@@ -414,13 +432,7 @@ function jsonOutput<const S extends ValueSchemaSpec>(schema: S): {
   return { schema, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] }
 }
 
-export function installGitTools(ctx: Context, fleetGit: FleetGit, options: {
-  readonly memberFor: (agentId: string) => string | undefined
-  readonly hasMember: (member: string) => boolean
-  readonly hasPermission: (agentId: string, permission: string) => boolean
-  readonly workspaceFor: (agentId: string) => string | undefined
-  readonly permissions: ReadonlySet<string>
-}): () => void {
+export function installGitTools(ctx: Context, fleetGit: FleetGit, options: FleetGitToolOptions): () => void {
   const actions = [
     ...(options.permissions.has('git.inspect') ? ['scope' as const] : []),
     ...(options.permissions.has('git.scope-check') ? ['check' as const] : []),
@@ -442,18 +454,21 @@ export function installGitTools(ctx: Context, fleetGit: FleetGit, options: {
     execute(args, exec) {
       const agent = exec.agent as Agent | undefined
       if (agent === undefined) throw new Error('fleet_git requires a calling Agent')
-      const agentId = String(agent.id)
-      const caller = options.memberFor(agentId)
-      if (caller === undefined) throw new Error(`Agent ${String(agent.id)} is not a Fleet member`)
+      const caller = options.member
+      const workspace = agent.session.header.cwd ?? fleetGit.projectRoot
+      const repository = fleetGit.root
+      const requireAction = (action: string): void => {
+        options.authorization.require({
+          teamId: options.teamId,
+          subject: { kind: 'member', id: caller },
+          action,
+          resource: { kind: 'git-repository', id: repository },
+        })
+      }
       if (args.action === 'scope' || args.action === 'check') {
-        const permission = args.action === 'scope' ? 'git.inspect' : 'git.scope-check'
-        const allowed = options.hasPermission(agentId, permission)
-        if (!allowed) throw new Error(`Fleet member ${caller} lacks Fleet permission ${permission}`)
+        requireAction(args.action === 'scope' ? 'git.inspect' : 'git.scope-check')
         const intent = args.intent ?? 'read'
-        const cwd = args.cwd?.trim() || agent.session.header.cwd
-        if (cwd === undefined) throw new Error('fleet_git scope checking requires a working directory')
-        const workspace = options.workspaceFor(agentId) ?? agent.session.header.cwd
-        if (workspace === undefined) throw new Error('fleet_git scope checking requires a Fleet workspace')
+        const cwd = args.cwd?.trim() || workspace
         const scope = fleetGit.scope(
           caller,
           cwd,
@@ -464,14 +479,16 @@ export function installGitTools(ctx: Context, fleetGit: FleetGit, options: {
         )
         return Promise.resolve({ action: args.action, scope: { ...scope, paths: [...scope.paths] } })
       }
-      if (!options.hasPermission(agentId, 'git.worktree-create')) {
-        throw new Error(`Fleet member ${caller} lacks Fleet permission git.worktree-create`)
-      }
+      requireAction('git.worktree-create')
       const member = args.member?.trim() || caller
       if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(member)) throw new Error('Fleet Git member must use lower-kebab-case')
       if (!options.hasMember(member)) throw new Error(`unknown Fleet member ${member}`)
-      if (member !== caller && !options.hasPermission(agentId, 'git.worktree-manage')) {
-        throw new Error(`Fleet member ${caller} lacks Fleet permission git.worktree-manage`)
+      if (member !== caller) requireAction('git.worktree-manage')
+      const sandbox = ctx.get('sandboxPolicy', false)
+      const policy = sandbox?.resolve({ session: agent.session })
+      if (policy?.mode === 'read-only') throw new Error('fleet_git create_worktree is unavailable in read-only sandbox mode')
+      if (policy?.mode === 'workspace-write' && !inside(canonical(policy.workspaceRoot), canonical(workspace))) {
+        throw new Error(`DSH Session workspace ${workspace} is outside the sandbox write root ${policy.workspaceRoot}`)
       }
       return Promise.resolve({ action: 'create_worktree' as const, worktree: fleetGit.createWorktree(member) })
     },

@@ -29,7 +29,7 @@ describe('FleetAuthorizationService', () => {
     access.installActionPolicy({ resolve: () => ({ toolGroups: [], actions: [], op: true }) })
     const effective = access.resolve('team-1', member)
     expect(effective.toolGroups).toContain('messages')
-    expect(effective.actions).toContain('workspace.manage')
+    expect(effective.actions).toContain('team.manage')
     expect(effective.actions).toContain('deploy.release')
   })
 
@@ -96,5 +96,51 @@ describe('FleetAuthorizationService', () => {
       teamId: 'team-1', subject, action: 'workspace.manage',
       resource: { kind: 'file', id: '/workspace/team/readme.md' },
     })).toBe(false)
+  })
+
+  it('lets a feature plugin provide standalone action and resource defaults', () => {
+    const access = new FleetAuthorizationService()
+    access.installBaseline({
+      resolveSubject: () => member,
+      authorizeResource: () => false,
+    })
+    access.registerNamespace({
+      namespace: 'lark-im',
+      actions: [
+        { id: 'message-read', description: 'Read messages.' },
+        { id: 'message-send', description: 'Send messages.' },
+      ],
+      defaultActions: () => ['message-read', 'message-send'],
+      authorizeBaseline: input => input.subject.kind === 'external' && input.action === 'lark-im.message-read',
+    })
+    access.registerResourceKind({ kind: 'lark-chat', authorizeBaseline: () => true })
+
+    expect(access.authorize({
+      teamId: 'team-1',
+      subject: { kind: 'member', id: 'alice' },
+      action: 'lark-im.message-send',
+      resource: { kind: 'lark-chat', id: 'oc_example' },
+    })).toBe(true)
+    expect(access.authorize({
+      teamId: 'team-1',
+      subject: { kind: 'external', id: 'lark:user-1' },
+      action: 'lark-im.message-read',
+      resource: { kind: 'lark-chat', id: 'oc_example' },
+    })).toBe(true)
+  })
+
+  it('resolves a native Agent to its optional Fleet actor', () => {
+    const access = new FleetAuthorizationService()
+    access.installBaseline({
+      resolveSubject: () => undefined,
+      actorForAgent: agentId => agentId === 'session-1'
+        ? { teamId: 'team-1', subject: { kind: 'member', id: 'alice' } }
+        : undefined,
+      authorizeResource: () => false,
+    })
+    expect(access.actorForAgent('session-1')).toEqual({
+      teamId: 'team-1', subject: { kind: 'member', id: 'alice' },
+    })
+    expect(access.actorForAgent('ordinary-session')).toBeUndefined()
   })
 })
