@@ -52,6 +52,7 @@ describe('dsh-agent-fleet', () => {
       ['fleetRuns', 'fleetConfiguration'],
       ['fleetAuthorization', 'fleetRuns', 'fleetConfiguration', 'fleetGroups'],
       ['fleetAuthorization', 'fleetRuns', 'fleetGroups'],
+      ['fleetAuthorization', 'fleetAccess', 'fleetRuns', 'fs'],
     ]))
   })
 

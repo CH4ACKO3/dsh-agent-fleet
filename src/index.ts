@@ -3,6 +3,7 @@ import * as Core from '@dsh-agent-fleet/core'
 import * as Message from '@dsh-agent-fleet/message'
 import * as Resources from '@dsh-agent-fleet/resources'
 import * as Authorization from './authorization/index.js'
+import * as Data from './data/index.js'
 import { FleetArchiveRegistry } from './archive.js'
 import { FleetAssistantRuntime } from './assistant.js'
 import { FleetAuthorizationService } from './authorization.js'
@@ -14,8 +15,9 @@ import { FleetRunService, installRunTools } from './run.js'
 import { FleetSetupService, installSetupTool } from './setup.js'
 import { FLEET_WEB_LOCAL, FleetWebRemote } from './web.js'
 
-export { Authorization, Core, Message, Resources }
+export { Authorization, Core, Data, Message, Resources }
 export * from './authorization/index.js'
+export * from './data/index.js'
 export * from './authorization.js'
 export * from './assistant.js'
 export * from './archive.js'
@@ -73,6 +75,7 @@ export function apply(ctx: Context): void {
     }, 'fleetRuns.close()')
   })
   Authorization.apply(ctx)
+  Data.apply(ctx)
   ctx.inject(['fleetRuns', 'fleetSetups', 'typert', 'agents'], (scope) => {
     new FleetWebRemote(scope, scope.fleetRuns, scope.fleetSetups)
     return scope.typert.register(FLEET_WEB_LOCAL)
