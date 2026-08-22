@@ -7,10 +7,11 @@ import {
   type FleetRunService,
 } from 'dsh-agent-fleet'
 import {
+  FLEET_PERMISSIONS_CONFIGURATION_MODULE,
   FLEET_PERMISSION_PRESETS,
   FleetPermissionService,
   parseFleetPermissionConfiguration,
-} from '../src/index.js'
+} from '../src/permissions.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -89,10 +90,10 @@ describe('FleetPermissionService', () => {
     })
   })
 
-  it('loads an initial assignment from the Team configuration module', () => {
+  it('loads an initial assignment from the Authorization configuration module', () => {
     const { authorization } = fixture({
       modules: {
-        '@ch4acko3/dsh-agent-fleet-permissions': {
+        [FLEET_PERMISSIONS_CONFIGURATION_MODULE]: {
           members: { alice: { groups: ['observer'] } },
         },
       },
@@ -102,6 +103,17 @@ describe('FleetPermissionService', () => {
       actions: expect.arrayContaining(['message.read', 'message.post', 'member-status.read', 'member-status.write', 'resource.read']),
       op: false,
     })
+  })
+
+  it('continues to load the legacy Permissions configuration module', () => {
+    const { authorization } = fixture({
+      modules: {
+        '@ch4acko3/dsh-agent-fleet-permissions': {
+          members: { alice: { groups: ['observer'] } },
+        },
+      },
+    })
+    expect(authorization.resolve('team-1', alice).toolGroups).toEqual(['messages', 'status', 'resources'])
   })
 
   it('uses preset inheritance as a complete dynamic profile', () => {

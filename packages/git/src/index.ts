@@ -1,7 +1,10 @@
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry/types'
 import type {} from '@deepseek-ai/dsh-typert-registry'
+import type {} from '@ch4acko3/dsh-agent-fleet-authorization'
 import type {} from 'dsh-agent-fleet'
 
 import { FleetGit, installGitTools } from './git.js'
@@ -24,6 +27,20 @@ export const FLEET_GIT_PERMISSIONS = [
   { id: 'worktree-create', description: 'Create a member Git worktree.' },
   { id: 'worktree-manage', description: 'Create a Git worktree for another member.' },
 ] as const
+
+function pathInside(root: string, target: string): boolean {
+  const value = relative(root, target)
+  return value === '' || (!isAbsolute(value) && value !== '..' && !value.startsWith(`..${sep}`))
+}
+
+function repositoryResourceId(projectRoot: string, resourceId: string): string {
+  if (/^(?:workspace|absolute):/u.test(resourceId)) return resourceId
+  const root = resolve(projectRoot)
+  const target = resolve(isAbsolute(resourceId) ? resourceId : resolve(root, resourceId))
+  return pathInside(root, target)
+    ? `workspace:${relative(root, target) || '.'}`
+    : `absolute:${target}`
+}
 
 const FLEET_GIT_WEB_LOCAL: TypertContribution = {
   package: '@ch4acko3/dsh-agent-fleet-git/web',
@@ -89,6 +106,19 @@ export function apply(ctx: Context): void {
       stopNamespace()
     }
   })
+  ctx.inject(['fleetAccess', 'fleetRuns'], scope => scope.fleetAccess.registerAdapter({
+    kind: 'git-repository',
+    levelFor: action => {
+      if (action === 'git.inspect' || action === 'git.scope-check') return 'read'
+      if (action === 'git.worktree-create') return 'write'
+      if (action === 'git.worktree-manage') return 'manage'
+      return undefined
+    },
+    normalize: (teamId, resourceId) => repositoryResourceId(
+      scope.fleetRuns.status(teamId).projectRoot,
+      resourceId,
+    ),
+  }))
   ctx.inject(['typert'], scope => {
     new FleetGitWebRemote(scope)
     return scope.typert.register(FLEET_GIT_WEB_LOCAL)

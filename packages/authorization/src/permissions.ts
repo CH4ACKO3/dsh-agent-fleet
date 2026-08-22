@@ -14,8 +14,8 @@ import {
   type FleetRunService,
 } from 'dsh-agent-fleet'
 
-export const name = '@ch4acko3/dsh-agent-fleet-permissions'
-export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-permissions'
+export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/permissions'
+export const FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-permissions'
 
 export interface FleetPermissionGroup {
   readonly id: string
@@ -370,7 +370,9 @@ export class FleetPermissionService implements FleetActionPolicy {
     const configuration = this.runs.exportConfiguration(teamId)
     const modules = configuration.modules
     if (typeof modules !== 'object' || modules === null || Array.isArray(modules)) return undefined
-    return (modules as Record<string, unknown>)[FLEET_PERMISSIONS_CONFIGURATION_MODULE] as JsonValue | undefined
+    const configured = modules as Record<string, unknown>
+    return (configured[FLEET_PERMISSIONS_CONFIGURATION_MODULE]
+      ?? configured[FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE]) as JsonValue | undefined
   }
 
   private save(teamId: string, state: FleetPermissionState): void {
@@ -474,12 +476,16 @@ function installPermissionTool(
   }))
 }
 
-export function apply(ctx: Context): void {
+export function applyPermissions(ctx: Context): void {
   ctx.inject(['fleetAuthorization', 'fleetRuns', 'fleetConfiguration'], scope => {
     const service = new FleetPermissionService(scope.fleetRuns, scope.fleetAuthorization)
     scope.provide('fleetPermissions', service)
     const stopConfiguration = scope.fleetConfiguration.register({
       id: FLEET_PERMISSIONS_CONFIGURATION_MODULE,
+      parse: parseFleetPermissionConfiguration,
+    })
+    const stopLegacyConfiguration = scope.fleetConfiguration.register({
+      id: FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE,
       parse: parseFleetPermissionConfiguration,
     })
     const stopPolicy = scope.fleetAuthorization.installActionPolicy(service)
@@ -494,6 +500,7 @@ export function apply(ctx: Context): void {
     return () => {
       stopNamespace()
       stopPolicy()
+      stopLegacyConfiguration()
       stopConfiguration()
     }
   })
