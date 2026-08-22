@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 
 import { installResourceTools } from '../src/index.js'
-import { FleetResources, sharedPath } from '../src/resources.js'
+import { FleetResources } from '../src/resources.js'
 
 function target(path: string): FsTarget {
   return { targetKey: path as FsTarget['targetKey'], displayPath: path }
@@ -27,38 +27,13 @@ describe('FleetResources', () => {
       tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
     } as unknown as Context, resources, {
       resourceWrite: false,
-      documentWrite: false,
     })
     const actions = (name: string): readonly string[] | undefined =>
       registered.find(tool => tool.name === name)?.parameters.properties.action?.enum
 
-    expect(actions('fleet_shared')).toEqual(['read'])
+    expect(actions('fleet_shared')).toEqual(['list', 'read'])
     expect(actions('fleet_work')).toEqual(['list'])
     expect(actions('fleet_resource')).toEqual(['get', 'list'])
-    expect(actions('fleet_document')).toEqual(['list', 'search', 'get'])
-  })
-
-  it('keeps resource and document discovery groups separate', () => {
-    const names = (resourcesEnabled: boolean, documentsEnabled: boolean): string[] => {
-      const registered: Array<{ readonly name: string }> = []
-      installResourceTools({
-        fs: containment,
-        on: () => {},
-        tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
-      } as unknown as Context, new FleetResources(containment), {
-        resources: resourcesEnabled,
-        documents: documentsEnabled,
-      })
-      return registered.map(tool => tool.name)
-    }
-
-    expect(names(true, false)).toEqual(['fleet_shared', 'fleet_work', 'fleet_resource'])
-    expect(names(false, true)).toEqual(['fleet_document'])
-  })
-
-  it('uses fixed workspace files for the shared plan and checklist', () => {
-    expect(sharedPath('plan')).toBe('.fleet/plan.md')
-    expect(sharedPath('checklist')).toBe('.fleet/checklist.md')
   })
 
   it('records disjoint work without warnings', () => {
@@ -155,30 +130,4 @@ describe('FleetResources', () => {
     expect(() => resources.recordRevision('builder-session', 'missing', '', 'new')).toThrow('Unknown Fleet resource')
   })
 
-  it('keeps shared documents, versions, comments, replies, and restoration in the Resources service', () => {
-    const resources = new FleetResources(containment)
-    const events: Parameters<FleetResources['restoreDocuments']>[0] = []
-    resources.onEvent(event => {
-      if ('document' in event) events.push(event)
-    })
-    const created = resources.createDocument('lead', {
-      name: 'release-notes',
-      title: 'Release Notes',
-      content: '# Draft',
-    })
-    const updated = resources.updateDocument('writer', created.id, { content: '# Ready' })
-    const commented = resources.commentDocument('reviewer', created.id, 'Verify the version number.')
-    const commentId = commented.comments[0]?.id
-    if (commentId === undefined) throw new Error('expected document comment')
-    resources.commentDocument('writer', created.id, 'Verified.', commentId)
-    resources.resolveDocumentComment('reviewer', created.id, commentId)
-    const reverted = resources.revertDocument('lead', created.id, 1)
-
-    expect(updated.version).toBe(2)
-    expect(reverted).toMatchObject({ version: 3, content: '# Draft' })
-    expect(resources.listDocuments('release')).toHaveLength(1)
-    const restored = new FleetResources(containment)
-    restored.restoreDocuments(events)
-    expect(restored.getDocument(created.id)).toEqual(reverted)
-  })
 })

@@ -19,10 +19,8 @@ import type { RuntimeAgent, RuntimeAgentHandle } from './types.js'
 
 export * from './core.js'
 export * from './activation.js'
-export * from './calendar.js'
 export * from './collaboration.js'
 export * from './names.js'
-export * from './tasks.js'
 export * from './types.js'
 
 export const name = 'dsh-agent-fleet-core'

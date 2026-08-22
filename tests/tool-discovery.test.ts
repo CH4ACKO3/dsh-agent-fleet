@@ -5,7 +5,7 @@ import type { FleetMemberToolGroup } from '../src/member-view.js'
 
 describe('Fleet tool discovery', () => {
   const allowed = new Set<FleetMemberToolGroup>([
-    'messages', 'coordination', 'resources', 'status', 'schedule', 'tasks', 'calendar', 'documents', 'git',
+    'messages', 'coordination', 'resources', 'status',
   ])
 
   it('finds optional tools by English or Chinese intent without an LLM', () => {
@@ -16,7 +16,7 @@ describe('Fleet tool discovery', () => {
   })
 
   it('does not reveal groups unavailable to the member', () => {
-    expect(searchFleetTools('git branch', new Set(['messages']), new Set())).toEqual([])
+    expect(searchFleetTools('external deployment', new Set(['messages']), new Set())).toEqual([])
   })
 
   it('reports only actions granted by member permissions', () => {

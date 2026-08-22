@@ -26,15 +26,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -42,8 +38,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -64,15 +59,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "git",
                 "schedule"
               ],
               "permissions": [
                 "resource.write",
                 "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create",
                 "channel.manage",
                 "meeting.manage",
                 "vote.create",
@@ -80,8 +71,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "task.manage",
                 "calendar.manage",
                 "team.manage",
-                "workspace.manage",
-                "git.worktree-manage"
+                "workspace.manage"
               ]
             },
             {
@@ -100,15 +90,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -127,15 +113,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]
@@ -200,15 +182,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -216,8 +194,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -238,15 +215,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "git",
                 "schedule"
               ],
               "permissions": [
                 "resource.write",
                 "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create",
                 "channel.manage",
                 "meeting.manage",
                 "vote.create",
@@ -254,8 +227,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "task.manage",
                 "calendar.manage",
                 "team.manage",
-                "workspace.manage",
-                "git.worktree-manage"
+                "workspace.manage"
               ]
             },
             {
@@ -274,15 +246,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -301,15 +269,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]
@@ -381,15 +345,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -397,8 +357,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -419,8 +378,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "schedule",
-                "git"
+                "schedule"
               ],
               "permissions": [
                 "channel.manage",
@@ -428,10 +386,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "vote.create",
                 "schedule.create",
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -451,15 +406,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "git",
                 "schedule"
               ],
               "permissions": [
                 "resource.write",
                 "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create",
                 "channel.manage",
                 "meeting.manage",
                 "vote.create",
@@ -467,8 +418,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "task.manage",
                 "calendar.manage",
                 "team.manage",
-                "workspace.manage",
-                "git.worktree-manage"
+                "workspace.manage"
               ]
             },
             {
@@ -487,15 +437,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -514,15 +460,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -541,15 +483,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -568,15 +506,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -595,15 +529,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]
@@ -668,15 +598,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -684,8 +610,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -706,8 +631,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "schedule",
-                "git"
+                "schedule"
               ],
               "permissions": [
                 "channel.manage",
@@ -715,10 +639,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "vote.create",
                 "schedule.create",
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -738,15 +659,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "git",
                 "schedule"
               ],
               "permissions": [
                 "resource.write",
                 "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create",
                 "channel.manage",
                 "meeting.manage",
                 "vote.create",
@@ -754,8 +671,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "task.manage",
                 "calendar.manage",
                 "team.manage",
-                "workspace.manage",
-                "git.worktree-manage"
+                "workspace.manage"
               ]
             },
             {
@@ -774,15 +690,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -801,15 +713,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -828,15 +736,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -855,15 +759,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -882,15 +782,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]
@@ -962,15 +858,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -978,8 +870,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -1000,8 +891,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "schedule",
-                "git"
+                "schedule"
               ],
               "permissions": [
                 "channel.manage",
@@ -1009,10 +899,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "vote.create",
                 "schedule.create",
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1032,15 +919,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "git",
                 "schedule"
               ],
               "permissions": [
                 "resource.write",
                 "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create",
                 "channel.manage",
                 "meeting.manage",
                 "vote.create",
@@ -1048,8 +931,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "task.manage",
                 "calendar.manage",
                 "team.manage",
-                "workspace.manage",
-                "git.worktree-manage"
+                "workspace.manage"
               ]
             },
             {
@@ -1068,15 +950,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1095,15 +973,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1122,15 +996,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1149,15 +1019,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1176,15 +1042,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1203,15 +1065,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1230,15 +1088,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1257,15 +1111,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]
@@ -1330,15 +1180,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -1346,8 +1192,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -1368,8 +1213,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "schedule",
-                "git"
+                "schedule"
               ],
               "permissions": [
                 "channel.manage",
@@ -1377,10 +1221,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "vote.create",
                 "schedule.create",
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1400,15 +1241,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "git",
                 "schedule"
               ],
               "permissions": [
                 "resource.write",
                 "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create",
                 "channel.manage",
                 "meeting.manage",
                 "vote.create",
@@ -1416,8 +1253,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "task.manage",
                 "calendar.manage",
                 "team.manage",
-                "workspace.manage",
-                "git.worktree-manage"
+                "workspace.manage"
               ]
             },
             {
@@ -1436,15 +1272,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1463,15 +1295,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1490,15 +1318,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1517,15 +1341,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1544,15 +1364,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1571,15 +1387,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1598,15 +1410,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1625,15 +1433,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]
@@ -1705,15 +1509,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -1721,8 +1521,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -1743,8 +1542,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "schedule",
-                "git"
+                "schedule"
               ],
               "permissions": [
                 "channel.manage",
@@ -1752,10 +1550,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "vote.create",
                 "schedule.create",
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1774,15 +1569,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1801,15 +1592,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1828,15 +1615,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1855,15 +1638,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]
@@ -1928,15 +1707,11 @@ export const FULL_TEAM_TEMPLATES = [
               "coordination",
               "tasks",
               "calendar",
-              "git",
               "schedule"
             ],
             "permissions": [
               "resource.write",
               "document.write",
-              "git.inspect",
-              "git.scope-check",
-              "git.worktree-create",
               "channel.manage",
               "meeting.manage",
               "vote.create",
@@ -1944,8 +1719,7 @@ export const FULL_TEAM_TEMPLATES = [
               "task.manage",
               "calendar.manage",
               "team.manage",
-              "workspace.manage",
-              "git.worktree-manage"
+              "workspace.manage"
             ]
           },
           "members": [
@@ -1966,8 +1740,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "coordination",
                 "tasks",
                 "calendar",
-                "schedule",
-                "git"
+                "schedule"
               ],
               "permissions": [
                 "channel.manage",
@@ -1975,10 +1748,7 @@ export const FULL_TEAM_TEMPLATES = [
                 "vote.create",
                 "schedule.create",
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -1997,15 +1767,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -2024,15 +1790,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -2051,15 +1813,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             },
             {
@@ -2078,15 +1836,11 @@ export const FULL_TEAM_TEMPLATES = [
                 "documents",
                 "coordination",
                 "tasks",
-                "calendar",
-                "git"
+                "calendar"
               ],
               "permissions": [
                 "resource.write",
-                "document.write",
-                "git.inspect",
-                "git.scope-check",
-                "git.worktree-create"
+                "document.write"
               ]
             }
           ]

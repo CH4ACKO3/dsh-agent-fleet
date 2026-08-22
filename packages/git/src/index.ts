@@ -5,7 +5,6 @@ import type {} from '@deepseek-ai/dsh-typert-registry'
 import type {} from 'dsh-agent-fleet'
 
 import { FleetGit, installGitTools } from './git.js'
-import type { FleetGitEvent } from './git.js'
 
 import {
   FLEET_GIT_WEB_INVOCATIONS,
@@ -18,7 +17,7 @@ export * from './contract.js'
 export * from './git.js'
 
 export const name = '@ch4acko3/dsh-agent-fleet-git'
-export const inject = ['typert', 'fleetAccess'] as const
+export const inject = ['fleetAuthorization'] as const
 
 export const FLEET_GIT_PERMISSIONS = [
   { id: 'inspect', description: 'Inspect Git operation scope.' },
@@ -26,21 +25,6 @@ export const FLEET_GIT_PERMISSIONS = [
   { id: 'worktree-create', description: 'Create a member Git worktree.' },
   { id: 'worktree-manage', description: 'Create a Git worktree for another member.' },
 ] as const
-
-export class FleetGitIntegration {
-  open(input: {
-    readonly teamId: string
-    readonly projectRoot: string
-    readonly onEvent: (event: FleetGitEvent) => void
-  }) {
-    const git = new FleetGit(input.projectRoot, input.onEvent, input.teamId)
-    return {
-      installTools(ctx: Context, options: Parameters<typeof installGitTools>[2]): () => void {
-        return installGitTools(ctx, git, options)
-      },
-    }
-  }
-}
 
 const FLEET_GIT_WEB_LOCAL: TypertContribution = {
   package: '@ch4acko3/dsh-agent-fleet-git/web',
@@ -85,12 +69,33 @@ export class FleetGitWebRemote extends TypertRemoteService {
 }
 
 export function apply(ctx: Context): void {
-  ctx.inject(['fleetAccess'], scope => {
-    scope.provide('fleetGitIntegration', new FleetGitIntegration())
-    return scope.fleetAccess.registerNamespace({
+  ctx.inject(['fleetAuthorization'], scope => {
+    const stopNamespace = scope.fleetAuthorization.registerNamespace({
       namespace: 'git',
-      permissions: FLEET_GIT_PERMISSIONS,
+      actions: FLEET_GIT_PERMISSIONS,
+      defaultActions: () => ['inspect', 'scope-check', 'worktree-create'],
+      installTools(agentContext, input) {
+        return installGitTools(
+          agentContext,
+          new FleetGit(input.projectRoot, undefined, input.teamId),
+          {
+            teamId: input.teamId,
+            member: input.member.id,
+            hasMember: input.hasMember,
+            authorization: scope.fleetAuthorization,
+            permissions: new Set(input.authorization.actions),
+          },
+        )
+      },
     })
+    const stopResource = scope.fleetAuthorization.registerResourceKind({
+      kind: 'git-repository',
+      authorizeBaseline: () => true,
+    })
+    return () => {
+      stopResource()
+      stopNamespace()
+    }
   })
   ctx.inject(['typert'], scope => {
     new FleetGitWebRemote(scope)

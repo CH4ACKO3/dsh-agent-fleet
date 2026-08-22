@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { FleetAccessService, type FleetMemberView, type FleetRunService } from 'dsh-agent-fleet'
-import { FleetPermissionService, parseFleetPermissionConfiguration } from '../src/index.js'
+import { FleetAuthorizationService, type FleetMemberView, type FleetRunService } from 'dsh-agent-fleet'
+import {
+  FLEET_PERMISSION_PRESETS,
+  FleetPermissionService,
+  parseFleetPermissionConfiguration,
+} from '../src/index.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -9,10 +13,10 @@ const alice: FleetMemberView = {
   contacts: { members: '*', channels: '*' },
 }
 
-const builder: FleetMemberView = {
-  id: 'builder', name: 'Blake', role: 'Engineer', prompt: '',
-  toolGroups: ['messages', 'status', 'resources', 'documents', 'coordination', 'tasks', 'calendar', 'git'],
-  permissions: ['resource.write', 'document.write', 'git.inspect', 'git.scope-check', 'git.worktree-create'],
+const researcher: FleetMemberView = {
+  id: 'researcher', name: 'Blake', role: 'Researcher', prompt: '',
+  toolGroups: ['messages', 'status', 'resources', 'coordination'],
+  permissions: ['resource.write'],
   contacts: { members: '*', channels: '*' },
 }
 
@@ -25,13 +29,24 @@ function fixture(configuration: Record<string, unknown> = {}, members: FleetMemb
     memberViewForAgent: () => structuredClone(members[0]),
     exportConfiguration: () => structuredClone(configuration),
   } as unknown as FleetRunService
-  const access = new FleetAccessService()
+  const access = new FleetAuthorizationService()
   const permissions = new FleetPermissionService(runs, access)
-  access.installPolicy(permissions)
+  access.installActionPolicy(permissions)
   return { access, permissions, stored: () => stored }
 }
 
 describe('FleetPermissionService', () => {
+  it('provides default groups for common Agent collaboration roles', () => {
+    expect(FLEET_PERMISSION_PRESETS.map(group => [group.id, group.name, group.parents])).toEqual([
+      ['observer', 'Observer', []],
+      ['member', 'Collaborator', ['observer']],
+      ['researcher', 'Researcher', ['member']],
+      ['facilitator', 'Facilitator', ['member']],
+      ['maintainer', 'Maintainer', ['researcher', 'facilitator']],
+      ['op', 'OP', []],
+    ])
+  })
+
   it('rejects malformed Team permission modules instead of silently widening access', () => {
     expect(() => parseFleetPermissionConfiguration({})).toThrow(/members must be an object/)
     expect(() => parseFleetPermissionConfiguration({ version: 2, members: {} })).toThrow(/version must be 1/)
@@ -41,16 +56,18 @@ describe('FleetPermissionService', () => {
   it('adapts a native fixed profile without changing its effective access', () => {
     const { access } = fixture()
     expect(access.resolve('team-1', alice)).toEqual({
-      toolGroups: ['messages', 'resources'], permissions: ['resource.write'], op: false,
+      toolGroups: ['messages', 'resources'],
+      actions: expect.arrayContaining(['message.read', 'message.post', 'resource.read', 'work.read', 'work.claim', 'resource.write']),
+      op: false,
     })
   })
 
   it('recognizes a native built-in profile as its optional permission group', () => {
-    const { access, permissions } = fixture({}, [builder])
-    expect(permissions.member('team-1', 'builder')?.groups).toEqual(['builder'])
-    expect(access.resolve('team-1', builder)).toEqual({
-      toolGroups: builder.toolGroups,
-      permissions: builder.permissions,
+    const { access, permissions } = fixture({}, [researcher])
+    expect(permissions.member('team-1', 'researcher')?.groups).toEqual(['researcher'])
+    expect(access.resolve('team-1', researcher)).toEqual({
+      toolGroups: researcher.toolGroups,
+      actions: expect.arrayContaining(researcher.permissions),
       op: false,
     })
   })
@@ -64,8 +81,8 @@ describe('FleetPermissionService', () => {
       },
     })
     expect(access.resolve('team-1', alice)).toEqual({
-      toolGroups: ['messages', 'status', 'resources', 'documents'],
-      permissions: [],
+      toolGroups: ['messages', 'status', 'resources'],
+      actions: expect.arrayContaining(['message.read', 'message.post', 'member-status.read', 'member-status.write', 'resource.read']),
       op: false,
     })
   })
@@ -73,29 +90,37 @@ describe('FleetPermissionService', () => {
   it('uses preset inheritance as a complete dynamic profile', () => {
     const { access, permissions, stored } = fixture()
     permissions.setMember('team-1', 'alice', {
-      groups: ['builder'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
+      groups: ['maintainer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
     })
     const effective = access.resolve('team-1', alice)
     expect(effective.toolGroups).toEqual(expect.arrayContaining([
-      'messages', 'status', 'resources', 'documents', 'coordination', 'tasks', 'calendar', 'git',
+      'messages', 'status', 'resources', 'coordination',
     ]))
-    expect(effective.permissions).toEqual(expect.arrayContaining([
-      'resource.write', 'document.write', 'git.inspect', 'git.scope-check', 'git.worktree-create',
+    expect(effective.actions).toEqual(expect.arrayContaining([
+      'resource.write', 'channel.manage', 'meeting.manage', 'vote.create', 'team.manage',
     ]))
-    expect(effective.permissions).not.toContain('team.manage')
     expect(stored()).toBeDefined()
+  })
+
+  it('keeps research roles below Team management authority', () => {
+    const { access, permissions } = fixture()
+    permissions.setMember('team-1', 'alice', {
+      groups: ['researcher'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
+    })
+    expect(access.resolve('team-1', alice)).toMatchObject({ actions: expect.arrayContaining(['resource.write']) })
+    expect(access.resolve('team-1', alice).actions).not.toContain('team.manage')
   })
 
   it('supports OP, DEOP, and reset to the fixed profile', () => {
     const { access, permissions } = fixture()
     access.registerNamespace({
-      namespace: 'deploy', permissions: [{ id: 'release', description: 'Release.' }],
+      namespace: 'deploy', actions: [{ id: 'release', description: 'Release.' }],
     })
     permissions.setOp('team-1', 'alice', true)
-    expect(access.resolve('team-1', alice).permissions).toContain('deploy.release')
+    expect(access.resolve('team-1', alice).actions).toContain('deploy.release')
     permissions.setOp('team-1', 'alice', false)
-    expect(access.resolve('team-1', alice).permissions).not.toContain('deploy.release')
-    expect(access.resolve('team-1', alice).permissions).toContain('resource.write')
+    expect(access.resolve('team-1', alice).actions).not.toContain('deploy.release')
+    expect(access.resolve('team-1', alice).actions).toContain('resource.write')
     permissions.resetMember('team-1', 'alice')
     expect(access.resolve('team-1', alice).toolGroups).toEqual(['messages', 'resources'])
   })

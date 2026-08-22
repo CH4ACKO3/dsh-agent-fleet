@@ -32,23 +32,34 @@ function commit(root: string, message: string, paths: readonly string[]): void {
 }
 
 describe('FleetGit', () => {
-  it('exposes only inspection actions without write permissions', () => {
+  it('does not expose fleet_git without an explicit Git action', () => {
     const root = repository()
-    const registered: Array<{ readonly name: string; readonly parameters: { readonly properties: Record<string, { readonly enum?: readonly string[] }> } }> = []
+    const registered: unknown[] = []
     installGitTools({
-      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+      tools: { register: (tool: unknown) => { registered.push(tool); return () => {} } },
     } as unknown as Context, new FleetGit(root), {
-      memberFor: () => 'reviewer',
-      hasMember: () => true,
-      hasPermission: (_agentId, permission) => permission === 'git.inspect' || permission === 'git.scope-check',
-      workspacesFor: () => [{ path: root, access: 'read' }],
+      teamId: 'team-1', member: 'reviewer', hasMember: () => true,
+      authorization: { require: () => {} }, permissions: new Set(),
+    })
+
+    expect(registered).toEqual([])
+  })
+
+  it('exposes only the actions granted to that Fleet member', () => {
+    const root = repository()
+    const registered: Array<{ readonly parameters: { readonly properties: Record<string, { readonly enum?: readonly string[] }> } }> = []
+    installGitTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} } },
+    } as unknown as Context, new FleetGit(root), {
+      teamId: 'team-1', member: 'reviewer', hasMember: () => true,
+      authorization: { require: () => {} },
       permissions: new Set(['git.inspect', 'git.scope-check']),
     })
 
     expect(registered[0]?.parameters.properties.action?.enum).toEqual(['scope', 'check'])
   })
 
-  it('rechecks namespaced permissions when an Agent invokes the tool', async () => {
+  it('rechecks Fleet authorization at execution time', async () => {
     const root = repository()
     let inspect = false
     let execute: ((args: { readonly action: 'scope' }, exec: { readonly agent: unknown }) => Promise<unknown>) | undefined
@@ -58,16 +69,36 @@ describe('FleetGit', () => {
         return () => {}
       } },
     } as unknown as Context, new FleetGit(root), {
-      memberFor: () => 'reviewer', hasMember: () => true,
-      hasPermission: (_agentId, permission) => permission === 'git.inspect' && inspect,
-      workspacesFor: () => [{ path: root, access: 'read' }],
+      teamId: 'team-1', member: 'reviewer', hasMember: () => true,
+      authorization: { require: input => {
+        if (!inspect || input.action !== 'git.inspect') throw new Error(`denied ${input.action}`)
+      } },
       permissions: new Set(['git.inspect']),
     })
     const caller = { agent: { id: 'agent-1', session: { header: { cwd: root } } } }
 
-    await expect(execute?.({ action: 'scope' }, caller)).rejects.toThrow('git.inspect')
+    await expect(execute?.({ action: 'scope' }, caller)).rejects.toThrow('denied git.inspect')
     inspect = true
     await expect(execute?.({ action: 'scope' }, caller)).resolves.toMatchObject({ action: 'scope' })
+  })
+
+  it('keeps worktree mutation behind the native DSH sandbox policy', async () => {
+    const root = repository()
+    let execute: ((args: { readonly action: 'create_worktree' }, exec: { readonly agent: unknown }) => Promise<unknown>) | undefined
+    installGitTools({
+      get: () => ({ resolve: () => ({ mode: 'read-only', workspaceRoot: root }) }),
+      tools: { register: (tool: unknown) => {
+        execute = (tool as { readonly execute: typeof execute }).execute
+        return () => {}
+      } },
+    } as unknown as Context, new FleetGit(root), {
+      teamId: 'team-1', member: 'reviewer', hasMember: () => true,
+      authorization: { require: () => {} }, permissions: new Set(['git.worktree-create']),
+    })
+
+    await expect(execute?.({ action: 'create_worktree' }, {
+      agent: { id: 'agent-1', session: { header: { cwd: root } } },
+    })).rejects.toThrow('read-only sandbox mode')
   })
 
   it('reports changes and creates idempotent member worktrees', () => {

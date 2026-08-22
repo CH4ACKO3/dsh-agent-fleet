@@ -217,6 +217,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: '>=0.1.1-rc.1 <0.1.2-0'
         version: 0.1.1-rc.2(c1537a8836b04097f168b024f1e38d85)
+      '@deepseek-ai/dsh-sandbox-policy':
+        specifier: '>=0.1.1-rc.1 <0.1.2-0'
+        version: 0.1.1-rc.2(7b0710aaf8575f4849d2fecbf6f2f5f9)
       '@deepseek-ai/dsh-tools':
         specifier: '>=0.1.1-rc.1 <0.1.2-0'
         version: 0.1.1-rc.2(119bc70f73f8eddebfaa6b47561adeb3)

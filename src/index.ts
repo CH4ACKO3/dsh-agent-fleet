@@ -4,7 +4,7 @@ import * as Message from '@dsh-agent-fleet/message'
 import * as Resources from '@dsh-agent-fleet/resources'
 import { FleetArchiveRegistry } from './archive.js'
 import { FleetAssistantRuntime } from './assistant.js'
-import { FleetAccessService } from './access.js'
+import { FleetAuthorizationService } from './authorization.js'
 import { installFleetActivationBridge } from './activation.js'
 import { FleetCollaborationService } from './collaboration.js'
 import { FleetConfigurationRegistry } from './configuration.js'
@@ -14,7 +14,7 @@ import { FleetSetupService, installSetupTool } from './setup.js'
 import { FLEET_WEB_LOCAL, FleetWebRemote } from './web.js'
 
 export { Core, Message, Resources }
-export * from './access.js'
+export * from './authorization.js'
 export * from './assistant.js'
 export * from './archive.js'
 export * from './activation.js'
@@ -33,15 +33,15 @@ export function apply(ctx: Context): void {
   ctx.plugin(Core)
   ctx.inject(['fleetCore', 'agents', 'sessions', 'tools', 'fs'], (scope) => {
     const archives = new FleetArchiveRegistry()
-    const access = new FleetAccessService()
+    const authorization = new FleetAuthorizationService()
     const configuration = new FleetConfigurationRegistry()
-    const assistant = new FleetAssistantRuntime(group =>
-      group !== 'git' || scope.get('fleetGitIntegration', false) !== undefined)
+    const assistant = new FleetAssistantRuntime()
     const meta = new FleetMetaAssistantService(assistant)
-    const collaboration = new FleetCollaborationService(scope, access)
-    const service = new FleetRunService(scope, scope.fleetCore, collaboration, { archives, access, configuration })
+    const collaboration = new FleetCollaborationService(scope, authorization)
+    const service = new FleetRunService(scope, scope.fleetCore, collaboration, { archives, authorization, configuration })
+    authorization.installBaseline(service.authorizationBaseline())
     const setups = new FleetSetupService(assistant, service, { configuration })
-    scope.provide('fleetAccess', access)
+    scope.provide('fleetAuthorization', authorization)
     scope.provide('fleetAssistant', assistant)
     scope.provide('fleetArchives', archives)
     scope.provide('fleetCollaboration', collaboration)
@@ -80,7 +80,7 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     fleetAssistant: FleetAssistantRuntime
     fleetArchives: FleetArchiveRegistry
-    fleetAccess: FleetAccessService
+    fleetAuthorization: FleetAuthorizationService
     fleetCollaboration: FleetCollaborationService
     fleetConfiguration: FleetConfigurationRegistry
     fleetMetaAssistant: FleetMetaAssistantService

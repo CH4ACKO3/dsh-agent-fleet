@@ -17,7 +17,7 @@ import {
   type FleetWebSetupUploadInput,
 } from '@dsh-agent-fleet/core/web'
 
-import type { FleetMemberView, FleetWorkspaceMount } from './member-view.js'
+import type { FleetMemberView } from './member-view.js'
 import type { FleetRunService, FleetWorkStatus } from './run.js'
 import type { FleetSetupService } from './setup.js'
 
@@ -47,10 +47,9 @@ export interface FleetWebSendInput {
 export interface FleetWebMemberInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'add' | 'update' | 'pause' | 'resume' | 'remove' | 'assign_workspaces'
+  readonly action: 'add' | 'update' | 'pause' | 'resume' | 'remove'
   readonly member?: string
   readonly view?: FleetMemberView
-  readonly workspaces?: readonly FleetWorkspaceMount[]
 }
 
 export interface FleetWebControlInput {
@@ -189,20 +188,12 @@ export class FleetWebRemote extends TypertRemoteService {
     switch (input.action) {
       case 'add':
         if (input.view === undefined) throw new Error('member add requires view')
-        return this.runs.addMember(caller, {
-          runId: teamId,
-          view: input.view,
-          ...(input.workspaces === undefined ? {} : { workspaces: input.workspaces }),
-        })
+        return this.runs.addMember(caller, { runId: teamId, view: input.view })
       case 'update':
         if (input.view === undefined) throw new Error('member update requires view')
         return this.runs.updateMember(caller, {
           runId: teamId, member: required(input.member, 'member'), view: input.view,
         })
-      case 'assign_workspaces':
-        return Promise.resolve(this.runs.assignMemberWorkspaces(
-          caller, teamId, required(input.member, 'member'), input.workspaces ?? [],
-        ))
       case 'pause': return this.runs.pauseMember(caller, teamId, required(input.member, 'member'))
       case 'resume': return this.runs.resumeMember(caller, teamId, required(input.member, 'member'))
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))

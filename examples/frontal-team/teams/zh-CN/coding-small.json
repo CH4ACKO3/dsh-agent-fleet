@@ -19,15 +19,11 @@
         "coordination",
         "tasks",
         "calendar",
-        "git",
         "schedule"
       ],
       "permissions": [
         "resource.write",
         "document.write",
-        "git.inspect",
-        "git.scope-check",
-        "git.worktree-create",
         "channel.manage",
         "meeting.manage",
         "vote.create",
@@ -35,8 +31,7 @@
         "task.manage",
         "calendar.manage",
         "team.manage",
-        "workspace.manage",
-        "git.worktree-manage"
+        "workspace.manage"
       ]
     },
     "members": [
@@ -57,15 +52,11 @@
           "coordination",
           "tasks",
           "calendar",
-          "git",
           "schedule"
         ],
         "permissions": [
           "resource.write",
           "document.write",
-          "git.inspect",
-          "git.scope-check",
-          "git.worktree-create",
           "channel.manage",
           "meeting.manage",
           "vote.create",
@@ -73,8 +64,7 @@
           "task.manage",
           "calendar.manage",
           "team.manage",
-          "workspace.manage",
-          "git.worktree-manage"
+          "workspace.manage"
         ]
       },
       {
@@ -93,15 +83,11 @@
           "documents",
           "coordination",
           "tasks",
-          "calendar",
-          "git"
+          "calendar"
         ],
         "permissions": [
           "resource.write",
-          "document.write",
-          "git.inspect",
-          "git.scope-check",
-          "git.worktree-create"
+          "document.write"
         ]
       },
       {
@@ -120,15 +106,11 @@
           "documents",
           "coordination",
           "tasks",
-          "calendar",
-          "git"
+          "calendar"
         ],
         "permissions": [
           "resource.write",
-          "document.write",
-          "git.inspect",
-          "git.scope-check",
-          "git.worktree-create"
+          "document.write"
         ]
       }
     ]

@@ -61,6 +61,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
     "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
     "@deepseek-ai/dsh-typert-registry": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
@@ -70,6 +71,7 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-sandbox-policy": ">=0.1.1-rc.1 <0.1.2-0",
     "@deepseek-ai/dsh-tools": ">=0.1.1-rc.1 <0.1.2-0",
     "@deepseek-ai/dsh-typert-protocol": ">=0.1.1-rc.1 <0.1.2-0",
     "@deepseek-ai/dsh-typert-registry": ">=0.1.1-rc.1 <0.1.2-0",

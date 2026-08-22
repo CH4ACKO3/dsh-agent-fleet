@@ -146,7 +146,6 @@ describe('FleetAssistantRuntime', () => {
       'fleet_assistant',
       'fleet_send',
       'fleet_meeting',
-      'fleet_schedule',
     ]))
     expect(fixture.restrict).not.toHaveBeenCalled()
     expect(fixture.section).toHaveBeenCalledWith(expect.objectContaining({
@@ -158,32 +157,24 @@ describe('FleetAssistantRuntime', () => {
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('organize Meetings')
   })
 
-  it('advertises an optional tool group only when its sub-plugin is available', () => {
+  it('leaves plugin-owned tools to the native DSH tool registry', () => {
     const view = {
-      id: 'assistant-git',
-      name: 'Linus',
-      role: 'Developer',
+      id: 'assistant-extension',
+      name: 'Maya',
+      role: 'Specialist',
       prompt: '',
-      toolGroups: ['messages', 'git'] as const,
+      toolGroups: ['messages', 'external-service'] as const,
       permissions: [] as const,
       contacts: { members: '*' as const, channels: '*' as const },
     }
-    const withoutGit = new FleetAssistantRuntime(group => group !== 'git')
-      .activate(fakeAgent().agent, 'team-1', {
-        ...view,
-        toolGroups: [...view.toolGroups],
-        permissions: [...view.permissions],
-      })
-    const withGit = new FleetAssistantRuntime()
-      .activate(fakeAgent().agent, 'team-1', {
-        ...view,
-        toolGroups: [...view.toolGroups],
-        permissions: [...view.permissions],
-      })
+    const mode = new FleetAssistantRuntime().activate(fakeAgent().agent, 'team-1', {
+      ...view,
+      toolGroups: [...view.toolGroups],
+      permissions: [...view.permissions],
+    })
 
-    expect(withoutGit.tools).toContain('fleet_send')
-    expect(withoutGit.tools).not.toContain('fleet_git')
-    expect(withGit.tools).toContain('fleet_git')
+    expect(mode.tools).toContain('fleet_send')
+    expect(mode.tools).not.toContain('external_service')
   })
 
   it('allows a Fleet member to use the user-facing assistant surface and rolls back partial activation', () => {
