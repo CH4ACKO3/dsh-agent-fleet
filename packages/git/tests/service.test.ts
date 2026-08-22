@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { FleetGit, installGitTools, type FleetGitEvent } from '../src/git.js'
+import { FleetGitAttributionStore, installGitAttributionTracking } from '../src/index.js'
 
 const roots: string[] = []
 
@@ -32,6 +33,38 @@ function commit(root: string, message: string, paths: readonly string[]): void {
 }
 
 describe('FleetGit', () => {
+  it('attributes commits from successful member terminal calls and persists the local hash map', async () => {
+    const root = repository()
+    const states = new Map<string, unknown>()
+    const runs = {
+      readExtensionState: (teamId: string, namespace: string) => states.get(`${teamId}:${namespace}`),
+      writeExtensionState: (teamId: string, namespace: string, value: unknown) => { states.set(`${teamId}:${namespace}`, value) },
+    }
+    const store = new FleetGitAttributionStore(runs as never)
+    let listener: ((exec: never, next: () => Promise<never>) => Promise<never>) | undefined
+    const context = {
+      fleetAuthorization: {
+        actorForAgent: () => ({ teamId: 'team-1', subject: { kind: 'member', id: 'builder' } }),
+      },
+      on: (_event: string, callback: typeof listener) => { listener = callback; return () => {} },
+    } as unknown as Context
+    installGitAttributionTracking(context, store)
+    writeFileSync(join(root, 'README.md'), '# Fleet\n')
+
+    await listener?.({
+      name: 'bash',
+      arguments: { command: 'git add README.md && git commit -m "Initialize"' },
+      agent: { id: 'agent-1', session: { header: { cwd: root } } },
+    } as never, async () => {
+      commit(root, 'Initialize', ['README.md'])
+      return { isError: false, value: null, content: [] } as never
+    })
+
+    const hash = new FleetGit(root).status().head as string
+    expect(store.select('team-1', [hash])).toEqual({ [hash]: 'builder' })
+    expect(new FleetGitAttributionStore(runs as never).select('team-1', [hash])).toEqual({ [hash]: 'builder' })
+  })
+
   it('does not expose fleet_git without an explicit Git action', () => {
     const root = repository()
     const registered: unknown[] = []
@@ -140,6 +173,23 @@ describe('FleetGit', () => {
     execFileSync('git', ['-C', root, 'add', 'README.md'])
     expect(fleetGit.diff(root, 'README.md', true).text).toContain('+Working tree')
     expect(fleetGit.diff(root, 'README.md').text).toBe('')
+  })
+
+  it('projects every stash as a labeled graph commit', () => {
+    const root = repository()
+    const fleetGit = new FleetGit(root)
+    writeFileSync(join(root, 'README.md'), '# Fleet\n')
+    commit(root, 'Initialize Fleet project', ['README.md'])
+    writeFileSync(join(root, 'README.md'), '# Fleet\n\nFirst stash\n')
+    execFileSync('git', ['-C', root, 'stash', 'push', '-qm', 'first'])
+    writeFileSync(join(root, 'README.md'), '# Fleet\n\nSecond stash\n')
+    execFileSync('git', ['-C', root, 'stash', 'push', '-qm', 'second'])
+
+    const snapshot = fleetGit.snapshot(root, 20)
+    expect(snapshot.stashes?.map(stash => stash.ref)).toEqual(['stash@{0}', 'stash@{1}'])
+    for (const stash of snapshot.stashes ?? []) {
+      expect(snapshot.commits.find(item => item.hash === stash.hash)?.decorations).toContain(stash.ref)
+    }
   })
 
   it('checks repository, workspace, branch, and path scope before terminal Git operations', () => {

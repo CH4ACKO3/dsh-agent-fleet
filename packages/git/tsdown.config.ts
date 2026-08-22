@@ -24,8 +24,8 @@ export default defineConfig({
   sourcemap: true,
   dts: false,
   deps: {
-    alwaysBundle: ['zod'],
-    onlyBundle: ['zod'],
+    alwaysBundle: ['simple-icons', 'zod'],
+    onlyBundle: ['simple-icons', 'zod'],
   },
   banner: { js: moduleHeader },
   footer: { js: moduleFooter },

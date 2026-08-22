@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { FleetAuthorizationService } from 'dsh-agent-fleet'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
-import { FLEET_GIT_PERMISSIONS, FleetGitWebRemote, apply } from '../src/index.js'
+import { FLEET_GIT_PERMISSIONS, FleetGitAttributionStore, FleetGitWebRemote, apply } from '../src/index.js'
 
 const roots: string[] = []
 
@@ -47,26 +47,59 @@ describe('FleetGitWebRemote', () => {
     expect(namespace?.installTools).toBeTypeOf('function')
   })
 
-  it('exposes strict snapshot and diff invocations', () => {
+  it('exposes strict snapshot, diff, commit, and fetch invocations', () => {
     const root = repository()
     writeFileSync(join(root, 'README.md'), '# Fleet\n\nChanged\n')
     const remote = new FleetGitWebRemote(new Context())
     const signal = new AbortController().signal
 
-    expect(remote.snapshot({ root, limit: 20 }, signal)).toMatchObject({
+    const snapshot = remote.snapshot({ root, limit: 20 }, signal)
+    expect(snapshot).toMatchObject({
       status: { root: realpathSync(root), changes: [expect.objectContaining({ path: 'README.md', worktree: 'M' })] },
       commits: [expect.objectContaining({ subject: 'Initial commit' })],
     })
-    const hash = remote.snapshot({ root, limit: 20 }, signal).commits[0]?.hash ?? ''
+    const hash = snapshot?.commits[0]?.hash ?? ''
     expect(remote.commit({ root, hash }, signal)).toMatchObject({
       hash,
       files: [{ path: 'README.md', additions: 1, deletions: 0 }],
     })
     expect(remote.diff({ root, path: 'README.md' }, signal)).toMatchObject({ staged: false, truncated: false })
+    expect(remote.fetch({ root }, signal)).toMatchObject({
+      status: { root: realpathSync(root) },
+      commits: [expect.objectContaining({ subject: 'Initial commit' })],
+    })
     expect(FLEET_GIT_WEB_REMOTE.descriptors.every(descriptor =>
       descriptor.result.mode === 'strict'
       && descriptor.parameters.every(parameter => parameter.codec.mode === 'strict'),
     )).toBe(true)
+  })
+
+  it('projects only the selected Team commit attributions without changing Git metadata', () => {
+    const root = repository()
+    const hash = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    let state: unknown
+    const attributions = new FleetGitAttributionStore({
+      readExtensionState: () => state as never,
+      writeExtensionState: (_teamId, _namespace, value) => { state = value },
+    })
+    attributions.record('team-1', [hash], 'core-engineer')
+    const remote = new FleetGitWebRemote(new Context(), attributions)
+
+    expect(remote.snapshot({ root, teamId: 'team-1' }, new AbortController().signal)).toMatchObject({
+      commits: [expect.objectContaining({ hash, authorName: 'Fleet' })],
+      attributions: { [hash]: 'core-engineer' },
+    })
+    expect(remote.snapshot({ root, teamId: 'team-2' }, new AbortController().signal)).toMatchObject({
+      attributions: {},
+    })
+  })
+
+  it('returns an ordinary empty state for a workspace that is not a Git repository', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fleet-git-non-repository-'))
+    roots.push(root)
+
+    const remote = new FleetGitWebRemote(new Context())
+    expect(remote.snapshot({ root, limit: 20 }, new AbortController().signal)).toBeNull()
   })
 
   it('rejects unbounded history requests', () => {

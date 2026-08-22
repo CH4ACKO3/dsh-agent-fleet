@@ -57,6 +57,12 @@ export interface FleetGitCommitDetails extends FleetGitCommit {
   readonly files: readonly FleetGitCommitFile[]
 }
 
+export interface FleetGitStash {
+  readonly ref: string
+  readonly hash: string
+  readonly subject: string
+}
+
 export interface FleetGitDiff {
   readonly path?: string
   readonly staged: boolean
@@ -68,6 +74,8 @@ export interface FleetGitSnapshot {
   readonly status: FleetGitStatus
   readonly branches: readonly FleetGitBranch[]
   readonly commits: readonly FleetGitCommit[]
+  readonly stashes?: readonly FleetGitStash[]
+  readonly attributions?: Readonly<Record<string, string>>
 }
 
 export interface FleetGitStatus {
@@ -101,6 +109,13 @@ export interface FleetGitEvent {
   readonly member: string
   readonly path: string
   readonly branch: string
+}
+
+export class FleetGitNotRepositoryError extends Error {
+  constructor(readonly path: string) {
+    super(`Fleet workspace is not a Git repository: ${path}`)
+    this.name = 'FleetGitNotRepositoryError'
+  }
 }
 
 export interface FleetGitAuthorization {
@@ -247,6 +262,18 @@ function parseCommits(output: string): FleetGitCommit[] {
   })
 }
 
+function parseStashes(output: string): FleetGitStash[] {
+  const fields = output.split('\0')
+  const stashes: FleetGitStash[] = []
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const ref = fields[index] ?? ''
+    const hash = fields[index + 1] ?? ''
+    const subject = fields[index + 2] ?? ''
+    if (ref.length > 0 && hash.length > 0) stashes.push({ ref, hash, subject })
+  }
+  return stashes
+}
+
 function parseCommitFiles(nameStatusOutput: string, numstatOutput: string): FleetGitCommitFile[] {
   const stats = new Map<string, { readonly additions?: number; readonly deletions?: number; readonly binary: boolean }>()
   const numstatRecords = numstatOutput.split('\0')
@@ -300,7 +327,7 @@ export class FleetGit {
 
   get root(): string {
     const root = git(this.projectRoot, ['rev-parse', '--show-toplevel'], true)
-    if (root.length === 0) throw new Error(`Fleet project is not inside a Git repository: ${this.projectRoot}`)
+    if (root.length === 0) throw new FleetGitNotRepositoryError(this.projectRoot)
     return root
   }
 
@@ -394,17 +421,22 @@ export class FleetGit {
     ]), current)
   }
 
-  log(cwd = this.projectRoot, limit = 200): FleetGitCommit[] {
+  log(cwd = this.projectRoot, limit = 200, additionalHeads: readonly string[] = []): FleetGitCommit[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error('Git log limit must be from 1 through 500')
     return parseCommits(gitOutput(cwd, [
       'log',
       '--all',
+      ...additionalHeads,
       '--topo-order',
       '--date-order',
       `--max-count=${String(limit)}`,
       '-z',
       '--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%D%x1f%s',
     ]))
+  }
+
+  stashes(cwd = this.projectRoot): FleetGitStash[] {
+    return parseStashes(gitOutput(cwd, ['stash', 'list', '--format=%gd%x00%H%x00%gs', '-z']))
   }
 
   commit(cwd = this.projectRoot, hash: string): FleetGitCommitDetails {
@@ -452,7 +484,27 @@ export class FleetGit {
   }
 
   snapshot(cwd = this.projectRoot, limit = 200): FleetGitSnapshot {
-    return { status: this.status(cwd), branches: this.branches(cwd), commits: this.log(cwd, limit) }
+    void this.root
+    const stashes = this.stashes(cwd)
+    const commits = this.log(cwd, limit, stashes.map(stash => stash.hash)).map(commit => {
+      const stashRefs = stashes.filter(stash => stash.hash === commit.hash).map(stash => stash.ref)
+      if (stashRefs.length === 0) return commit
+      return {
+        ...commit,
+        decorations: [...commit.decorations.filter(decoration => decoration !== 'refs/stash'), ...stashRefs],
+      }
+    })
+    return { status: this.status(cwd), branches: this.branches(cwd), commits, stashes }
+  }
+
+  fetch(cwd = this.projectRoot): void {
+    void this.root
+    git(cwd, ['fetch', '--all', '--prune'])
+  }
+
+  commitsSince(cwd: string, before: string | undefined, after: string): string[] {
+    if (before === undefined) return [after]
+    return git(cwd, ['rev-list', '--reverse', after, `^${before}`], true).split('\n').filter(Boolean)
   }
 
   worktree(member: string): FleetGitWorktree | undefined {

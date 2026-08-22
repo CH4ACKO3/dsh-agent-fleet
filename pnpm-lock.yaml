@@ -207,6 +207,9 @@ importers:
 
   packages/git:
     dependencies:
+      simple-icons:
+        specifier: ^16.28.0
+        version: 16.28.0
       zod:
         specifier: ^4.3.6
         version: 4.4.3
@@ -1394,6 +1397,10 @@ packages:
   siginfo@2.0.0:
     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
 
+  simple-icons@16.28.0:
+    resolution: {integrity: sha512-sQPR5AtK/ijRjou7zw7mlLp08oB6FH7i0lOy5XJ2zp9mJs/yejgiOn7KvQoe2q4YJIx6VmgUSW5AOefebPt5kg==}
+    engines: {node: '>=0.12.18'}
+
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
@@ -2575,6 +2582,8 @@ snapshots:
   semver@7.8.5: {}
 
   siginfo@2.0.0: {}
+
+  simple-icons@16.28.0: {}
 
   source-map-js@1.2.1: {}
 

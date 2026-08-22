@@ -2933,6 +2933,8 @@ export interface FleetPanelTeamSnapshot {
   readonly runtimeState?: 'active' | 'dormant'
   readonly conversations: readonly FleetPanelConversation[]
   readonly members: readonly FleetPanelMember[]
+  /** User-facing assistants attached to this Team; the global Fleet Help assistant is intentionally excluded. */
+  readonly assistants?: readonly FleetPanelMember[]
   readonly messages: readonly FleetPanelMessage[]
   readonly resources: readonly FleetPanelResource[]
   readonly workspaces?: readonly FleetPanelWorkspace[]
