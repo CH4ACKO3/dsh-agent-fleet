@@ -1,0 +1,59 @@
+{
+  "core": {
+    "name": "Product Engineering",
+    "positioning": "Own the product engineering workflow over time.",
+    "assistant": {
+      "id": "team-assistant",
+      "name": "",
+      "color": "",
+      "role": "Team assistant",
+      "responsibilities": "Maintain the user-facing Team conversation and help the user observe, control, and collaborate with the Team.",
+      "prompt": "",
+      "provider": "",
+      "model": ""
+    },
+    "members": [
+      {
+        "id": "product-lead",
+        "name": "Avery",
+        "color": "#527FCA",
+        "role": "Product lead",
+        "responsibilities": "Own lasting product direction and requirement clarity.",
+        "prompt": "Keep implementation and independent acceptance with their responsible owners.",
+        "provider": "",
+        "model": ""
+      },
+      {
+        "id": "engineer",
+        "name": "Morgan",
+        "color": "#5C9071",
+        "role": "Development engineer",
+        "responsibilities": "Implement, integrate, and deliver verifiable engineering results.",
+        "prompt": "",
+        "provider": "",
+        "model": ""
+      }
+    ]
+  },
+  "modules": {
+    "dsh-agent-fleet/message": {
+      "defaultChannel": {
+        "id": "main",
+        "name": "Main"
+      },
+      "rules": "Important decisions include reviewable evidence.",
+      "collaborationMethod": "Use explicit ownership and independent review."
+    },
+    "dsh-agent-fleet/resources": {
+      "policy": "Keep plans, checklists, and consequential artifacts visible to the Team.",
+      "items": []
+    },
+    "dsh-agent-fleet/ui": {
+      "userAccess": {
+        "updateDensity": "balanced",
+        "notificationPolicy": "decisions",
+        "contentPreference": "Lead with decisions and visual results."
+      }
+    }
+  }
+}

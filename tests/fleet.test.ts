@@ -27,10 +27,14 @@ class FakeAgent implements RuntimeAgent, MessageAgent {
   followup(message: Parameters<MessageAgent['followup']>[0]): void {
     this.inject(message)
   }
+
+  steer(message: Parameters<MessageAgent['steer']>[0]): void {
+    this.inject(message)
+  }
 }
 
 describe('dsh-agent-fleet', () => {
-  it('installs Core, Resources, and Message from one plugin entry', () => {
+  it('installs Core globally and leaves Team collaboration tools team-scoped', () => {
     const installed: string[] = []
     const ctx = {
       plugin(plugin: { name?: string }) {
@@ -40,11 +44,7 @@ describe('dsh-agent-fleet', () => {
     } as unknown as Context
 
     apply(ctx)
-    expect(installed).toEqual([
-      'dsh-agent-fleet-core',
-      'dsh-agent-fleet-resources',
-      'dsh-agent-fleet-message',
-    ])
+    expect(installed).toEqual(['dsh-agent-fleet-core'])
   })
 
   it('uses a Core Fleet name to address a Message recipient', () => {

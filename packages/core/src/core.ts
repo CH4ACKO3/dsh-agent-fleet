@@ -11,16 +11,29 @@ import type {
   RuntimeAgentHandle,
   UpdateFleetAgentInput,
 } from './types.js'
+import {
+  generateFleetMemberColor,
+  generateMemberDisplayName,
+  normalizeFleetMemberColor,
+} from './names.js'
 
 const MEMBER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 interface MemberRecord {
   readonly id: string
   readonly name: string
+  readonly displayName: string
+  readonly color: FleetAgent['color']
   readonly role: string
   readonly capabilities: string[]
   readonly createdBy?: string
   readonly registeredAt: string
+}
+
+interface ManagedAgent {
+  readonly handle: RuntimeAgentHandle
+  readonly archiveId?: string
+  readonly setup?: CreateFleetAgentInput['setup']
 }
 
 function requiredText(value: string, label: string): string {
@@ -51,8 +64,9 @@ function uniqueStrings(values: readonly string[]): string[] {
 export class FleetCore {
   private readonly members = new Map<string, MemberRecord>()
   private readonly memberNamesByAgent = new Map<string, string>()
-  private readonly handles = new Map<string, RuntimeAgentHandle>()
+  private readonly handles = new Map<string, ManagedAgent>()
   private readonly creatingNames = new Set<string>()
+  private readonly rotatingAgentIds = new Set<string>()
   private sharedRoot: string | undefined
   private closed = false
 
@@ -79,6 +93,12 @@ export class FleetCore {
   nameForAgent(id: string): string | undefined {
     this.assertOpen()
     return this.memberNamesByAgent.get(id)
+  }
+
+  displayNameForAgent(id: string): string | undefined {
+    this.assertOpen()
+    const name = this.memberNamesByAgent.get(id)
+    return name === undefined ? undefined : this.members.get(name)?.displayName
   }
 
   bindProjectRoot(path: string): string {
@@ -109,6 +129,12 @@ export class FleetCore {
     const member: MemberRecord = {
       id: agent.id,
       name,
+      displayName: input.displayName === undefined
+        ? generateMemberDisplayName([...this.members.values()].map(member => member.displayName))
+        : requiredText(input.displayName, 'display name'),
+      color: input.color === undefined
+        ? generateFleetMemberColor([...this.members.values()].map(member => member.color))
+        : normalizeFleetMemberColor(input.color),
       role: requiredText(input.role, 'role'),
       capabilities: uniqueStrings(input.capabilities ?? []),
       registeredAt: new Date().toISOString(),
@@ -148,6 +174,7 @@ export class FleetCore {
   }
 
   disposed(id: string): void {
+    if (this.rotatingAgentIds.has(id)) return
     const name = this.memberNamesByAgent.get(id)
     if (name === undefined) return
     this.members.delete(name)
@@ -162,17 +189,23 @@ export class FleetCore {
     this.requireAvailableName(name)
     const role = requiredText(input.role, 'role')
     const capabilities = uniqueStrings(input.capabilities ?? [])
+    const displayName = input.displayName === undefined
+      ? generateMemberDisplayName([...this.members.values()].map(member => member.displayName))
+      : requiredText(input.displayName, 'display name')
     this.creatingNames.add(name)
 
     let handle: RuntimeAgentHandle | undefined
     try {
       handle = await this.runtime.create(owner, {
         id: randomUUID(),
+        ...(input.archiveId === undefined ? {} : { archiveId: input.archiveId }),
+        label: displayName,
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
         ...(input.persona === undefined ? {} : { persona: input.persona }),
+        ...(input.setup === undefined ? {} : { setup: input.setup }),
       })
       this.assertOpen()
       if (this.memberNamesByAgent.has(handle.agent.id)) {
@@ -181,6 +214,10 @@ export class FleetCore {
       const member: MemberRecord = {
         id: handle.agent.id,
         name,
+        displayName,
+        color: input.color === undefined
+          ? generateFleetMemberColor([...this.members.values()].map(member => member.color))
+          : normalizeFleetMemberColor(input.color),
         role,
         capabilities,
         createdBy: owner.id,
@@ -188,7 +225,11 @@ export class FleetCore {
       }
       this.members.set(name, member)
       this.memberNamesByAgent.set(member.id, name)
-      this.handles.set(name, handle)
+      this.handles.set(name, {
+        handle,
+        ...(input.archiveId === undefined ? {} : { archiveId: input.archiveId }),
+        ...(input.setup === undefined ? {} : { setup: input.setup }),
+      })
       return this.describe(member)
     } catch (error) {
       if (handle !== undefined) await handle.dispose()
@@ -205,16 +246,20 @@ export class FleetCore {
     this.requireAvailableName(name)
     const role = requiredText(input.role, 'role')
     const capabilities = uniqueStrings(input.capabilities ?? [])
+    const displayName = requiredText(input.displayName, 'display name')
     this.creatingNames.add(name)
 
     let handle: RuntimeAgentHandle | undefined
     try {
       handle = await this.runtime.resume(owner, {
         id: requiredText(input.id, 'Agent id'),
+        ...(input.archiveId === undefined ? {} : { archiveId: input.archiveId }),
+        label: displayName,
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
         ...(input.persona === undefined ? {} : { persona: input.persona }),
+        ...(input.setup === undefined ? {} : { setup: input.setup }),
       })
       this.assertOpen()
       if (this.memberNamesByAgent.has(handle.agent.id)) {
@@ -223,6 +268,8 @@ export class FleetCore {
       const member: MemberRecord = {
         id: handle.agent.id,
         name,
+        displayName,
+        color: normalizeFleetMemberColor(input.color),
         role,
         capabilities,
         createdBy: owner.id,
@@ -230,7 +277,11 @@ export class FleetCore {
       }
       this.members.set(name, member)
       this.memberNamesByAgent.set(member.id, name)
-      this.handles.set(name, handle)
+      this.handles.set(name, {
+        handle,
+        ...(input.archiveId === undefined ? {} : { archiveId: input.archiveId }),
+        ...(input.setup === undefined ? {} : { setup: input.setup }),
+      })
       return this.describe(member)
     } catch (error) {
       if (handle !== undefined) await handle.dispose()
@@ -279,11 +330,40 @@ export class FleetCore {
     if (agent?.status === 'running') agent.cancel({ kind: 'parent' })
   }
 
+  clearManagedInbox(name: string): void {
+    const member = this.requireMember(memberName(name))
+    this.requireLive(member.id).inbox?.clear()
+  }
+
+  async rotateManaged(name: string): Promise<FleetAgent | undefined> {
+    const member = this.requireMember(memberName(name))
+    const managed = this.handles.get(member.name)
+    if (managed?.archiveId === undefined || this.runtime.rotate === undefined) return undefined
+    const previousId = member.id
+    this.rotatingAgentIds.add(previousId)
+    let handle: RuntimeAgentHandle | undefined
+    try {
+      handle = await this.runtime.rotate(managed.handle, {
+        archiveId: managed.archiveId,
+        ...(managed.setup === undefined ? {} : { setup: managed.setup }),
+      })
+    } finally {
+      this.rotatingAgentIds.delete(previousId)
+    }
+    if (handle === undefined) return undefined
+    const updated: MemberRecord = { ...member, id: handle.agent.id }
+    this.members.set(member.name, updated)
+    this.memberNamesByAgent.delete(previousId)
+    this.memberNamesByAgent.set(updated.id, updated.name)
+    this.handles.set(member.name, { ...managed, handle })
+    return this.describe(updated)
+  }
+
   async stopManaged(name: string): Promise<FleetAgent> {
     const member = this.requireMember(memberName(name))
     const handle = this.handles.get(member.name)
     if (handle === undefined) throw new Error(`Fleet Agent ${member.name} is not managed by Core`)
-    await handle.dispose()
+    await handle.handle.dispose()
     this.handles.delete(member.name)
     this.members.delete(member.name)
     this.memberNamesByAgent.delete(member.id)
@@ -298,7 +378,7 @@ export class FleetCore {
     this.members.clear()
     this.memberNamesByAgent.clear()
     this.sharedRoot = undefined
-    await Promise.all(handles.map(handle => handle.dispose()))
+    await Promise.all(handles.map(managed => managed.handle.dispose()))
   }
 
   private describe(member: MemberRecord): FleetAgent {
@@ -306,6 +386,8 @@ export class FleetCore {
       id: member.id,
       target: `@${member.id}`,
       name: member.name,
+      displayName: member.displayName,
+      color: member.color,
       role: member.role,
       capabilities: [...member.capabilities],
       status: this.runtime.get(member.id)?.status ?? 'offline',

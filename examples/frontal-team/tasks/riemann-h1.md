@@ -15,8 +15,10 @@ If a direct proof stalls, investigate unconditional density statements for simpl
 
 ## Working contract
 
-- Use only `/corpus` for literature. Live internet is intentionally unavailable and its absence
-  is not a blocker. Record exact corpus identifiers and distinguish prior facts from new work.
+- Use only the local arXiv filter for literature. The launcher must set `FLEET_LITERATURE_CUTOFF`;
+  search with `node examples/frontal-team/tools/arxiv-filter.mjs search --query "..."` and inspect or
+  download a result with the same tool. Do not use raw web access. Record exact arXiv IDs, published
+  dates, and distinguish prior facts from new work.
 - During kickoff, map roles to theorem architecture, literature audit, analytic/numerical
   exploration, independent proof audit, and reproducibility/formal checking. Assign separate
   owners and reviewers for every central lemma.
@@ -29,7 +31,7 @@ If a direct proof stalls, investigate unconditional density statements for simpl
   support a claim but does not replace proof unless the claim is explicitly finite and the
   computation is independently reproducible.
 - Keep all editable proof notes, scripts, formalizations, logs, and the final paper under
-  `/work/artifacts`. Never place credentials or hidden Team state in an artifact.
+  `e2e-output/riemann-h1/`. Never place credentials or hidden Team state in an artifact.
 
 ## Required terminal package
 

@@ -10,51 +10,119 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": {
+      "types": "./lib/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "lib/**/*.js",
     "lib/**/*.d.ts",
+    "harmony/**/*.cjs",
+    "skills/**/*.md",
     "cordis.patch.yml",
     "README.md"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ],
+      "immediately": true,
+      "platform": "web"
+    },
+    "harmony": {
+      "patches": [
+        "./harmony/hero-team-entry.cjs"
+      ]
     }
   },
   "packageManager": "pnpm@11.19.0",
   "engines": {
-    "node": ">=22.19.0"
+    "node": "^22.22.3 || >=24.11.1"
   },
   "scripts": {
-    "build": "pnpm -r --if-present build && tsc -p tsconfig.package.json",
-    "test": "pnpm -r --if-present test && pnpm -r --if-present build && vitest run tests",
-    "typecheck": "pnpm -r --if-present typecheck && pnpm -r --if-present build && tsc -p tsconfig.package.json --noEmit"
+    "generate:team-templates": "node scripts/generate-team-templates.mjs",
+    "compact:fleet-journal": "node scripts/compact-fleet-journal.mjs",
+    "build": "pnpm -r --if-present build && pnpm run build:client && pnpm run build:host",
+    "build:client": "pnpm run generate:team-templates && tsdown --config-loader unrun && tsc -p tsconfig.client.build.json",
+    "build:host": "tsc -p tsconfig.package.json",
+    "test": "pnpm -r --if-present test && pnpm run build && vitest run tests",
+    "typecheck": "pnpm --filter @dsh-agent-fleet/core build && pnpm --filter @dsh-agent-fleet/message build && pnpm -r --if-present typecheck && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.package.json --noEmit"
   },
   "dependencies": {
+    "dsh-hover-hint": "workspace:*",
     "@dsh-agent-fleet/core": "workspace:*",
     "@dsh-agent-fleet/message": "workspace:*",
-    "@dsh-agent-fleet/resources": "workspace:*"
+    "@dsh-agent-fleet/resources": "workspace:*",
+    "dsh-harmony": "^0.8.0",
+    "dsh-harmony-react": "^0.3.1",
+    "tar": "^7.5.22"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8"
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-typert-registry": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-fs": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-sandbox-policy": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-agent": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-agent-presets": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-api-gateway": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-atomic-write": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-attachment": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-brand": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-client-connection": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-code-runtime": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-commands": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-compaction": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-cordis-host-runner": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-file-reference": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-fs": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-home-paths": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-host-apiproxy": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-host-plugin-inventory": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-invariants": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-jobs": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-message-feedback": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-output-retention": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-sandbox": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-sandbox-policy": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-scope": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-session": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-session-persistence": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-session-projection": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-session-projection-cache": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-session-reference": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-settings": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-storage": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-subagent": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-timeout": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-typert-registry": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-user-approval": ">=0.1.1-rc.1 <0.1.2-0",
     "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.14",
     "typescript": "^6.0.3",
+    "unrun": "^0.3.1",
     "vitest": "^4.1.11"
   },
   "publishConfig": {

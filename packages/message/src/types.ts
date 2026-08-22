@@ -2,8 +2,17 @@ import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 export interface MessageAgent {
   readonly id: string
+  /** Native pending context, when the backing runtime is a DSH Agent. */
+  readonly inbox?: {
+    readonly nextTurn: readonly UserMessage[]
+    readonly nextStep: readonly UserMessage[]
+    replace(messageId: UserMessage['id'], newMessage: UserMessage): boolean
+    remove(messageId: UserMessage['id']): boolean
+  }
   inject(message: UserMessage): void
   followup(message: UserMessage): void
+  steer(message: UserMessage): void
+  cancel(cause: { readonly kind: 'user' | 'parent' }, options?: { readonly keepInbox?: boolean }): void
 }
 
 export interface AgentDirectory {
@@ -11,10 +20,16 @@ export interface AgentDirectory {
   list(): MessageAgent[]
   resolve?(reference: string): string
   displayName?(id: string): string | undefined
+  canContact?(senderId: string, recipientId: string): boolean
+  canAccessChannel?(agentId: string, channelId: string): boolean
+  hasPermission?(agentId: string, permission: FleetMessagePermission): boolean
+  defaultVoter?(agentId: string): boolean
 }
 
+export type FleetMessagePermission = 'channel.manage' | 'meeting.manage' | 'vote.create'
+
 export type FleetTarget = `@${string}` | `#${string}` | `meeting:${string}`
-export type FleetDelivery = 'quiet' | 'wakeup'
+export type FleetDelivery = 'quiet' | 'wakeup' | 'interrupt'
 export type FleetMessageKind =
   | 'text'
   | 'meeting_opened'
@@ -22,6 +37,8 @@ export type FleetMessageKind =
   | 'vote_opened'
   | 'vote_cast'
   | 'vote_closed'
+  | 'task_notification'
+  | 'calendar_notification'
 
 export interface FleetMessage {
   readonly id: string
@@ -45,6 +62,8 @@ export interface SendMessageInput {
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
   readonly delivery: FleetDelivery
+  /** Internal service classification; ordinary tool calls omit this. */
+  readonly kind?: FleetMessageKind
 }
 
 export interface SendMessageResult {
@@ -63,6 +82,43 @@ export interface ReadMessagesResult {
   readonly messages: FleetMessage[]
   readonly hasMore: boolean
   readonly revision: number
+}
+
+export interface FleetMessageTextChunk {
+  readonly messageId: string
+  readonly offset: number
+  readonly text: string
+  readonly totalLength: number
+  readonly hasMore: boolean
+  readonly nextOffset?: number
+}
+
+export interface SearchMessagesInput {
+  readonly query?: string
+  readonly conversation?: FleetTarget
+  readonly from?: string
+  readonly resource?: string
+  readonly limit?: number
+}
+
+export interface FleetMessageReaction {
+  readonly messageId: string
+  readonly reaction: string
+  readonly members: string[]
+  readonly updatedAt: string
+}
+
+export interface FleetMessagePin {
+  readonly messageId: string
+  readonly conversation: FleetTarget
+  readonly pinnedBy: string
+  readonly createdAt: string
+}
+
+export interface FleetInboxItem {
+  readonly message: FleetMessage
+  readonly reasons: Array<'direct' | 'mention' | 'meeting'>
+  readonly acknowledged: boolean
 }
 
 export interface FleetChannel {
@@ -94,8 +150,11 @@ export interface InitializeChannelInput extends CreateChannelInput {
 }
 
 export interface UpdateChannelInput {
+  readonly topic?: string
   readonly summary?: string
   readonly body?: string
+  readonly addMembers?: readonly string[]
+  readonly removeMembers?: readonly string[]
 }
 
 export interface FleetMeeting {
@@ -104,7 +163,16 @@ export interface FleetMeeting {
   readonly agenda: string
   readonly initiator: string
   readonly participants: string[]
+  readonly attendance: Record<string, { readonly joinedAt: string; readonly leftAt?: string }>
   readonly status: 'open' | 'closed'
+  readonly summary?: string
+  readonly decisions: string[]
+  readonly actionItems: Array<{
+    readonly text: string
+    readonly assignee?: string
+    readonly taskId?: string
+  }>
+  readonly resources: string[]
   readonly createdAt: string
   readonly closedAt?: string
 }
@@ -116,9 +184,21 @@ export interface OpenMeetingInput {
   readonly participants: readonly string[]
 }
 
+export interface CloseMeetingInput {
+  readonly summary?: string
+  readonly decisions?: readonly string[]
+  readonly actionItems?: readonly {
+    readonly text: string
+    readonly assignee?: string
+    readonly taskId?: string
+  }[]
+  readonly resources?: readonly string[]
+}
+
 export interface WaitResult {
   readonly timedOut: boolean
   readonly revision: number
+  readonly reason: 'changed' | 'timeout' | 'disconnected' | 'stopped'
 }
 
 export type FleetVoteKind = 'start_work' | 'finish' | 'blocked' | 'message'
@@ -142,10 +222,12 @@ export interface CreateVoteInput {
   readonly channel: `#${string}`
   readonly kind: FleetVoteKind
   readonly statement: string
+  readonly voters?: readonly string[]
 }
 
 export interface CastVoteInput {
-  readonly id: string
+  /** May be omitted when the caller has exactly one open Vote awaiting its response. */
+  readonly id?: string
   readonly response: 'approve' | 'reject'
   readonly reason?: string
 }
@@ -153,5 +235,8 @@ export interface CastVoteInput {
 export type FleetCoordinationEvent =
   | { readonly type: 'message'; readonly message: FleetMessage }
   | { readonly type: 'channel'; readonly action: 'created' | 'updated' | 'archived'; readonly channel: FleetChannel }
-  | { readonly type: 'meeting'; readonly action: 'opened' | 'closed'; readonly meeting: FleetMeeting }
-  | { readonly type: 'vote'; readonly action: 'opened' | 'cast' | 'closed'; readonly vote: FleetVote }
+  | { readonly type: 'meeting'; readonly action: 'opened' | 'updated' | 'joined' | 'left' | 'closed'; readonly meeting: FleetMeeting }
+  | { readonly type: 'vote'; readonly action: 'opened' | 'updated' | 'cast' | 'closed'; readonly vote: FleetVote }
+  | { readonly type: 'reaction'; readonly action: 'updated' | 'removed'; readonly reaction: FleetMessageReaction }
+  | { readonly type: 'pin'; readonly action: 'pinned' | 'unpinned'; readonly pin: FleetMessagePin }
+  | { readonly type: 'inbox'; readonly action: 'acknowledged'; readonly agentId: string; readonly messageId: string }

@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import { FleetCore } from '../src/core.js'
+import { generateFleetMemberColor, normalizeFleetMemberColor } from '../src/names.js'
 import type {
   AgentRuntime,
   CreateRuntimeAgentInput,
+  RotateRuntimeAgentInput,
   RuntimeAgent,
   RuntimeAgentHandle,
 } from '../src/types.js'
@@ -38,6 +40,7 @@ class FakeAgent implements RuntimeAgent {
 class FakeRuntime implements AgentRuntime {
   readonly agents = new Map<string, FakeAgent>()
   readonly creates: CreateRuntimeAgentInput[] = []
+  rotateTo: string | undefined
 
   add(id: string): FakeAgent {
     const agent = new FakeAgent(id)
@@ -59,6 +62,16 @@ class FakeRuntime implements AgentRuntime {
       },
     })
   }
+
+  rotate(handle: RuntimeAgentHandle, _input: RotateRuntimeAgentInput): Promise<RuntimeAgentHandle | undefined> {
+    if (this.rotateTo === undefined) return Promise.resolve(undefined)
+    this.agents.delete(handle.agent.id)
+    const agent = this.add(this.rotateTo)
+    return Promise.resolve({
+      agent,
+      dispose: async () => { this.agents.delete(agent.id) },
+    })
+  }
 }
 
 function setup(): {
@@ -74,10 +87,18 @@ function setup(): {
 }
 
 describe('FleetCore', () => {
+  it('generates persistent hex colors and normalizes the previous palette names', () => {
+    expect(generateFleetMemberColor()).toMatch(/^#[0-9a-f]{6}$/)
+    expect(normalizeFleetMemberColor('blue')).toBe('#527fca')
+    expect(() => normalizeFleetMemberColor('not-a-color')).toThrow('#RRGGBB')
+  })
+
   it('registers, lists, updates, and unregisters a live Agent', () => {
     const { core, lead } = setup()
     core.register(lead, {
       name: 'tech-lead',
+      displayName: 'Ada',
+      color: '#408f92',
       role: 'Technical lead',
       capabilities: ['planning', 'planning', 'review'],
     })
@@ -86,6 +107,8 @@ describe('FleetCore', () => {
       id: 'lead-id',
       target: '@lead-id',
       name: 'tech-lead',
+      displayName: 'Ada',
+      color: '#408f92',
       status: 'idle',
       capabilities: ['planning', 'review'],
       managed: false,
@@ -107,11 +130,12 @@ describe('FleetCore', () => {
 
   it('resolves Fleet names while preserving native Agent targets', () => {
     const { core, lead } = setup()
-    core.register(lead, { name: 'tech-lead', role: 'Lead' })
+    core.register(lead, { name: 'tech-lead', displayName: 'Ada', role: 'Lead' })
 
     expect(core.resolveTarget('@tech-lead')).toBe('@lead-id')
     expect(core.resolveTarget('@native-agent-id')).toBe('@native-agent-id')
     expect(core.nameForAgent('lead-id')).toBe('tech-lead')
+    expect(core.displayNameForAgent('lead-id')).toBe('Ada')
     expect(core.nameForAgent('native-agent-id')).toBeUndefined()
   })
 
@@ -135,6 +159,8 @@ describe('FleetCore', () => {
     const { core, runtime, lead, reviewer } = setup()
     const created = await core.create(lead, {
       name: 'reviewer',
+      displayName: 'Grace',
+      color: '#bd6578',
       role: 'Code reviewer',
       capabilities: ['review'],
       cwd: '/workspace',
@@ -144,11 +170,14 @@ describe('FleetCore', () => {
 
     expect(created).toMatchObject({
       name: 'reviewer',
+      displayName: 'Grace',
+      color: '#bd6578',
       createdBy: 'lead-id',
       managed: true,
       status: 'idle',
     })
     expect(runtime.creates[0]).toMatchObject({
+      label: 'Grace',
       cwd: '/workspace',
       model: 'deepseek-chat',
       persona: 'Review code independently.',
@@ -169,5 +198,19 @@ describe('FleetCore', () => {
     expect(() => core.cancel(reviewer, 'worker')).toThrow('cannot cancel')
     expect(core.cancel(lead, 'worker')).toMatchObject({ name: 'worker' })
     expect(worker.cancellations).toEqual([{ kind: 'parent' }])
+  })
+
+  it('rebinds a managed member after an archive rotation', async () => {
+    const { core, runtime, lead } = setup()
+    const created = await core.create(lead, {
+      archiveId: 'fleet/team/member/worker',
+      name: 'worker',
+      role: 'Worker',
+    })
+    runtime.rotateTo = 'worker-hot-segment'
+
+    await expect(core.rotateManaged('worker')).resolves.toMatchObject({ id: 'worker-hot-segment' })
+    expect(core.nameForAgent(created.id)).toBeUndefined()
+    expect(core.nameForAgent('worker-hot-segment')).toBe('worker')
   })
 })

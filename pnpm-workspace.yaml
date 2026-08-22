@@ -1,2 +1,14 @@
 packages:
   - packages/*
+autoInstallPeers: false
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': true
+  dsh-harmony: false
+  koffi: true
+  node-pty: true
+  protobufjs: true
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh*'
+  - dsh-harmony
+  - dsh-harmony-react

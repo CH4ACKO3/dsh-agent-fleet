@@ -9,7 +9,9 @@ Fleet 的控制平面和公共基础。
 - 创建受 Core 管理的 Fleet Agent；
 - 由创建者取消或停止受管理 Agent。
 
-Core 只保存成员名称、角色和能力等 Fleet 元数据。Agent 的实际创建、运行状态、取消
+Core 保存成员的路由标识、持久显示名、姓名卡配色、角色和能力等 Fleet 元数据；未提供时会生成英文名，
+并在受控的饱和度和亮度范围内生成 `#RRGGBB` 配色。
+Agent 的实际创建、运行状态、取消
 和停止均委托给 DSH 原生 `AgentRegistry`，并复用 DSH Subagent 的模型、工具组合与
 sandbox 委派逻辑，不实现第二套 Agent loop。
 

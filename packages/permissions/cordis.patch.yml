@@ -1,0 +1,3 @@
+- insert:
+    - id: ch4acko3-dsh-agent-fleet-permissions
+      name: '@ch4acko3/dsh-agent-fleet-permissions'

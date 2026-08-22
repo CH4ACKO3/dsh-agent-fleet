@@ -1,42 +1,128 @@
 import { randomUUID } from 'node:crypto'
 import {
   appendFileSync,
+  closeSync,
+  cpSync,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
+  mkdtempSync,
+  openSync,
+  readlinkSync,
   readFileSync,
+  readSync,
   readdirSync,
+  rmSync,
   renameSync,
+  statSync,
+  realpathSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { FleetCore } from '@dsh-agent-fleet/core'
-import type { FleetCoordinationEvent, MessageHub } from '@dsh-agent-fleet/message'
-import type { FleetResourceEvent, FleetResources } from '@dsh-agent-fleet/resources'
+import type {
+  FleetCalendarEvent,
+  FleetCalendarEventChange,
+  FleetMemberStatusBoard,
+  FleetMemberStatusEvent,
+  FleetScheduler,
+  FleetScheduledTask,
+  FleetScheduledTaskEvent,
+  FleetProjectTaskEvent,
+} from '@dsh-agent-fleet/core'
+import {
+  generateFleetMemberColor,
+  generateMemberDisplayName,
+  normalizeFleetMemberColor,
+} from '@dsh-agent-fleet/core/names'
+import type {
+  FleetCoordinationEvent,
+  FleetTarget,
+  MessageHub,
+  SendMessageResult,
+} from '@dsh-agent-fleet/message'
+import type { FleetResources } from '@dsh-agent-fleet/resources'
+import type { FleetResourceEvent } from '@dsh-agent-fleet/resources'
+import type { FleetDocument, FleetResource } from '@dsh-agent-fleet/resources'
+import { create as createTar, extract as extractTar } from 'tar'
+import { FleetArchiveRegistry } from './archive.js'
+import type { FleetArchiveRestoreReport, FleetArchiveTeam } from './archive.js'
+import type { FleetAccessService } from './access.js'
+import type { FleetAssistantRuntime, FleetAssistantView } from './assistant.js'
+import type { FleetCollaborationService, FleetCollaborationTeam } from './collaboration.js'
+import {
+  FLEET_MESSAGE_MODULE,
+  FLEET_RESOURCES_MODULE,
+  FLEET_UI_MODULE,
+  FleetConfigurationRegistry,
+  type FleetConfigurationValue,
+  parseFleetMessageConfiguration,
+  parseFleetResourcesConfiguration,
+  parseFleetUiConfiguration,
+} from './configuration.js'
+import {
+  FLEET_MEMBER_PERMISSIONS,
+  FLEET_MEMBER_TOOL_GROUPS,
+  fleetMemberCanAccessChannel,
+} from './member-view.js'
+import type {
+  FleetMemberContacts,
+  FleetMemberPermission,
+  FleetMemberToolGroup,
+  FleetMemberView,
+  FleetWorkspaceMount,
+} from './member-view.js'
 
-export type FleetRunStatus = 'starting' | 'running' | 'finished' | 'blocked' | 'failed' | 'cancelled'
+export type FleetRunStatus = 'starting' | 'idle' | 'running' | 'paused' | 'finishing' | 'closed' | 'failed'
+export type FleetWorkStatus = 'running' | 'finished' | 'blocked' | 'failed' | 'cancelled'
+
+export interface FleetWorkRecord {
+  readonly id: string
+  readonly taskPath: string
+  readonly status: FleetWorkStatus
+  readonly startedAt: string
+  readonly endedAt?: string
+  readonly summary?: string
+}
 
 export interface FleetRunMember {
   readonly name: string
+  readonly displayName?: string
+  readonly color?: string
   readonly role: string
   readonly sessionId: string
+  readonly provider?: string
+  readonly model?: string
+  readonly status?: 'idle' | 'running' | 'waiting' | 'error' | 'offline' | 'paused' | 'unknown'
+}
+
+export interface FleetRunAssistant {
+  readonly sessionId: string
+  readonly view: FleetAssistantView
   readonly status?: 'idle' | 'running' | 'offline'
 }
 
 export interface FleetRunRecord {
   readonly id: string
+  readonly sourceSetupId?: string
   readonly team: string
   readonly name: string
   readonly configPath: string
-  readonly taskPath: string
   readonly projectRoot: string
-  readonly coordinator: string
+  /** @deprecated Legacy Teams may retain their former dedicated coordinator id. */
+  readonly coordinator?: string
+  /** @deprecated Use assistants. Kept while existing persisted Teams migrate. */
   readonly launcherSessionId: string
   readonly agentOptions?: {
     readonly provider?: string
@@ -44,7 +130,13 @@ export interface FleetRunRecord {
     readonly maxTokens?: number
   }
   readonly members: FleetRunMember[]
+  readonly assistants: FleetRunAssistant[]
   readonly status: FleetRunStatus
+  /** Members stopped by the current Team-level pause. Individually paused members are not included. */
+  readonly teamPausedMembers?: string[]
+  /** Runtime projection only; omitted from persisted run.json records. */
+  readonly runtimeState?: 'active' | 'dormant'
+  readonly work?: FleetWorkRecord
   readonly settled: boolean
   readonly startedAt: string
   readonly endedAt?: string
@@ -55,16 +147,93 @@ export interface FleetRunRecord {
 export interface FleetTraceEvent {
   readonly sequence: number
   readonly createdAt: string
+  readonly scope: 'team' | 'member'
+  readonly member?: string
+  readonly sourceSequence?: number
   readonly type: string
   readonly data: string
 }
 
-interface TeamMemberTemplate {
+export interface FleetJournalEvent {
+  readonly sequence: number
+  readonly createdAt: string
+  readonly scope: 'team' | 'member'
+  readonly member?: string
+  readonly sourceSequence?: number
+  readonly type: string
+  readonly data: unknown
+}
+
+export interface FleetTeamProjection {
+  readonly run: FleetRunRecord
+  readonly memberViews: FleetMemberView[]
+  readonly events: FleetJournalEvent[]
+  readonly hasMore: boolean
+}
+
+export interface FleetMemberProjection {
+  readonly run: FleetRunRecord
+  readonly view: FleetMemberView
+  readonly events: FleetJournalEvent[]
+  readonly hasMore: boolean
+}
+
+export interface FleetResourcePreview {
   readonly id: string
-  readonly name: string
-  readonly role: string
-  readonly prompt: string
-  readonly readableChannels: string[]
+  readonly kind: 'markdown' | 'text'
+  readonly body: string
+  readonly mediaType?: string
+  readonly size?: number
+  readonly history: readonly FleetResourceRevisionSummary[]
+  readonly historyTruncated: boolean
+  readonly revision?: FleetResourceRevisionDetail
+}
+
+export interface FleetResourceRevisionSummary {
+  readonly id: string
+  readonly updatedBy: string
+  readonly updatedAt: string
+  readonly operation: 'created' | 'updated'
+  readonly available: boolean
+  readonly size: number
+}
+
+export interface FleetResourceRevisionDetail extends FleetResourceRevisionSummary {
+  readonly before: string | null
+  readonly after: string
+}
+
+export type FleetActivityKind = 'message' | 'task' | 'calendar' | 'meeting' | 'vote' | 'document' | 'schedule' | 'member'
+
+export interface FleetActivityItem {
+  readonly id: string
+  readonly sequence: number
+  readonly createdAt: string
+  readonly kind: FleetActivityKind
+  readonly type: string
+  readonly acknowledged: boolean
+  readonly data: Record<string, JsonValue>
+}
+
+export interface FleetActivityInbox {
+  readonly runId: string
+  readonly member: string
+  readonly items: FleetActivityItem[]
+  readonly hasMore: boolean
+}
+
+export type FleetAssistantMessageKind = 'collaboration' | 'directive'
+
+export interface FleetAssistantMessage {
+  readonly id: string
+  readonly runId: string
+  readonly kind: FleetAssistantMessageKind
+  readonly text: string
+  readonly recipients: string[]
+  readonly assistantSessionId: string
+  readonly assistantId: string
+  readonly assistantName: string
+  readonly createdAt: string
 }
 
 interface TeamChannelTemplate {
@@ -78,10 +247,17 @@ interface TeamChannelTemplate {
 interface TeamTemplate {
   readonly team: string
   readonly name: string
-  readonly startupCoordinator: string
   readonly operatingPrompt: string
   readonly channels: TeamChannelTemplate[]
-  readonly members: TeamMemberTemplate[]
+  readonly assistant: FleetAssistantView
+  readonly members: FleetMemberView[]
+  readonly sharedResources: TeamResourceTemplate[]
+}
+
+interface TeamResourceTemplate {
+  readonly path: string
+  readonly label?: string
+  readonly mediaType?: string
 }
 
 interface StoredFleetEvent {
@@ -89,6 +265,131 @@ interface StoredFleetEvent {
   readonly createdAt: string
   readonly type: string
   readonly data: unknown
+  readonly member?: {
+    readonly name: string
+    readonly sessionId: string
+    readonly sequence: number
+  }
+}
+
+function projectionEntityId(data: unknown, key: string): string | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const entity = (data as Record<string, unknown>)[key]
+  if (typeof entity !== 'object' || entity === null) return undefined
+  const id = (entity as Record<string, unknown>).id
+  return typeof id === 'string' && id.length > 0 ? id : undefined
+}
+
+function projectionStateKey(event: StoredFleetEvent): string | undefined {
+  if (event.type === 'coordination.channel') {
+    const id = projectionEntityId(event.data, 'channel')
+    return id === undefined ? undefined : `channel:${id}`
+  }
+  if (event.type === 'coordination.meeting') {
+    const id = projectionEntityId(event.data, 'meeting')
+    return id === undefined ? undefined : `meeting:${id}`
+  }
+  if (event.type === 'resource.resource_added') {
+    const id = projectionEntityId(event.data, 'resource')
+    return id === undefined ? undefined : `resource:${id}`
+  }
+  if (event.type.startsWith('resource.document_')) {
+    const id = projectionEntityId(event.data, 'document')
+    return id === undefined ? undefined : `document:${id}`
+  }
+  if (event.type === 'workspace.assigned') {
+    const member = typeof event.data === 'object' && event.data !== null
+      ? (event.data as Record<string, unknown>).member
+      : undefined
+    return typeof member === 'string' && member.length > 0 ? `workspace:${member}` : undefined
+  }
+  if (event.type === 'member_status.updated') {
+    const member = typeof event.data === 'object' && event.data !== null
+      && 'status' in event.data && typeof event.data.status === 'object' && event.data.status !== null
+      && 'member' in event.data.status
+      ? event.data.status.member
+      : undefined
+    return typeof member === 'string' && member.length > 0 ? `member-status:${member}` : undefined
+  }
+  if (event.type === 'member_status.cleared') {
+    const member = typeof event.data === 'object' && event.data !== null && 'member' in event.data
+      ? event.data.member
+      : undefined
+    return typeof member === 'string' && member.length > 0 ? `member-status:${member}` : undefined
+  }
+  return undefined
+}
+
+function isProjectionActivity(event: StoredFleetEvent): boolean {
+  return event.type.startsWith('resource.')
+    || event.type === 'coordination.vote'
+    || event.type.startsWith('work_')
+    || event.type === 'team_status'
+    || event.type.startsWith('member_')
+    || event.type.startsWith('assistant_')
+}
+
+function projectionReceiptMessageId(event: StoredFleetEvent): string | undefined {
+  if (event.type !== 'coordination.inbox' || typeof event.data !== 'object' || event.data === null) return undefined
+  const data = event.data as Record<string, unknown>
+  return data.type === 'inbox' && data.action === 'acknowledged' && typeof data.messageId === 'string'
+    ? data.messageId
+    : undefined
+}
+
+/** Current entity state plus bounded recent UI history; Session events have a dedicated trace endpoint. */
+function compactTeamProjectionEvents(events: readonly StoredFleetEvent[]): StoredFleetEvent[] {
+  const state = new Map<string, StoredFleetEvent>()
+  const messages: StoredFleetEvent[] = []
+  const receipts: StoredFleetEvent[] = []
+  const activity: StoredFleetEvent[] = []
+  for (const event of events) {
+    if (event.type.startsWith('session.')) continue
+    const key = projectionStateKey(event)
+    if (key !== undefined) {
+      state.set(key, event)
+      continue
+    }
+    if (event.type === 'coordination.message') {
+      messages.push(event)
+      continue
+    }
+    if (projectionReceiptMessageId(event) !== undefined) {
+      receipts.push(event)
+      continue
+    }
+    if (isProjectionActivity(event)) activity.push(event)
+  }
+  const retainedMessages = messages.slice(-TEAM_PROJECTION_MESSAGE_LIMIT)
+  const retainedMessageIds = new Set(retainedMessages.flatMap(event => {
+    const id = projectionEntityId(event.data, 'message')
+    return id === undefined ? [] : [id]
+  }))
+  return [
+    ...state.values(),
+    ...retainedMessages,
+    ...receipts.filter(event => retainedMessageIds.has(projectionReceiptMessageId(event) ?? '')),
+    ...activity.slice(-TEAM_PROJECTION_ACTIVITY_LIMIT),
+  ].sort((left, right) => left.sequence - right.sequence)
+}
+
+function parseStoredEvents(source: string): StoredFleetEvent[] {
+  const events: StoredFleetEvent[] = []
+  let start = 0
+  while (start < source.length) {
+    const newline = source.indexOf('\n', start)
+    const end = newline < 0 ? source.length : newline
+    if (end > start) {
+      const typeMarker = source.indexOf('"type":"', start)
+      const typeStart = typeMarker < 0 || typeMarker >= end ? -1 : typeMarker + 8
+      if (typeStart < 0 || !source.startsWith('session.', typeStart)) {
+        events.push(JSON.parse(source.slice(start, end)) as StoredFleetEvent)
+      }
+    }
+    if (newline < 0) break
+    start = newline + 1
+  }
+  return events
 }
 
 interface SessionEventLike {
@@ -99,7 +400,13 @@ interface SessionEventLike {
 }
 
 interface SessionPersistenceLike {
-  inspect(id: ReturnType<typeof SessionId>): Promise<{ readonly events: readonly SessionEventLike[] }>
+  inspect(id: ReturnType<typeof SessionId>): Promise<{
+    readonly meta?: SessionHeader
+    readonly events: readonly SessionEventLike[]
+  }>
+  list?(): Promise<SessionHeader[]>
+  create?(meta: SessionHeader): Promise<void>
+  append?(id: ReturnType<typeof SessionId>, events: readonly SessionEvent[]): Promise<void>
 }
 
 interface RunWaiter {
@@ -108,14 +415,57 @@ interface RunWaiter {
   fail(error: unknown): void
 }
 
-interface StartRunInput {
+interface StoredTeamReference {
+  readonly id: string
+  readonly projectRoot: string
+}
+
+export interface FleetRunServiceOptions {
+  readonly registryDirectory?: string
+  readonly archives?: FleetArchiveRegistry
+  readonly access?: FleetAccessService
+  readonly configuration?: FleetConfigurationRegistry
+}
+
+export interface ExportFleetArchiveInput {
+  readonly runId: string
+  readonly destination: string
+  readonly includeWorkspace?: boolean
+}
+
+export interface FleetArchiveExportResult {
+  readonly path: string
+  readonly teamId: string
+  readonly includesWorkspace: boolean
+  readonly extensions: readonly string[]
+}
+
+export interface ImportFleetArchiveInput {
+  readonly archivePath: string
+  readonly projectRoot: string
+  /** Restore keeps archive identities; copy creates a new Team and member Sessions. */
+  readonly mode?: 'restore' | 'copy'
+}
+
+export interface FleetArchiveImportResult {
+  readonly run: FleetRunRecord
+  readonly extensions: FleetArchiveRestoreReport
+}
+
+export interface CreateRunInput {
   readonly configPath: string
-  readonly taskPath: string
   readonly projectRoot: string
   readonly requiredPaths: readonly string[]
+  readonly sourceSetupId?: string
   readonly provider?: string
   readonly model?: string
   readonly maxTokens?: number
+}
+
+interface StartRunInput {
+  readonly runId?: string
+  readonly taskPath: string
+  readonly projectRoot: string
 }
 
 interface ResumeRunInput {
@@ -123,7 +473,86 @@ interface ResumeRunInput {
   readonly projectRoot: string
 }
 
-const TERMINAL = new Set<FleetRunStatus>(['finished', 'blocked', 'failed', 'cancelled'])
+export interface SendAssistantMessageInput {
+  readonly runId?: string
+  readonly kind: FleetAssistantMessageKind
+  readonly text: string
+  readonly projectRoot?: string
+}
+
+export interface SendFleetConversationMessageInput {
+  readonly runId: string
+  readonly to: FleetTarget
+  readonly text: string
+  readonly replyTo?: string
+  readonly resources?: readonly string[]
+  readonly mentions?: readonly string[]
+  readonly delivery: 'quiet' | 'wakeup' | 'interrupt'
+}
+
+export interface UploadFleetResourceInput {
+  readonly runId: string
+  readonly name: string
+  readonly base64: string
+  readonly label?: string
+  readonly mediaType?: string
+}
+
+export interface AttachAssistantInput {
+  readonly runId?: string
+  readonly projectRoot?: string
+  readonly assistantId?: string
+  readonly id?: string
+  readonly name?: string
+  readonly color?: string
+  readonly role?: string
+  readonly responsibility?: string
+  readonly prompt?: string
+  readonly provider?: string
+  readonly model?: string
+  readonly toolGroups?: readonly FleetMemberToolGroup[]
+  readonly permissions?: readonly FleetMemberPermission[]
+  readonly contacts?: FleetMemberContacts
+}
+
+export interface AddFleetMemberInput {
+  readonly runId: string
+  readonly view: FleetMemberView
+  readonly workspaces?: readonly FleetWorkspaceMount[]
+}
+
+export interface UpdateFleetMemberInput {
+  readonly runId: string
+  readonly member: string
+  readonly view: FleetMemberView
+}
+
+const TERMINAL = new Set<FleetRunStatus>(['closed', 'failed'])
+const MAX_ASSISTANT_MESSAGE_LENGTH = 16_000
+const TEAM_PROJECTION_MESSAGE_LIMIT = 500
+const TEAM_PROJECTION_ACTIVITY_LIMIT = 250
+const TEAM_PROJECTION_CACHE_LIMIT = 16
+const FLEET_ARCHIVE_FORMAT = 'dsh-agent-fleet-archive'
+const FLEET_ARCHIVE_VERSION = 1
+
+interface FleetArchiveManifest {
+  readonly format: typeof FLEET_ARCHIVE_FORMAT
+  readonly version: typeof FLEET_ARCHIVE_VERSION
+  readonly exportedAt: string
+  readonly includesWorkspace: boolean
+  readonly team: FleetArchiveTeam & { readonly status: 'paused' }
+  readonly sessions: readonly string[]
+  readonly extensions: readonly string[]
+}
+
+interface FleetArchiveSession {
+  readonly meta: SessionHeader
+  readonly events: readonly SessionEvent[]
+}
+
+function parseStoredRecord(value: unknown): FleetRunRecord {
+  return object(value, 'Fleet run record') as unknown as FleetRunRecord
+}
 
 function recordSnapshot(record: FleetRunRecord): FleetRunRecord {
   return structuredClone(record)
@@ -134,6 +563,181 @@ function object(value: unknown, label: string): Record<string, unknown> {
     throw new Error(`${label} must be an object`)
   }
   return value as Record<string, unknown>
+}
+
+function archiveManifest(value: unknown): FleetArchiveManifest {
+  const manifest = object(value, 'Fleet archive manifest')
+  if (manifest.format !== FLEET_ARCHIVE_FORMAT || manifest.version !== FLEET_ARCHIVE_VERSION) {
+    throw new Error('unsupported Fleet archive format or version')
+  }
+  if (typeof manifest.includesWorkspace !== 'boolean') {
+    throw new Error('Fleet archive includesWorkspace must be a boolean')
+  }
+  const team = object(manifest.team, 'Fleet archive Team')
+  const id = text(team.id, 'Fleet archive Team id')
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`invalid Fleet archive Team id ${id}`)
+  const projectRoot = text(team.projectRoot, 'Fleet archive Team projectRoot')
+  if (!isAbsolute(projectRoot)) throw new Error('Fleet archive Team projectRoot must be absolute')
+  if (team.status !== 'paused') throw new Error('Fleet archive Team must be paused')
+  const sessions = array(manifest.sessions, 'Fleet archive sessions').map((value, index) => {
+    const id = text(value, `Fleet archive sessions[${index}]`)
+    if (basename(id) !== id) throw new Error(`invalid Fleet archive Session id ${id}`)
+    return id
+  })
+  const extensions = array(manifest.extensions, 'Fleet archive extensions').map((value, index) =>
+    text(value, `Fleet archive extensions[${index}]`))
+  return {
+    format: FLEET_ARCHIVE_FORMAT,
+    version: FLEET_ARCHIVE_VERSION,
+    exportedAt: text(manifest.exportedAt, 'Fleet archive exportedAt'),
+    includesWorkspace: manifest.includesWorkspace,
+    team: {
+      id,
+      name: text(team.name, 'Fleet archive Team name'),
+      projectRoot,
+      status: 'paused',
+    },
+    sessions,
+    extensions,
+  }
+}
+
+function pathInside(root: string, target: string): boolean {
+  const boundary = relative(root, target)
+  return boundary === '' || (boundary !== '..' && !boundary.startsWith(`..${sep}`) && !isAbsolute(boundary))
+}
+
+function relocateArchivePath(
+  path: string,
+  sourceRoot: string,
+  targetRoot: string,
+  sourceTeamId: string,
+  targetTeamId: string,
+): string {
+  if (!isAbsolute(path) || !pathInside(sourceRoot, path)) return path
+  const sourceRun = join(sourceRoot, '.fleet', 'runs', sourceTeamId)
+  if (pathInside(sourceRun, path)) {
+    return resolve(targetRoot, '.fleet', 'runs', targetTeamId, relative(sourceRun, path))
+  }
+  return resolve(targetRoot, relative(sourceRoot, path))
+}
+
+function remapArchiveIdentity(
+  value: unknown,
+  sourceTeamId: string,
+  targetTeamId: string,
+  sessionIdMap: Readonly<Record<string, string>>,
+): unknown {
+  if (typeof value === 'string') {
+    if (value === sourceTeamId) return targetTeamId
+    const direct = sessionIdMap[value]
+    if (direct !== undefined) return direct
+    if (value.startsWith('@')) {
+      const recipient = sessionIdMap[value.slice(1)]
+      if (recipient !== undefined) return `@${recipient}`
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => remapArchiveIdentity(item, sourceTeamId, targetTeamId, sessionIdMap))
+  }
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    sessionIdMap[key] ?? (key === sourceTeamId ? targetTeamId : key),
+    remapArchiveIdentity(item, sourceTeamId, targetTeamId, sessionIdMap),
+  ]))
+}
+
+function relocateArchiveEvents(
+  source: string,
+  sourceRoot: string,
+  targetRoot: string,
+  sourceTeamId: string,
+  targetTeamId: string,
+  sessionIdMap: Readonly<Record<string, string>>,
+  currentWorkId?: string,
+): string {
+  return source.split('\n').flatMap(line => {
+    if (line.length === 0) return []
+    const stored = JSON.parse(line) as StoredFleetEvent
+    const event = {
+      ...stored,
+      data: remapArchiveIdentity(stored.data, sourceTeamId, targetTeamId, sessionIdMap),
+    } as StoredFleetEvent
+    if (event.type === 'team_created') {
+      const data = event.data as { readonly configPath: string; readonly sourceConfigPath?: string }
+      return [JSON.stringify({
+        ...event,
+        data: {
+          ...data,
+          configPath: join(targetRoot, '.fleet', 'runs', targetTeamId, 'team.json'),
+          ...(data.sourceConfigPath === undefined ? {} : {
+            sourceConfigPath: relocateArchivePath(
+              data.sourceConfigPath, sourceRoot, targetRoot, sourceTeamId, targetTeamId,
+            ),
+          }),
+        },
+      })]
+    }
+    if (event.type === 'work_started') {
+      const data = event.data as { readonly workId: string; readonly taskPath: string }
+      return [JSON.stringify({
+        ...event,
+        data: {
+          ...data,
+          taskPath: data.workId === currentWorkId
+            ? join(targetRoot, '.fleet', 'runs', targetTeamId, 'current-work.md')
+            : relocateArchivePath(data.taskPath, sourceRoot, targetRoot, sourceTeamId, targetTeamId),
+        },
+      })]
+    }
+    if (event.type === 'workspace.assigned') {
+      const data = event.data as { readonly member: string; readonly workspaces: readonly FleetWorkspaceMount[] }
+      return [JSON.stringify({
+        ...event,
+        data: {
+          ...data,
+          workspaces: data.workspaces.map(workspace => ({
+            ...workspace,
+            path: relocateArchivePath(
+              workspace.path, sourceRoot, targetRoot, sourceTeamId, targetTeamId,
+            ),
+          })),
+        },
+      })]
+    }
+    if (event.type === 'resource.resource_added') {
+      const data = event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>
+      return [JSON.stringify({
+        ...event,
+        data: {
+          ...data,
+          resource: {
+            ...data.resource,
+            path: relocateArchivePath(
+              data.resource.path, sourceRoot, targetRoot, sourceTeamId, targetTeamId,
+            ),
+          },
+        },
+      })]
+    }
+    return [JSON.stringify(event)]
+  }).join('\n') + '\n'
+}
+
+function assertSafeArchiveLinks(root: string, directory = root): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    const info = lstatSync(path)
+    if (info.isSymbolicLink()) {
+      const link = readlinkSync(path)
+      if (isAbsolute(link) || !pathInside(root, resolve(dirname(path), link))) {
+        throw new Error(`Fleet archive contains an unsafe symbolic link: ${relative(root, path)}`)
+      }
+    } else if (info.isDirectory()) {
+      assertSafeArchiveLinks(root, path)
+    }
+  }
 }
 
 function text(value: unknown, label: string): string {
@@ -152,61 +756,262 @@ function array(value: unknown, label: string): unknown[] {
   return value
 }
 
-function parseTeamTemplate(value: unknown): TeamTemplate {
-  const root = object(value, 'Team template')
-  const members = array(root.members, 'members').map((rawMember, index): TeamMemberTemplate => {
-    const member = object(rawMember, `members[${index}]`)
-    const identity = object(member.identity, `members[${index}].identity`)
-    const access = member.access === undefined ? undefined : object(member.access, `members[${index}].access`)
-    const channels = access?.channels === undefined ? undefined : object(access.channels, `members[${index}].access.channels`)
-    const reads = channels?.read === undefined
-      ? []
-      : array(channels.read, `members[${index}].access.channels.read`).map((item, readIndex) =>
-        text(item, `members[${index}].access.channels.read[${readIndex}]`),
-      )
-    return {
-      id: text(member.id, `members[${index}].id`),
-      name: text(member.name, `members[${index}].name`),
-      role: text(identity.role, `members[${index}].identity.role`),
-      prompt: text(identity.prompt, `members[${index}].identity.prompt`),
-      readableChannels: reads,
-    }
-  })
-  const ids = new Set(members.map(member => member.id))
-  if (ids.size !== members.length) throw new Error('Team member ids must be unique')
+const FLEET_COORDINATOR_ID = 'fleet-coordinator'
 
-  const channels = array(root.channels, 'channels').map((rawChannel, index): TeamChannelTemplate => {
-    const channel = object(rawChannel, `channels[${index}]`)
-    return {
-      id: text(channel.id, `channels[${index}].id`),
-      name: text(channel.name, `channels[${index}].name`),
-      initialMessage: optionalText(channel.initial_message, `channels[${index}].initial_message`),
-      summary: optionalText(channel.summary, `channels[${index}].summary`),
-      body: optionalText(channel.body, `channels[${index}].body`),
-    }
-  })
-  const startupCoordinator = text(root.startup_coordinator, 'startup_coordinator')
-  if (!ids.has(startupCoordinator)) throw new Error(`startup coordinator ${startupCoordinator} is not a Team member`)
+function choice<const T extends string>(value: unknown, label: string, options: readonly T[]): T {
+  const selected = text(value, label)
+  if (!options.includes(selected as T)) throw new Error(`${label} must be one of ${options.join(', ')}`)
+  return selected as T
+}
+
+function memberColor(member: Record<string, unknown>, label: string): string | undefined {
+  const color = optionalText(member.color, `${label}.color`)
+  return color.length === 0 ? undefined : normalizeFleetMemberColor(color)
+}
+
+function memberToolGroups(value: unknown, label: string): FleetMemberToolGroup[] {
+  if (value === undefined) return [...FLEET_MEMBER_TOOL_GROUPS]
+  return array(value, label).map((item, index) => choice(item, `${label}[${index}]`, FLEET_MEMBER_TOOL_GROUPS))
+}
+
+function memberPermissions(value: unknown, label: string): FleetMemberPermission[] {
+  if (value === undefined) return [...FLEET_MEMBER_PERMISSIONS]
+  return array(value, label).map((item, index) => choice(item, `${label}[${index}]`, FLEET_MEMBER_PERMISSIONS))
+}
+
+function contactScope(value: unknown, label: string): '*' | string[] {
+  if (value === undefined || value === '*') return '*'
+  return array(value, label).map((item, index) => text(item, `${label}[${index}]`))
+}
+
+function memberContacts(value: unknown, label: string): FleetMemberContacts {
+  if (value === undefined) return { members: '*', channels: '*' }
+  const contacts = object(value, label)
   return {
-    team: text(root.team, 'team'),
-    name: text(root.name, 'name'),
-    startupCoordinator,
-    operatingPrompt: text(root.operating_prompt, 'operating_prompt'),
-    channels,
-    members,
+    members: contactScope(contacts.members, `${label}.members`),
+    channels: contactScope(contacts.channels, `${label}.channels`),
   }
 }
 
-function persona(template: TeamTemplate, member: TeamMemberTemplate): string {
+function normalizedMemberView(value: FleetMemberView, label = 'member'): FleetMemberView {
+  const raw = value as unknown as Record<string, unknown>
+  const color = memberColor(raw, label)
+  const provider = optionalText(raw.provider, `${label}.provider`)
+  const model = optionalText(raw.model, `${label}.model`)
+  const id = text(raw.id, `${label}.id`)
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) throw new Error(`${label}.id must use lower-kebab-case`)
+  return {
+    id,
+    name: text(raw.name, `${label}.name`),
+    ...(color === undefined ? {} : { color }),
+    role: text(raw.role, `${label}.role`),
+    ...(raw.responsibility === undefined ? {} : { responsibility: optionalText(raw.responsibility, `${label}.responsibility`) }),
+    prompt: optionalText(raw.prompt, `${label}.prompt`),
+    ...(provider.length === 0 ? {} : { provider }),
+    ...(model.length === 0 ? {} : { model }),
+    toolGroups: memberToolGroups(raw.toolGroups, `${label}.toolGroups`),
+    permissions: memberPermissions(raw.permissions, `${label}.permissions`),
+    contacts: memberContacts(raw.contacts, `${label}.contacts`),
+  }
+}
+
+function validateMemberContacts(
+  members: readonly FleetMemberView[],
+  channelIds: ReadonlySet<string>,
+  additionalMemberIds: readonly string[] = [],
+): void {
+  const memberIds = new Set([...members.map(member => member.id), ...additionalMemberIds])
+  for (const member of members) {
+    if (member.contacts.members !== '*') {
+      for (const contact of member.contacts.members) {
+        if (!memberIds.has(contact)) throw new Error(`Fleet member ${member.id} has unknown contact ${contact}`)
+      }
+    }
+    if (member.contacts.channels !== '*') {
+      for (const channel of member.contacts.channels) {
+        if (!channelIds.has(channel)) throw new Error(`Fleet member ${member.id} has unknown Channel #${channel}`)
+      }
+    }
+  }
+}
+
+function templateMember(value: unknown, label: string): FleetMemberView {
+  const member = object(value, label)
+  return normalizedMemberView({
+    ...member,
+    responsibility: text(member.responsibilities, `${label}.responsibilities`),
+  } as unknown as FleetMemberView, label)
+}
+
+function parseInitializationTemplate(
+  root: Record<string, unknown>,
+  configuration: FleetConfigurationRegistry,
+): TeamTemplate {
+  const core = object(root.core, 'core')
+  const modules = configuration.parse(root.modules)
+  const message = parseFleetMessageConfiguration(modules[FLEET_MESSAGE_MODULE])
+  const resources = parseFleetResourcesConfiguration(modules[FLEET_RESOURCES_MODULE])
+  const ui = parseFleetUiConfiguration(modules[FLEET_UI_MODULE])
+  const name = text(core.name, 'core.name')
+  const positioning = optionalText(core.positioning, 'core.positioning')
+  const rules = message.rules
+  const collaborationMethod = message.collaborationMethod
+  const resourcePolicy = resources.policy
+  const updateDensity = ui.userAccess.updateDensity
+  const notificationPolicy = ui.userAccess.notificationPolicy
+  const contentPreference = ui.userAccess.contentPreference
+  const updateInstruction = {
+    concise: 'Keep user-facing updates concise.',
+    balanced: 'Use balanced user-facing updates with decisions, progress, and enough supporting context.',
+    detailed: 'Provide detailed user-facing updates with relevant reasoning and evidence.',
+  }[updateDensity]
+  const notificationInstruction = {
+    decisions: 'Notify the user only when a user decision or external intervention is needed.',
+    milestones: 'Notify the user for important milestones, decisions, and external blockers.',
+    continuous: 'Keep the user continuously informed of meaningful progress, decisions, and blockers.',
+  }[notificationPolicy]
+  const members = array(core.members, 'core.members').map((rawMember, index) => (
+    templateMember(rawMember, `core.members[${index}]`)
+  ))
+  const assistant = templateMember(core.assistant, 'core.assistant')
+  const participants = [assistant, ...members]
+  const ids = new Set(participants.map(member => member.id))
+  if (ids.size !== participants.length) throw new Error('Team member ids must be unique')
+
+  const channelId = message.defaultChannel.id
+  const channelName = message.defaultChannel.name
+  validateMemberContacts(participants, new Set([channelId]))
+  const sharedResources = resources.items.map(resource => ({ ...resource }))
+  const profile = [
+    positioning.length === 0 ? '' : `## Team positioning\n${positioning}`,
+    rules.length === 0 ? '' : `## Rules and preferences\n${rules}`,
+    collaborationMethod.length === 0 ? '' : `## Collaboration method\n${collaborationMethod}`,
+    resourcePolicy.length === 0 ? '' : `## Shared resource preferences\n${resourcePolicy}`,
+    [
+      '## External user access',
+      'The user is an external controller and observer, not a Fleet member. The Team continues to operate when the user is absent.',
+      updateInstruction,
+      notificationInstruction,
+      ...(contentPreference.length === 0 ? [] : [`Content preference: ${contentPreference}`]),
+    ].join('\n'),
+  ].filter(Boolean).join('\n\n')
+  const channelBody = [
+    `Team: ${name}`,
+    positioning.length === 0 ? '' : `Positioning: ${positioning}`,
+    rules.length === 0 ? '' : `Rules and preferences: ${rules}`,
+    collaborationMethod.length === 0 ? '' : `Collaboration method: ${collaborationMethod}`,
+    resourcePolicy.length === 0 ? '' : `Shared resource preferences: ${resourcePolicy}`,
+  ].filter(Boolean).join('\n\n')
+  return {
+    team: name,
+    name,
+    operatingPrompt: profile,
+    channels: [{
+      id: channelId,
+      name: channelName,
+      initialMessage: '',
+      summary: `${name} initialized.`,
+      body: channelBody,
+    }],
+    assistant,
+    members,
+    sharedResources,
+  }
+}
+
+function parseTeamTemplate(value: unknown, configuration: FleetConfigurationRegistry): TeamTemplate {
+  const root = object(value, 'Team template')
+  return parseInitializationTemplate(root, configuration)
+}
+
+function materializeTeamConfiguration(value: unknown): Record<string, unknown> {
+  const root = object(value, 'Team template')
+  const core = object(root.core, 'core')
+  const names: string[] = []
+  const colors: string[] = []
+  const members = array(core.members, 'core.members').map((rawMember, index) => {
+    const member = object(rawMember, `core.members[${index}]`)
+    const configuredName = optionalText(member.name, `core.members[${index}].name`)
+    const configuredColor = optionalText(member.color, `core.members[${index}].color`)
+    const name = configuredName || generateMemberDisplayName(names)
+    const color = configuredColor.length === 0
+      ? generateFleetMemberColor(colors)
+      : normalizeFleetMemberColor(configuredColor)
+    names.push(name)
+    colors.push(color)
+    return { ...member, name, color }
+  })
+  const configuredAssistant = object(core.assistant, 'core.assistant')
+  const assistantName = optionalText(configuredAssistant.name, 'core.assistant.name')
+    || generateMemberDisplayName(names)
+  const assistantColor = optionalText(configuredAssistant.color, 'core.assistant.color')
+  const assistant = {
+    ...configuredAssistant,
+    id: optionalText(configuredAssistant.id, 'core.assistant.id') || 'team-assistant',
+    name: assistantName,
+    color: assistantColor.length === 0
+      ? generateFleetMemberColor(colors)
+      : normalizeFleetMemberColor(assistantColor),
+    role: optionalText(configuredAssistant.role, 'core.assistant.role') || 'Team Assistant',
+    responsibilities: optionalText(configuredAssistant.responsibilities, 'core.assistant.responsibilities')
+      || 'Maintain the user-facing Team conversation and help the user observe, control, and collaborate with the Team.',
+    prompt: optionalText(configuredAssistant.prompt, 'core.assistant.prompt'),
+  }
+  return {
+    core: { ...core, assistant, members },
+    modules: object(root.modules, 'modules'),
+  }
+}
+
+function persona(template: TeamTemplate, member: FleetMemberView): string {
+  const members = member.contacts.members === '*' ? 'all Team members' : member.contacts.members.map(id => `@${id}`).join(', ')
+  const channels = member.contacts.channels === '*' ? 'all Team channels' : member.contacts.channels.map(id => `#${id}`).join(', ')
   return [
     template.operatingPrompt,
     '## Fleet identity',
-    `You are @${member.id} (${member.name}), one peer in Fleet Team ${template.team}.`,
+    `You are @${member.name}, one peer in Fleet Team ${template.team}.`,
+    `Use display names such as @${member.name} when addressing teammates; member ids are internal stable identifiers.`,
     'No member is your parent. Use Fleet Channels, direct messages, Meetings, Votes, shared files, and resource references to coordinate.',
-    'The startup coordinator only begins the first coordination round and does not own the other members.',
+    'No Fleet member is a default coordinator. Claim work, negotiate ownership, and ask the relevant peers for review directly.',
+    'Keep your short Fleet member status text current when the work you are doing meaningfully changes. Clear it when the note is no longer useful. This self-declared text is separate from automatic runtime state.',
+    'Use Fleet scheduled tasks for real future follow-ups or recurring team routines; do not create reminders for work you can do immediately.',
+    '## Member view',
+    `Configured Fleet tool groups: ${member.toolGroups.join(', ') || 'none'}. Optional groups are available only when their sub-plugin is installed.`,
+    'Messaging and member status tools stay available. Use fleet_tools to search for and load other granted Fleet capabilities only when needed.',
+    `Granted Fleet permissions: ${member.permissions.join(', ') || 'none'}.`,
+    `Reachable members: ${members || 'none'}.`,
+    `Reachable Channels: ${channels || 'none'}.`,
     '## Role',
-    member.prompt,
+    member.role,
+    ...(member.responsibility === undefined ? [] : ['## Responsibility', member.responsibility]),
+    ...(member.prompt.length === 0 ? [] : ['## Member instructions', member.prompt]),
   ].join('\n\n')
+}
+
+async function installMemberTools(
+  childCtx: Context,
+  runtime: FleetCollaborationTeam,
+  member: string,
+  exposeHostFleetTools = false,
+): Promise<void> {
+  await childCtx.inject(['fs', 'tools'], (scope) => {
+    return runtime.installTools(scope, member, { exposeHostFleetTools })
+  })
+}
+
+/**
+ * An omitted channel member list means "open to every participant whose Fleet
+ * view grants the channel". Keep an explicit list only for genuinely restricted
+ * channels so assistants attached after Team creation are not frozen out of
+ * otherwise public Team conversations.
+ */
+function initialChannelMembers(
+  members: readonly FleetMemberView[],
+  channelId: string,
+): readonly string[] | undefined {
+  const readable = members.filter(member => fleetMemberCanAccessChannel(member, channelId))
+  if (readable.length === members.length) return undefined
+  return readable.map(member => `@${member.id}`)
 }
 
 function isTerminal(status: FleetRunStatus): boolean {
@@ -217,49 +1022,144 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const EXPLICIT_WAIT_DELAY_MS = 2_000
+const QUIET_TOOL_WAIT_DELAY_MS = 90_000
+const EXPLICIT_WAIT_TOOLS = new Set(['fleet_wait', 'sleep', 'wait', 'wait_agent', 'wait_threads'])
+const COMMAND_ARGUMENT_KEYS = new Set(['cmd', 'command', 'script', 'shell'])
+
+function commandStrings(value: unknown, key?: string): string[] {
+  if (typeof value === 'string') return key !== undefined && COMMAND_ARGUMENT_KEYS.has(key.toLowerCase()) ? [value] : []
+  if (Array.isArray(value)) return value.flatMap(item => commandStrings(item, key))
+  if (typeof value !== 'object' || value === null) return []
+  return Object.entries(value).flatMap(([childKey, child]) => commandStrings(child, childKey))
+}
+
+function isPassiveWaitCommand(command: string): boolean {
+  const segments = command
+    .split(/(?:&&|\|\||;|\n)/u)
+    .map(segment => segment.trim())
+    .filter(Boolean)
+  const passiveCommand = /^(?:(?:builtin|command|exec|timeout)\s+(?:\S+\s+)?)?(?:sleep|wait|tail\s+-f|watch)(?:\s|$)/iu
+  return segments.length > 0 && segments.every(segment => passiveCommand.test(segment))
+}
+
+function isExplicitWaitCall(name: string, rawArguments: string): boolean {
+  const normalizedName = name.trim().toLowerCase().replaceAll('-', '_')
+  if (EXPLICIT_WAIT_TOOLS.has(normalizedName)) return true
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(rawArguments) as unknown
+  } catch {
+    return false
+  }
+  if (normalizedName === 'fleet_run' && typeof parsed === 'object' && parsed !== null) {
+    if ((parsed as Record<string, unknown>).action === 'wait') return true
+  }
+  return commandStrings(parsed).some(isPassiveWaitCommand)
+}
+
+const NETWORK_RECOVERY_INITIAL_DELAY_MS = 30_000
+const NETWORK_RECOVERY_MAX_DELAY_MS = 5 * 60_000
+const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
+const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
+const RESOURCE_HISTORY_LIMIT = 500
+
+function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kind'] | undefined {
+  const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
+  const name = (resource.label ?? basename(resource.path)).toLowerCase()
+  const path = resource.path.toLowerCase()
+  if (mediaType === 'text/markdown' || mediaType === 'text/x-markdown'
+    || /\.(?:md|markdown)$/u.test(name) || /\.(?:md|markdown)$/u.test(path)) {
+    return 'markdown'
+  }
+  if (mediaType?.startsWith('text/') === true
+    || ['application/json', 'application/ld+json', 'application/xml', 'application/yaml', 'application/x-yaml'].includes(mediaType ?? '')
+    || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(name)
+    || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(path)) return 'text'
+  return undefined
+}
+
+interface MemberToolActivity {
+  readonly calls: Map<string, { readonly explicitWait: boolean }>
+  lastInteractionAt: number
+  timer: ReturnType<typeof setTimeout> | undefined
+}
+
+interface NetworkRecovery {
+  readonly runId: string
+  readonly member: string
+  readonly route: string
+  readonly attempt: number
+  timer: ReturnType<typeof setTimeout> | undefined
+}
+
 export class FleetRunService {
   private readonly records = new Map<string, FleetRunRecord>()
+  private readonly voteWorkIds = new Map<string, Map<string, string>>()
+  private readonly dormantRunIds = new Set<string>()
   private readonly eventSequences = new Map<string, number>()
+  private readonly teamProjectionEvents = new Map<string, StoredFleetEvent[]>()
+  private readonly memberViewSnapshots = new Map<string, FleetMemberView[]>()
   private readonly waiters = new Set<RunWaiter>()
   private readonly finalizations = new Map<string, Promise<void>>()
-  private activeRunId: string | undefined
-  private resumingRunId: string | undefined
+  private readonly resumingRunIds = new Set<string>()
+  private readonly networkRecoveries = new Map<string, NetworkRecovery>()
+  private readonly memberToolActivity = new Map<string, MemberToolActivity>()
+  private readonly waitingSessionIds = new Set<string>()
+  private readonly abnormalSessionIds = new Set<string>()
+  private readonly registryDirectory: string
+  private readonly archives: FleetArchiveRegistry
+  private readonly access: FleetAccessService | undefined
+  private readonly configuration: FleetConfigurationRegistry
 
   constructor(
     private readonly ctx: Context,
     private readonly core: FleetCore,
-    private readonly messages: MessageHub,
-    private readonly resources: FleetResources,
-  ) {}
+    private readonly collaboration: FleetCollaborationService,
+    options: FleetRunServiceOptions = {},
+  ) {
+    const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+    this.registryDirectory = options.registryDirectory ?? join(dshHome, 'dsh-agent-fleet', 'teams')
+    this.archives = options.archives ?? new FleetArchiveRegistry()
+    this.access = options.access
+    this.configuration = options.configuration ?? new FleetConfigurationRegistry()
+    this.loadPersistedTeams()
+  }
 
-  async start(launcher: Agent, input: StartRunInput): Promise<FleetRunRecord> {
-    if (this.resumingRunId !== undefined) throw new Error(`Fleet run ${this.resumingRunId} is currently resuming`)
-    const active = this.activeRunId === undefined ? undefined : this.records.get(this.activeRunId)
-    if (active !== undefined && !isTerminal(active.status)) throw new Error(`Fleet run ${active.id} is still ${active.status}`)
-    if (active !== undefined && !active.settled) throw new Error(`Fleet run ${active.id} is still settling`)
-    if (this.persistence() === undefined) throw new Error('fleet_run requires a DSH session persistence provider')
-    if (active !== undefined) {
-      this.messages.reset()
-      this.resources.reset()
+  async create(launcher: Agent, input: CreateRunInput): Promise<FleetRunRecord> {
+    if (input.sourceSetupId !== undefined) {
+      const existing = this.findBySetupId(input.sourceSetupId, input.projectRoot)
+      if (existing !== undefined) {
+        return this.dormantRunIds.has(existing.id)
+          ? this.resume(launcher, { runId: existing.id, projectRoot: input.projectRoot })
+          : existing
+      }
     }
+    const assistantTeam = this.assistantTeamForSession(String(launcher.id))
+    if (assistantTeam !== undefined) {
+      throw new Error(`Session ${String(launcher.id)} is already the foreground assistant for Fleet team ${assistantTeam.id}; create or connect the new Team from a separate native Session`)
+    }
+    if (this.persistence() === undefined) throw new Error('fleet_run requires a DSH session persistence provider')
 
-    const configPath = isAbsolute(input.configPath) ? input.configPath : resolve(input.projectRoot, input.configPath)
-    const taskPath = isAbsolute(input.taskPath) ? input.taskPath : resolve(input.projectRoot, input.taskPath)
-    const template = parseTeamTemplate(JSON.parse(readFileSync(configPath, 'utf8')) as unknown)
-    const task = readFileSync(taskPath, 'utf8').trim()
-    if (task.length === 0) throw new Error('Fleet task cannot be empty')
+    const sourceConfigPath = isAbsolute(input.configPath) ? input.configPath : resolve(input.projectRoot, input.configPath)
+    const configuration = materializeTeamConfiguration(
+      JSON.parse(readFileSync(sourceConfigPath, 'utf8')) as unknown,
+    )
+    const template = parseTeamTemplate(configuration, this.configuration)
     const provider = input.provider ?? launcher.options.provider
     const model = input.model ?? launcher.options.model
     const maxTokens = input.maxTokens ?? launcher.options.maxTokens
+    const runId = `team_${randomUUID()}`
+    const configPath = join(input.projectRoot, '.fleet', 'runs', runId, 'team.json')
 
     const record: FleetRunRecord = {
-      id: `run_${randomUUID()}`,
+      id: runId,
+      ...(input.sourceSetupId === undefined ? {} : { sourceSetupId: input.sourceSetupId }),
       team: template.team,
       name: template.name,
       configPath,
-      taskPath,
       projectRoot: input.projectRoot,
-      coordinator: template.startupCoordinator,
       launcherSessionId: String(launcher.id),
       agentOptions: {
         ...(provider === undefined ? {} : { provider }),
@@ -267,149 +1167,297 @@ export class FleetRunService {
         ...(maxTokens === undefined ? {} : { maxTokens }),
       },
       members: [],
+      assistants: [],
       status: 'starting',
       settled: false,
       startedAt: new Date().toISOString(),
     }
     this.records.set(record.id, record)
-    this.activeRunId = record.id
     this.eventSequences.set(record.id, 0)
-    this.writeRecord(record)
-    this.appendEvent(record.id, 'run_started', {
+    try {
+      mkdirSync(this.runDirectory(record), { recursive: true })
+      writeFileSync(configPath, `${JSON.stringify(configuration, null, 2)}\n`, 'utf8')
+      this.writeRecord(record)
+      this.rememberTeam(record)
+    } catch (error) {
+      this.records.delete(record.id)
+      this.eventSequences.delete(record.id)
+      throw error
+    }
+    const runtime = this.openCollaboration(record, template.members)
+    this.voteWorkIds.set(record.id, new Map())
+    this.appendEvent(record.id, 'team_created', {
       team: template.team,
       configPath,
-      taskPath,
+      sourceConfigPath,
+      ...(input.sourceSetupId === undefined ? {} : { sourceSetupId: input.sourceSetupId }),
       launcherSessionId: String(launcher.id),
     })
 
-    const missing = input.requiredPaths
+    const resourceFiles = template.sharedResources.map(resource => ({
+      ...resource,
+      path: isAbsolute(resource.path) ? resource.path : resolve(input.projectRoot, resource.path),
+    }))
+    const missing = [...input.requiredPaths, ...resourceFiles.map(resource => resource.path)]
       .map(path => isAbsolute(path) ? path : resolve(input.projectRoot, path))
       .filter(path => !existsSync(path))
     if (missing.length > 0) {
-      return this.setTerminal(record.id, 'blocked', `Missing required paths: ${missing.join(', ')}`, String(launcher.id))
+      const summary = `Missing required paths: ${missing.join(', ')}`
+      const failed = this.replaceRecord(record.id, {
+        assistants: [],
+        status: 'failed',
+        settled: true,
+        endedAt: new Date().toISOString(),
+        summary,
+        error: summary,
+      })
+      this.appendEvent(record.id, 'team_status', { status: 'failed', summary })
+      this.notify(failed)
+      this.collaboration.closeTeam(record.id)
+      this.voteWorkIds.delete(record.id)
+      this.teamProjectionEvents.delete(record.id)
+      this.eventSequences.delete(record.id)
+      this.forgetTeam(record.id)
+      return this.describeRecord(failed)
+    }
+    const invalidResources = resourceFiles.filter(resource => !statSync(resource.path).isFile())
+    if (invalidResources.length > 0) {
+      const summary = `Shared resources must be regular files: ${invalidResources.map(resource => resource.path).join(', ')}`
+      const failed = this.replaceRecord(record.id, {
+        status: 'failed',
+        settled: true,
+        endedAt: new Date().toISOString(),
+        summary,
+        error: summary,
+      })
+      this.appendEvent(record.id, 'team_status', { status: 'failed', summary })
+      this.notify(failed)
+      this.collaboration.closeTeam(record.id)
+      this.voteWorkIds.delete(record.id)
+      this.teamProjectionEvents.delete(record.id)
+      this.eventSequences.delete(record.id)
+      this.forgetTeam(record.id)
+      return this.describeRecord(failed)
     }
 
     const created: string[] = []
     try {
-      this.core.resetProjectRoot(input.projectRoot)
       const members: FleetRunMember[] = []
       for (const member of template.members) {
+        const memberProvider = member.provider ?? input.provider
+        const memberModel = member.model ?? input.model
         const agent = await this.core.create(launcher, {
-          name: member.id,
+          name: this.runtimeMemberName(record.id, member.id),
+          archiveId: this.memberArchiveId(record.id, member.id),
+          displayName: member.name,
+          ...(member.color === undefined ? {} : { color: member.color }),
           role: member.role,
           cwd: input.projectRoot,
           persona: persona(template, member),
-          ...(input.provider === undefined ? {} : { provider: input.provider }),
-          ...(input.model === undefined ? {} : { model: input.model }),
+          ...(memberProvider === undefined ? {} : { provider: memberProvider }),
+          ...(memberModel === undefined ? {} : { model: memberModel }),
           ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+          setup: childCtx => installMemberTools(childCtx, runtime, member.id),
         })
         created.push(member.id)
-        members.push({ name: member.id, role: member.role, sessionId: agent.id })
+        runtime.memberIdsByName.set(member.id, agent.id)
+        runtime.memberNamesById.set(agent.id, member.id)
+        members.push({
+          name: member.id,
+          displayName: agent.displayName,
+          color: agent.color,
+          role: member.role,
+          sessionId: agent.id,
+        })
         this.replaceRecord(record.id, { members: [...members] })
         this.appendEvent(record.id, 'member_attached', members.at(-1))
       }
 
       for (const channel of template.channels) {
-        const readableNames = template.members
-          .filter(member => member.readableChannels.length === 0 || member.readableChannels.includes(channel.id))
-          .map(member => `@${member.id}`)
-        this.messages.initializeChannel({
+        const channelMembers = initialChannelMembers([template.assistant, ...template.members], channel.id)
+        runtime.messages.initializeChannel({
           id: channel.id,
           name: channel.name,
-          members: readableNames,
+          ...(channelMembers === undefined ? {} : { members: channelMembers }),
           summary: channel.summary,
           body: channel.body,
           ...(channel.initialMessage.length === 0 ? {} : { initialMessage: channel.initialMessage }),
         })
       }
 
-      const roster = members.map(member => `@${member.name}: ${member.role}`).join('\n')
-      for (const member of members) {
-        const prompt = createUserMessage({
-          content: [{
-            type: 'text',
-            text: [
-              `[Fleet run ${record.id}]`,
-              `Team: ${template.name}`,
-              `Your Fleet identity: @${member.name}`,
-              `Startup coordinator: @${template.startupCoordinator}`,
-              `Members:\n${roster}`,
-              `Read #${template.channels[0]?.id ?? 'general'} before acting.`,
-              `Task:\n${task}`,
-            ].join('\n\n'),
-          }],
-          source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+      const attached = await this.attachAssistant(launcher, {
+        runId: record.id,
+        id: template.assistant.id,
+        name: template.assistant.name,
+        ...(template.assistant.color === undefined ? {} : { color: template.assistant.color }),
+        role: template.assistant.role,
+        ...(template.assistant.responsibility === undefined
+          ? {}
+          : { responsibility: template.assistant.responsibility }),
+        prompt: template.assistant.prompt,
+        ...(template.assistant.provider === undefined ? {} : { provider: template.assistant.provider }),
+        ...(template.assistant.model === undefined ? {} : { model: template.assistant.model }),
+        toolGroups: template.assistant.toolGroups,
+        permissions: template.assistant.permissions,
+        contacts: template.assistant.contacts,
+      })
+      const resourceOwnerSessionId = members[0]?.sessionId ?? attached.assistant.sessionId
+      for (const resource of resourceFiles) {
+        const info = statSync(resource.path)
+        runtime.resources.addResource(resourceOwnerSessionId, {
+          path: resource.path,
+          label: resource.label ?? basename(resource.path),
+          ...(resource.mediaType === undefined ? {} : { mediaType: resource.mediaType }),
+          size: info.size,
         })
-        if (member.name === template.startupCoordinator) this.core.followup(member.name, prompt)
-        else this.core.inject(member.name, prompt)
       }
-      const running = this.replaceRecord(record.id, { status: 'running' })
-      this.appendEvent(record.id, 'run_status', { status: 'running' })
-      return this.describeRecord(running)
+
+      const idle = this.replaceRecord(record.id, { status: 'idle' })
+      this.appendEvent(record.id, 'team_status', { status: 'idle' })
+      return this.describeRecord(idle)
     } catch (error) {
       for (const name of created.reverse()) {
         try {
-          await this.core.stopManaged(name)
+          await this.core.stopManaged(this.runtimeMemberName(record.id, name))
         } catch {}
       }
+      this.collaboration.closeTeam(record.id)
+      this.voteWorkIds.delete(record.id)
+      this.forgetTeam(record.id)
       const failed = this.replaceRecord(record.id, {
+        assistants: [],
         status: 'failed',
         settled: true,
         endedAt: new Date().toISOString(),
         error: errorMessage(error),
       })
-      this.appendEvent(record.id, 'run_status', { status: 'failed', error: failed.error })
+      this.appendEvent(record.id, 'team_status', { status: 'failed', error: failed.error })
+      this.teamProjectionEvents.delete(record.id)
+      this.eventSequences.delete(record.id)
       this.notify(failed)
       throw error
     }
   }
 
+  start(launcher: Agent, input: StartRunInput): FleetRunRecord {
+    if (input.runId !== undefined && this.resumingRunIds.has(input.runId)) {
+      throw new Error(`Fleet run ${input.runId} is resuming`)
+    }
+    const record = this.requireRecord(input.runId, input.projectRoot)
+    this.requireRuntime(record.id)
+    if (record.status !== 'idle') throw new Error(`Fleet team ${record.id} cannot start work while ${record.status}`)
+    this.requireParticipant(record, launcher)
+
+    const taskPath = isAbsolute(input.taskPath) ? input.taskPath : resolve(input.projectRoot, input.taskPath)
+    const task = readFileSync(taskPath, 'utf8').trim()
+    if (task.length === 0) throw new Error('Fleet work cannot be empty')
+    const available = record.members.filter(member => this.memberCanReply(member))
+    if (available.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
+    const work: FleetWorkRecord = {
+      id: `work_${randomUUID()}`,
+      taskPath,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    }
+    const running = this.replaceRecord(record.id, { status: 'running', work })
+    this.appendEvent(record.id, 'work_started', { workId: work.id, taskPath })
+
+    const roster = record.members
+      .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
+      .join('\n')
+    for (const member of available) {
+      const prompt = createUserMessage({
+        content: [{
+          type: 'text',
+          text: [
+            `[Fleet work ${work.id}]`,
+            `Team: ${record.name}`,
+            `Your Fleet identity: @${member.displayName ?? member.name}`,
+            `Members:\n${roster}`,
+            `Work:\n${task}`,
+          ].join('\n\n'),
+        }],
+        source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+      })
+      this.core.followup(this.runtimeMemberName(record.id, member.name), prompt)
+    }
+    return this.describeRecord(running)
+  }
+
   async resume(launcher: Agent, input: ResumeRunInput): Promise<FleetRunRecord> {
-    if (this.resumingRunId !== undefined) throw new Error(`Fleet run ${this.resumingRunId} is already resuming`)
-    const currentActive = this.activeRecord()
-    if (currentActive !== undefined) throw new Error(`Fleet run ${currentActive.id} is still active in this process`)
+    if (this.resumingRunIds.has(input.runId)) throw new Error(`Fleet run ${input.runId} is already resuming`)
+    const assistantTeam = this.assistantTeamForSession(String(launcher.id), input.runId)
+    if (assistantTeam !== undefined) {
+      throw new Error(`Session ${String(launcher.id)} is already the foreground assistant for Fleet team ${assistantTeam.id}; resume team ${input.runId} from a separate native Session`)
+    }
+    const wasDormant = this.dormantRunIds.has(input.runId)
+    if (!wasDormant && this.collaboration.has(input.runId)) {
+      throw new Error(`Fleet run ${input.runId} is already active in this process`)
+    }
 
     let record = this.requireRecord(input.runId, input.projectRoot)
     if (isTerminal(record.status)) {
       if (record.settled) throw new Error(`Fleet run ${record.id} is already ${record.status} and settled`)
       return this.settleInterruptedTerminal(record)
     }
-    if (record.status !== 'starting' && record.status !== 'running') {
+    if (record.status !== 'starting' && record.status !== 'idle' && record.status !== 'running'
+      && record.status !== 'paused' && record.status !== 'finishing') {
       throw new Error(`Fleet run ${record.id} cannot resume from ${record.status}`)
     }
     if (this.persistence() === undefined) throw new Error('fleet_run requires a DSH session persistence provider')
 
-    const template = parseTeamTemplate(JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown)
+    const template = parseTeamTemplate(
+      JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
+      this.configuration,
+    )
     if (template.team !== record.team) throw new Error(`Fleet run ${record.id} Team config no longer matches ${record.team}`)
-    if (template.startupCoordinator !== record.coordinator) {
-      throw new Error(`Fleet run ${record.id} startup coordinator no longer matches its Team config`)
-    }
-    const templates = new Map(template.members.map(member => [member.id, member]))
     const events = this.storedEvents(record)
+    const effectiveViews = this.effectiveMemberViews(record, events)
+    const effectiveTemplate: TeamTemplate = { ...template, members: effectiveViews }
+    const templates = new Map(effectiveViews.map(member => [member.id, member]))
+    const pendingScheduledDeliveries = this.pendingScheduledDeliveries(events)
+    const pendingProjectTaskDeliveries = this.pendingProjectTaskDeliveries(events)
+    const voteWorkIds = new Map<string, string>()
+    for (const event of events) {
+      if (event.type !== 'work_vote_bound') continue
+      const binding = event.data as { readonly voteId: string; readonly workId: string }
+      voteWorkIds.set(binding.voteId, binding.workId)
+    }
     const attached = new Map(record.members.map(member => [member.name, member]))
     for (const event of events) {
       if (event.type !== 'member_attached') continue
       const member = event.data as FleetRunMember
       if (!attached.has(member.name)) attached.set(member.name, member)
     }
-    if ([...attached.keys()].some(name => !templates.has(name))) {
-      throw new Error(`Fleet run ${record.id} member list no longer matches its Team config`)
-    }
-    if (record.status === 'running' && attached.size !== templates.size) {
-      throw new Error(`Fleet run ${record.id} is missing persisted member Sessions`)
-    }
-    const members = template.members.flatMap(member => {
+    const restoredColors: string[] = []
+    const members: FleetRunMember[] = effectiveViews.flatMap(member => {
       const attachedMember = attached.get(member.id)
-      return attachedMember === undefined ? [] : [attachedMember]
+      if (attachedMember === undefined) return []
+      const color = normalizeFleetMemberColor(member.color ?? attachedMember.color ?? generateFleetMemberColor(restoredColors))
+      restoredColors.push(color)
+      return [{
+        ...attachedMember,
+        displayName: member.name,
+        color,
+        role: member.role,
+      }]
     })
-    if (members.length !== record.members.length) record = this.replaceRecord(record.id, { members })
+    if (
+      members.length !== record.members.length
+      || record.members.some(member => member.displayName === undefined || member.color === undefined)
+    ) {
+      record = this.replaceRecord(record.id, { members })
+    }
 
-    const coordination = events
-      .filter(event => event.type.startsWith('coordination.'))
-      .map(event => event.data as FleetCoordinationEvent)
-    const resourceReferences = events
-      .filter(event => event.type === 'resource.resource_added')
-      .map(event => (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource)
+    const collaborationState = this.collaborationState(events)
+    const coordination = collaborationState.coordination
+    const approvedWorkVote = record.status === 'running' && record.work !== undefined
+      ? coordination.findLast(event => event.type === 'vote'
+        && event.action === 'closed'
+        && event.vote.status === 'approved'
+        && (event.vote.kind === 'finish' || event.vote.kind === 'blocked')
+        && voteWorkIds.get(event.vote.id) === record.work?.id)
+      : undefined
     const provider = record.agentOptions?.provider ?? launcher.options.provider
     const model = record.agentOptions?.model ?? launcher.options.model
     const maxTokens = record.agentOptions?.maxTokens ?? launcher.options.maxTokens
@@ -418,114 +1466,249 @@ export class FleetRunService {
       ...(model === undefined ? {} : { model }),
       ...(maxTokens === undefined ? {} : { maxTokens }),
     }
+    if (wasDormant) {
+      this.collaboration.closeTeam(input.runId)
+      this.voteWorkIds.delete(input.runId)
+      this.dormantRunIds.delete(input.runId)
+    }
+    const runtime = this.openCollaboration(record, effectiveViews)
+    this.voteWorkIds.set(record.id, voteWorkIds)
     const managed: string[] = []
-    this.resumingRunId = record.id
+    const memberRebinds: Array<{
+      readonly previousSessionId: string
+      readonly sessionId: string
+      readonly view: FleetMemberView
+    }> = []
+    const resumePausedMembers = new Set(record.status === 'paused' ? record.teamPausedMembers ?? [] : [])
+    const shouldResumeMember = (member: FleetRunMember): boolean => record.status === 'paused'
+      ? resumePausedMembers.has(member.name)
+      : member.status !== 'paused'
+    this.resumingRunIds.add(record.id)
     try {
-      this.core.resetProjectRoot(record.projectRoot)
-      for (const member of members) {
+      for (const member of members.filter(shouldResumeMember)) {
         const memberTemplate = templates.get(member.name)
         if (memberTemplate === undefined) throw new Error(`missing Team member ${member.name}`)
-        await this.core.resume(launcher, {
-          id: member.sessionId,
-          name: member.name,
-          role: member.role,
-          persona: persona(template, memberTemplate),
+        const memberAgentOptions = {
           ...agentOptions,
+          ...(memberTemplate.provider === undefined ? {} : { provider: memberTemplate.provider }),
+          ...(memberTemplate.model === undefined ? {} : { model: memberTemplate.model }),
+        }
+        const resumed = await this.core.resume(launcher, {
+          id: member.sessionId,
+          name: this.runtimeMemberName(record.id, member.name),
+          archiveId: this.memberArchiveId(record.id, member.name),
+          displayName: member.displayName ?? memberTemplate.name,
+          color: member.color ?? memberTemplate.color ?? generateFleetMemberColor(),
+          role: memberTemplate.role,
+          persona: persona(effectiveTemplate, {
+            ...memberTemplate,
+            name: member.displayName ?? memberTemplate.name,
+          }),
+          setup: childCtx => installMemberTools(childCtx, runtime, member.name),
+          ...memberAgentOptions,
         })
+        runtime.memberIdsByName.set(member.name, resumed.id)
+        runtime.memberNamesById.set(resumed.id, member.name)
+        if (resumed.id !== member.sessionId) {
+          memberRebinds.push({ previousSessionId: member.sessionId, sessionId: resumed.id, view: memberTemplate })
+        }
+        const index = members.findIndex(candidate => candidate.name === member.name)
+        if (index >= 0) members[index] = {
+          ...member,
+          sessionId: resumed.id,
+          displayName: resumed.displayName,
+          color: resumed.color,
+          status: 'idle',
+        }
         managed.push(member.name)
       }
-      if (record.status === 'starting') {
-        for (const memberTemplate of template.members) {
+      {
+        for (const memberTemplate of effectiveViews) {
           if (members.some(member => member.name === memberTemplate.id)) continue
-          const agent = await this.core.create(launcher, {
-            name: memberTemplate.id,
-            role: memberTemplate.role,
-            cwd: record.projectRoot,
-            persona: persona(template, memberTemplate),
+          const memberAgentOptions = {
             ...agentOptions,
+            ...(memberTemplate.provider === undefined ? {} : { provider: memberTemplate.provider }),
+            ...(memberTemplate.model === undefined ? {} : { model: memberTemplate.model }),
+          }
+          const agent = await this.core.create(launcher, {
+            name: this.runtimeMemberName(record.id, memberTemplate.id),
+            archiveId: this.memberArchiveId(record.id, memberTemplate.id),
+            displayName: memberTemplate.name,
+            ...(memberTemplate.color === undefined ? {} : { color: memberTemplate.color }),
+            role: memberTemplate.role,
+            cwd: this.effectiveWorkspaces(record, events).get(memberTemplate.id)?.find(workspace => workspace.access === 'write')?.path
+              ?? this.effectiveWorkspaces(record, events).get(memberTemplate.id)?.[0]?.path
+              ?? record.projectRoot,
+            persona: persona(effectiveTemplate, memberTemplate),
+            setup: childCtx => installMemberTools(childCtx, runtime, memberTemplate.id),
+            ...memberAgentOptions,
           })
-          const member = { name: memberTemplate.id, role: memberTemplate.role, sessionId: agent.id }
+          const member: FleetRunMember = {
+            name: memberTemplate.id,
+            displayName: agent.displayName,
+            color: agent.color,
+            role: memberTemplate.role,
+            sessionId: agent.id,
+          }
           members.push(member)
+          runtime.memberIdsByName.set(member.name, member.sessionId)
+          runtime.memberNamesById.set(member.sessionId, member.name)
           managed.push(member.name)
           record = this.replaceRecord(record.id, { members: [...members] })
           this.appendEvent(record.id, 'member_attached', member)
         }
       }
 
-      this.messages.restore(coordination)
-      this.resources.reset()
-      this.resources.restoreResources(resourceReferences)
+      runtime.restore(collaborationState)
+      for (const rebind of memberRebinds) {
+        runtime.rebindMember(rebind.previousSessionId, rebind.sessionId, rebind.view)
+      }
+      this.restoreAssistantRebinds(runtime, events)
+      for (const event of runtime.calendar.pendingStarts()) {
+        const meetingId = this.startCalendarMeeting(record.id, event)
+        if (meetingId !== undefined) runtime.calendar.linkMeeting(event.id, meetingId)
+      }
       const previousLauncherSessionId = record.launcherSessionId
-      this.activeRunId = record.id
       this.eventSequences.set(record.id, this.lastStoredSequence(record))
+      const previousAssistant = record.assistants.find(candidate =>
+        candidate.sessionId === previousLauncherSessionId,
+      ) ?? (record.assistants.length === 1 ? record.assistants[0] : undefined)
+      const attached = await this.attachAssistant(launcher, {
+        runId: record.id,
+        ...(previousAssistant === undefined ? {} : { assistantId: previousAssistant.view.id }),
+      })
+      record = this.requireRecord(attached.run.id)
 
-      const firstMember = members[0]
-      if (firstMember === undefined) throw new Error(`Fleet run ${record.id} has no members to resume`)
-      const firstAgent = this.ctx.agents.get(SessionId(firstMember.sessionId))
-      if (firstAgent === undefined) throw new Error(`Fleet member ${firstMember.name} did not resume`)
-      const restoredChannels = new Set(this.messages.listChannels(firstAgent).map(channel => channel.id))
+      const restoredChannels = new Set(runtime.messages.listChannels(launcher).map(channel => channel.id))
       for (const channel of template.channels) {
         if (restoredChannels.has(channel.id)) continue
-        const readableNames = template.members
-          .filter(member => member.readableChannels.length === 0 || member.readableChannels.includes(channel.id))
-          .map(member => `@${member.id}`)
-        this.messages.initializeChannel({
+        const channelMembers = initialChannelMembers(effectiveViews, channel.id)
+        runtime.messages.initializeChannel({
           id: channel.id,
           name: channel.name,
-          members: readableNames,
+          ...(channelMembers === undefined ? {} : { members: channelMembers }),
           summary: channel.summary,
           body: channel.body,
           ...(channel.initialMessage.length === 0 ? {} : { initialMessage: channel.initialMessage }),
         })
       }
+      runtime.messages.connectAgent(String(launcher.id), template.channels.map(channel => channel.id))
 
-      const task = readFileSync(record.taskPath, 'utf8').trim()
-      const roster = members.map(member => `@${member.name}: ${member.role}`).join('\n')
-      for (const member of members) {
-        const recovery = createUserMessage({
-          content: [{
-            type: 'text',
-            text: [
-              `[Fleet run ${record.id} resumed after a process restart.]`,
-              `Your Fleet identity: @${member.name}`,
-              `Members:\n${roster}`,
-              'Your persisted Session context is available. Inspect current Fleet Channels, Meetings, Votes, shared plan/checklist, and resource references before continuing.',
-              'Previous advisory work claims were released by the restart; declare your current paths again before editing.',
-              'The previous turn may have been interrupted; verify external side effects before retrying any tool action.',
-              `Task:\n${task}`,
-            ].join('\n\n'),
-          }],
-          source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
-        })
-        if (member.name === record.coordinator) this.core.followup(member.name, recovery)
-        else this.core.inject(member.name, recovery)
+      if (
+        approvedWorkVote === undefined
+        && (record.status === 'running' || record.status === 'starting')
+        && record.work?.status === 'running'
+      ) {
+        const task = readFileSync(record.work.taskPath, 'utf8').trim()
+        const roster = members
+          .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
+          .join('\n')
+        for (const member of members.filter(shouldResumeMember)) {
+          const resumedAgent = this.ctx.agents.get(SessionId(member.sessionId))
+          if (resumedAgent === undefined) throw new Error(`Fleet member ${member.name} did not resume`)
+          const inbox = (resumedAgent as Agent & {
+            readonly inbox?: { readonly nextTurn: readonly unknown[]; readonly nextStep: readonly unknown[] }
+          }).inbox
+          if (inbox !== undefined && inbox.nextTurn.length > 0) continue
+          if (inbox !== undefined && inbox.nextStep.length > 0) {
+            this.core.followup(this.runtimeMemberName(record.id, member.name), createUserMessage({
+              content: [{
+                type: 'text',
+                text: `[Fleet work ${record.work.id} resumed.] Continue the pending Fleet work already in your inbox and re-establish peer coordination.`,
+              }],
+              source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+            }))
+            continue
+          }
+          const recovery = createUserMessage({
+            content: [{
+              type: 'text',
+              text: [
+                `[Fleet work ${record.work.id} resumed after a process restart.]`,
+                `Your Fleet identity: @${member.displayName ?? member.name}`,
+                `Members:\n${roster}`,
+                'Your persisted Session context is available. Inspect current Fleet Channels, Meetings, Votes, shared plan/checklist, and resource references before continuing.',
+                'Previous advisory work claims were released by the restart; declare your current paths again before editing.',
+                'The previous turn may have been interrupted; verify external side effects before retrying any tool action.',
+                `Work:\n${task}`,
+              ].join('\n\n'),
+            }],
+            source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+          })
+          this.core.followup(this.runtimeMemberName(record.id, member.name), recovery)
+        }
       }
 
-      this.appendEvent(record.id, 'run_resumed', {
+      for (const delivery of pendingScheduledDeliveries) {
+        this.wakeScheduledTask(record.id, {
+          ...delivery.task,
+          assignees: delivery.assignees,
+        })
+      }
+      for (const delivery of pendingProjectTaskDeliveries) {
+        this.wakeProjectTask(record.id, {
+          ...delivery.task,
+          assignees: delivery.assignees,
+        })
+      }
+
+      this.appendEvent(record.id, 'team_resumed', {
         launcherSessionId: String(launcher.id),
         previousLauncherSessionId,
         members: members.map(member => member.name),
       })
-      if (record.status === 'starting') this.appendEvent(record.id, 'run_status', { status: 'running' })
+      const restoredStatus: FleetRunStatus = record.status === 'starting'
+        ? (record.work?.status === 'running' ? 'running' : 'idle')
+        : record.status === 'finishing' ? 'idle'
+          : record.status === 'paused' ? (record.work?.status === 'running' ? 'running' : 'idle')
+            : record.status
+      if (record.status === 'starting' || record.status === 'finishing' || record.status === 'paused') {
+        this.appendEvent(record.id, 'team_status', { status: restoredStatus })
+      }
       const restored = this.replaceRecord(record.id, {
         launcherSessionId: String(launcher.id),
         agentOptions,
         members: [...members],
-        status: 'running',
+        status: restoredStatus,
+        teamPausedMembers: [],
       })
+      if (approvedWorkVote !== undefined && approvedWorkVote.type === 'vote') {
+        const initiatorSessionId = this.restoredSessionId(events, approvedWorkVote.vote.initiator)
+        const participants = this.participants(record)
+        const initiator = participants.find(member => member.sessionId === initiatorSessionId)
+        const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
+          ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
+        if (caller !== undefined) {
+          return this.finish(
+            caller,
+            approvedWorkVote.vote.kind === 'finish' ? 'finished' : 'blocked',
+            approvedWorkVote.vote.statement,
+          )
+        }
+      }
       return this.describeRecord(restored)
     } catch (error) {
-      this.activeRunId = undefined
+      runtime.detachMember(String(launcher.id))
       for (const name of managed.reverse()) {
         try {
-          await this.core.stopManaged(name)
+          await this.core.stopManaged(this.runtimeMemberName(record.id, name))
         } catch {}
       }
-      this.messages.reset()
-      this.resources.reset()
+      this.collaboration.closeTeam(record.id)
+      this.voteWorkIds.delete(record.id)
+      const current = this.requireRecord(record.id)
+      if (!isTerminal(current.status)) {
+        try {
+          this.openDormantTeam(current)
+        } catch (restoreError) {
+          this.ctx.logger('dsh-agent-fleet').warn(
+            `Could not restore background services for Fleet Team ${record.id}: ${errorMessage(restoreError)}`,
+          )
+        }
+      }
       throw error
     } finally {
-      this.resumingRunId = undefined
+      this.resumingRunIds.delete(record.id)
     }
   }
 
@@ -536,8 +1719,16 @@ export class FleetRunService {
         if (!entry.isDirectory()) continue
         const path = join(root, entry.name, 'run.json')
         if (!existsSync(path)) continue
-        const record = JSON.parse(readFileSync(path, 'utf8')) as FleetRunRecord
+        const record = parseStoredRecord(JSON.parse(readFileSync(path, 'utf8')))
         this.records.set(record.id, record)
+        if (isTerminal(record.status)) {
+          this.forgetTeam(record.id)
+        } else {
+          this.rememberTeam(record)
+          if (!this.collaboration.has(record.id) && !this.resumingRunIds.has(record.id)) {
+            this.openDormantTeam(record)
+          }
+        }
       }
     }
     return [...this.records.values()]
@@ -545,8 +1736,1134 @@ export class FleetRunService {
       .map(record => this.describeRecord(record))
   }
 
+  findBySetupId(setupId: string, projectRoot: string): FleetRunRecord | undefined {
+    return this.list(projectRoot).find(record =>
+      record.sourceSetupId === setupId && record.projectRoot === projectRoot,
+    )
+  }
+
   status(runId?: string, projectRoot?: string): FleetRunRecord {
     return this.describeRecord(this.requireRecord(runId, projectRoot))
+  }
+
+  messageHub(runId: string): MessageHub {
+    return this.requireRuntime(runId).messages
+  }
+
+  requireAssistantConnection(caller: Agent, runId: string, allowDormant = false): FleetRunAssistant {
+    const record = this.requireRecord(runId)
+    if (allowDormant && this.dormantRunIds.has(record.id)) {
+      const assistant = record.assistants[0]
+      if (assistant === undefined) throw new Error(`Fleet team ${record.id} has no assistant identity to resume`)
+      return structuredClone(assistant)
+    }
+    const assistant = record.assistants.find(candidate => candidate.sessionId === String(caller.id))
+    if (assistant === undefined) {
+      throw new Error(`Agent ${String(caller.id)} is not a Fleet assistant for team ${record.id}`)
+    }
+    const connected = this.requireRuntime(record.id).memberNamesById.get(String(caller.id))
+    if (connected !== assistant.view.id) {
+      throw new Error(`Fleet assistant ${assistant.view.id} is not connected to team ${record.id}`)
+    }
+    return structuredClone(assistant)
+  }
+
+  resourceStore(runId: string): FleetResources {
+    return this.requireRuntime(runId).resources
+  }
+
+  memberStatusBoard(runId: string): FleetMemberStatusBoard {
+    return this.requireRuntime(runId).memberStatuses
+  }
+
+  scheduledTasks(runId: string): FleetScheduler {
+    return this.requireRuntime(runId).scheduler
+  }
+
+  projectTasks(runId: string) {
+    return this.requireRuntime(runId).tasks
+  }
+
+  calendar(runId: string) {
+    return this.requireRuntime(runId).calendar
+  }
+
+  memberViews(runId: string): FleetMemberView[] {
+    const record = this.requireRecord(runId)
+    let memberViews = this.memberViewSnapshots.get(record.id)
+    if (memberViews === undefined) {
+      memberViews = this.effectiveMemberViews(record)
+      this.memberViewSnapshots.set(record.id, memberViews)
+    }
+    return [
+      ...memberViews,
+      ...record.assistants.map(assistant => assistant.view),
+    ].map(view => structuredClone(view))
+  }
+
+  memberViewForAgent(runId: string, agentId: string): FleetMemberView | undefined {
+    const member = this.collaboration.get(runId)?.memberNamesById.get(agentId)
+    if (member === undefined) return undefined
+    return this.memberViews(runId).find(view => view.id === member)
+  }
+
+  readExtensionState(runId: string, namespace: string): JsonValue | undefined {
+    const record = this.requireRecord(runId)
+    const path = this.extensionStatePath(record, namespace)
+    if (!existsSync(path)) return undefined
+    return JSON.parse(readFileSync(path, 'utf8')) as JsonValue
+  }
+
+  writeExtensionState(runId: string, namespace: string, value: JsonValue): void {
+    const record = this.requireRecord(runId)
+    const target = this.extensionStatePath(record, namespace)
+    mkdirSync(dirname(target), { recursive: true })
+    const temporary = join(dirname(target), `.${namespace}.${process.pid}.${randomUUID()}.tmp`)
+    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    renameSync(temporary, target)
+  }
+
+  moduleConfiguration(runId: string, moduleId: string): FleetConfigurationValue | undefined {
+    const record = this.requireRecord(runId)
+    const configured = object(JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown, 'Team template')
+    return this.configuration.parse(configured.modules)[moduleId]
+  }
+
+  exportConfiguration(runId: string): Record<string, unknown> {
+    const record = this.requireRecord(runId)
+    const configured = object(JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown, 'Team template')
+    const members = this.effectiveMemberViews(record).map(view => ({
+      id: view.id,
+      name: view.name,
+      ...(view.color === undefined ? {} : { color: view.color }),
+      role: view.role,
+      responsibilities: view.responsibility ?? '',
+      prompt: view.prompt,
+      ...(view.provider === undefined ? {} : { provider: view.provider }),
+      ...(view.model === undefined ? {} : { model: view.model }),
+      toolGroups: [...view.toolGroups],
+      permissions: [...view.permissions],
+      contacts: structuredClone(view.contacts),
+    }))
+    const core = object(configured.core, 'core')
+    const modules = this.configuration.parse(configured.modules)
+    const resources = parseFleetResourcesConfiguration(modules[FLEET_RESOURCES_MODULE])
+    return {
+      core: {
+        ...structuredClone(core),
+        name: record.name,
+        members,
+      },
+      modules: {
+        ...modules,
+        [FLEET_RESOURCES_MODULE]: { ...resources, items: [] },
+      },
+      fleetExport: {
+        format: 'team-configuration',
+        sourceTeamId: record.id,
+        exportedAt: new Date().toISOString(),
+      },
+    }
+  }
+
+  async exportArchive(caller: Agent, input: ExportFleetArchiveInput): Promise<FleetArchiveExportResult> {
+    const record = this.requireRecord(input.runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    if (record.status !== 'paused') throw new Error('pause the Fleet Team before exporting a complete archive')
+    if (record.members.some(member => this.memberCanReply(member))) {
+      throw new Error('Fleet archive export requires every Team member runtime to be paused')
+    }
+    const cwd = caller.session.header.cwd ?? record.projectRoot
+    const destination = isAbsolute(input.destination) ? input.destination : resolve(cwd, input.destination)
+    if (existsSync(destination)) throw new Error(`Fleet archive destination already exists: ${destination}`)
+
+    const persistence = this.requirePersistence()
+    const staging = mkdtempSync(join(tmpdir(), 'dsh-agent-fleet-export-'))
+    const temporary = join(dirname(destination), `.${basename(destination)}.${process.pid}.${randomUUID()}.tmp`)
+    try {
+      const fleetDirectory = join(staging, 'fleet')
+      const stagedRun = join(fleetDirectory, 'run')
+      mkdirSync(fleetDirectory, { recursive: true })
+      cpSync(this.runDirectory(record), stagedRun, {
+        recursive: true,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      })
+      cpSync(record.configPath, join(fleetDirectory, 'team.json'))
+      if (record.work !== undefined && existsSync(record.work.taskPath)) {
+        cpSync(record.work.taskPath, join(fleetDirectory, 'current-work.md'))
+      }
+
+      const sessionsDirectory = join(staging, 'sessions')
+      mkdirSync(sessionsDirectory, { recursive: true })
+      for (const member of record.members) {
+        const inspected = await persistence.inspect(SessionId(member.sessionId))
+        if (inspected.meta === undefined) {
+          throw new Error(`DSH persistence did not return metadata for Fleet member Session ${member.sessionId}`)
+        }
+        const session: FleetArchiveSession = {
+          meta: inspected.meta,
+          events: inspected.events as readonly SessionEvent[],
+        }
+        writeFileSync(join(sessionsDirectory, `${member.sessionId}.json`), `${JSON.stringify(session)}\n`, 'utf8')
+      }
+
+      if (input.includeWorkspace === true) {
+        const excluded = join(realpathSync(record.projectRoot), '.fleet')
+        cpSync(record.projectRoot, join(staging, 'workspace'), {
+          recursive: true,
+          preserveTimestamps: true,
+          verbatimSymlinks: true,
+          filter: source => !pathInside(excluded, resolve(source)),
+        })
+      }
+
+      const team: FleetArchiveTeam = {
+        id: record.id,
+        name: record.name,
+        projectRoot: record.projectRoot,
+        status: record.status,
+      }
+      const extensionsRoot = join(stagedRun, 'extensions')
+      mkdirSync(extensionsRoot, { recursive: true })
+      const extensions = await this.archives.save(team, extensionsRoot)
+      const manifest: FleetArchiveManifest = {
+        format: FLEET_ARCHIVE_FORMAT,
+        version: FLEET_ARCHIVE_VERSION,
+        exportedAt: new Date().toISOString(),
+        includesWorkspace: input.includeWorkspace === true,
+        team: { ...team, status: 'paused' },
+        sessions: record.members.map(member => member.sessionId),
+        extensions,
+      }
+      writeFileSync(join(staging, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+      assertSafeArchiveLinks(staging)
+      mkdirSync(dirname(destination), { recursive: true })
+      await createTar({ cwd: staging, file: temporary, gzip: true, portable: true }, ['.'])
+      renameSync(temporary, destination)
+      return {
+        path: destination,
+        teamId: record.id,
+        includesWorkspace: input.includeWorkspace === true,
+        extensions,
+      }
+    } finally {
+      rmSync(staging, { recursive: true, force: true })
+      if (existsSync(temporary)) unlinkSync(temporary)
+    }
+  }
+
+  async importArchive(caller: Agent, input: ImportFleetArchiveInput): Promise<FleetArchiveImportResult> {
+    const callerRoot = caller.session.header.cwd ?? process.cwd()
+    const archivePath = isAbsolute(input.archivePath) ? input.archivePath : resolve(callerRoot, input.archivePath)
+    const projectRoot = isAbsolute(input.projectRoot) ? input.projectRoot : resolve(callerRoot, input.projectRoot)
+    if (!existsSync(archivePath) || !statSync(archivePath).isFile()) {
+      throw new Error(`Fleet archive does not exist: ${archivePath}`)
+    }
+
+    const persistence = this.requirePersistence()
+    if (persistence.list === undefined || persistence.create === undefined || persistence.append === undefined) {
+      throw new Error('DSH session persistence does not support Fleet archive import')
+    }
+    const staging = mkdtempSync(join(tmpdir(), 'dsh-agent-fleet-import-'))
+    let cleanupPath: string | undefined
+    try {
+      await extractTar({ cwd: staging, file: archivePath, strict: true, preservePaths: false })
+      assertSafeArchiveLinks(staging)
+      const manifest = archiveManifest(JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8')) as unknown)
+      const mode = input.mode ?? 'restore'
+      if (mode !== 'restore' && mode !== 'copy') throw new Error(`unknown Fleet archive import mode ${String(mode)}`)
+      const archivedRecord = parseStoredRecord(
+        JSON.parse(readFileSync(join(staging, 'fleet', 'run', 'run.json'), 'utf8')) as unknown,
+      )
+      if (archivedRecord.id !== manifest.team.id) throw new Error('Fleet archive run record does not match its manifest')
+      const existingSessions = new Set((await persistence.list()).map(header => String(header.id)))
+      let targetTeamId = manifest.team.id
+      if (mode === 'copy') {
+        do targetTeamId = `team_${randomUUID()}`
+        while (this.records.has(targetTeamId) || existsSync(this.teamReferencePath(targetTeamId)))
+      } else if (this.records.has(targetTeamId) || existsSync(this.teamReferencePath(targetTeamId))) {
+        throw new Error(`Fleet Team ${targetTeamId} already exists on this DSH installation`)
+      }
+      const sessionIdMap: Record<string, string> = {}
+      const allocatedSessionIds = new Set<string>()
+      for (const sourceId of manifest.sessions) {
+        if (mode === 'restore') {
+          sessionIdMap[sourceId] = sourceId
+          continue
+        }
+        let targetId = randomUUID()
+        while (existingSessions.has(targetId) || allocatedSessionIds.has(targetId)) targetId = randomUUID()
+        sessionIdMap[sourceId] = targetId
+        allocatedSessionIds.add(targetId)
+      }
+      const participantIdMap: Record<string, string> = { ...sessionIdMap }
+      for (const sourceId of new Set([
+        ...archivedRecord.assistants.map(assistant => assistant.sessionId),
+        archivedRecord.launcherSessionId,
+      ])) {
+        if (participantIdMap[sourceId] !== undefined) continue
+        if (mode === 'restore') {
+          participantIdMap[sourceId] = sourceId
+          continue
+        }
+        let targetId = randomUUID()
+        while (existingSessions.has(targetId) || allocatedSessionIds.has(targetId)) targetId = randomUUID()
+        participantIdMap[sourceId] = targetId
+        allocatedSessionIds.add(targetId)
+      }
+      const finalRunDirectory = join(projectRoot, '.fleet', 'runs', targetTeamId)
+      if (existsSync(finalRunDirectory)) throw new Error(`Fleet Team directory already exists: ${finalRunDirectory}`)
+      if (manifest.includesWorkspace) {
+        if (existsSync(projectRoot)) throw new Error('workspace archive import requires a new projectRoot path')
+      } else if (!existsSync(projectRoot) || !statSync(projectRoot).isDirectory()) {
+        throw new Error('archive without workspace content requires an existing projectRoot directory')
+      }
+
+      for (const sessionId of manifest.sessions) {
+        const targetSessionId = sessionIdMap[sessionId]
+        if (targetSessionId === undefined) throw new Error(`Fleet archive Session ${sessionId} has no import identity`)
+        if (existingSessions.has(targetSessionId)) {
+          throw new Error(`DSH Session ${targetSessionId} already exists; use copy mode or a clean DSH data store`)
+        }
+      }
+
+      const preparedProjectRoot = manifest.includesWorkspace
+        ? `${projectRoot}.fleet-import-${randomUUID()}`
+        : projectRoot
+      if (manifest.includesWorkspace) {
+        mkdirSync(dirname(preparedProjectRoot), { recursive: true })
+        cpSync(join(staging, 'workspace'), preparedProjectRoot, {
+          recursive: true,
+          preserveTimestamps: true,
+          verbatimSymlinks: true,
+        })
+        cleanupPath = preparedProjectRoot
+      }
+      const preparedRunDirectory = manifest.includesWorkspace
+        ? join(preparedProjectRoot, '.fleet', 'runs', targetTeamId)
+        : join(projectRoot, '.fleet', 'runs', `.import-${targetTeamId}-${randomUUID()}`)
+      if (!manifest.includesWorkspace) cleanupPath = preparedRunDirectory
+      mkdirSync(dirname(preparedRunDirectory), { recursive: true })
+      cpSync(join(staging, 'fleet', 'run'), preparedRunDirectory, {
+        recursive: true,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      })
+
+      const finalConfigPath = join(finalRunDirectory, 'team.json')
+      cpSync(join(staging, 'fleet', 'team.json'), join(preparedRunDirectory, 'team.json'))
+      const finalTaskPath = join(finalRunDirectory, 'current-work.md')
+      const archivedTask = join(staging, 'fleet', 'current-work.md')
+      if (archivedRecord.work !== undefined && !existsSync(archivedTask)) {
+        throw new Error('Fleet archive is missing the current work description')
+      }
+      if (existsSync(archivedTask)) cpSync(archivedTask, join(preparedRunDirectory, 'current-work.md'))
+      const { sourceSetupId: archivedSourceSetupId, ...archivedRecordWithoutSetup } = archivedRecord
+      const record: FleetRunRecord = {
+        ...archivedRecordWithoutSetup,
+        id: targetTeamId,
+        ...(mode === 'restore' && archivedSourceSetupId !== undefined
+          ? { sourceSetupId: archivedSourceSetupId }
+          : {}),
+        projectRoot,
+        configPath: finalConfigPath,
+        launcherSessionId: participantIdMap[archivedRecord.launcherSessionId] ?? archivedRecord.launcherSessionId,
+        members: archivedRecord.members.map(member => ({
+          ...member,
+          sessionId: participantIdMap[member.sessionId] ?? member.sessionId,
+        })),
+        assistants: archivedRecord.assistants.map(assistant => ({
+          ...assistant,
+          sessionId: participantIdMap[assistant.sessionId] ?? assistant.sessionId,
+        })),
+        status: 'paused',
+        ...(archivedRecord.work === undefined ? {} : {
+          work: { ...archivedRecord.work, taskPath: finalTaskPath },
+        }),
+      }
+      const eventsPath = join(preparedRunDirectory, 'events.jsonl')
+      if (existsSync(eventsPath)) {
+        writeFileSync(
+          eventsPath,
+          relocateArchiveEvents(
+            readFileSync(eventsPath, 'utf8'),
+            manifest.team.projectRoot,
+            projectRoot,
+            manifest.team.id,
+            targetTeamId,
+            participantIdMap,
+            archivedRecord.work?.id,
+          ),
+          'utf8',
+        )
+      }
+      writeFileSync(join(preparedRunDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
+
+      for (const sessionId of manifest.sessions) {
+        const session = object(
+          JSON.parse(readFileSync(join(staging, 'sessions', `${sessionId}.json`), 'utf8')) as unknown,
+          `Fleet archive Session ${sessionId}`,
+        ) as unknown as FleetArchiveSession
+        if (String(session.meta.id) !== sessionId) throw new Error(`Fleet archive Session ${sessionId} metadata does not match`)
+        const targetSessionId = sessionIdMap[sessionId]
+        if (targetSessionId === undefined) throw new Error(`Fleet archive Session ${sessionId} has no import identity`)
+        const { parentSession: sourceParentSession, ...sessionMeta } = session.meta
+        const parentSession = sourceParentSession === undefined
+          ? undefined
+          : mode === 'restore'
+            ? sourceParentSession
+            : sessionIdMap[String(sourceParentSession)]
+        const meta: SessionHeader = {
+          ...sessionMeta,
+          id: SessionId(targetSessionId),
+          ...(parentSession === undefined ? {} : { parentSession: SessionId(parentSession) }),
+          ...(session.meta.cwd === undefined ? {} : {
+            cwd: relocateArchivePath(
+              session.meta.cwd,
+              manifest.team.projectRoot,
+              projectRoot,
+              manifest.team.id,
+              targetTeamId,
+            ),
+          }),
+        }
+        await persistence.create(meta)
+        if (session.events.length > 0) await persistence.append(SessionId(targetSessionId), session.events)
+      }
+
+      if (manifest.includesWorkspace) {
+        renameSync(preparedProjectRoot, projectRoot)
+      } else {
+        renameSync(preparedRunDirectory, finalRunDirectory)
+      }
+      cleanupPath = undefined
+      this.rememberTeam(record)
+      this.openDormantTeam(record)
+      const extensionsRoot = join(finalRunDirectory, 'extensions')
+      mkdirSync(extensionsRoot, { recursive: true })
+      const targetTeam: FleetArchiveTeam = {
+        id: record.id,
+        name: record.name,
+        projectRoot: record.projectRoot,
+        status: record.status,
+      }
+      const extensions = await this.archives.restore(targetTeam, extensionsRoot, {
+        sourceTeam: manifest.team,
+        sessionIdMap,
+      })
+      return { run: this.describeRecord(record), extensions }
+    } finally {
+      rmSync(staging, { recursive: true, force: true })
+      if (cleanupPath !== undefined && existsSync(cleanupPath)) {
+        rmSync(cleanupPath, { recursive: true, force: true })
+      }
+    }
+  }
+
+  private effectiveMemberViews(
+    record: FleetRunRecord,
+    events: readonly StoredFleetEvent[] = this.storedEvents(record),
+  ): FleetMemberView[] {
+    const configured = parseTeamTemplate(
+      JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
+      this.configuration,
+    ).members
+    const views = new Map(configured.map(view => [view.id, structuredClone(view)]))
+    const order = configured.map(view => view.id)
+    const legacyCoordinator = record.coordinator === undefined
+      ? undefined
+      : record.members.find(member => member.name === record.coordinator)
+    if (legacyCoordinator !== undefined && !views.has(legacyCoordinator.name)) {
+      const legacyView: FleetMemberView = {
+        id: legacyCoordinator.name,
+        name: legacyCoordinator.displayName ?? 'Fleet Coordinator',
+        ...(legacyCoordinator.color === undefined ? {} : { color: legacyCoordinator.color }),
+        role: legacyCoordinator.role,
+        responsibility: 'Legacy coordinator retained only so an existing persisted Team can resume safely.',
+        prompt: 'Preserve the existing Team state while moving coordination and ownership to the configured peers.',
+        toolGroups: [...FLEET_MEMBER_TOOL_GROUPS],
+        permissions: [...FLEET_MEMBER_PERMISSIONS],
+        contacts: { members: '*', channels: '*' },
+      }
+      views.set(legacyView.id, legacyView)
+      order.unshift(legacyView.id)
+    }
+    for (const event of events) {
+      if (event.type === 'member_view_added' || event.type === 'member_view_updated') {
+        const view = structuredClone((event.data as { readonly view: FleetMemberView }).view)
+        if (!order.includes(view.id)) order.push(view.id)
+        views.set(view.id, view)
+      } else if (event.type === 'member_view_removed') {
+        views.delete((event.data as { readonly member: string }).member)
+      }
+    }
+    return order.flatMap(id => {
+      const view = views.get(id)
+      return view === undefined ? [] : [view]
+    })
+  }
+
+  async addMember(caller: Agent, input: AddFleetMemberInput): Promise<FleetRunMember> {
+    let record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const runtime = this.requireRuntime(record.id)
+    const view = normalizedMemberView(input.view)
+    const existing = this.memberViews(record.id)
+    if (existing.some(member => member.id === view.id)) throw new Error(`Fleet member ${view.id} already exists`)
+    const template = parseTeamTemplate(
+      JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
+      this.configuration,
+    )
+    validateMemberContacts([...this.effectiveMemberViews(record), view], new Set(template.channels.map(channel => channel.id)),
+      record.assistants.map(assistant => assistant.view.id))
+    const workspaces = this.normalizeWorkspaces(record, input.workspaces ?? [{
+      name: 'project', path: record.projectRoot, access: 'write',
+    }])
+    const effectiveTemplate: TeamTemplate = { ...template, members: [...this.effectiveMemberViews(record), view] }
+    const provider = view.provider ?? record.agentOptions?.provider
+    const model = view.model ?? record.agentOptions?.model
+    runtime.updateMemberView(view)
+    this.appendEvent(record.id, 'member_view_added', { view })
+    let created = false
+    try {
+      const primaryWorkspace = workspaces.find(workspace => workspace.access === 'write')?.path
+        ?? workspaces[0]?.path
+        ?? record.projectRoot
+      const agent = await this.core.create(caller, {
+        name: this.runtimeMemberName(record.id, view.id),
+        archiveId: this.memberArchiveId(record.id, view.id),
+        displayName: view.name,
+        ...(view.color === undefined ? {} : { color: view.color }),
+        role: view.role,
+        cwd: primaryWorkspace,
+        persona: persona(effectiveTemplate, view),
+        ...(provider === undefined ? {} : { provider }),
+        ...(model === undefined ? {} : { model }),
+        ...(record.agentOptions?.maxTokens === undefined ? {} : { maxTokens: record.agentOptions.maxTokens }),
+        setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+      })
+      created = true
+      runtime.attachMember(agent.id, view)
+      runtime.messages.connectAgent(agent.id, template.channels.map(channel => channel.id))
+      runtime.setMemberWorkspaces(view.id, workspaces)
+      this.appendEvent(record.id, 'workspace.assigned', { member: view.id, workspaces })
+      const member: FleetRunMember = {
+        name: view.id,
+        displayName: agent.displayName,
+        color: agent.color,
+        role: view.role,
+        sessionId: agent.id,
+      }
+      record = this.replaceRecord(record.id, { members: [...record.members, member] })
+      this.appendEvent(record.id, 'member_attached', member)
+      if (record.status === 'running' && record.work?.status === 'running') {
+        const work = readFileSync(record.work.taskPath, 'utf8').trim()
+        this.core.followup(this.runtimeMemberName(record.id, view.id), createUserMessage({
+          content: [{ type: 'text', text: `[Fleet member joined active work ${record.work.id}.]\n\n${work}` }],
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+        }))
+      }
+      return structuredClone(member)
+    } catch (error) {
+      if (created) {
+        try { await this.core.stopManaged(this.runtimeMemberName(record.id, view.id)) } catch {}
+      }
+      runtime.removeMemberView(view.id)
+      this.appendEvent(record.id, 'member_view_removed', { member: view.id, reason: 'add_failed' })
+      throw error
+    }
+  }
+
+  async updateMember(caller: Agent, input: UpdateFleetMemberInput): Promise<FleetRunMember> {
+    const record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const member = record.members.find(candidate => candidate.name === input.member)
+    if (member === undefined) throw new Error(`unknown Fleet member ${input.member}`)
+    if (member.sessionId === String(caller.id)) throw new Error('a Fleet member cannot restart its own runtime view')
+    const currentView = this.effectiveMemberViews(record).find(view => view.id === member.name)
+    if (currentView === undefined) throw new Error(`missing Fleet member view ${member.name}`)
+    const view = normalizedMemberView(input.view)
+    if (view.id !== member.name) throw new Error('Fleet member id cannot be changed')
+    const template = parseTeamTemplate(
+      JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
+      this.configuration,
+    )
+    const views = this.effectiveMemberViews(record).map(candidate => candidate.id === view.id ? view : candidate)
+    validateMemberContacts(views, new Set(template.channels.map(channel => channel.id)),
+      record.assistants.map(assistant => assistant.view.id))
+    const effectiveTemplate: TeamTemplate = { ...template, members: views }
+    const runtimeName = this.runtimeMemberName(record.id, member.name)
+    if (member.status === 'paused') {
+      const runtime = this.requireRuntime(record.id)
+      this.appendEvent(record.id, 'member_view_updated', { view })
+      runtime.updateMemberView(view)
+      const color = view.color ?? member.color
+      const updated: FleetRunMember = {
+        ...member,
+        displayName: view.name,
+        ...(color === undefined ? {} : { color }),
+        role: view.role,
+        status: 'paused',
+      }
+      this.replaceRecord(record.id, {
+        members: record.members.map(candidate => candidate.name === member.name ? updated : candidate),
+      })
+      this.appendEvent(record.id, 'member_updated', updated)
+      return structuredClone(updated)
+    }
+    if (this.core.get(runtimeName).status === 'running') throw new Error(`Fleet member ${member.name} must be idle before updating`)
+    const runtime = this.requireRuntime(record.id)
+    const provider = view.provider ?? record.agentOptions?.provider
+    const model = view.model ?? record.agentOptions?.model
+    this.appendEvent(record.id, 'member_view_updated', { view })
+    runtime.updateMemberView(view)
+    const live = this.ctx.agents.get(SessionId(member.sessionId))
+    if (live !== undefined) await this.ctx.sessions.flush(live.session)
+    await this.core.stopManaged(runtimeName)
+    runtime.detachMember(member.sessionId)
+    try {
+      const resumed = await this.core.resume(caller, {
+        id: member.sessionId,
+        name: runtimeName,
+        archiveId: this.memberArchiveId(record.id, member.name),
+        displayName: view.name,
+        color: view.color ?? member.color ?? generateFleetMemberColor(),
+        role: view.role,
+        persona: persona(effectiveTemplate, view),
+        ...(provider === undefined ? {} : { provider }),
+        ...(model === undefined ? {} : { model }),
+        ...(record.agentOptions?.maxTokens === undefined ? {} : { maxTokens: record.agentOptions.maxTokens }),
+        setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+      })
+      if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
+      else runtime.rebindMember(member.sessionId, resumed.id, view)
+      const updated: FleetRunMember = {
+        ...member,
+        sessionId: resumed.id,
+        displayName: resumed.displayName,
+        color: resumed.color,
+        role: view.role,
+      }
+      this.replaceRecord(record.id, {
+        members: record.members.map(candidate => candidate.name === member.name ? updated : candidate),
+      })
+      this.appendEvent(record.id, 'member_updated', updated)
+      return structuredClone(updated)
+    } catch (error) {
+      this.appendEvent(record.id, 'member_view_updated', { view: currentView, reason: 'update_rolled_back' })
+      runtime.updateMemberView(currentView)
+      try {
+        const restored = await this.core.resume(caller, {
+          id: member.sessionId,
+          name: runtimeName,
+          archiveId: this.memberArchiveId(record.id, member.name),
+          displayName: member.displayName ?? currentView.name,
+          color: member.color ?? currentView.color ?? generateFleetMemberColor(),
+          role: currentView.role,
+          persona: persona({ ...template, members: this.effectiveMemberViews(record) }, currentView),
+          setup: childCtx => installMemberTools(childCtx, runtime, currentView.id),
+        })
+        if (restored.id === member.sessionId) runtime.attachMember(restored.id, currentView)
+        else runtime.rebindMember(member.sessionId, restored.id, currentView)
+        if (restored.id !== member.sessionId) {
+          this.replaceRecord(record.id, {
+            members: record.members.map(candidate => candidate.name === member.name
+              ? { ...candidate, sessionId: restored.id }
+              : candidate),
+          })
+        }
+      } catch (rollbackError) {
+        this.replaceRecord(record.id, {
+          members: record.members.map(candidate => candidate.name === member.name
+            ? { ...candidate, status: 'offline' }
+            : candidate),
+        })
+        this.appendEvent(record.id, 'member_update_failed', {
+          member: member.name,
+          error: errorMessage(error),
+          rollbackError: errorMessage(rollbackError),
+        })
+        throw new Error(`Could not update Fleet member ${member.name}; restoring its previous runtime also failed: ${errorMessage(rollbackError)}`)
+      }
+      throw error
+    }
+  }
+
+  async removeMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
+    const record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const member = record.members.find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+    this.clearNetworkRecovery(member.sessionId)
+    if (member.sessionId === String(caller.id)) throw new Error('a Fleet member cannot remove itself')
+    const successor = this.participants(record).find(candidate => candidate.sessionId === String(caller.id))
+    if (successor === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+    const runtime = this.requireRuntime(record.id)
+    const runtimeName = this.runtimeMemberName(record.id, member.name)
+    const live = this.ctx.agents.get(SessionId(member.sessionId))
+    if (live !== undefined) await this.ctx.sessions.flush(live.session)
+    if (member.status !== 'paused') await this.core.stopManaged(runtimeName)
+    runtime.retireMember({
+      agentId: member.sessionId,
+      member: member.name,
+      successorAgentId: successor.sessionId,
+      successor: successor.name,
+    })
+    runtime.removeMemberView(member.name)
+    this.replaceRecord(record.id, { members: record.members.filter(candidate => candidate.name !== member.name) })
+    this.appendEvent(record.id, 'member_view_removed', { member: member.name })
+    this.appendEvent(record.id, 'member_detached', member)
+    return { ...structuredClone(member), status: 'offline' }
+  }
+
+  async pauseTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
+    let record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    if (record.status !== 'paused' && record.status !== 'idle' && record.status !== 'running') {
+      throw new Error(`Fleet team ${record.id} cannot pause from ${record.status}`)
+    }
+    if (record.members.some(member => member.sessionId === String(caller.id))) {
+      throw new Error('a Fleet member cannot pause its own Team; use the external Fleet assistant')
+    }
+    const teamPausedMembers = record.status === 'paused'
+      ? record.teamPausedMembers ?? []
+      : record.members.filter(member => this.memberCanReply(member)).map(member => member.name)
+    if (record.status !== 'paused') {
+      record = this.replaceRecord(record.id, { status: 'paused', teamPausedMembers })
+      this.appendEvent(record.id, 'team_status', { status: 'paused', members: teamPausedMembers, phase: 'pausing' })
+      this.notify(record)
+    }
+    for (const memberName of teamPausedMembers) {
+      const member = this.requireRecord(record.id).members.find(candidate => candidate.name === memberName)
+      if (member !== undefined && this.memberCanReply(member)) await this.pauseMember(caller, record.id, memberName)
+    }
+    const paused = this.requireRecord(record.id)
+    this.appendEvent(record.id, 'team_status', { status: 'paused', members: teamPausedMembers, phase: 'paused' })
+    this.notify(paused)
+    return this.describeRecord(paused)
+  }
+
+  async resumeTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
+    const record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    if (record.status !== 'paused') throw new Error(`Fleet team ${record.id} is not paused`)
+    for (const memberName of record.teamPausedMembers ?? []) {
+      const member = this.requireRecord(record.id).members.find(candidate => candidate.name === memberName)
+      if (member !== undefined && !this.memberCanReply(member)) await this.resumeMember(caller, record.id, memberName)
+    }
+    const status: FleetRunStatus = record.work?.status === 'running' ? 'running' : 'idle'
+    const resumed = this.replaceRecord(record.id, { status, teamPausedMembers: [] })
+    this.appendEvent(record.id, 'team_status', { status, resumedFrom: 'paused' })
+    this.notify(resumed)
+    return this.describeRecord(resumed)
+  }
+
+  async pauseMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
+    const record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const member = record.members.find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+    this.clearNetworkRecovery(member.sessionId)
+    if (member.status === 'paused' && !this.memberCanReply(member)) return structuredClone(member)
+    if (member.sessionId === String(caller.id)) throw new Error('a Fleet member cannot pause itself')
+    const live = this.liveMember(member)
+    if (live !== undefined) await this.ctx.sessions.flush(live.session)
+    const runtimeName = this.runtimeMemberName(record.id, member.name)
+    const runtime = this.requireRuntime(record.id)
+    let activeMember = member
+    if (live?.status === 'idle' && this.core.list().some(candidate => candidate.name === runtimeName)) {
+      const rotated = await this.core.rotateManaged(runtimeName)
+      if (rotated !== undefined && rotated.id !== member.sessionId) {
+        const view = this.effectiveMemberViews(record).find(candidate => candidate.id === member.name)
+        if (view === undefined) throw new Error(`missing Fleet member view ${member.name}`)
+        runtime.rebindMember(member.sessionId, rotated.id, view)
+        runtime.resources.release(member.sessionId)
+        activeMember = { ...member, sessionId: rotated.id }
+        this.replaceRecord(record.id, {
+          members: record.members.map(candidate => candidate.name === member.name ? activeMember : candidate),
+        })
+        this.appendEvent(record.id, 'member_session_rotated', {
+          member: member.name,
+          previousSessionId: member.sessionId,
+          sessionId: rotated.id,
+        })
+      }
+    }
+    runtime.messages.disconnectAgent(activeMember.sessionId)
+    if (this.core.list().some(candidate => candidate.name === runtimeName)) {
+      await this.core.stopManaged(runtimeName)
+    }
+    runtime.detachMember(activeMember.sessionId)
+    const paused: FleetRunMember = { ...activeMember, status: 'paused' }
+    this.replaceRecord(record.id, {
+      members: record.members.map(candidate => candidate.name === member.name ? paused : candidate),
+    })
+    this.appendEvent(record.id, 'member_paused', paused)
+    return structuredClone(paused)
+  }
+
+  async resumeMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
+    const record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const member = record.members.find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+    if (this.memberCanReply(member)) throw new Error(`Fleet member ${memberName} is already online and can reply`)
+    const view = this.effectiveMemberViews(record).find(candidate => candidate.id === member.name)
+    if (view === undefined) throw new Error(`missing Fleet member view ${member.name}`)
+    const template = parseTeamTemplate(
+      JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
+      this.configuration,
+    )
+    const runtime = this.requireRuntime(record.id)
+    runtime.updateMemberView(view)
+    const runtimeName = this.runtimeMemberName(record.id, member.name)
+    if (this.core.list().some(candidate => candidate.name === runtimeName)) {
+      await this.core.stopManaged(runtimeName)
+      runtime.detachMember(member.sessionId)
+    }
+    const provider = view.provider ?? record.agentOptions?.provider
+    const model = view.model ?? record.agentOptions?.model
+    const resumed = await this.core.resume(caller, {
+      id: member.sessionId,
+      name: runtimeName,
+      archiveId: this.memberArchiveId(record.id, member.name),
+      displayName: view.name,
+      color: view.color ?? member.color ?? generateFleetMemberColor(),
+      role: view.role,
+      persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
+      ...(provider === undefined ? {} : { provider }),
+      ...(model === undefined ? {} : { model }),
+      ...(record.agentOptions?.maxTokens === undefined ? {} : { maxTokens: record.agentOptions.maxTokens }),
+      setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+    })
+    if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
+    else runtime.rebindMember(member.sessionId, resumed.id, view)
+    const active: FleetRunMember = {
+      ...member,
+      sessionId: resumed.id,
+      displayName: resumed.displayName,
+      color: resumed.color,
+      role: view.role,
+      status: 'idle',
+    }
+    this.replaceRecord(record.id, {
+      members: record.members.map(candidate => candidate.name === member.name ? active : candidate),
+    })
+    this.appendEvent(record.id, 'member_resumed', active)
+    const events = this.storedEvents(record)
+    for (const delivery of this.pendingScheduledDeliveries(events)) {
+      if (!delivery.assignees.includes(member.name)) continue
+      this.wakeScheduledTask(record.id, { ...delivery.task, assignees: [member.name] })
+    }
+    for (const delivery of this.pendingProjectTaskDeliveries(events)) {
+      if (!delivery.assignees.includes(member.name)) continue
+      this.wakeProjectTask(record.id, { ...delivery.task, assignees: [member.name] })
+    }
+    return structuredClone(active)
+  }
+
+  memberWorkspaces(caller: Agent, runId?: string, memberName?: string): {
+    readonly runId: string
+    readonly member: string
+    readonly workspaces: FleetWorkspaceMount[]
+  } {
+    const record = this.requireCallerRecord(caller, runId)
+    const callerMember = this.participants(record).find(member => member.sessionId === String(caller.id))
+    if (callerMember === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+    const member = memberName ?? callerMember.name
+    if (!this.participants(record).some(candidate => candidate.name === member)) {
+      throw new Error(`unknown Fleet member ${member}`)
+    }
+    if (member !== callerMember.name) this.requireFleetPermission(record, caller, 'workspace.manage')
+    return { runId: record.id, member, workspaces: this.effectiveWorkspaces(record).get(member) ?? [] }
+  }
+
+  assignMemberWorkspaces(
+    caller: Agent,
+    runId: string,
+    memberName: string,
+    workspaces: readonly FleetWorkspaceMount[],
+  ): { readonly runId: string; readonly member: string; readonly workspaces: FleetWorkspaceMount[] } {
+    const record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'workspace.manage')
+    if (!this.participants(record).some(member => member.name === memberName)) throw new Error(`unknown Fleet member ${memberName}`)
+    const normalized = this.normalizeWorkspaces(record, workspaces)
+    this.requireRuntime(record.id).setMemberWorkspaces(memberName, normalized)
+    this.appendEvent(record.id, 'workspace.assigned', { member: memberName, workspaces: normalized })
+    const notification = createUserMessage({
+      content: [{
+        type: 'text',
+        text: [
+          '[Fleet workspace allocation updated.]',
+          ...(normalized.length === 0
+            ? ['No Fleet resource/work claims are currently allocated to you.']
+            : normalized.map(workspace => `- ${workspace.name}: ${workspace.path} (${workspace.access})`)),
+          'Use fleet_workspace list when you need to inspect the current allocation.',
+        ].join('\n'),
+      }],
+      source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+    })
+    try {
+      const assistant = record.assistants.find(candidate => candidate.view.id === memberName)
+      if (assistant === undefined) this.core.inject(this.runtimeMemberName(record.id, memberName), notification)
+      else this.ctx.agents.get(SessionId(assistant.sessionId))?.inject(notification)
+    } catch (error) {
+      this.appendEvent(record.id, 'workspace.notification_deferred', { member: memberName, error: errorMessage(error) })
+    }
+    return { runId: record.id, member: memberName, workspaces: normalized }
+  }
+
+  private effectiveWorkspaces(record: FleetRunRecord, events = this.storedEvents(record)): Map<string, FleetWorkspaceMount[]> {
+    const views = [...this.effectiveMemberViews(record, events), ...record.assistants.map(assistant => assistant.view)]
+    const defaults = new Map<string, FleetWorkspaceMount[]>(views.map(view => [view.id, [{
+      name: 'project', path: record.projectRoot, access: 'write' as const,
+    }]]))
+    for (const event of events) {
+      if (event.type !== 'workspace.assigned') continue
+      const data = event.data as { readonly member: string; readonly workspaces: FleetWorkspaceMount[] }
+      defaults.set(data.member, data.workspaces.map(workspace => structuredClone(workspace)))
+    }
+    return defaults
+  }
+
+  private normalizeWorkspaces(record: FleetRunRecord, workspaces: readonly FleetWorkspaceMount[]): FleetWorkspaceMount[] {
+    const projectRoot = realpathSync(record.projectRoot)
+    const names = new Set<string>()
+    return workspaces.map((workspace, index) => {
+      const name = workspace.name.trim()
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
+        throw new Error(`workspaces[${index}].name must use lower-kebab-case`)
+      }
+      if (names.has(name)) throw new Error(`duplicate Fleet workspace name ${name}`)
+      names.add(name)
+      const candidate = realpathSync(isAbsolute(workspace.path) ? workspace.path : resolve(record.projectRoot, workspace.path))
+      const boundary = relative(projectRoot, candidate)
+      if (boundary === '..' || boundary.startsWith(`..${sep}`) || isAbsolute(boundary)) {
+        throw new Error(`Fleet workspace ${candidate} must be inside Team project root ${projectRoot}`)
+      }
+      if (!statSync(candidate).isDirectory()) throw new Error(`Fleet workspace ${candidate} must be a directory`)
+      if (workspace.access !== 'read' && workspace.access !== 'write') {
+        throw new Error(`workspaces[${index}].access must be read or write`)
+      }
+      return { name, path: candidate, access: workspace.access }
+    })
+  }
+
+  private requireFleetPermission(record: FleetRunRecord, caller: Agent, permission: FleetMemberPermission): FleetMemberView {
+    const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
+    if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+    const assistant = record.assistants.find(candidate => candidate.sessionId === String(caller.id))
+    if (assistant !== undefined) this.requireAssistantConnection(caller, record.id)
+    const view = this.memberViews(record.id).find(candidate => candidate.id === participant.name)
+    if (view === undefined || !(this.access?.has(record.id, view, permission) ?? view.permissions.includes(permission))) {
+      throw new Error(`Fleet member ${participant.name} lacks ${permission}`)
+    }
+    return view
+  }
+
+  async attachAssistant(caller: Agent, input: AttachAssistantInput = {}): Promise<{
+    readonly run: FleetRunRecord
+    readonly assistant: FleetRunAssistant
+  }> {
+    const record = this.requireRecord(input.runId, input.projectRoot ?? caller.session.header.cwd)
+    const runtime = this.requireRuntime(record.id)
+    if (isTerminal(record.status)) throw new Error(`Fleet team ${record.id} is ${record.status}`)
+
+    const callerId = String(caller.id)
+    const autoJoinChannels = parseTeamTemplate(
+      JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
+      this.configuration,
+    )
+      .channels.map(channel => channel.id)
+    const otherTeam = this.assistantTeamForSession(callerId, record.id)
+    if (otherTeam !== undefined) {
+      throw new Error(`Session ${callerId} is already the foreground assistant for Fleet team ${otherTeam.id}; use a separate native Session for team ${record.id}`)
+    }
+    const current = record.assistants.find(assistant => assistant.sessionId === callerId)
+    if (current !== undefined && runtime.memberNamesById.get(callerId) === current.view.id) {
+      runtime.attachMember(callerId, current.view)
+      runtime.messages.connectAgent(callerId, autoJoinChannels)
+      runtime.setMemberWorkspaces(current.view.id, this.effectiveWorkspaces(record).get(current.view.id) ?? [])
+      return { run: this.describeRecord(record), assistant: structuredClone(current) }
+    }
+    const rebound = current ?? (input.assistantId === undefined
+      ? undefined
+      : record.assistants.find(assistant => assistant.view.id === input.assistantId))
+    if (input.assistantId !== undefined && rebound === undefined) {
+      throw new Error(`unknown Fleet assistant ${input.assistantId}`)
+    }
+    if (rebound !== undefined
+      && rebound.sessionId !== callerId
+      && runtime.memberNamesById.get(rebound.sessionId) === rebound.view.id) {
+      throw new Error(`Fleet assistant ${rebound.view.id} is already attached to a live session`)
+    }
+
+    const configured = this.effectiveMemberViews(record)
+    const existingViews = [...configured, ...record.assistants.map(assistant => assistant.view)]
+    const view: FleetAssistantView = rebound?.view ?? {
+      id: input.id?.trim() || `assistant-${randomUUID().slice(0, 8)}`,
+      name: input.name?.trim() || generateMemberDisplayName(existingViews.map(member => member.name)),
+      color: input.color === undefined
+        ? generateFleetMemberColor(existingViews.flatMap(member => member.color === undefined ? [] : [member.color]))
+        : normalizeFleetMemberColor(input.color),
+      role: input.role?.trim() || 'Team Assistant',
+      responsibility: input.responsibility?.trim()
+        || 'Maintain the user-facing Team conversation and help the user collaborate with the Team.',
+      prompt: input.prompt?.trim() ?? '',
+      ...((input.provider ?? caller.options.provider) === undefined
+        ? {}
+        : { provider: input.provider ?? caller.options.provider }),
+      ...((input.model ?? caller.options.model) === undefined
+        ? {}
+        : { model: input.model ?? caller.options.model }),
+      toolGroups: input.toolGroups === undefined ? [...FLEET_MEMBER_TOOL_GROUPS] : [...input.toolGroups],
+      permissions: input.permissions === undefined ? [...FLEET_MEMBER_PERMISSIONS] : [...input.permissions],
+      contacts: input.contacts === undefined
+        ? { members: '*', channels: '*' }
+        : structuredClone(input.contacts),
+    }
+    normalizedMemberView(view, 'assistant')
+    if (existingViews.some(member => member.id === view.id) && rebound === undefined) {
+      throw new Error(`Fleet member id ${view.id} already exists`)
+    }
+
+    try {
+      if (rebound !== undefined && rebound.sessionId !== callerId) {
+        runtime.rebindMember(rebound.sessionId, callerId, view)
+      } else {
+        runtime.attachMember(callerId, view)
+      }
+      runtime.setMemberWorkspaces(view.id, this.effectiveWorkspaces(record).get(view.id) ?? [{
+        name: 'project', path: record.projectRoot, access: 'write',
+      }])
+      const callerCtx = (caller as Agent & { readonly ctx?: Context }).ctx
+      if (callerCtx !== undefined) await installMemberTools(callerCtx, runtime, view.id, true)
+      runtime.messages.connectAgent(callerId, autoJoinChannels)
+    } catch (error) {
+      runtime.detachMember(callerId)
+      if (rebound !== undefined && rebound.sessionId !== callerId) {
+        runtime.memberIdsByName.set(rebound.view.id, rebound.sessionId)
+        runtime.memberNamesById.set(rebound.sessionId, rebound.view.id)
+        runtime.messages.rebindAgent(callerId, rebound.sessionId, { silent: true })
+      }
+      throw error
+    }
+    const assistant: FleetRunAssistant = { sessionId: callerId, view: structuredClone(view) }
+    const assistants = rebound === undefined
+      ? [...record.assistants, assistant]
+      : record.assistants.map(candidate => candidate.view.id === rebound.view.id ? assistant : candidate)
+    const updated = this.replaceRecord(record.id, { assistants })
+    this.appendEvent(record.id, rebound === undefined ? 'assistant_attached' : 'assistant_rebound', {
+      ...(rebound === undefined ? {} : { previousSessionId: rebound.sessionId }),
+      sessionId: callerId,
+      view,
+    })
+    return { run: this.describeRecord(updated), assistant: structuredClone(assistant) }
+  }
+
+  detachAssistant(caller: Agent, runId?: string): FleetRunRecord {
+    const record = this.requireCallerRecord(caller, runId)
+    const assistant = this.requireAssistantConnection(caller, record.id)
+    const runtime = this.requireRuntime(record.id)
+    runtime.messages.disconnectAgent(String(caller.id))
+    runtime.detachMember(String(caller.id))
+    this.appendEvent(record.id, 'assistant_detached', {
+      assistantId: assistant.view.id,
+      sessionId: assistant.sessionId,
+    })
+    return this.describeRecord(record)
+  }
+
+  sendAssistantMessage(caller: Agent, input: SendAssistantMessageInput): FleetAssistantMessage {
+    const record = this.requireMutableRecord(input.runId, input.projectRoot)
+    const assistant = this.requireAssistantConnection(caller, record.id)
+    if (record.status !== 'idle' && record.status !== 'running') {
+      throw new Error(`Fleet team ${record.id} cannot receive assistant messages while ${record.status}`)
+    }
+    const content = input.text.trim()
+    if (content.length === 0) throw new Error('Fleet assistant message cannot be empty')
+    if (content.length > MAX_ASSISTANT_MESSAGE_LENGTH) {
+      throw new Error(`Fleet assistant message cannot exceed ${MAX_ASSISTANT_MESSAGE_LENGTH} characters`)
+    }
+    const recipients = record.members.filter(member => this.memberCanReply(member)).map(member => member.name)
+    if (recipients.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
+    const message: FleetAssistantMessage = {
+      id: `assistant_message_${randomUUID()}`,
+      runId: record.id,
+      kind: input.kind,
+      text: content,
+      recipients,
+      assistantSessionId: String(caller.id),
+      assistantId: assistant.view.id,
+      assistantName: assistant.view.name,
+      createdAt: new Date().toISOString(),
+    }
+    const channel = parseTeamTemplate(
+      JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
+      this.configuration,
+    ).channels[0]
+    if (channel === undefined) throw new Error(`Fleet team ${record.id} has no Team Channel`)
+    this.requireRuntime(record.id).messages.send(caller, {
+      to: `#${channel.id}`,
+      text: content,
+      delivery: input.kind === 'directive' ? 'wakeup' : 'quiet',
+      ...(input.kind === 'directive' ? { mentions: recipients.map(member => `@${member}`) } : {}),
+    })
+    this.appendEvent(record.id, 'assistant_message', message)
+    return structuredClone(message)
+  }
+
+  sendConversationMessage(caller: Agent, input: SendFleetConversationMessageInput): SendMessageResult {
+    const record = this.requireMutableRecord(input.runId)
+    this.requireAssistantConnection(caller, record.id)
+    return this.requireRuntime(record.id).messages.send(caller, {
+      to: input.to,
+      text: input.text,
+      delivery: input.delivery,
+      ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
+      ...(input.resources === undefined ? {} : { resources: input.resources }),
+      ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
+    })
+  }
+
+  sendUserConversationMessage(input: SendFleetConversationMessageInput): SendMessageResult {
+    const record = this.requireMutableRecord(input.runId)
+    return this.requireRuntime(record.id).sendUserMessage({
+      to: input.to,
+      text: input.text,
+      delivery: input.delivery,
+      ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
+      ...(input.resources === undefined ? {} : { resources: input.resources }),
+      ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
+    })
+  }
+
+  uploadResource(caller: Agent, input: UploadFleetResourceInput): FleetResource {
+    const record = this.requireMutableRecord(input.runId)
+    this.requireFleetPermission(record, caller, 'resource.write')
+    const resources = this.requireRuntime(record.id).resources
+    const name = input.name.trim()
+    if (name.length === 0 || name.length > 255 || basename(name) !== name || name === '.' || name === '..') {
+      throw new Error('Fleet upload name must be a plain file name up to 255 characters')
+    }
+    if (input.base64.length > 35_000_000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.base64)) {
+      throw new Error('Fleet upload content must be valid base64')
+    }
+    const content = Buffer.from(input.base64, 'base64')
+    if (content.byteLength > 25 * 1024 * 1024) throw new Error('Fleet upload cannot exceed 25 MiB')
+    const directory = join(this.runDirectory(record), 'uploads', randomUUID())
+    mkdirSync(directory, { recursive: true })
+    const path = join(directory, name)
+    writeFileSync(path, content)
+    return resources.addResource(String(caller.id), {
+      path,
+      label: input.label?.trim() || name,
+      ...(input.mediaType === undefined || input.mediaType.trim().length === 0
+        ? {}
+        : { mediaType: input.mediaType.trim() }),
+      size: content.byteLength,
+    })
   }
 
   async wait(
@@ -556,6 +2873,7 @@ export class FleetRunService {
     projectRoot?: string,
   ): Promise<FleetRunRecord> {
     const record = this.requireRecord(runId, projectRoot)
+    if (record.status === 'idle') return this.describeRecord(record)
     if (isTerminal(record.status)) {
       const finalization = this.finalizations.get(record.id)
       if (finalization !== undefined) await finalization
@@ -581,40 +2899,382 @@ export class FleetRunService {
         fail: error => { settle(() => { rejectPromise(error) }) },
       }
       const onAbort = (): void => { waiter.fail(signal?.reason ?? new Error('fleet_run wait aborted')) }
-      const timer = setTimeout(() => { waiter.fail(new Error(`Fleet run ${record.id} did not finish before timeout`)) }, timeoutMs)
+      const timer = setTimeout(() => { waiter.finish(this.requireRecord(record.id, projectRoot)) }, timeoutMs)
       signal?.addEventListener('abort', onAbort, { once: true })
       this.waiters.add(waiter)
     })
   }
 
-  finish(caller: Agent, status: Exclude<FleetRunStatus, 'starting' | 'running'>, summary: string): FleetRunRecord {
-    const record = this.requireRecord()
-    const memberIds = new Set(record.members.map(member => member.sessionId))
-    if (record.launcherSessionId !== String(caller.id) && !memberIds.has(String(caller.id))) {
-      throw new Error(`Agent ${String(caller.id)} does not belong to Fleet run ${record.id}`)
+  finish(
+    caller: Agent,
+    status: Exclude<FleetWorkStatus, 'running'>,
+    summary: string,
+    runId?: string,
+  ): FleetRunRecord {
+    const record = this.requireCallerRecord(caller, runId)
+    const runtime = this.requireRuntime(record.id)
+    this.requireParticipant(record, caller)
+    if (record.status !== 'running' || record.work === undefined) {
+      throw new Error(`Fleet team ${record.id} has no active work to finish`)
     }
-    return this.setTerminal(record.id, status, summary, String(caller.id))
+    const terminalSummary = summary.trim()
+    if (terminalSummary.length === 0) throw new Error('Fleet work terminal summary cannot be empty')
+    this.clearRunNetworkRecoveries(record.id)
+    const callerId = String(caller.id)
+    for (const member of record.members) {
+      try {
+        this.core.cancelManaged(this.runtimeMemberName(record.id, member.name), callerId)
+      } catch (error) {
+        if (!errorMessage(error).includes('unknown Fleet Agent')) throw error
+      }
+      try {
+        this.core.clearManagedInbox(this.runtimeMemberName(record.id, member.name))
+      } catch (error) {
+        if (!errorMessage(error).includes('unknown Fleet Agent')) throw error
+      }
+      runtime.resources.release(member.sessionId)
+    }
+    const finishing = this.replaceRecord(record.id, {
+      status: 'finishing',
+      work: {
+        ...record.work,
+        status,
+        endedAt: new Date().toISOString(),
+        summary: terminalSummary,
+      },
+    })
+    this.appendEvent(record.id, 'work_status', {
+      workId: record.work.id,
+      status,
+      summary: terminalSummary,
+      callerId,
+    })
+    void this.settleFinishedWork(finishing)
+    return this.describeRecord(finishing)
   }
 
-  recordCoordination(event: FleetCoordinationEvent): void {
-    const record = this.activeRecord()
-    if (record === undefined) return
+  end(caller: Agent, summary: string, runId?: string): FleetRunRecord {
+    const record = this.requireCallerRecord(caller, runId)
+    this.requireParticipant(record, caller)
+    return this.setTerminal(record.id, summary, String(caller.id))
+  }
+
+  recordCoordination(runId: string, event: FleetCoordinationEvent): void {
+    const record = this.records.get(runId)
+    const runtime = this.collaboration.get(runId)
+    const voteBindings = this.voteWorkIds.get(runId)
+    if (record === undefined || runtime === undefined || voteBindings === undefined) return
     this.appendEvent(record.id, `coordination.${event.type}`, event)
+    if (event.type === 'meeting' && event.action === 'closed') {
+      runtime.calendar.closeLinkedMeeting(event.meeting.id, event.meeting.closedAt)
+    }
+    if (
+      event.type === 'vote'
+      && event.action === 'opened'
+      && (event.vote.kind === 'finish' || event.vote.kind === 'blocked')
+      && record.status === 'running'
+      && record.work?.status === 'running'
+    ) {
+      voteBindings.set(event.vote.id, record.work.id)
+      this.appendEvent(record.id, 'work_vote_bound', { voteId: event.vote.id, workId: record.work.id })
+    }
     if (event.type === 'vote' && event.action === 'closed' && event.vote.status === 'approved') {
       if (event.vote.kind === 'finish' || event.vote.kind === 'blocked') {
-        this.setTerminal(
-          record.id,
-          event.vote.kind === 'finish' ? 'finished' : 'blocked',
-          event.vote.statement,
-          event.vote.initiator,
-        )
+        const vote = event.vote
+        queueMicrotask(() => {
+          const current = this.records.get(runId)
+          if (
+            current?.status !== 'running'
+            || current.work === undefined
+            || voteBindings.get(vote.id) !== current.work.id
+          ) return
+          const participants = this.participants(current)
+          const initiator = participants.find(member => member.sessionId === vote.initiator)
+          const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
+            ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
+          if (caller !== undefined) {
+            this.finish(caller, vote.kind === 'finish' ? 'finished' : 'blocked', vote.statement, runId)
+          }
+        })
       }
     }
   }
 
-  recordResource(event: FleetResourceEvent): void {
-    const record = this.activeRecord()
-    if (record !== undefined) this.appendEvent(record.id, `resource.${event.type}`, event)
+  recordResource(runId: string, event: FleetResourceEvent): void {
+    if (!this.collaboration.has(runId)) return
+    if (event.type === 'resource_revised') {
+      const record = this.requireRecord(runId)
+      const beforeBytes = event.revision.before === null ? 0 : Buffer.byteLength(event.revision.before, 'utf8')
+      const afterBytes = Buffer.byteLength(event.revision.after, 'utf8')
+      const size = beforeBytes + afterBytes
+      const available = size <= RESOURCE_REVISION_MAX_BYTES
+      if (available) {
+        const directory = join(this.runDirectory(record), 'resource-revisions')
+        mkdirSync(directory, { recursive: true })
+        const target = join(directory, `${event.revision.id}.json`)
+        const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`
+        writeFileSync(temporary, JSON.stringify(event.revision), 'utf8')
+        renameSync(temporary, target)
+      }
+      appendFileSync(
+        join(this.runDirectory(record), 'resource-history.jsonl'),
+        `${JSON.stringify({
+          id: event.revision.id,
+          resourceId: event.revision.resourceId,
+          updatedBy: event.revision.updatedBy,
+          updatedAt: event.revision.updatedAt,
+          operation: event.revision.before === null ? 'created' : 'updated',
+          available,
+          size,
+        })}\n`,
+        'utf8',
+      )
+      return
+    }
+    this.appendEvent(runId, `resource.${event.type}`, event)
+  }
+
+  private clearMemberActivity(sessionId: string): void {
+    const activity = this.memberToolActivity.get(sessionId)
+    if (activity?.timer !== undefined) clearTimeout(activity.timer)
+    this.memberToolActivity.delete(sessionId)
+    this.waitingSessionIds.delete(sessionId)
+  }
+
+  private refreshMemberActivity(sessionId: string): void {
+    const activity = this.memberToolActivity.get(sessionId)
+    if (activity === undefined) return
+    if (activity.timer !== undefined) clearTimeout(activity.timer)
+    activity.timer = undefined
+    if (activity.calls.size === 0) {
+      this.clearMemberActivity(sessionId)
+      return
+    }
+    const explicitWait = [...activity.calls.values()].every(call => call.explicitWait)
+    const delay = explicitWait ? EXPLICIT_WAIT_DELAY_MS : QUIET_TOOL_WAIT_DELAY_MS
+    const remaining = activity.lastInteractionAt + delay - Date.now()
+    if (remaining <= 0) {
+      this.waitingSessionIds.add(sessionId)
+      return
+    }
+    this.waitingSessionIds.delete(sessionId)
+    activity.timer = setTimeout(() => { this.refreshMemberActivity(sessionId) }, remaining)
+  }
+
+  private recordMemberActivity(sessionId: string, event: SessionEvent): void {
+    let activity = this.memberToolActivity.get(sessionId)
+    if (event.type === 'tool/call') {
+      activity ??= { calls: new Map(), lastInteractionAt: Date.now(), timer: undefined }
+      activity.calls.set(String(event.data.callId), {
+        explicitWait: isExplicitWaitCall(event.data.name, event.data.arguments),
+      })
+      this.memberToolActivity.set(sessionId, activity)
+    }
+    if (activity === undefined) return
+    activity.lastInteractionAt = Date.now()
+    if (event.type === 'tool/result') activity.calls.delete(String(event.data.message.source.callId))
+    if (event.type === 'step/end' || event.type === 'turn/end') activity.calls.clear()
+    this.refreshMemberActivity(sessionId)
+  }
+
+  private recordMemberHealth(sessionId: string, event: SessionEvent): void {
+    if (event.type === 'turn/start') this.abnormalSessionIds.delete(sessionId)
+    if (event.type !== 'turn/end') return
+    if (event.data.reason.kind === 'error') this.abnormalSessionIds.add(sessionId)
+    else this.abnormalSessionIds.delete(sessionId)
+  }
+
+  recordMemberSessionEvent(sessionId: string, event: SessionEvent): void {
+    if (event.type === 'session/end-seed') return
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      !this.dormantRunIds.has(runId) && runtime.memberNamesById.has(sessionId),
+    )
+    if (entry === undefined) return
+    const [runId, runtime] = entry
+    const member = runtime.memberNamesById.get(sessionId)
+    if (member === undefined || this.records.get(runId) === undefined) return
+    this.recordMemberActivity(sessionId, event)
+    this.recordMemberHealth(sessionId, event)
+    if (event.type === 'assistant/chunk') return
+    if (event.type !== 'turn/end') return
+    const reason = event.data.reason
+    if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
+      const agent = this.ctx.agents.get(SessionId(sessionId))
+      if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
+      return
+    }
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    const route = agent === undefined ? undefined : this.networkRoute(agent)
+    this.clearNetworkRecovery(sessionId)
+    if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
+      this.wakeNetworkRecoveriesForRoute(runId, route, sessionId)
+    }
+  }
+
+  agentIdle(agent: Agent): void {
+    if (agent.status !== 'idle') return
+    const agentId = String(agent.id)
+    this.clearMemberActivity(agentId)
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      !this.dormantRunIds.has(runId) && runtime.memberNamesById.has(agentId),
+    )
+    if (entry === undefined) return
+    const [runId, runtime] = entry
+    const record = this.records.get(runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running') return
+
+    let wokePending = false
+    for (const member of record.members) {
+      if (this.networkRecoveries.has(member.sessionId)) continue
+      const live = this.liveMember(member)
+      if (live?.status !== 'idle') continue
+      const pending = runtime.messages.pendingWakeups(member.sessionId)
+      if (pending.length === 0) continue
+      live.followup(createUserMessage({
+        content: [{
+          type: 'text',
+          text: [
+            `[Fleet work ${record.work.id} continuation]`,
+            'You still have a wake-up message that has not been answered in its Fleet conversation.',
+            ...pending.map(message => `- ${message.conversation} ${message.id} from @${message.fromName ?? message.from}`),
+            'Read the conversation, continue the requested work, and post a response in that same conversation.',
+          ].join('\n'),
+        }],
+        source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+      }))
+      this.appendEvent(runId, 'member_continued', {
+        member: member.name,
+        reason: 'pending_wakeup',
+        messages: pending.map(message => message.id),
+      })
+      wokePending = true
+    }
+    if (wokePending) return
+
+    const online = record.members.flatMap(member => {
+      const live = this.liveMember(member)
+      return live === undefined ? [] : [live]
+    })
+    const allIdle = online.length > 0 && online.every(member => member.status === 'idle')
+    if (!allIdle) return
+    for (const member of record.members.filter(candidate =>
+      this.memberCanReply(candidate) && !this.networkRecoveries.has(candidate.sessionId),
+    )) {
+      const agent = this.ctx.agents.get(SessionId(member.sessionId))
+      if (agent?.status !== 'idle') continue
+      agent.followup(createUserMessage({
+        content: [{
+          type: 'text',
+          text: [
+            `[Fleet work ${record.work.id} continuation]`,
+            'The Team still has active work, but every member is idle and no explicit wake-up reply is pending.',
+            'Inspect the current Channels, Meetings, Votes, shared files, and member status. Claim the next useful step, ask the relevant peers for review, or propose a finish/blocked Vote with evidence.',
+          ].join('\n\n'),
+        }],
+        source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+      }))
+      this.appendEvent(runId, 'member_continued', {
+        member: member.name,
+        reason: 'team_quiescent',
+      })
+    }
+  }
+
+  agentDisconnected(agentId: string): void {
+    this.clearNetworkRecovery(agentId)
+    this.clearMemberActivity(agentId)
+    this.abnormalSessionIds.delete(agentId)
+    for (const [runId, runtime] of this.collaboration.entries()) {
+      if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
+      runtime.messages.disconnectAgent(agentId)
+    }
+  }
+
+  private networkRoute(agent: Agent): string {
+    return `${agent.options.provider ?? ''}\u0000${agent.options.model ?? ''}`
+  }
+
+  private scheduleNetworkRecovery(runId: string, member: string, agent: Agent, code: string): void {
+    const record = this.records.get(runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running') return
+    const sessionId = String(agent.id)
+    const route = this.networkRoute(agent)
+    const current = this.networkRecoveries.get(sessionId)
+    if (current?.timer !== undefined) return
+    const attempt = current?.route === route ? current.attempt + 1 : 1
+    const delayMs = Math.min(
+      NETWORK_RECOVERY_MAX_DELAY_MS,
+      NETWORK_RECOVERY_INITIAL_DELAY_MS * 2 ** Math.min(attempt - 1, 4),
+    )
+    const dueAt = new Date(Date.now() + delayMs).toISOString()
+    const recovery: NetworkRecovery = { runId, member, route, attempt, timer: undefined }
+    recovery.timer = setTimeout(() => {
+      recovery.timer = undefined
+      this.wakeNetworkRecovery(sessionId, 'backoff_elapsed')
+    }, delayMs)
+    this.networkRecoveries.set(sessionId, recovery)
+    this.appendEvent(runId, 'member_network_recovery_scheduled', {
+      member,
+      sessionId,
+      code,
+      attempt,
+      delayMs,
+      dueAt,
+    })
+  }
+
+  private wakeNetworkRecoveriesForRoute(runId: string, route: string, sourceSessionId: string): void {
+    for (const [sessionId, recovery] of [...this.networkRecoveries]) {
+      if (sessionId === sourceSessionId || recovery.runId !== runId || recovery.route !== route) continue
+      this.wakeNetworkRecovery(sessionId, 'route_recovered')
+    }
+  }
+
+  private wakeNetworkRecovery(sessionId: string, reason: 'backoff_elapsed' | 'route_recovered'): void {
+    const recovery = this.networkRecoveries.get(sessionId)
+    if (recovery === undefined) return
+    if (recovery.timer !== undefined) clearTimeout(recovery.timer)
+    recovery.timer = undefined
+    const record = this.records.get(recovery.runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running') {
+      this.clearNetworkRecovery(sessionId)
+      return
+    }
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) {
+      this.clearNetworkRecovery(sessionId)
+      return
+    }
+    if (agent.status !== 'idle') return
+    agent.followup(createUserMessage({
+      content: [{
+        type: 'text',
+        text: [
+          `[Fleet work ${record.work.id} network recovery]`,
+          'Your previous model request ended after its transient network retries were exhausted.',
+          'Connectivity may now be available. Re-check the Team state, verify whether any external action already completed, then continue the interrupted work without duplicating irreversible actions.',
+        ].join('\n\n'),
+      }],
+      source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+    }))
+    this.appendEvent(record.id, 'member_network_recovery_woken', {
+      member: recovery.member,
+      sessionId,
+      attempt: recovery.attempt,
+      reason,
+    })
+  }
+
+  private clearNetworkRecovery(sessionId: string): void {
+    const recovery = this.networkRecoveries.get(sessionId)
+    if (recovery?.timer !== undefined) clearTimeout(recovery.timer)
+    this.networkRecoveries.delete(sessionId)
+  }
+
+  private clearRunNetworkRecoveries(runId: string): void {
+    for (const [sessionId, recovery] of [...this.networkRecoveries]) {
+      if (recovery.runId === runId) this.clearNetworkRecovery(sessionId)
+    }
   }
 
   readTrace(runId: string | undefined, afterSequence: number, limit: number, projectRoot?: string): {
@@ -623,20 +3283,115 @@ export class FleetRunService {
     readonly hasMore: boolean
   } {
     const record = this.requireRecord(runId, projectRoot)
-    const path = join(this.runDirectory(record), 'events.jsonl')
-    const stored = existsSync(path)
-      ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as StoredFleetEvent)
-      : []
+    const stored = this.storedEvents(record)
     const matching = stored.filter(event => event.sequence > afterSequence)
     return {
       runId: record.id,
       events: matching.slice(0, limit).map(event => ({
         sequence: event.sequence,
         createdAt: event.createdAt,
+        scope: event.member === undefined ? 'team' : 'member',
+        ...(event.member === undefined ? {} : {
+          member: event.member.name,
+          sourceSequence: event.member.sequence,
+        }),
         type: event.type,
         data: JSON.stringify(event.data),
       })),
       hasMore: matching.length > limit,
+    }
+  }
+
+  readTeamProjection(runId: string, afterSequence: number, limit: number): FleetTeamProjection {
+    const record = this.requireRecord(runId)
+    const matching = this.storedEvents(record).filter(event => event.sequence > afterSequence)
+    return {
+      run: this.describeRecord(record),
+      memberViews: this.memberViews(runId),
+      events: matching.slice(0, limit).map(event => this.journalEvent(event)),
+      hasMore: matching.length > limit,
+    }
+  }
+
+  readWebTeamProjection(runId: string, afterSequence: number, limit: number): FleetTeamProjection {
+    const record = this.requireRecord(runId)
+    let projection = this.teamProjectionEvents.get(record.id)
+    if (projection === undefined) {
+      const stored = this.storedEvents(record)
+      projection = compactTeamProjectionEvents(stored)
+      this.cacheTeamProjection(record.id, projection)
+      if (!this.memberViewSnapshots.has(record.id)) {
+        this.memberViewSnapshots.set(record.id, this.effectiveMemberViews(record, stored))
+      }
+    }
+    const matching = projection.filter(event => event.sequence > afterSequence)
+    return {
+      run: this.describeRecord(record),
+      memberViews: this.memberViews(runId),
+      events: matching.slice(0, limit).map(event => this.journalEvent(event)),
+      hasMore: matching.length > limit,
+    }
+  }
+
+  async readResourcePreview(
+    runId: string,
+    resourceId: string,
+    signal?: AbortSignal,
+    revisionId?: string,
+  ): Promise<FleetResourcePreview> {
+    const record = this.requireRecord(runId)
+    const events = this.storedEvents(record)
+    const resource = events.flatMap(event => {
+      if (event.type !== 'resource.resource_added') return []
+      const candidate = (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource
+      return candidate.id === resourceId ? [candidate] : []
+    }).at(-1)
+    if (resource === undefined) throw new Error(`Unknown Fleet resource: ${resourceId}`)
+    const kind = resourcePreviewKind(resource)
+    if (kind === undefined) throw new Error('This file type does not support inline preview')
+
+    const target = await this.ctx.fs.resolve(resource.path, signal === undefined ? {} : { signal })
+    const info = await this.ctx.fs.stat(target, signal)
+    if (info === undefined) throw new Error(`Fleet resource file does not exist: ${resource.path}`)
+    if (info.type !== 'file') throw new Error(`Fleet resource is not a regular file: ${resource.path}`)
+    if (info.size !== undefined && info.size > RESOURCE_PREVIEW_MAX_BYTES) {
+      throw new Error('Fleet resource preview is limited to 2 MiB')
+    }
+    const bytes = await this.ctx.fs.readBytes(target, signal, RESOURCE_PREVIEW_MAX_BYTES)
+    const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    const revisions = this.storedResourceRevisionSummaries(record).filter(revision => revision.resourceId === resourceId)
+    const selected = revisionId === undefined
+      ? undefined
+      : revisions.find(revision => revision.id === revisionId)
+    if (revisionId !== undefined && selected === undefined) {
+      throw new Error(`Unknown Fleet resource revision: ${revisionId}`)
+    }
+    return {
+      id: resource.id,
+      kind,
+      body,
+      ...(resource.mediaType === undefined ? {} : { mediaType: resource.mediaType }),
+      ...(info.size === undefined ? {} : { size: info.size }),
+      history: revisions.slice(-RESOURCE_HISTORY_LIMIT).map((revision): FleetResourceRevisionSummary => ({
+        id: revision.id,
+        updatedBy: revision.updatedBy,
+        updatedAt: revision.updatedAt,
+        operation: revision.operation,
+        available: revision.available,
+        size: revision.size,
+      })).reverse(),
+      historyTruncated: revisions.length > RESOURCE_HISTORY_LIMIT,
+      ...(selected === undefined || !selected.available ? {} : {
+        revision: {
+          id: selected.id,
+          updatedBy: selected.updatedBy,
+          updatedAt: selected.updatedAt,
+          operation: selected.operation,
+          available: true,
+          size: selected.size,
+          ...this.storedResourceRevision(record, selected.id),
+        },
+      }),
     }
   }
 
@@ -653,7 +3408,7 @@ export class FleetRunService {
     readonly hasMore: boolean
   }> {
     const record = this.requireRecord(runId, projectRoot)
-    const member = record.members.find(candidate => candidate.name === memberName)
+    const member = this.participants(record).find(candidate => candidate.name === memberName)
     if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
     const live = this.ctx.agents.get(SessionId(member.sessionId))
     const events: readonly SessionEventLike[] = live === undefined
@@ -666,6 +3421,9 @@ export class FleetRunService {
       events: matching.slice(0, limit).map(event => ({
         sequence: event.seq,
         createdAt: new Date(event.time).toISOString(),
+        scope: 'member' as const,
+        member: member.name,
+        sourceSequence: event.seq,
         type: `session.${event.type}`,
         data: JSON.stringify(event.data),
       })),
@@ -673,48 +3431,392 @@ export class FleetRunService {
     }
   }
 
-  close(): void {
-    for (const waiter of [...this.waiters]) waiter.fail(new Error('Fleet Run service stopped'))
+  async readMemberTraceTail(
+    runId: string | undefined,
+    memberName: string,
+    limit: number,
+    projectRoot?: string,
+  ): Promise<{
+    readonly runId: string
+    readonly member: string
+    readonly events: FleetTraceEvent[]
+    readonly hasMore: boolean
+  }> {
+    const record = this.requireRecord(runId, projectRoot)
+    const member = this.participants(record).find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
+    const live = this.ctx.agents.get(SessionId(member.sessionId))
+    const events: readonly SessionEventLike[] = live === undefined
+      ? (await this.requirePersistence().inspect(SessionId(member.sessionId))).events
+      : live.session.events
+    const tail: SessionEventLike[] = []
+    let hasMore = false
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event === undefined || event.type === 'assistant/chunk' || event.type === 'session/end-seed') continue
+      if (tail.length === limit) {
+        hasMore = true
+        break
+      }
+      tail.push(event)
+    }
+    tail.reverse()
+    return {
+      runId: record.id,
+      member: member.name,
+      events: tail.map(event => ({
+        sequence: event.seq,
+        createdAt: new Date(event.time).toISOString(),
+        scope: 'member' as const,
+        member: member.name,
+        sourceSequence: event.seq,
+        type: `session.${event.type}`,
+        data: JSON.stringify(event.data),
+      })),
+      hasMore,
+    }
   }
 
-  private setTerminal(
+  readMemberProjection(
     runId: string,
-    status: Exclude<FleetRunStatus, 'starting' | 'running'>,
-    summary: string,
-    callerId: string,
-  ): FleetRunRecord {
+    memberName: string,
+    afterSequence: number,
+    limit: number,
+  ): FleetMemberProjection {
+    const record = this.requireRecord(runId)
+    return this.projectMember(record, memberName, afterSequence, limit, this.storedEvents(record))
+  }
+
+  private projectMember(
+    record: FleetRunRecord,
+    memberName: string,
+    afterSequence: number,
+    limit: number,
+    stored: readonly StoredFleetEvent[],
+  ): FleetMemberProjection {
+    const participants = this.participants(record)
+    if (!participants.some(member => member.name === memberName)) {
+      throw new Error(`unknown Fleet run member ${memberName}`)
+    }
+    const view = [
+      ...this.effectiveMemberViews(record, stored),
+      ...record.assistants.map(assistant => assistant.view),
+    ].find(member => member.id === memberName)
+    if (view === undefined) throw new Error(`missing Fleet member view ${memberName}`)
+    const memberSessionId = participants.find(member => member.name === memberName)?.sessionId ?? ''
+    const channels = new Map<string, Extract<FleetCoordinationEvent, { type: 'channel' }>['channel']>()
+    for (const event of stored) {
+      if (event.type !== 'coordination.channel') continue
+      const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'channel' }>
+      channels.set(coordination.channel.id, coordination.channel)
+    }
+    const visibleChannels = new Set([
+      ...(fleetMemberCanAccessChannel(view, 'general') ? ['general'] : []),
+      ...[...channels.values()].flatMap(channel =>
+        fleetMemberCanAccessChannel(view, channel.id)
+        && (channel.open || channel.members.includes(memberSessionId))
+          ? [channel.id]
+          : [],
+      ),
+    ])
+    const meetings = new Set(stored.flatMap(event => {
+      if (event.type !== 'coordination.meeting') return []
+      const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'meeting' }>
+      return coordination.meeting.participants.includes(memberSessionId) ? [coordination.meeting.id] : []
+    }))
+    const matching = stored.filter(event =>
+      event.sequence > afterSequence && this.visibleToMember(record, view, visibleChannels, meetings, event),
+    )
+    return {
+      run: this.describeRecord(record),
+      view: structuredClone(view),
+      events: matching.slice(0, limit).map(event => this.journalEvent(event)),
+      hasMore: matching.length > limit,
+    }
+  }
+
+  activityInbox(caller: Agent, input: {
+    readonly runId?: string
+    readonly afterSequence?: number
+    readonly limit?: number
+    readonly unreadOnly?: boolean
+  } = {}): FleetActivityInbox {
+    const record = this.requireCallerRecord(caller, input.runId)
+    const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
+    if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+    const afterSequence = input.afterSequence ?? 0
+    const limit = input.limit ?? 50
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new Error('afterSequence must be a non-negative integer')
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('limit must be an integer from 1 through 100')
+    }
+    const stored = this.storedEvents(record)
+    const acknowledged = new Set(stored.flatMap(event => {
+      if (event.type !== 'activity.acknowledged') return []
+      const data = event.data as { readonly member: string; readonly sequence: number }
+      return data.member === participant.name ? [data.sequence] : []
+    }))
+    const visible = this.projectMember(record, participant.name, afterSequence, stored.length || 1, stored).events
+    const matching = visible.flatMap((event): FleetActivityItem[] => {
+      const kind = this.activityKind(participant, event)
+      if (kind === undefined) return []
+      const isAcknowledged = acknowledged.has(event.sequence)
+      if (input.unreadOnly === true && isAcknowledged) return []
+      return [{
+        id: `${record.id}:${event.sequence}`,
+        sequence: event.sequence,
+        createdAt: event.createdAt,
+        kind,
+        type: event.type,
+        acknowledged: isAcknowledged,
+        data: structuredClone(event.data) as Record<string, JsonValue>,
+      }]
+    })
+    return {
+      runId: record.id,
+      member: participant.name,
+      items: matching.slice(0, limit),
+      hasMore: matching.length > limit,
+    }
+  }
+
+  acknowledgeActivity(caller: Agent, sequence: number, runId?: string): FleetActivityItem {
+    if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error('activity sequence must be a positive integer')
+    const current = this.activityInbox(caller, {
+      ...(runId === undefined ? {} : { runId }),
+      afterSequence: Math.max(0, sequence - 1),
+      limit: 1,
+    }).items
+      .find(item => item.sequence === sequence)
+    if (current === undefined) throw new Error(`activity ${sequence} is not visible to the calling Fleet member`)
+    if (!current.acknowledged) {
+      const record = this.requireCallerRecord(caller, runId)
+      const member = this.participants(record).find(participant => participant.sessionId === String(caller.id))?.name
+      if (member === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+      this.appendEvent(record.id, 'activity.acknowledged', { member, sequence })
+    }
+    return { ...current, acknowledged: true }
+  }
+
+  private activityKind(
+    participant: { readonly name: string; readonly sessionId: string },
+    event: FleetJournalEvent,
+  ): FleetActivityKind | undefined {
+    if (event.type === 'coordination.message') {
+      const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'message' }>
+      if (coordination.message.from === participant.sessionId) return undefined
+      if (coordination.message.kind === 'task_notification' || coordination.message.kind === 'calendar_notification') {
+        return undefined
+      }
+      const conversation = coordination.message.conversation
+      const direct = conversation === `@${participant.sessionId}`
+      const mentioned = coordination.message.mentions.includes(participant.sessionId)
+      return direct || mentioned || conversation.startsWith('meeting:') ? 'message' : undefined
+    }
+    if (event.type === 'coordination.meeting') return 'meeting'
+    if (event.type === 'coordination.vote') {
+      const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'vote' }>
+      return coordination.action === 'opened' || coordination.action === 'closed' ? 'vote' : undefined
+    }
+    if (/^task\.(created|updated|commented|progressed|completed|reopened|due)$/.test(event.type)) return 'task'
+    if (/^calendar\.(created|updated|rsvp|started|closed|cancelled)$/.test(event.type)) return 'calendar'
+    if (event.type === 'resource.document_commented' || event.type === 'resource.document_resolved') return 'document'
+    if (event.type === 'schedule.triggered') return 'schedule'
+    if (event.type === 'member_view_added' || event.type === 'member_view_updated' || event.type === 'member_view_removed'
+      || event.type === 'member_paused' || event.type === 'member_resumed') {
+      return 'member'
+    }
+    return undefined
+  }
+
+  private journalEvent(event: StoredFleetEvent): FleetJournalEvent {
+    return {
+      sequence: event.sequence,
+      createdAt: event.createdAt,
+      scope: event.member === undefined ? 'team' : 'member',
+      ...(event.member === undefined ? {} : {
+        member: event.member.name,
+        sourceSequence: event.member.sequence,
+      }),
+      type: event.type,
+        data: structuredClone(event.data) as Record<string, JsonValue>,
+    }
+  }
+
+  private visibleToMember(
+    record: FleetRunRecord,
+    view: FleetMemberView,
+    channels: ReadonlySet<string>,
+    meetings: ReadonlySet<string>,
+    event: StoredFleetEvent,
+  ): boolean {
+    if (event.member !== undefined) return event.member.name === view.id
+    if (event.type === 'activity.acknowledged') {
+      return (event.data as { readonly member: string }).member === view.id
+    }
+    if (event.type.startsWith('resource.document_')) return view.toolGroups.includes('documents')
+    if (event.type.startsWith('resource.')) return view.toolGroups.includes('resources')
+    if (event.type.startsWith('task.')) {
+      if (!view.toolGroups.includes('tasks')) return false
+      const data = event.data as FleetProjectTaskEvent | {
+        readonly sender?: string
+        readonly recipient?: string
+        readonly assignee?: string
+      }
+      if (!('task' in data)) return data.sender === view.id || data.recipient === view.id || data.assignee === view.id
+      return data.task.createdBy === view.id
+        || data.task.assignees.includes(view.id)
+        || data.task.followers.includes(view.id)
+    }
+    if (event.type.startsWith('calendar.')) {
+      const data = event.data as FleetCalendarEventChange | { readonly eventId?: string }
+      return view.toolGroups.includes('calendar') && ('event' in data
+        ? data.event.organizer === view.id || data.event.attendees.includes(view.id)
+        : true)
+    }
+    if (event.type.startsWith('schedule.')) {
+      const data = event.data as { readonly task?: FleetScheduledTask; readonly assignee?: string }
+      return data.assignee === view.id
+        || data.task?.createdBy === view.id
+        || data.task?.assignees.includes(view.id) === true
+    }
+    if (event.type === 'assistant_message') {
+      const message = event.data as FleetAssistantMessage
+      return message.recipients?.includes(view.id) === true
+        || (message as FleetAssistantMessage & { readonly coordinator?: string }).coordinator === view.id
+        || message.assistantId === view.id
+    }
+    if (!event.type.startsWith('coordination.')) return true
+
+    const coordination = event.data as FleetCoordinationEvent
+    if (coordination.type === 'channel') {
+      return channels.has(coordination.channel.id)
+    }
+    if (coordination.type === 'vote') {
+      return channels.has(coordination.vote.channel.slice(1))
+    }
+    if (coordination.type === 'meeting') {
+      return coordination.meeting.participants.some(sessionId =>
+        this.participants(record).some(member => member.name === view.id && member.sessionId === sessionId),
+      )
+    }
+    if (coordination.type === 'inbox') {
+      return this.participants(record).some(member => member.name === view.id && member.sessionId === coordination.agentId)
+    }
+    if (coordination.type === 'reaction' || coordination.type === 'pin') return true
+
+    const conversation = coordination.message.conversation
+    if (conversation.startsWith('#')) return channels.has(conversation.slice(1))
+    if (conversation.startsWith('meeting:')) return meetings.has(conversation.slice('meeting:'.length))
+    if (!conversation.startsWith('@')) return false
+    const targetSessionId = conversation.slice(1)
+    const target = this.participants(record).find(member => member.sessionId === targetSessionId)?.name ?? targetSessionId
+    const sender = coordination.message.fromName
+      ?? this.participants(record).find(member => member.sessionId === coordination.message.from)?.name
+      ?? coordination.message.from
+    return sender === view.id || target === view.id
+  }
+
+  close(): void {
+    for (const waiter of [...this.waiters]) waiter.fail(new Error('Fleet Run service stopped'))
+    for (const recovery of this.networkRecoveries.values()) {
+      if (recovery.timer !== undefined) clearTimeout(recovery.timer)
+    }
+    this.networkRecoveries.clear()
+    for (const sessionId of [...this.memberToolActivity.keys()]) this.clearMemberActivity(sessionId)
+    this.waitingSessionIds.clear()
+    this.abnormalSessionIds.clear()
+    this.collaboration.close()
+    this.voteWorkIds.clear()
+    this.dormantRunIds.clear()
+    this.teamProjectionEvents.clear()
+    this.memberViewSnapshots.clear()
+  }
+
+  private async settleFinishedWork(record: FleetRunRecord): Promise<void> {
+    let error: string | undefined
+    await Promise.all(record.members.map(async member => {
+      try {
+        await this.core.whenIdle(this.runtimeMemberName(record.id, member.name))
+      } catch (idleError) {
+        if (!errorMessage(idleError).includes('unknown Fleet Agent')) error ??= errorMessage(idleError)
+      }
+    }))
+    const current = this.requireRecord(record.id)
+    if (current.status !== 'finishing' || current.work?.id !== record.work?.id) return
+    const idle = this.replaceRecord(record.id, {
+      status: 'idle',
+      ...(error === undefined ? {} : { error }),
+    })
+    this.appendEvent(record.id, 'team_status', {
+      status: 'idle',
+      workId: record.work?.id,
+      ...(error === undefined ? {} : { error }),
+    })
+    this.notify(idle)
+  }
+
+  private setTerminal(runId: string, summary: string, callerId: string): FleetRunRecord {
     const current = this.requireRecord(runId)
     if (isTerminal(current.status)) return this.describeRecord(current)
     const terminalSummary = summary.trim()
-    if (terminalSummary.length === 0) throw new Error('Fleet run terminal summary cannot be empty')
+    if (terminalSummary.length === 0) throw new Error('Fleet team close summary cannot be empty')
+    this.clearRunNetworkRecoveries(runId)
+    const endedAt = new Date().toISOString()
+    this.collaboration.get(runId)?.scheduler.close()
     const record = this.replaceRecord(runId, {
-      status,
+      status: 'closed',
       settled: current.members.length === 0,
-      endedAt: new Date().toISOString(),
+      endedAt,
       summary: terminalSummary,
+      ...(current.work?.status === 'running'
+        ? { work: { ...current.work, status: 'cancelled' as const, endedAt, summary: terminalSummary } }
+        : {}),
     })
-    this.appendEvent(runId, 'run_status', { status, summary: record.summary, callerId })
+    if (current.work?.status === 'running') {
+      this.appendEvent(runId, 'work_status', {
+        workId: current.work.id,
+        status: 'cancelled',
+        summary: terminalSummary,
+        callerId,
+      })
+    }
+    this.appendEvent(runId, 'team_status', { status: 'closed', summary: record.summary, callerId })
+    this.forgetTeam(runId)
     if (record.members.length === 0) {
+      this.voteWorkIds.delete(record.id)
+      this.teamProjectionEvents.delete(record.id)
+      this.eventSequences.delete(record.id)
       this.notify(record)
       return this.describeRecord(record)
     }
     for (const member of record.members) {
       try {
-        this.core.cancelManaged(member.name, callerId)
+        this.core.cancelManaged(this.runtimeMemberName(record.id, member.name), callerId)
       } catch (error) {
         if (!errorMessage(error).includes('unknown Fleet Agent')) throw error
       }
     }
     const finalization = this.finalize(record, callerId)
     this.finalizations.set(record.id, finalization)
+    void finalization.then(
+      () => { this.finalizations.delete(record.id) },
+      () => { this.finalizations.delete(record.id) },
+    )
     return this.describeRecord(record)
   }
 
   private settleInterruptedTerminal(record: FleetRunRecord): FleetRunRecord {
     if (!isTerminal(record.status)) throw new Error(`Fleet run ${record.id} is not terminal`)
     if (record.settled) return this.describeRecord(record)
+    this.forgetTeam(record.id)
     const settled = this.replaceRecord(record.id, { settled: true })
-    this.appendEvent(record.id, 'run_settled', { recoveredAfterRestart: true })
+    this.appendEvent(record.id, 'team_settled', { recoveredAfterRestart: true })
+    this.voteWorkIds.delete(record.id)
+    this.teamProjectionEvents.delete(record.id)
+    this.eventSequences.delete(record.id)
     this.notify(settled)
     return this.describeRecord(settled)
   }
@@ -724,7 +3826,7 @@ export class FleetRunService {
     const remember = (failure: unknown): void => { error ??= errorMessage(failure) }
     await Promise.all(record.members.map(async member => {
       try {
-        await this.core.whenIdle(member.name)
+        await this.core.whenIdle(this.runtimeMemberName(record.id, member.name))
       } catch (idleError) {
         if (!errorMessage(idleError).includes('unknown Fleet Agent')) remember(idleError)
       }
@@ -739,38 +3841,84 @@ export class FleetRunService {
     }
     for (const member of record.members) {
       try {
-        await this.core.stopManaged(member.name)
+        await this.core.stopManaged(this.runtimeMemberName(record.id, member.name))
       } catch (stopError) {
         if (!errorMessage(stopError).includes('unknown Fleet Agent')) remember(stopError)
       }
+    }
+    const runtime = this.collaboration.get(record.id)
+    for (const assistant of record.assistants) {
+      runtime?.detachMember(assistant.sessionId)
     }
     const settled = this.replaceRecord(record.id, {
       settled: true,
       ...(error === undefined ? {} : { error }),
     })
-    this.appendEvent(record.id, 'run_settled', error === undefined ? {} : { error })
+    this.appendEvent(record.id, 'team_settled', error === undefined ? {} : { error })
+    this.collaboration.closeTeam(record.id)
+    this.voteWorkIds.delete(record.id)
+    this.teamProjectionEvents.delete(record.id)
+    this.eventSequences.delete(record.id)
     this.notify(settled)
   }
 
-  private activeRecord(): FleetRunRecord | undefined {
-    const record = this.activeRunId === undefined ? undefined : this.records.get(this.activeRunId)
-    return record?.settled === true ? undefined : record
+  private requireParticipant(record: FleetRunRecord, caller: Agent): void {
+    const callerId = String(caller.id)
+    if (record.members.some(member => member.sessionId === callerId)) return
+    if (record.assistants.some(assistant => assistant.sessionId === callerId)) {
+      this.requireAssistantConnection(caller, record.id)
+      return
+    }
+    throw new Error(`Agent ${callerId} does not belong to Fleet team ${record.id}`)
   }
 
   private describeRecord(record: FleetRunRecord): FleetRunRecord {
     const live = new Map(this.core.list().map(member => [member.name, member.status]))
     return recordSnapshot({
       ...record,
-      members: record.members.map(member => ({
-        ...member,
-        status: live.get(member.name) ?? 'offline',
+      runtimeState: this.dormantRunIds.has(record.id) ? 'dormant' : 'active',
+      members: record.members.map(member => {
+        const nativeStatus = live.get(this.runtimeMemberName(record.id, member.name))
+        const liveAgent = this.ctx.agents.get(SessionId(member.sessionId))
+        const status = member.status === 'paused' || member.status === 'offline'
+          ? member.status
+          : this.abnormalSessionIds.has(member.sessionId)
+            ? 'error'
+            : nativeStatus === 'running' && this.waitingSessionIds.has(member.sessionId)
+              ? 'waiting'
+              : nativeStatus ?? (isTerminal(record.status) ? 'offline' : 'unknown')
+        return {
+          ...member,
+          ...(liveAgent?.options.provider === undefined ? {} : { provider: liveAgent.options.provider }),
+          ...(liveAgent?.options.model === undefined ? {} : { model: liveAgent.options.model }),
+          status,
+        }
+      }),
+      assistants: record.assistants.map(assistant => ({
+        ...assistant,
+        status: this.collaboration.get(record.id)?.memberNamesById.get(assistant.sessionId) === assistant.view.id
+          ? this.ctx.agents.get(SessionId(assistant.sessionId))?.status ?? 'offline'
+          : 'offline',
       })),
     })
   }
 
   private requireRecord(runId?: string, projectRoot?: string): FleetRunRecord {
-    let id = runId ?? this.activeRunId
-    if (id === undefined && projectRoot !== undefined) id = this.list(projectRoot)[0]?.id
+    let id = runId
+    if (id === undefined) {
+      const candidates = this.activeTeamIds()
+        .map(candidate => this.records.get(candidate))
+        .filter((record): record is FleetRunRecord => record !== undefined && (
+          projectRoot === undefined || record.projectRoot === projectRoot
+        ))
+      if (candidates.length > 1) throw new Error('run_id is required when more than one Fleet team is active')
+      id = candidates[0]?.id
+    }
+    if (id === undefined && projectRoot !== undefined) {
+      const stored = this.list(projectRoot)
+      if (stored.length > 1) throw new Error('run_id is required when more than one Fleet team exists')
+      id = stored[0]?.id
+    }
     if (id === undefined) throw new Error('no Fleet run is available')
     let record = this.records.get(id)
     if (record === undefined) {
@@ -778,13 +3926,389 @@ export class FleetRunService {
       if (root !== undefined) {
         const path = join(root, id, 'run.json')
         if (existsSync(path)) {
-          record = JSON.parse(readFileSync(path, 'utf8')) as FleetRunRecord
+          record = parseStoredRecord(JSON.parse(readFileSync(path, 'utf8')))
           this.records.set(id, record)
         }
       }
     }
     if (record === undefined) throw new Error(`unknown Fleet run ${id}`)
     return record
+  }
+
+  private requireCallerRecord(caller: Agent, runId?: string): FleetRunRecord {
+    if (runId !== undefined) return this.requireRecord(runId, caller.session.header.cwd)
+    const callerId = String(caller.id)
+    const candidates = this.activeTeamIds()
+      .map(id => this.records.get(id))
+      .filter((record): record is FleetRunRecord => record !== undefined && (
+        record.assistants.some(assistant => assistant.sessionId === callerId)
+        || record.members.some(member => member.sessionId === callerId)
+      ))
+    if (candidates.length === 1) return candidates[0] as FleetRunRecord
+    if (candidates.length > 1) throw new Error('run_id is required when the caller participates in more than one Fleet team')
+    return this.requireRecord(undefined, caller.session.header.cwd)
+  }
+
+  private requireMutableRecord(runId?: string, projectRoot?: string): FleetRunRecord {
+    const record = this.requireRecord(runId, projectRoot)
+    if (isTerminal(record.status)) throw new Error(`Fleet team ${record.id} is ${record.status}`)
+    return record
+  }
+
+  private requireRuntime(runId: string): FleetCollaborationTeam {
+    if (this.dormantRunIds.has(runId)) {
+      throw new Error(`Fleet team ${runId} is loaded but its member Agents have not resumed`)
+    }
+    return this.collaboration.require(runId)
+  }
+
+  private activeTeamIds(): string[] {
+    return this.collaboration.ids().filter(id => !this.dormantRunIds.has(id))
+  }
+
+  private openCollaboration(
+    record: FleetRunRecord,
+    memberViews: readonly FleetMemberView[],
+  ): FleetCollaborationTeam {
+    const team = this.collaboration.open({
+      id: record.id,
+      memberViews: [
+        ...memberViews,
+        ...record.assistants.map(assistant => assistant.view),
+      ],
+      projectRoot: record.projectRoot,
+      sharedDirectory: `.fleet/runs/${record.id}`,
+      onCoordination: event => { this.recordCoordination(record.id, event) },
+      onResource: event => { this.recordResource(record.id, event) },
+      onGit: event => { this.appendEvent(record.id, `git.${event.action}`, event) },
+      onMemberStatus: event => {
+        this.appendEvent(record.id, `member_status.${event.action}`, event)
+      },
+      onScheduledTask: event => {
+        this.appendEvent(record.id, `schedule.${event.action}`, event)
+      },
+      onScheduledTaskDue: task => { this.wakeScheduledTask(record.id, task) },
+      onProjectTask: event => {
+        this.appendEvent(record.id, `task.${event.action}`, event)
+        this.notifyProjectTask(record.id, event)
+      },
+      onProjectTaskDue: task => { this.wakeProjectTask(record.id, task) },
+      onCalendar: event => {
+        this.appendEvent(record.id, `calendar.${event.action}`, event)
+        this.notifyCalendarEvent(record.id, event)
+      },
+      onCalendarDue: event => this.startCalendarMeeting(record.id, event),
+    })
+    for (const [member, workspaces] of this.effectiveWorkspaces(record)) {
+      if (team.memberViews.has(member)) team.setMemberWorkspaces(member, workspaces)
+    }
+    return team
+  }
+
+  private startCalendarMeeting(runId: string, event: FleetCalendarEvent): string | undefined {
+    if (this.dormantRunIds.has(runId)) {
+      this.appendEvent(runId, 'calendar.delivery_deferred', { eventId: event.id, reason: 'team_members_not_resumed' })
+      return undefined
+    }
+    const record = this.requireRecord(runId)
+    const organizer = this.participants(record).find(member => member.name === event.organizer)
+    if (organizer === undefined) return undefined
+    const agent = this.ctx.agents.get(SessionId(organizer.sessionId))
+    if (agent === undefined) {
+      this.appendEvent(runId, 'calendar.delivery_deferred', { eventId: event.id, reason: 'organizer_offline' })
+      return undefined
+    }
+    const participants = event.attendees
+      .filter(name => event.rsvps[name] !== 'declined')
+      .map(name => `@${name}`)
+    if (participants.length === 0) {
+      this.appendEvent(runId, 'calendar.delivery_deferred', { eventId: event.id, reason: 'no_attendees' })
+      return undefined
+    }
+    const meetingId = `${event.id}-${event.occurrence}`
+    if (this.requireRuntime(runId).messages.listMeetings(agent).some(meeting => meeting.id === meetingId)) {
+      return meetingId
+    }
+    const meeting = this.requireRuntime(runId).messages.openMeeting(agent, {
+      id: meetingId,
+      title: event.title,
+      agenda: event.agenda,
+      participants,
+    })
+    this.appendEvent(runId, 'calendar.meeting_opened', { eventId: event.id, meetingId: meeting.id })
+    return meeting.id
+  }
+
+  private notifyProjectTask(runId: string, event: FleetProjectTaskEvent): void {
+    if (this.dormantRunIds.has(runId)) return
+    if (event.action === 'due') return
+    const task = event.task
+    const author = event.actor
+      ?? (event.action === 'created' ? task.createdBy : task.entries.at(-1)?.author)
+    if (author === undefined) return
+    const recipients = [...new Set([task.createdBy, ...task.assignees, ...task.followers])]
+    const detail = event.action === 'commented' || event.action === 'progressed'
+      ? task.entries.at(-1)?.text ?? ''
+      : task.description
+    const action = {
+      created: 'A project task was assigned or shared with you.',
+      updated: 'The task assignment or details changed.',
+      commented: 'New comment.',
+      progressed: 'New progress update.',
+      completed: 'The task was completed.',
+      reopened: 'The task was reopened.',
+    }[event.action]
+    const text = [
+      `[Fleet task ${task.id}] ${task.title}`,
+      action,
+      ...(detail.length === 0 ? [] : [detail]),
+      `Status: ${task.status}. Priority: ${task.priority}.`,
+    ].join('\n\n')
+    for (const recipient of recipients) {
+      if (recipient === author) continue
+      this.sendServiceMessage(runId, author, recipient, text,
+        event.action === 'created' || event.action === 'updated' || event.action === 'reopened' ? 'wakeup' : 'quiet', {
+        service: 'task',
+        objectId: task.id,
+        action: event.action,
+      })
+    }
+  }
+
+  private notifyCalendarEvent(runId: string, change: FleetCalendarEventChange): void {
+    if (this.dormantRunIds.has(runId)) return
+    if (change.action !== 'created' && change.action !== 'updated') return
+    const event = change.event
+    const text = [
+      `[Fleet calendar ${event.id}] ${event.title}`,
+      change.action === 'created' ? 'You were invited to this Team event.' : 'This Team event was updated.',
+      event.agenda,
+      `Starts: ${event.startAt}${event.endAt === undefined ? '' : `\nEnds: ${event.endAt}`}`,
+      'Use fleet_calendar with action rsvp to accept, decline, or mark tentative.',
+    ].join('\n\n')
+    for (const attendee of event.attendees) {
+      this.sendServiceMessage(runId, event.organizer, attendee, text, 'quiet', {
+        service: 'calendar',
+        objectId: event.id,
+        action: change.action,
+      })
+    }
+  }
+
+  private wakeProjectTask(runId: string, task: FleetProjectTaskEvent['task']): void {
+    const record = this.requireRecord(runId)
+    const text = [
+      `[Fleet task due ${task.id}] ${task.title}`,
+      ...(task.description.length === 0 ? [] : [task.description]),
+      `This task reached its deadline at ${task.dueAt ?? task.updatedAt}. Review its status and coordinate the next action.`,
+    ].join('\n\n')
+    for (const assignee of task.assignees) {
+      if (!this.participants(record).some(member => member.name === assignee)) continue
+      if (this.dormantRunIds.has(runId)) {
+        this.appendEvent(runId, 'task.due_delivery_deferred', { task, assignee, reason: 'team_members_not_resumed' })
+        continue
+      }
+      try {
+        const message = createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+        })
+        const assistant = record.assistants.find(candidate => candidate.view.id === assignee)
+        if (assistant === undefined) this.core.followup(this.runtimeMemberName(runId, assignee), message)
+        else {
+          const agent = this.ctx.agents.get(SessionId(assistant.sessionId))
+          if (agent === undefined) throw new Error(`Fleet assistant ${assignee} is offline`)
+          agent.followup(message)
+        }
+        this.appendEvent(runId, 'task.due_delivered', {
+          taskId: task.id,
+          triggeredAt: task.dueNotifiedAt ?? task.updatedAt,
+          assignee,
+          dueAt: task.dueAt,
+        })
+      } catch (error) {
+        this.appendEvent(runId, 'task.due_delivery_deferred', {
+          task,
+          assignee,
+          error: errorMessage(error),
+        })
+      }
+    }
+  }
+
+  private sendServiceMessage(
+    runId: string,
+    senderName: string,
+    recipientName: string,
+    text: string,
+    delivery: 'quiet' | 'wakeup',
+    metadata: { readonly service: 'task' | 'calendar'; readonly objectId: string; readonly action: string },
+  ): void {
+    const record = this.requireRecord(runId)
+    const sender = this.participants(record).find(member => member.name === senderName)
+    if (sender === undefined) return
+    const agent = this.ctx.agents.get(SessionId(sender.sessionId))
+    if (agent === undefined) return
+    try {
+      this.requireRuntime(runId).messages.send(agent, {
+        to: `@${recipientName}`,
+        text,
+        delivery,
+        kind: metadata.service === 'task' ? 'task_notification' : 'calendar_notification',
+      })
+      this.appendEvent(runId, `${metadata.service}.notification_delivered`, {
+        ...metadata,
+        sender: senderName,
+        recipient: recipientName,
+      })
+    } catch (error) {
+      this.appendEvent(runId, `${metadata.service}.notification_deferred`, {
+        ...metadata,
+        sender: senderName,
+        recipient: recipientName,
+        error: errorMessage(error),
+      })
+    }
+  }
+
+  private wakeScheduledTask(runId: string, task: FleetScheduledTask): void {
+    const record = this.requireRecord(runId)
+    const text = [
+      `[Fleet scheduled task ${task.id}]`,
+      task.title,
+      ...(task.instructions.length === 0 ? [] : [task.instructions]),
+      ...(task.repeatMinutes === undefined ? [] : [`This task repeats every ${task.repeatMinutes} minutes. Next due: ${task.dueAt}`]),
+      'Coordinate through the Team channels as needed, then mark or cancel the scheduled task when appropriate.',
+    ].join('\n\n')
+    for (const assignee of task.assignees) {
+      if (!this.participants(record).some(member => member.name === assignee)) continue
+      if (this.dormantRunIds.has(runId)) {
+        this.appendEvent(runId, 'schedule.delivery_deferred', {
+          task,
+          assignee,
+          reason: 'team_members_not_resumed',
+        })
+        continue
+      }
+      try {
+        const message = createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+        })
+        const assistant = record.assistants.find(candidate => candidate.view.id === assignee)
+        if (assistant === undefined) {
+          this.core.followup(this.runtimeMemberName(runId, assignee), message)
+        } else {
+          const agent = this.ctx.agents.get(SessionId(assistant.sessionId))
+          if (agent === undefined) throw new Error(`Fleet assistant ${assignee} is offline`)
+          agent.followup(message)
+        }
+        this.appendEvent(runId, 'schedule.delivered', {
+          taskId: task.id,
+          triggeredAt: task.lastTriggeredAt ?? task.updatedAt,
+          assignee,
+        })
+      } catch (error) {
+        this.appendEvent(runId, 'schedule.delivery_deferred', {
+          task,
+          assignee,
+          error: errorMessage(error),
+        })
+      }
+    }
+  }
+
+  private pendingScheduledDeliveries(events: readonly StoredFleetEvent[]): Array<{
+    readonly task: FleetScheduledTask
+    readonly assignees: string[]
+  }> {
+    const pending = new Map<string, { readonly task: FleetScheduledTask; readonly assignee: string }>()
+    for (const event of events) {
+      if (event.type === 'schedule.delivery_deferred') {
+        const data = event.data as { readonly task: FleetScheduledTask; readonly assignee: string }
+        pending.set(this.scheduledDeliveryKey(
+          data.task.id,
+          data.task.lastTriggeredAt ?? data.task.updatedAt,
+          data.assignee,
+        ), data)
+      } else if (event.type === 'schedule.delivered') {
+        const data = event.data as {
+          readonly taskId: string
+          readonly triggeredAt: string
+          readonly assignee: string
+        }
+        pending.delete(this.scheduledDeliveryKey(data.taskId, data.triggeredAt, data.assignee))
+      }
+    }
+    const grouped = new Map<string, { task: FleetScheduledTask; assignees: string[] }>()
+    for (const [key, delivery] of pending) {
+      const groupKey = key.slice(0, key.lastIndexOf(':'))
+      const group = grouped.get(groupKey)
+      if (group === undefined) grouped.set(groupKey, { task: delivery.task, assignees: [delivery.assignee] })
+      else group.assignees.push(delivery.assignee)
+    }
+    return [...grouped.values()]
+  }
+
+  private pendingProjectTaskDeliveries(events: readonly StoredFleetEvent[]): Array<{
+    readonly task: FleetProjectTaskEvent['task']
+    readonly assignees: string[]
+  }> {
+    const pending = new Map<string, { readonly task: FleetProjectTaskEvent['task']; readonly assignee: string }>()
+    for (const event of events) {
+      if (event.type === 'task.due_delivery_deferred') {
+        const data = event.data as { readonly task: FleetProjectTaskEvent['task']; readonly assignee: string }
+        const key = `${data.task.id}:${data.task.dueNotifiedAt ?? data.task.updatedAt}:${data.assignee}`
+        pending.set(key, data)
+      } else if (event.type === 'task.due_delivered') {
+        const data = event.data as { readonly taskId: string; readonly triggeredAt: string; readonly assignee: string }
+        pending.delete(`${data.taskId}:${data.triggeredAt}:${data.assignee}`)
+      }
+    }
+    const grouped = new Map<string, { task: FleetProjectTaskEvent['task']; assignees: string[] }>()
+    for (const [key, delivery] of pending) {
+      const groupKey = key.slice(0, key.lastIndexOf(':'))
+      const group = grouped.get(groupKey)
+      if (group === undefined) grouped.set(groupKey, { task: delivery.task, assignees: [delivery.assignee] })
+      else group.assignees.push(delivery.assignee)
+    }
+    return [...grouped.values()]
+  }
+
+  private scheduledDeliveryKey(taskId: string, triggeredAt: string, assignee: string): string {
+    return `${taskId}:${triggeredAt}:${assignee}`
+  }
+
+  private runtimeMemberName(runId: string, memberName: string): string {
+    return `${runId.replace(/[^a-z0-9]+/g, '-')}-${memberName}`
+  }
+
+  private memberArchiveId(runId: string, memberName: string): string {
+    return `fleet/${runId}/members/${memberName}`
+  }
+
+  private participants(record: FleetRunRecord): Array<{ readonly name: string; readonly sessionId: string }> {
+    return [
+      ...record.members.map(member => ({ name: member.name, sessionId: member.sessionId })),
+      ...record.assistants.map(assistant => ({ name: assistant.view.id, sessionId: assistant.sessionId })),
+    ]
+  }
+
+  private assistantTeamForSession(sessionId: string, exceptRunId?: string): FleetRunRecord | undefined {
+    return [...this.records.values()].find(record =>
+      record.id !== exceptRunId
+      && !isTerminal(record.status)
+      && record.assistants.some(assistant => assistant.sessionId === sessionId),
+    )
+  }
+
+  private liveMember(member: FleetRunMember): Agent | undefined {
+    if (member.status === 'paused') return undefined
+    return this.ctx.agents.get(SessionId(member.sessionId))
+  }
+
+  private memberCanReply(member: FleetRunMember): boolean {
+    return this.liveMember(member) !== undefined
   }
 
   private replaceRecord(runId: string, change: Partial<FleetRunRecord>): FleetRunRecord {
@@ -803,36 +4327,271 @@ export class FleetRunService {
     renameSync(temporary, target)
   }
 
-  private appendEvent(runId: string, type: string, data: unknown): void {
+  private appendEvent(
+    runId: string,
+    type: string,
+    data: unknown,
+    options: {
+      readonly createdAt?: string
+      readonly member?: StoredFleetEvent['member']
+    } = {},
+  ): void {
     const record = this.requireRecord(runId)
     const sequence = (this.eventSequences.get(runId) ?? this.lastStoredSequence(record)) + 1
     this.eventSequences.set(runId, sequence)
     const event: StoredFleetEvent = {
       sequence,
-      createdAt: new Date().toISOString(),
+      createdAt: options.createdAt ?? new Date().toISOString(),
       type,
       data,
+      ...(options.member === undefined ? {} : { member: options.member }),
     }
     appendFileSync(join(this.runDirectory(record), 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
+    if (event.type === 'member_view_added' || event.type === 'member_view_updated' || event.type === 'member_view_removed') {
+      this.memberViewSnapshots.delete(runId)
+    }
+    const projection = this.teamProjectionEvents.get(runId)
+    if (projection !== undefined && !event.type.startsWith('session.')) {
+      this.cacheTeamProjection(runId, compactTeamProjectionEvents([...projection, event]))
+    }
+  }
+
+  private cacheTeamProjection(runId: string, projection: StoredFleetEvent[]): void {
+    this.teamProjectionEvents.delete(runId)
+    this.teamProjectionEvents.set(runId, projection)
+    while (this.teamProjectionEvents.size > TEAM_PROJECTION_CACHE_LIMIT) {
+      const oldest = this.teamProjectionEvents.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.teamProjectionEvents.delete(oldest)
+      this.memberViewSnapshots.delete(oldest)
+    }
   }
 
   private lastStoredSequence(record: FleetRunRecord): number {
     const path = join(this.runDirectory(record), 'events.jsonl')
     if (!existsSync(path)) return 0
-    const lines = readFileSync(path, 'utf8').trim().split('\n')
-    const last = lines.at(-1)
-    return last === undefined || last.length === 0 ? 0 : (JSON.parse(last) as StoredFleetEvent).sequence
+    const descriptor = openSync(path, 'r')
+    try {
+      let cursor = fstatSync(descriptor).size
+      if (cursor === 0) return 0
+      const chunks: Buffer[] = []
+      while (cursor > 0) {
+        const length = Math.min(64 * 1024, cursor)
+        cursor -= length
+        const chunk = Buffer.allocUnsafe(length)
+        let offset = 0
+        while (offset < length) {
+          const count = readSync(descriptor, chunk, offset, length - offset, cursor + offset)
+          if (count === 0) break
+          offset += count
+        }
+        chunks.unshift(offset === length ? chunk : chunk.subarray(0, offset))
+        const tail = Buffer.concat(chunks)
+        let end = tail.length
+        while (end > 0 && (tail[end - 1] === 0x0a || tail[end - 1] === 0x0d)) end -= 1
+        const newline = tail.lastIndexOf(0x0a, end - 1)
+        if (newline >= 0 || cursor === 0) {
+          const line = tail.subarray(newline + 1, end).toString('utf8')
+          return line.length === 0 ? 0 : (JSON.parse(line) as StoredFleetEvent).sequence
+        }
+      }
+      return 0
+    } finally {
+      closeSync(descriptor)
+    }
   }
 
   private storedEvents(record: FleetRunRecord): StoredFleetEvent[] {
     const path = join(this.runDirectory(record), 'events.jsonl')
     return existsSync(path)
-      ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as StoredFleetEvent)
+      ? parseStoredEvents(readFileSync(path, 'utf8'))
       : []
+  }
+
+  private storedResourceRevisionSummaries(
+    record: FleetRunRecord,
+  ): Array<FleetResourceRevisionSummary & { readonly resourceId: string }> {
+    const path = join(this.runDirectory(record), 'resource-history.jsonl')
+    return existsSync(path)
+      ? readFileSync(path, 'utf8').split('\n').flatMap(line => (
+          line.length === 0
+            ? []
+            : [JSON.parse(line) as FleetResourceRevisionSummary & { readonly resourceId: string }]
+        ))
+      : []
+  }
+
+  private storedResourceRevision(
+    record: FleetRunRecord,
+    revisionId: string,
+  ): Pick<FleetResourceRevisionDetail, 'before' | 'after'> {
+    const path = join(this.runDirectory(record), 'resource-revisions', `${revisionId}.json`)
+    if (!existsSync(path) || statSync(path).size > RESOURCE_REVISION_MAX_BYTES + 4_096) {
+      throw new Error(`Fleet resource revision ${revisionId} is unavailable`)
+    }
+    const revision = JSON.parse(readFileSync(path, 'utf8')) as Extract<FleetResourceEvent, { type: 'resource_revised' }>['revision']
+    return { before: revision.before, after: revision.after }
+  }
+
+  private collaborationState(events: readonly StoredFleetEvent[]): {
+    readonly coordination: FleetCoordinationEvent[]
+    readonly resources: Array<Extract<FleetResourceEvent, { type: 'resource_added' }>['resource']>
+    readonly memberStatuses: FleetMemberStatusEvent[]
+    readonly scheduledTasks: FleetScheduledTaskEvent[]
+    readonly projectTasks: FleetProjectTaskEvent[]
+    readonly calendarEvents: FleetCalendarEventChange[]
+    readonly documents: Array<Extract<FleetResourceEvent, { document: FleetDocument }>>
+  } {
+    return {
+      coordination: events
+        .filter(event => event.type.startsWith('coordination.'))
+        .map(event => event.data as FleetCoordinationEvent),
+      resources: events
+        .filter(event => event.type === 'resource.resource_added')
+        .map(event => (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource),
+      memberStatuses: events
+        .filter(event => event.type === 'member_status.updated' || event.type === 'member_status.cleared')
+        .map(event => event.data as FleetMemberStatusEvent),
+      scheduledTasks: events
+        .filter(event => event.type === 'schedule.created'
+          || event.type === 'schedule.updated'
+          || event.type === 'schedule.triggered'
+          || event.type === 'schedule.completed'
+          || event.type === 'schedule.cancelled')
+        .map(event => event.data as FleetScheduledTaskEvent),
+      projectTasks: events
+        .filter(event => event.type === 'task.created'
+          || event.type === 'task.updated'
+          || event.type === 'task.commented'
+          || event.type === 'task.progressed'
+          || event.type === 'task.completed'
+          || event.type === 'task.reopened'
+          || event.type === 'task.due')
+        .map(event => event.data as FleetProjectTaskEvent),
+      calendarEvents: events
+        .filter(event => event.type === 'calendar.created'
+          || event.type === 'calendar.updated'
+          || event.type === 'calendar.rsvp'
+          || event.type === 'calendar.started'
+          || event.type === 'calendar.closed'
+          || event.type === 'calendar.cancelled')
+        .map(event => event.data as FleetCalendarEventChange),
+      documents: events
+        .filter(event => event.type.startsWith('resource.document_'))
+        .map(event => event.data as Extract<FleetResourceEvent, { document: FleetDocument }>),
+    }
+  }
+
+  private restoreAssistantRebinds(runtime: FleetCollaborationTeam, events: readonly StoredFleetEvent[]): void {
+    for (const event of events) {
+      if (event.type !== 'assistant_rebound') continue
+      const data = event.data as { readonly previousSessionId?: string; readonly sessionId: string }
+      if (data.previousSessionId !== undefined) {
+        runtime.messages.rebindAgent(data.previousSessionId, data.sessionId, { silent: true })
+      }
+    }
+  }
+
+  private restoredSessionId(events: readonly StoredFleetEvent[], sessionId: string): string {
+    let restored = sessionId
+    for (const event of events) {
+      if (event.type !== 'assistant_rebound') continue
+      const data = event.data as { readonly previousSessionId?: string; readonly sessionId: string }
+      if (data.previousSessionId === restored) restored = data.sessionId
+    }
+    return restored
+  }
+
+  private loadPersistedTeams(): void {
+    if (!existsSync(this.registryDirectory)) return
+    for (const entry of readdirSync(this.registryDirectory, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      let reference: StoredTeamReference | undefined
+      try {
+        reference = this.readTeamReference(join(this.registryDirectory, entry.name))
+        const runPath = join(reference.projectRoot, '.fleet', 'runs', reference.id, 'run.json')
+        if (!existsSync(runPath)) throw new Error(`run record does not exist at ${runPath}`)
+        const record = parseStoredRecord(JSON.parse(readFileSync(runPath, 'utf8')) as unknown)
+        if (record.id !== reference.id || record.projectRoot !== reference.projectRoot) {
+          throw new Error(`Team reference ${reference.id} does not match its run record`)
+        }
+        if (isTerminal(record.status)) {
+          this.forgetTeam(record.id)
+          continue
+        }
+        this.openDormantTeam(record)
+      } catch (error) {
+        if (reference !== undefined) {
+          this.collaboration.closeTeam(reference.id)
+          this.voteWorkIds.delete(reference.id)
+          this.dormantRunIds.delete(reference.id)
+          this.records.delete(reference.id)
+        }
+        this.ctx.logger('dsh-agent-fleet').warn(
+          `Could not load persisted Fleet Team reference ${entry.name}: ${errorMessage(error)}`,
+        )
+      }
+    }
+  }
+
+  private openDormantTeam(record: FleetRunRecord): void {
+    this.records.set(record.id, record)
+    const events = this.storedEvents(record)
+    this.eventSequences.set(record.id, this.lastStoredSequence(record))
+    const bindings = new Map<string, string>()
+    for (const event of events) {
+      if (event.type !== 'work_vote_bound') continue
+      const binding = event.data as { readonly voteId: string; readonly workId: string }
+      bindings.set(binding.voteId, binding.workId)
+    }
+    this.voteWorkIds.set(record.id, bindings)
+    this.dormantRunIds.add(record.id)
+    const runtime = this.openCollaboration(record, this.effectiveMemberViews(record, events))
+    for (const member of record.members) {
+      runtime.memberIdsByName.set(member.name, member.sessionId)
+      runtime.memberNamesById.set(member.sessionId, member.name)
+    }
+    runtime.restore(this.collaborationState(events))
+    this.restoreAssistantRebinds(runtime, events)
+  }
+
+  private readTeamReference(path: string): StoredTeamReference {
+    const value = object(JSON.parse(readFileSync(path, 'utf8')) as unknown, 'Fleet Team reference')
+    const id = text(value.id, 'Fleet Team reference id')
+    const projectRoot = text(value.projectRoot, 'Fleet Team reference projectRoot')
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`invalid Fleet Team reference id ${id}`)
+    if (!isAbsolute(projectRoot)) throw new Error('Fleet Team reference projectRoot must be absolute')
+    return { id, projectRoot }
+  }
+
+  private rememberTeam(record: FleetRunRecord): void {
+    mkdirSync(this.registryDirectory, { recursive: true })
+    const target = this.teamReferencePath(record.id)
+    const temporary = join(this.registryDirectory, `.${record.id}.${process.pid}.tmp`)
+    const reference: StoredTeamReference = { id: record.id, projectRoot: record.projectRoot }
+    writeFileSync(temporary, `${JSON.stringify(reference, null, 2)}\n`, 'utf8')
+    renameSync(temporary, target)
+  }
+
+  private forgetTeam(runId: string): void {
+    const path = this.teamReferencePath(runId)
+    if (existsSync(path)) unlinkSync(path)
+  }
+
+  private teamReferencePath(runId: string): string {
+    if (!/^[a-zA-Z0-9_-]+$/.test(runId)) throw new Error(`invalid Fleet run id ${runId}`)
+    return join(this.registryDirectory, `${runId}.json`)
   }
 
   private runDirectory(record: FleetRunRecord): string {
     return join(record.projectRoot, '.fleet', 'runs', record.id)
+  }
+
+  private extensionStatePath(record: FleetRunRecord, namespace: string): string {
+    if (!/^[a-z][a-z0-9-]*$/u.test(namespace)) {
+      throw new Error('Fleet extension namespace must use lower-kebab-case')
+    }
+    return join(this.runDirectory(record), 'extensions', `${namespace}.json`)
   }
 
   private runsRoot(projectRoot: string | undefined): string | undefined {
@@ -863,8 +4622,60 @@ const RUN_MEMBER_SCHEMA = {
   additionalProperties: false,
   properties: {
     name: { type: 'string', required: true },
+    displayName: { type: 'string' },
+    color: { type: 'string' },
     role: { type: 'string', required: true },
     sessionId: { type: 'string', required: true },
+    provider: { type: 'string' },
+    model: { type: 'string' },
+    status: { type: 'string', enum: ['idle', 'running', 'waiting', 'error', 'offline', 'paused', 'unknown'] },
+  },
+} as const
+
+const MEMBER_VIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    name: { type: 'string', required: true },
+    color: { type: 'string' },
+    role: { type: 'string', required: true },
+    responsibility: { type: 'string' },
+    prompt: { type: 'string', required: true },
+    provider: { type: 'string' },
+    model: { type: 'string' },
+    toolGroups: { type: 'array', required: true, items: { type: 'string', enum: FLEET_MEMBER_TOOL_GROUPS } },
+    permissions: { type: 'array', required: true, items: { type: 'string', enum: FLEET_MEMBER_PERMISSIONS } },
+    contacts: {
+      type: 'object',
+      required: true,
+      additionalProperties: false,
+      properties: {
+        members: {
+          required: true,
+          oneOf: [
+            { type: 'string', const: '*' },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
+        channels: {
+          required: true,
+          oneOf: [
+            { type: 'string', const: '*' },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
+      },
+    },
+  },
+} as const
+
+const RUN_ASSISTANT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    sessionId: { type: 'string', required: true },
+    view: { ...MEMBER_VIEW_SCHEMA, required: true },
     status: { type: 'string', enum: ['idle', 'running', 'offline'] },
   },
 } as const
@@ -879,24 +4690,41 @@ const RUN_AGENT_OPTIONS_SCHEMA = {
   },
 } as const
 
+const RUN_WORK_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    taskPath: { type: 'string', required: true },
+    status: { type: 'string', required: true, enum: ['running', 'finished', 'blocked', 'failed', 'cancelled'] },
+    startedAt: { type: 'string', required: true },
+    endedAt: { type: 'string' },
+    summary: { type: 'string' },
+  },
+} as const
+
 const RUN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
+    sourceSetupId: { type: 'string' },
     team: { type: 'string', required: true },
     name: { type: 'string', required: true },
     configPath: { type: 'string', required: true },
-    taskPath: { type: 'string', required: true },
     projectRoot: { type: 'string', required: true },
-    coordinator: { type: 'string', required: true },
+    coordinator: { type: 'string' },
     launcherSessionId: { type: 'string', required: true },
     agentOptions: RUN_AGENT_OPTIONS_SCHEMA,
     members: { type: 'array', required: true, items: RUN_MEMBER_SCHEMA },
+    assistants: { type: 'array', required: true, items: RUN_ASSISTANT_SCHEMA },
+    teamPausedMembers: { type: 'array', items: { type: 'string' } },
+    runtimeState: { type: 'string', enum: ['active', 'dormant'] },
+    work: RUN_WORK_SCHEMA,
     status: {
       type: 'string',
       required: true,
-      enum: ['starting', 'running', 'finished', 'blocked', 'failed', 'cancelled'],
+      enum: ['starting', 'idle', 'running', 'paused', 'finishing', 'closed', 'failed'],
     },
     settled: { type: 'boolean', required: true },
     startedAt: { type: 'string', required: true },
@@ -910,8 +4738,33 @@ const RUN_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', required: true, enum: ['start', 'resume', 'list', 'status', 'wait', 'finish'] },
+    action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'wait', 'finish', 'close'] },
     runs: { type: 'array', items: RUN_SCHEMA },
+    run: RUN_SCHEMA,
+  },
+} as const
+
+const ARCHIVE_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    action: { type: 'string', required: true, enum: ['export', 'import'] },
+    path: { type: 'string' },
+    teamId: { type: 'string' },
+    includesWorkspace: { type: 'boolean' },
+    extensions: { type: 'array', items: { type: 'string' } },
+    missingExtensions: { type: 'array', items: { type: 'string' } },
+    failedExtensions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true },
+          error: { type: 'string', required: true },
+        },
+      },
+    },
     run: RUN_SCHEMA,
   },
 } as const
@@ -922,6 +4775,9 @@ const TRACE_EVENT_SCHEMA = {
   properties: {
     sequence: { type: 'integer', required: true },
     createdAt: { type: 'string', required: true },
+    scope: { type: 'string', required: true, enum: ['team', 'member'] },
+    member: { type: 'string' },
+    sourceSequence: { type: 'integer' },
     type: { type: 'string', required: true },
     data: { type: 'string', required: true },
   },
@@ -935,6 +4791,90 @@ const TRACE_RESULT_SCHEMA = {
     member: { type: 'string' },
     events: { type: 'array', required: true, items: TRACE_EVENT_SCHEMA },
     hasMore: { type: 'boolean', required: true },
+  },
+} as const
+
+const ACTIVITY_ITEM_SCHEMA = {
+  type: 'object', additionalProperties: false, properties: {
+    id: { type: 'string', required: true }, sequence: { type: 'integer', required: true },
+    createdAt: { type: 'string', required: true },
+    kind: { type: 'string', required: true, enum: ['message', 'task', 'calendar', 'meeting', 'vote', 'document', 'schedule', 'member'] },
+    type: { type: 'string', required: true }, acknowledged: { type: 'boolean', required: true },
+    data: { type: 'object', required: true, additionalProperties: true },
+  },
+} as const
+
+const ACTIVITY_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false, properties: {
+    action: { type: 'string', required: true, enum: ['list', 'ack'] },
+    runId: { type: 'string', required: true }, member: { type: 'string', required: true },
+    items: { type: 'array', items: ACTIVITY_ITEM_SCHEMA }, item: ACTIVITY_ITEM_SCHEMA,
+    hasMore: { type: 'boolean' },
+  },
+} as const
+
+const MEMBER_MANAGEMENT_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false, properties: {
+    action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'pause', 'resume', 'remove'] },
+    run: RUN_SCHEMA, member: RUN_MEMBER_SCHEMA,
+    members: { type: 'array', items: RUN_MEMBER_SCHEMA },
+    views: { type: 'array', items: MEMBER_VIEW_SCHEMA },
+  },
+} as const
+
+const WORKSPACE_SCHEMA = {
+  type: 'object', additionalProperties: false, properties: {
+    name: { type: 'string', required: true }, path: { type: 'string', required: true },
+    access: { type: 'string', required: true, enum: ['read', 'write'] },
+  },
+} as const
+
+const WORKSPACE_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false, properties: {
+    action: { type: 'string', required: true, enum: ['list', 'assign'] },
+    runId: { type: 'string', required: true }, member: { type: 'string', required: true },
+    workspaces: { type: 'array', required: true, items: WORKSPACE_SCHEMA },
+  },
+} as const
+
+const ASSISTANT_MESSAGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    runId: { type: 'string', required: true },
+    kind: { type: 'string', required: true, enum: ['collaboration', 'directive'] },
+    text: { type: 'string', required: true },
+    recipients: { type: 'array', required: true, items: { type: 'string' } },
+    assistantSessionId: { type: 'string', required: true },
+    assistantId: { type: 'string', required: true },
+    assistantName: { type: 'string', required: true },
+    createdAt: { type: 'string', required: true },
+  },
+} as const
+
+const ASSISTANT_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    action: { type: 'string', required: true, enum: ['activate', 'deactivate', 'observe', 'message'] },
+    run: RUN_SCHEMA,
+    mode: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        active: { type: 'boolean', required: true },
+        phase: { type: 'string', required: true, enum: ['inactive', 'meta', 'setup', 'operating'] },
+        sessionId: { type: 'string', required: true },
+        tools: { type: 'array', required: true, items: { type: 'string' } },
+        setupId: { type: 'string' },
+        runId: { type: 'string' },
+        view: MEMBER_VIEW_SCHEMA,
+      },
+    },
+    message: ASSISTANT_MESSAGE_SCHEMA,
+    events: { type: 'array', items: TRACE_EVENT_SCHEMA },
+    hasMore: { type: 'boolean' },
   },
 } as const
 
@@ -953,23 +4893,27 @@ function callingAgent(agent: Agent | undefined, tool: string): Agent {
   return agent
 }
 
-export function installRunTools(ctx: Context, service: FleetRunService): void {
+export function installRunTools(
+  ctx: Context,
+  service: FleetRunService,
+  assistant: FleetAssistantRuntime,
+): void {
   ctx.tools.register(defineTool({
     name: 'fleet_run',
-    description: 'Start or resume a persistent Fleet Team, inspect or wait for its terminal status, or end it explicitly.',
+    description: 'Control a persistent Fleet Team lifecycle: create it, pause or resume its member runtimes, submit work, poll a short wait slice, directly finish current work, or close the Team.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['start', 'resume', 'list', 'status', 'wait', 'finish'] },
-      run_id: { type: 'string', description: 'Run id for resume, status, or wait. Defaults to the active run where supported.' },
-      team_config: { type: 'string', description: 'Team JSON path required for start.' },
-      task: { type: 'string', description: 'Task Markdown path required for start.' },
-      cwd: { type: 'string', description: 'Shared project root. Defaults to the calling session cwd.' },
-      required_paths: { type: 'array', items: { type: 'string' }, description: 'Optional paths that must exist before Agents start.' },
-      provider: { type: 'string', description: 'Optional provider route for every member.' },
-      model: { type: 'string', description: 'Optional model for every member.' },
-      max_tokens: { type: 'integer', description: 'Optional positive output-token limit per member request.' },
-      status: { type: 'string', enum: ['finished', 'blocked', 'failed', 'cancelled'], description: 'Terminal status required for finish.' },
-      summary: { type: 'string', description: 'Terminal summary required for finish.' },
-      timeout_ms: { type: 'integer', description: 'Wait timeout from 10000 through 3600000 milliseconds.' },
+      action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'wait', 'finish', 'close'] },
+      run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team where supported.' },
+      team_config: { type: 'string', description: 'Team JSON path required for create.' },
+      task: { type: 'string', description: 'Work Markdown path required for start.' },
+      cwd: { type: 'string', description: 'Team project root. Defaults to the calling session cwd, which remains the only workspace source.' },
+      required_paths: { type: 'array', items: { type: 'string' }, description: 'Optional paths that must exist before Team creation.' },
+      provider: { type: 'string', description: 'Optional default provider route for every member, used only by create.' },
+      model: { type: 'string', description: 'Optional default model for every member, used only by create.' },
+      max_tokens: { type: 'integer', description: 'Optional positive output-token limit per member request, used only by create.' },
+      status: { type: 'string', enum: ['finished', 'blocked', 'failed', 'cancelled'], description: 'Outcome required for finish; the Team returns to idle.' },
+      summary: { type: 'string', description: 'Work outcome summary for finish, or Team shutdown summary for close.' },
+      timeout_ms: { type: 'integer', description: 'Short wait slice from 1000 through 5000 milliseconds so queued steer messages promptly return to the native Agent loop.' },
     },
     output: jsonOutput(RUN_RESULT_SCHEMA),
     async execute(args, exec) {
@@ -980,9 +4924,9 @@ export function installRunTools(ctx: Context, service: FleetRunService): void {
         return { action: 'status' as const, run: service.status(args.run_id, callerRoot) }
       }
       if (args.action === 'wait') {
-        const timeout = args.timeout_ms ?? 3_600_000
-        if (!Number.isSafeInteger(timeout) || timeout < 10_000 || timeout > 3_600_000) {
-          throw new Error('timeout_ms must be an integer from 10000 through 3600000')
+        const timeout = args.timeout_ms ?? 5_000
+        if (!Number.isSafeInteger(timeout) || timeout < 1_000 || timeout > 5_000) {
+          throw new Error('timeout_ms must be an integer from 1000 through 5000')
         }
         return {
           action: 'wait' as const,
@@ -993,38 +4937,184 @@ export function installRunTools(ctx: Context, service: FleetRunService): void {
         if (args.status === undefined || args.summary === undefined) {
           throw new Error('fleet_run finish requires status and summary')
         }
-        return { action: 'finish' as const, run: service.finish(caller, args.status, args.summary) }
+        return { action: 'finish' as const, run: service.finish(caller, args.status, args.summary, args.run_id) }
+      }
+      if (args.action === 'close') {
+        if (args.summary === undefined) throw new Error('fleet_run close requires summary')
+        return { action: 'close' as const, run: service.end(caller, args.summary, args.run_id) }
+      }
+      if (args.action === 'pause') {
+        return { action: 'pause' as const, run: await service.pauseTeam(caller, args.run_id) }
       }
       if (args.action === 'resume') {
         if (args.run_id === undefined) throw new Error('fleet_run resume requires run_id')
+        const current = service.status(args.run_id, args.cwd ?? caller.session.header.cwd)
+        if (current.status === 'paused' && current.runtimeState === 'active') {
+          return { action: 'resume' as const, run: await service.resumeTeam(caller, args.run_id) }
+        }
         const projectRoot = args.cwd ?? caller.session.header.cwd
         if (projectRoot === undefined || !isAbsolute(projectRoot)) {
           throw new Error('fleet_run resume requires an absolute cwd or a calling session cwd')
         }
-        return {
-          action: 'resume' as const,
-          run: await service.resume(caller, { runId: args.run_id, projectRoot }),
-        }
-      }
-      if (args.team_config === undefined || args.task === undefined) {
-        throw new Error('fleet_run start requires team_config and task')
+        const run = await service.resume(caller, { runId: args.run_id, projectRoot })
+        const view = run.assistants.find(candidate => candidate.sessionId === String(caller.id))?.view
+        assistant.activate(caller, run.id, view)
+        return { action: 'resume' as const, run }
       }
       const projectRoot = args.cwd ?? caller.session.header.cwd
       if (projectRoot === undefined || !isAbsolute(projectRoot)) {
-        throw new Error('fleet_run start requires an absolute cwd or a calling session cwd')
+        throw new Error(`fleet_run ${args.action} requires an absolute cwd or a calling session cwd`)
       }
+      if (args.action === 'create') {
+        if (args.team_config === undefined) throw new Error('fleet_run create requires team_config')
+        const run = await service.create(caller, {
+            configPath: args.team_config,
+            projectRoot,
+            requiredPaths: args.required_paths ?? [],
+            ...(args.provider === undefined ? {} : { provider: args.provider }),
+            ...(args.model === undefined ? {} : { model: args.model }),
+            ...(args.max_tokens === undefined ? {} : { maxTokens: args.max_tokens }),
+          })
+        const view = run.assistants.find(candidate => candidate.sessionId === String(caller.id))?.view
+        assistant.activate(caller, run.id, view)
+        return { action: 'create' as const, run }
+      }
+      if (args.task === undefined) throw new Error('fleet_run start requires task')
       return {
         action: 'start' as const,
-        run: await service.start(caller, {
-          configPath: args.team_config,
+        run: service.start(caller, {
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
           taskPath: args.task,
           projectRoot,
-          requiredPaths: args.required_paths ?? [],
-          ...(args.provider === undefined ? {} : { provider: args.provider }),
-          ...(args.model === undefined ? {} : { model: args.model }),
-          ...(args.max_tokens === undefined ? {} : { maxTokens: args.max_tokens }),
         }),
       }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_archive',
+    description: 'Export or import a complete paused Fleet Team archive. Shared documents and member Sessions are always included; workspace files are optional.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['export', 'import'] },
+      run_id: { type: 'string', description: 'Paused Team id required for export.' },
+      path: { type: 'string', required: true, description: 'Archive file path to write or read.' },
+      cwd: { type: 'string', description: 'Target project root required for import. Relative paths resolve from the calling Session cwd.' },
+      include_workspace: { type: 'boolean', description: 'For export, include the project workspace. Defaults to false.' },
+      import_mode: {
+        type: 'string',
+        enum: ['copy', 'restore'],
+        description: 'For import, create new Team and Session ids (copy, default) or preserve archive ids (restore).',
+      },
+    },
+    output: jsonOutput(ARCHIVE_RESULT_SCHEMA),
+    async execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_archive')
+      if (args.action === 'export') {
+        if (args.run_id === undefined) throw new Error('fleet_archive export requires run_id')
+        const exported = await service.exportArchive(caller, {
+          runId: args.run_id,
+          destination: args.path,
+          includeWorkspace: args.include_workspace ?? false,
+        })
+        return {
+          action: 'export' as const,
+          path: exported.path,
+          teamId: exported.teamId,
+          includesWorkspace: exported.includesWorkspace,
+          extensions: [...exported.extensions],
+        }
+      }
+      if (args.cwd === undefined) throw new Error('fleet_archive import requires cwd')
+      const imported = await service.importArchive(caller, {
+        archivePath: args.path,
+        projectRoot: args.cwd,
+        mode: args.import_mode ?? 'copy',
+      })
+      return {
+        action: 'import' as const,
+        run: imported.run,
+        missingExtensions: [...imported.extensions.missing],
+        failedExtensions: [...imported.extensions.failed],
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_assistant',
+    description: 'Activate or leave a user-facing Fleet member, observe a Team, or relay external collaboration input and explicit directions through its operator path. Activation installs the assistant persona and its configured Fleet member tools for this foreground Session.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['activate', 'deactivate', 'observe', 'message'] },
+      run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team.' },
+      kind: { type: 'string', enum: ['collaboration', 'directive'], description: 'Message intent. Collaboration preserves normal flow; directive is an explicit controller direction.' },
+      text: { type: 'string', description: 'Message to relay to the Team coordinator. Required for message.' },
+      after_sequence: { type: 'integer', description: 'For observe, return durable Team events after this sequence. Defaults to 0.' },
+      limit: { type: 'integer', description: 'For observe, return from 1 through 200 events. Defaults to 100.' },
+      assistant_id: { type: 'string', description: 'Existing assistant id to rebind after a restart; omit to add a new assistant.' },
+      name: { type: 'string', description: 'Persistent assistant name used when adding a new assistant.' },
+      color: { type: 'string', description: 'Persistent assistant color in #RRGGBB.' },
+      role: { type: 'string', description: 'Team role for a new assistant.' },
+      responsibility: { type: 'string', description: 'Long-term responsibility for a new assistant.' },
+      prompt: { type: 'string', description: 'Additional role instructions for a new assistant.' },
+      tool_groups: { type: 'array', items: { type: 'string', enum: FLEET_MEMBER_TOOL_GROUPS }, description: 'Fleet tool groups granted to a new assistant.' },
+      permissions: { type: 'array', items: { type: 'string', enum: FLEET_MEMBER_PERMISSIONS }, description: 'Fleet permissions granted to a new assistant.' },
+    },
+    output: jsonOutput(ASSISTANT_RESULT_SCHEMA),
+    async execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_assistant')
+      const projectRoot = caller.session.header.cwd
+      if (args.action === 'activate') {
+        const attached = await service.attachAssistant(caller, {
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+          ...(projectRoot === undefined ? {} : { projectRoot }),
+          ...(args.assistant_id === undefined ? {} : { assistantId: args.assistant_id }),
+          ...(args.name === undefined ? {} : { name: args.name }),
+          ...(args.color === undefined ? {} : { color: args.color }),
+          ...(args.role === undefined ? {} : { role: args.role }),
+          ...(args.responsibility === undefined ? {} : { responsibility: args.responsibility }),
+          ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
+          ...(args.tool_groups === undefined ? {} : { toolGroups: args.tool_groups }),
+          ...(args.permissions === undefined ? {} : { permissions: args.permissions }),
+        })
+        return {
+          action: 'activate' as const,
+          run: attached.run,
+          mode: assistant.activate(caller, attached.run.id, attached.assistant.view),
+        }
+      }
+      if (args.action === 'deactivate') {
+        const mode = assistant.status(caller)
+        const run = service.detachAssistant(caller, args.run_id ?? mode.runId)
+        return Promise.resolve({ action: 'deactivate' as const, run, mode: assistant.deactivate(caller) })
+      }
+      if (args.action === 'message') {
+        if (args.text === undefined) throw new Error('fleet_assistant message requires text')
+        const message = service.sendAssistantMessage(caller, {
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+          kind: args.kind ?? 'collaboration',
+          text: args.text,
+          ...(projectRoot === undefined ? {} : { projectRoot }),
+        })
+        return Promise.resolve({
+          action: 'message' as const,
+          run: service.status(message.runId, projectRoot),
+          message,
+        })
+      }
+      const afterSequence = args.after_sequence ?? 0
+      const limit = args.limit ?? 100
+      if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+        throw new Error('after_sequence must be a non-negative integer')
+      }
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        throw new Error('limit must be an integer from 1 through 200')
+      }
+      const trace = service.readTrace(args.run_id, afterSequence, limit, projectRoot)
+      return Promise.resolve({
+        action: 'observe' as const,
+        run: service.status(trace.runId, projectRoot),
+        events: trace.events,
+        hasMore: trace.hasMore,
+      })
     },
   }))
 
@@ -1051,17 +5141,118 @@ export function installRunTools(ctx: Context, service: FleetRunService): void {
         : service.readMemberTrace(args.run_id, args.member, args.after_sequence ?? -1, limit, projectRoot)
     },
   }))
-}
 
-export function connectRunObservers(
-  service: FleetRunService,
-  messages: MessageHub,
-  resources: FleetResources,
-): () => void {
-  const stopMessages = messages.onEvent(event => { service.recordCoordination(event) })
-  const stopResources = resources.onEvent(event => { service.recordResource(event) })
-  return () => {
-    stopMessages()
-    stopResources()
-  }
+  ctx.tools.register(defineTool({
+    name: 'fleet_activity',
+    description: 'Read the calling member\'s unified Team activity inbox derived from the durable Fleet journal, or acknowledge one activity item.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['list', 'ack'] },
+      run_id: { type: 'string', description: 'Team id; inferred when the caller belongs to exactly one active Team.' },
+      sequence: { type: 'integer', description: 'Activity sequence required for ack.' },
+      after_sequence: { type: 'integer', description: 'List activity after this Team sequence.' },
+      limit: { type: 'integer', description: 'Maximum 1 through 100 items.' },
+      unread_only: { type: 'boolean', description: 'Return only unacknowledged activity.' },
+    },
+    output: jsonOutput(ACTIVITY_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_activity')
+      if (args.action === 'ack') {
+        if (args.sequence === undefined) throw new Error('fleet_activity ack requires sequence')
+        const item = service.acknowledgeActivity(caller, args.sequence, args.run_id)
+        const record = service.status(args.run_id, caller.session.header.cwd)
+        const member = service.memberViews(record.id).find(view =>
+          record.members.some(runMember => runMember.name === view.id && runMember.sessionId === String(caller.id))
+          || record.assistants.some(assistant => assistant.view.id === view.id && assistant.sessionId === String(caller.id)),
+        )?.id
+        if (member === undefined) throw new Error('calling Agent is not attached to this Fleet Team')
+        return Promise.resolve({ action: 'ack' as const, runId: record.id, member, item })
+      }
+      const inbox = service.activityInbox(caller, {
+        ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+        ...(args.after_sequence === undefined ? {} : { afterSequence: args.after_sequence }),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        ...(args.unread_only === undefined ? {} : { unreadOnly: args.unread_only }),
+      })
+      return Promise.resolve({ action: 'list' as const, ...inbox })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_member',
+    description: 'List or dynamically add, update, pause, resume, and remove formal Fleet Team members. Updates restart the idle DSH Agent with the same persisted Session and new member view.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'pause', 'resume', 'remove'] },
+      run_id: { type: 'string', description: 'Team id.' },
+      member: { type: 'string', description: 'Member id required for update, pause, resume, or remove.' },
+      view: { ...MEMBER_VIEW_SCHEMA, description: 'Complete member view required for add or update.' },
+      workspaces: { type: 'array', items: WORKSPACE_SCHEMA, description: 'Optional initial workspace allocations for add.' },
+    },
+    output: jsonOutput(MEMBER_MANAGEMENT_RESULT_SCHEMA),
+    async execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_member')
+      const record = service.status(args.run_id, caller.session.header.cwd)
+      if (args.action === 'list') {
+        const ids = new Set(record.members.map(member => member.name))
+        return {
+          action: 'list' as const,
+          run: record,
+          members: record.members,
+          views: service.memberViews(record.id).filter(view => ids.has(view.id)),
+        }
+      }
+      if (args.action === 'add') {
+        if (args.view === undefined) throw new Error('fleet_member add requires view')
+        const member = await service.addMember(caller, {
+          runId: record.id,
+          view: args.view as FleetMemberView,
+          ...(args.workspaces === undefined ? {} : { workspaces: args.workspaces }),
+        })
+        return { action: 'add' as const, run: service.status(record.id), member }
+      }
+      if (args.member === undefined) throw new Error(`fleet_member ${args.action} requires member`)
+      if (args.action === 'pause' || args.action === 'resume') {
+        const member = args.action === 'pause'
+          ? await service.pauseMember(caller, record.id, args.member)
+          : await service.resumeMember(caller, record.id, args.member)
+        return { action: args.action, run: service.status(record.id), member }
+      }
+      if (args.action === 'update') {
+        if (args.view === undefined) throw new Error('fleet_member update requires view')
+        const member = await service.updateMember(caller, {
+          runId: record.id,
+          member: args.member,
+          view: args.view as FleetMemberView,
+        })
+        return { action: 'update' as const, run: service.status(record.id), member }
+      }
+      const member = await service.removeMember(caller, record.id, args.member)
+      return { action: 'remove' as const, run: service.status(record.id), member }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_workspace',
+    description: 'List the calling member workspace allocations, or replace a member allocation with directories inside the Team project root.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['list', 'assign'] },
+      run_id: { type: 'string', description: 'Team id.' },
+      member: { type: 'string', description: 'Target member; defaults to caller for list and is required for assign.' },
+      workspaces: { type: 'array', items: WORKSPACE_SCHEMA, description: 'Complete replacement workspace list for assign.' },
+    },
+    output: jsonOutput(WORKSPACE_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_workspace')
+      if (args.action === 'list') return Promise.resolve({
+        action: 'list' as const,
+        ...service.memberWorkspaces(caller, args.run_id, args.member),
+      })
+      if (args.run_id === undefined || args.member === undefined || args.workspaces === undefined) {
+        throw new Error('fleet_workspace assign requires run_id, member, and workspaces')
+      }
+      return Promise.resolve({
+        action: 'assign' as const,
+        ...service.assignMemberWorkspaces(caller, args.run_id, args.member, args.workspaces),
+      })
+    },
+  }))
 }

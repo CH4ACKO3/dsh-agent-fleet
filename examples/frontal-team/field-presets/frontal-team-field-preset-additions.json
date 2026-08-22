@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "fields": {
+    "rules": [
+      {
+        "id": "durable-source-of-truth",
+        "name": ["持久状态唯一来源", "Durable source of truth"],
+        "detail": [
+          "使用 Fleet Task 作为任务状态、负责人、期限、依赖和进展的权威来源；任务 owner 在责任、状态、阻塞或验收证据变化后更新对应 Task。作出分工或跨任务决策的成员负责更新主 Channel 摘要；发现重大风险、主协作模式或检查点变化的成员也应直接更新。实际产物只通过 Fleet Resource 引用。不要在多个频道、对话或文档中复制完整看板和产物状态。恢复或接手工作时先读取 Channel 摘要、相关 Task 与 Resource，再按需追溯历史消息。",
+          "Use Fleet Task as the authority for task state, ownership, deadlines, dependencies, and progress; the task owner updates it whenever responsibility, state, blockers, or acceptance evidence changes. The peers who make an ownership or cross-task decision update the main Channel summary; a member who discovers a material risk or a change to the primary collaboration method or checkpoint records it directly. Actual artifacts are referenced through Fleet Resource. Do not duplicate complete boards or artifact state across Channels, chats, or documents. On resume or handoff, inspect the Channel summary, relevant Tasks, and Resources before reading only the history still needed."
+        ]
+      },
+      {
+        "id": "independent-definition-of-done",
+        "name": ["独立完成定义", "Independent definition of done"],
+        "detail": [
+          "任务只有在约定的交付物或可观察结果、验收标准和可复核证据齐备，并由非交付作者的成员独立检查后才能完成。reviewer 必须记录通过结论或具体缺口；作者不得验收自己的交付。未覆盖的标准、失败验证和不可接受的剩余风险必须让任务保持 open、in_progress 或 blocked，并写明整改动作与下一责任人。",
+          "Complete a task only when the agreed deliverable or observable outcome, acceptance criteria, and reviewable evidence exist and a member other than the delivery author has checked them independently. The reviewer records either approval or concrete gaps; authors do not accept their own work. Unmet criteria, failed verification, and unacceptable residual risk keep the task open, in_progress, or blocked with a remediation action and next owner recorded."
+        ]
+      },
+      {
+        "id": "bounded-escalation",
+        "name": ["有界用户升级", "Bounded user escalation"],
+        "detail": [
+          "把日常分工、实现选择、审查意见和可逆修复留在 Team 内部。只有产品语义、不可逆或外部副作用、授权与凭据、预算或资源范围变化、重大安全/数据风险，以及尝试合理替代方案后仍无法解决的依赖才升级给用户；可能造成损失的紧急风险应立即升级，不必先耗尽替代方案。升级时给出已知事实、影响和明确建议；确有多个可行选择时再列 2–3 个实质选项，不转发内部讨论流水。",
+          "Keep routine ownership, implementation choices, review findings, and reversible fixes inside the Team. Escalate only product semantics, irreversible or external side effects, authorization or credentials, budget or resource-scope changes, material security or data risk, and dependencies unresolved after reasonable alternatives. Escalate urgent loss-bearing risk immediately without first exhausting alternatives. Present known facts, consequences, and a recommendation; list two or three material options only when multiple viable choices actually exist, rather than forwarding the internal discussion stream."
+        ]
+      },
+      {
+        "id": "on-demand-activation",
+        "name": ["按需激活成员", "On-demand member activation"],
+        "detail": [
+          "唤醒成员、召开 Meeting 或增加临时成员前，先指出具体 Task、决策、审查或阻塞，以及期望产出。只激活 owner、reviewer 和必要依赖方；没有当前责任的核心成员保持空闲，不因例行广播被反复唤醒。临时专家必须有边界清晰的 Task、可见交接产物、接收人和退出条件；其任务与 Meeting 行动项关闭、交接被接收人确认后，再暂停或移除。",
+          "Before waking a member, opening a Meeting, or adding a temporary member, identify the concrete Task, decision, review, or blocker and the expected output. Activate only the owner, reviewer, and required dependency owners; core members without current responsibility remain idle and are not repeatedly woken by routine broadcasts. Temporary specialists need a bounded Task, a Team-visible handoff artifact, a recipient, and an exit condition; pause or remove them only after their Tasks and Meeting actions close and the recipient acknowledges the handoff."
+        ]
+      },
+      {
+        "id": "failure-memory",
+        "name": ["保留失败记忆", "Preserve failure memory"],
+        "detail": [
+          "对重大、重复、影响决策或具有复用价值的失败，简洁记录尝试条件、观察结果、被否决方案、复现步骤、回滚状态和下一次应避免或验证的事项；写入对应 Fleet Task 评论/进展，较长材料注册为共享 Resource。区分已观察事实、解释性假设和未验证推断，不记录无后续价值的瞬时噪声，也不得删除或改写反面证据。后续工作在采用相近方案前先检查相关失败记录。",
+          "For failures that are material, repeated, decision-relevant, or reusable, concisely record the conditions tried, observed result, rejected alternative, reproduction steps, rollback state, and what a later attempt should avoid or verify. Put the record in the relevant Fleet Task entry and register longer material as a shared Resource. Separate observed facts, explanatory hypotheses, and unverified inference; omit transient noise with no future value, but never delete or rewrite contrary evidence. Check relevant failure records before adopting a similar approach later."
+        ]
+      },
+      {
+        "id": "one-primary-method",
+        "name": ["单一主协作模式", "One primary collaboration method"],
+        "detail": [
+          "每个 work item 由认领该工作的成员与相关同行在主 Channel 中记录一种主生命周期模式、适用原因、完成条件和检查节奏。看板、Sprint 和阶段门是互斥的主生命周期，不得同时施加冲突的 WIP、迭代承诺和门禁；契约优先只是可叠加的并行策略。证据表明当前模式不再合适时，使用 kind=message 的 Fleet Vote 记录切换原因、对进行中 Task 的处理和新模式生效点；finish 与 blocked Vote 仅用于整个 work item 的终态。",
+          "For each work item, the member who claims it and the relevant peers record one primary lifecycle, why it fits, its completion conditions, and inspection cadence in the main Channel. Kanban, Sprint, and stage gates are mutually exclusive primary lifecycles: do not impose conflicting WIP, iteration commitments, and gates at once. Contract-first is only an optional parallelization strategy. When evidence shows the lifecycle no longer fits, use a Fleet Vote with kind=message to record the reason, treatment of active Tasks, and activation point of the replacement; reserve finish and blocked Votes for the terminal state of the whole work item."
+        ]
+      }
+    ],
+    "collaboration": [
+      {
+        "id": "kanban-flow",
+        "name": ["看板流动", "Kanban flow"],
+        "detail": [
+          "适用于工作持续到达、优先级可调整且不需要固定批次承诺的情景。Fleet Task 是卡片权威来源：在描述中写明结果、验收证据、优先级/拉取顺序和就绪条件；用 assignee、parent/子任务、Resource 与评论记录 owner、独立 reviewer、依赖和产物。成员从最高优先级且依赖已满足的 open Task 拉取工作，默认每人最多一个 in_progress；blocked 不占主动执行容量，但必须记录阻塞、已试方案、解除条件和跟进人。工具没有 Ready/Review 原生列：就绪条件写入描述，轻量审查由 reviewer 明确评论，复杂审查建立子任务，不用标题前缀伪造状态。只有 reviewer 留下通过证据后才能 completed。用 fleet_schedule 按项目尺度检查老化 Task、阻塞和在制品；仅在跨成员阻塞、策略变化或积压失衡时召开 Meeting。",
+          "Use when work arrives continuously, priorities may change, and fixed-batch commitment is unnecessary. Fleet Task is the card authority: record the outcome, acceptance evidence, priority or pull order, and readiness conditions in the description; use assignees, parent or child Tasks, Resources, and comments for the owner, independent reviewer, dependencies, and artifacts. Pull the highest-priority open Task whose dependencies are satisfied, with a default limit of one in_progress Task per member. Blocked work does not consume active execution capacity, but records the blocker, attempted alternatives, unblock condition, and follow-up owner. Because the tool has no native Ready or Review columns, put readiness in the description, use an explicit reviewer comment for light review, and create a child Task for substantial review rather than faking states in titles. Mark completed only after reviewer approval evidence. Use fleet_schedule at a project-appropriate cadence to inspect aging Tasks, blockers, and WIP; open a Meeting only for cross-member blockers, policy changes, or unhealthy backlog flow."
+        ]
+      },
+      {
+        "id": "agile-iteration",
+        "name": ["敏捷迭代", "Agile iteration"],
+        "detail": [
+          "适用于需要在固定短周期内交付可验证增量、并通过反馈调整后续工作的中型或长期任务；一次性小任务不要强行建立 Sprint。主 Channel 保存 Product Goal 与当前 Sprint Goal；一个带 due_at 的父 Fleet Task 表示迭代，子任务表示 Sprint Backlog，每项都写明可验证结果、owner、独立 reviewer 和完成定义。Planning Meeting 只澄清目标、容量与依赖；首轮计划用 start_work Vote 承诺，后续 Sprint 用 kind=message 的 Vote 记录目标、范围和起止点。用 fleet_schedule 按项目时长设置异步检查节奏，多日工作默认每日一次，短迭代可更密；只唤醒相关成员更新已验证进展、阻塞和下一动作。Review 根据实际增量和证据决定接受、返工或回到 backlog；父任务仅在已承诺子任务完成审查后完成。随后 Retrospective 只选择一个最高价值的流程改进并建立下一轮 Task。范围可澄清，但质量不得降低，危及 Sprint Goal 的变化必须显式重议。",
+          "Use for medium or long work that can deliver verifiable increments on a fixed short cadence and adapt through feedback; do not force a Sprint onto a small one-shot task. The main Channel holds the Product Goal and current Sprint Goal. A parent Fleet Task with due_at represents the iteration, with child Tasks as the Sprint Backlog; each names a verifiable outcome, owner, independent reviewer, and definition of done. Planning clarifies only the goal, capacity, and dependencies. Commit the first plan with a start_work Vote, and record later Sprint goals, scope, and boundaries with a kind=message Vote. Use fleet_schedule at a cadence proportional to project duration: daily by default for multi-day work and more frequently only for short iterations. Wake only relevant members to update verified progress, blockers, and the next action. Review the actual increment and evidence to accept it, request rework, or return work to the backlog; complete the parent only after committed child Tasks pass review. Retrospective selects one highest-value process improvement and creates its next-iteration Task. Scope may be clarified, but quality does not decrease and any threat to the Sprint Goal is explicitly renegotiated."
+        ]
+      },
+      {
+        "id": "stage-gated-delivery",
+        "name": ["瀑布阶段门禁", "Stage-gated delivery"],
+        "detail": [
+          "适用于需求相对稳定、阶段产物需要审计或下游返工成本很高的工作。启动时按实际风险裁剪需求、设计、实现、验证和发布阶段，不创建无交付物的空阶段；每个保留阶段用父 Fleet Task 表示，并把门禁清单与产物注册为 Fleet Resource。下游 Task 可预先创建为 open，但前一门禁通过前不得进入 in_progress。门禁由产物 owner、独立 reviewer 和直接下游代表检查范围、证据、未决项与返工风险，并由明确列出的参与者使用 kind=message 的 Vote 通过或拒绝。拒绝时当前阶段保持 in_progress 或 blocked，建立有 owner 的整改 Task，补齐证据后重新投票。门禁后的需求或契约变化必须建立变更 Task，记录影响、受影响基线、迁移/回滚方案并重新批准；不得静默修改。用 fleet_calendar 安排真实门禁日期，不以日程压力替代证据。",
+          "Use when requirements are relatively stable, phase artifacts need auditability, or downstream rework is expensive. At kickoff, tailor the requirements, design, implementation, verification, and release phases to actual risk; do not create empty phases with no deliverable. Represent each retained phase with a parent Fleet Task and register its gate checklist and artifacts as Fleet Resources. Downstream Tasks may be created as open but do not enter in_progress before the prior gate passes. At each gate, the artifact owner, an independent reviewer, and a direct downstream representative inspect scope, evidence, open issues, and rework risk, then explicitly named voters approve or reject it with a kind=message Vote. On rejection, keep the phase in_progress or blocked, create owned remediation Tasks, and vote again after evidence is repaired. Any post-gate requirement or contract change creates a change Task with impact, affected baselines, migration or rollback, and renewed approval; never edit an approved baseline silently. Schedule real gates with fleet_calendar without substituting schedule pressure for evidence."
+        ]
+      },
+      {
+        "id": "contract-first-parallel",
+        "name": ["契约驱动并行", "Contract-first parallel delivery"],
+        "detail": [
+          "把它作为所选主生命周期中的并行化策略，而不是第二套生命周期。并行实现前，技术负责人把 ADR、API、数据模型、接口契约、兼容边界和验收样例形成带版本或修订标识的权威产物，注册为 Fleet Resource，并在受影响 Task 中引用；明确列出相关 owner 与集成 reviewer 作为 kind=message Vote 的参与者。确认后用 Fleet Task 分配互不重叠的结果、依赖和集成责任，必要时通过 fleet_workspace 隔离工作区。实现者不得在本地暗改共享契约；发现不足时先发布证据、建立契约变更 Task、标明受影响任务与兼容/迁移措施，再由所有受影响 owner 重新确认。集成 reviewer 必须按同一契约版本独立检查各产物和端到端路径，确认兼容后才能完成父任务。",
+          "Treat this as a parallelization strategy inside the selected primary lifecycle, not a second lifecycle. Before parallel implementation, the technical owner produces authoritative ADR, API, data-model, interface-contract, compatibility-boundary, and acceptance-example artifacts with a version or revision identifier, registers them through Fleet Resource, and links them from affected Tasks. Explicitly name affected owners and the integration reviewer as voters in the kind=message Vote. After approval, use Fleet Task to assign non-overlapping outcomes, dependencies, and integration ownership, with fleet_workspace isolation when needed. Implementers never change a shared contract silently in a local branch; when it is insufficient, publish evidence, create a contract-change Task, name affected work and compatibility or migration measures, and obtain renewed agreement from every affected owner. The integration reviewer checks every artifact and the end-to-end path independently against the same contract revision before the parent Task completes."
+        ]
+      }
+    ],
+    "content": [
+      {
+        "id": "executive-sponsor",
+        "name": ["执行赞助人视角", "Executive sponsor view"],
+        "detail": [
+          "面向关注结果而非执行过程的用户。固定按“结果与价值／需要决定／最高风险／下一检查点”组织内容；已交付与预计交付必须分开，预测时间、资源和信心都说明依据。对每个用户决策给出推荐、主要证据和不采纳的影响。隐藏成员间日常协调、命令、文件路径和原始日志，除非它们直接改变成本、时间、风险或结论可信度；不得因视角简化而降低内部验收或证据标准。",
+          "For users who care about outcomes more than execution detail, use the stable structure Outcome and value / Decision needed / Top risk / Next checkpoint. Separate delivered outcomes from forecasts, and state the basis for schedule, resource, and confidence estimates. For every user decision, give a recommendation, primary evidence, and the consequence of declining it. Hide routine member coordination, commands, file paths, and raw logs unless they directly change cost, schedule, risk, or confidence in the conclusion; simplification never lowers internal acceptance or evidence standards."
+        ]
+      },
+      {
+        "id": "product-lead-view",
+        "name": ["产品负责人视角", "Product lead view"],
+        "detail": [
+          "固定按“用户影响／产品选项与取舍／验收标准／演示或下一验证”组织内容，优先呈现用户流程、可见行为和成功指标；适合时附界面、截图或可操作演示，并区分已验证行为与产品假设。技术方案只总结其对体验、范围、成本、交付时间和未来约束的影响。只有不可由团队代决的产品语义或优先级才交给用户，团队内部承担可行性分析、实现、证据和追踪。",
+          "Use the stable structure User impact / Product options and tradeoffs / Acceptance criteria / Demonstration or next validation. Prioritize user journeys, visible behavior, and success measures; include interfaces, screenshots, or an operable demonstration when useful, and distinguish verified behavior from product hypotheses. Summarize technical approaches only through impact on experience, scope, cost, delivery time, and future constraints. Give the user only product semantics or priority choices the Team cannot legitimately decide, while the Team owns feasibility analysis, implementation, evidence, and tracking."
+        ]
+      },
+      {
+        "id": "technical-lead-view",
+        "name": ["技术负责人视角", "Technical lead view"],
+        "detail": [
+          "固定按“技术决策／边界与契约／验证证据／迁移与剩余风险”组织内容。呈现相关 ADR 或 Resource 修订、接口与数据契约、关键选型，以及安全、可靠性、性能和兼容影响；说明采用方案、被否决的实质替代方案及仍未验证的假设。省略不影响判断的例行命令和逐文件流水，但保留可复核证据的位置。需要用户判断时明确标注这是架构方向、风险接受还是资源取舍。",
+          "Use the stable structure Technical decision / Boundaries and contracts / Verification evidence / Migration and residual risk. Present the relevant ADR or Resource revision, interface and data contracts, consequential choices, and security, reliability, performance, and compatibility impact. Explain the selected approach, material rejected alternatives, and assumptions still unverified. Omit routine commands and file-by-file narration that do not affect judgment, but retain locations of reviewable evidence. When user input is required, label it as architecture direction, risk acceptance, or resource tradeoff."
+        ]
+      },
+      {
+        "id": "project-manager-view",
+        "name": ["项目经理视角", "Project manager view"],
+        "detail": [
+          "固定按“目标与状态／负责人和关键路径／阻塞与变化／下一可验收结果”组织内容。区分已验证进展、正在进行的活动和未经证据支持的承诺；完成信心与预计检查点必须基于已通过标准、剩余关键路径和已知依赖，不使用无依据的百分比。列出影响范围或时间的阻塞、对应 owner、解除条件与下一检查时间。隐藏不改变计划的内部技术讨论，只有需要用户调整优先级、资源、范围或期限时才升级。",
+          "Use the stable structure Goal and status / Owners and critical path / Blockers and changes / Next reviewable result. Separate verified progress, activity in motion, and commitments unsupported by evidence. Base completion confidence and forecast checkpoints on passed criteria, remaining critical path, and known dependencies; do not invent percentages. For blockers affecting scope or schedule, name the owner, unblock condition, and next inspection time. Hide internal technical discussion that does not change the plan and escalate only when the user must adjust priority, resources, scope, or deadline."
+        ]
+      },
+      {
+        "id": "evidence-pack",
+        "name": ["证据包视角", "Evidence pack view"],
+        "detail": [
+          "固定按“结论／证据索引／独立复核／限制与剩余风险”组织最终或阶段性结果。每项结论关联对应 Fleet Task、产物或 Resource 修订、验证方法与观察结果、reviewer 结论，以及会影响可信度的失败或反面证据；必要时给出可重复的最短命令或步骤。不要转储完整聊天、日志或思维过程，只保留足以让另一位操作者复核结论、重现关键证据并判断发布可信度的信息。",
+          "Use the stable structure Conclusion / Evidence index / Independent review / Limitations and residual risk for final or milestone results. Link every claim to its Fleet Task, artifact or Resource revision, verification method and observed result, reviewer conclusion, and any failed or contrary evidence that changes confidence; when useful, include the shortest reproducible command or procedure. Do not dump complete chats, logs, or reasoning traces. Retain only enough for another operator to review the claim, reproduce decisive evidence, and judge release confidence."
+        ]
+      }
+    ]
+  }
+}
