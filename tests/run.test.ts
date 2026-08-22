@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -283,6 +283,7 @@ function setup(root: string, options?: {
   readonly launcher: FakeAgent
   readonly persisted: Map<string, FakeEvent[]>
   readonly persistedHeaders: Map<string, SessionHeader>
+  readonly context: Context
   disconnect(): void
 } {
   const runtime = new FakeRuntime(options?.resumeInboxes, options?.resumedIds)
@@ -290,72 +291,69 @@ function setup(root: string, options?: {
   const core = new FleetCore(runtime)
   const persisted = options?.persisted ?? new Map<string, FakeEvent[]>()
   const persistedHeaders = options?.persistedHeaders ?? new Map<string, SessionHeader>()
-  const context = {
-    on: () => () => {},
-    get: (name: string) => name === 'sessionPersistence'
-      ? {
-          inspect: (id: string) => {
-            const agent = runtime.get(id)
-            const meta = persistedHeaders.get(id) ?? (agent === undefined ? undefined : {
-              version: 0,
-              id: SessionId(id),
-              createdAt: 0,
-              cwd: agent.session.header.cwd,
-            })
-            return Promise.resolve({ ...(meta === undefined ? {} : { meta }), events: persisted.get(id) ?? [] })
-          },
-          list: () => Promise.resolve([...persistedHeaders.values()]),
-          create: (meta: SessionHeader) => {
-            persistedHeaders.set(String(meta.id), structuredClone(meta))
-            return Promise.resolve()
-          },
-          append: (id: string, events: readonly FakeEvent[]) => {
-            persisted.set(id, structuredClone([...events]))
-            return Promise.resolve()
-          },
-        }
-      : name === 'sessionArchive' ? options?.sessionArchive : undefined,
-    agents: { get: (id: string) => runtime.get(id) },
-    sessions: {
-      flush: (session: FakeAgent['session']) => {
-        const agent = [...runtime.agents.values()].find(candidate => candidate.session === session)
-        if (agent !== undefined) {
-          persisted.set(agent.id, structuredClone(session.events))
-          persistedHeaders.set(agent.id, {
-            version: 0,
-            id: SessionId(agent.id),
-            createdAt: 0,
-            cwd: agent.session.header.cwd,
-          })
-        }
-        return Promise.resolve()
-      },
+  const context = new Context()
+  context.provide('sessionPersistence', {
+    inspect: (id: string) => {
+      const agent = runtime.get(id)
+      const meta = persistedHeaders.get(id) ?? (agent === undefined ? undefined : {
+        version: 0,
+        id: SessionId(id),
+        createdAt: 0,
+        cwd: agent.session.header.cwd,
+      })
+      return Promise.resolve({ ...(meta === undefined ? {} : { meta }), events: persisted.get(id) ?? [] })
     },
-    llm: {
-      resolveCallConfig: (config: RuntimeRequestConfig) => Promise.resolve(structuredClone(config)),
+    list: () => Promise.resolve([...persistedHeaders.values()]),
+    create: (meta: SessionHeader) => {
+      persistedHeaders.set(String(meta.id), structuredClone(meta))
+      return Promise.resolve()
     },
-    fs: {
-      ...containment,
-      resolve: async (path: string) => {
-        const resolved = realpathSync(path)
-        return { targetKey: resolved, displayPath: resolved }
-      },
-      stat: async (target: FsTarget) => {
-        if (!existsSync(target.displayPath)) return undefined
-        const info = statSync(target.displayPath)
-        return {
-          version: `${String(info.mtimeMs)}:${String(info.size)}`,
-          type: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
-          size: info.size,
-        }
-      },
-      readBytes: async (target: FsTarget, _signal: AbortSignal | undefined, maxBytes: number) => {
-        const bytes = readFileSync(target.displayPath)
-        if (bytes.byteLength > maxBytes) throw new Error('file too large')
-        return bytes
-      },
+    append: (id: string, events: readonly FakeEvent[]) => {
+      persisted.set(id, structuredClone([...events]))
+      return Promise.resolve()
     },
-  } as unknown as Context
+  })
+  context.provide('agents', { get: (id: string) => runtime.get(id) })
+  context.provide('sessions', {
+    flush: (session: FakeAgent['session']) => {
+      const agent = [...runtime.agents.values()].find(candidate => candidate.session === session)
+      if (agent !== undefined) {
+        persisted.set(agent.id, structuredClone(session.events))
+        persistedHeaders.set(agent.id, {
+          version: 0,
+          id: SessionId(agent.id),
+          createdAt: 0,
+          cwd: agent.session.header.cwd,
+        })
+      }
+      return Promise.resolve()
+    },
+  })
+  context.provide('llm', {
+    resolveCallConfig: (config: RuntimeRequestConfig) => Promise.resolve(structuredClone(config)),
+  })
+  context.provide('fs', {
+    ...containment,
+    resolve: async (path: string) => {
+      const resolved = realpathSync(path)
+      return { targetKey: resolved, displayPath: resolved }
+    },
+    stat: async (target: FsTarget) => {
+      if (!existsSync(target.displayPath)) return undefined
+      const info = statSync(target.displayPath)
+      return {
+        version: `${String(info.mtimeMs)}:${String(info.size)}`,
+        type: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
+        size: info.size,
+      }
+    },
+    readBytes: async (target: FsTarget, _signal: AbortSignal | undefined, maxBytes: number) => {
+      const bytes = readFileSync(target.displayPath)
+      if (bytes.byteLength > maxBytes) throw new Error('file too large')
+      return bytes
+    },
+  })
+  if (options?.sessionArchive !== undefined) context.provide('sessionArchive', options.sessionArchive)
   const authorization = new FleetAuthorizationService()
   const collaboration = new FleetCollaborationService(context, authorization)
   const service = new FleetRunService(context, core, collaboration, {
@@ -371,7 +369,11 @@ function setup(root: string, options?: {
     launcher,
     persisted,
     persistedHeaders,
-    disconnect: () => { service.close() },
+    context,
+    disconnect: () => {
+      service.close()
+      void context.fiber.dispose()
+    },
   }
 }
 
@@ -877,7 +879,7 @@ describe('FleetRunService', () => {
         contacts: { members: [], channels: ['delivery'] },
       }],
     })))
-    const { service, runtime, launcher, disconnect } = setup(root, {
+    const { service, runtime, launcher, context, disconnect } = setup(root, {
       launcherOptions: { provider: 'default-provider', model: 'default-model' },
     })
 
@@ -931,7 +933,10 @@ describe('FleetRunService', () => {
     const restrict = vi.fn(() => () => {})
     const guard = vi.fn(() => () => {})
     const get = vi.fn((name: string) => name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
+    const memberSetup = vi.fn()
+    context.on('fleet/member/setup', memberSetup)
     await runtime.creates[0]?.setup?.({
+      agent: runtime.get(run.members[0]?.sessionId ?? '') as unknown as Agent,
       inject: (_deps: readonly string[], callback: (scope: Context) => void) => {
         callback({ tools: { register, restrict, guard, get } } as unknown as Context)
         return Promise.resolve()
@@ -973,6 +978,11 @@ describe('FleetRunService', () => {
       'fleet_vote',
       'fleet_meeting',
     ])
+    expect(memberSetup).toHaveBeenCalledWith(expect.objectContaining({
+      team: expect.objectContaining({ id: run.id }),
+      member: 'product-lead',
+      source: 'create',
+    }))
     const actionEnum = (name: string): readonly string[] | undefined =>
       (register.mock.calls.find(call => (call[0] as { name: string }).name === name)?.[0] as {
         parameters?: { readonly properties?: { readonly action?: { readonly enum?: readonly string[] } } }
@@ -1448,6 +1458,73 @@ describe('FleetRunService', () => {
     expect(persisted.size).toBe(2)
     expect(core.list()).toEqual([])
     expect(readFileSync(join(root, '.fleet-registry', run.id, 'run.json'), 'utf8')).toContain('"status": "closed"')
+    disconnect()
+  })
+
+  it('runs Team lifecycle, work, message, and durable-event hooks at their commit boundaries', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, context, disconnect } = setup(root)
+    const starts: string[] = []
+    const events: string[] = []
+    const disposed: string[] = []
+    let rejectWork = true
+
+    context.on('fleet/team/session-start', ({ team, source }) => {
+      starts.push(`${team.id}:${source}`)
+      team.ctx.on('fleet/message/pre-send', (_payload, next) => {
+        const decision = next()
+        return decision.kind === 'reject'
+          ? decision
+          : { kind: 'send', input: { ...decision.input, text: `[hook] ${decision.input.text}` } }
+      })
+    })
+    context.on('fleet/team/event', ({ event }) => { events.push(event.type) })
+    context.on('fleet/team/disposed', ({ team }) => { disposed.push(team.id) })
+    context.on('fleet/work/pre-start', (_payload, next) => {
+      const decision = next()
+      return decision.kind === 'reject'
+        ? decision
+        : { kind: 'start', task: `${decision.task}\n\nHook-added acceptance criteria.` }
+    })
+    context.on('fleet/work/pre-start', (_payload, next) => {
+      return rejectWork ? { kind: 'reject', reason: 'Work is not admitted yet.' } : next()
+    })
+
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    expect(starts).toEqual([`${run.id}:create`])
+
+    expect(() => service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root }))
+      .toThrow('Work is not admitted yet.')
+    expect(events).not.toContain('work_started')
+    rejectWork = false
+    const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const acceptedTaskPath = running.work?.acceptedTaskPath
+    expect(acceptedTaskPath).toBeDefined()
+    expect(readFileSync(acceptedTaskPath ?? '', 'utf8')).toContain('Hook-added acceptance criteria.')
+    expect(runtime.get(run.members[0]?.sessionId ?? '')?.messages.at(-1)?.content)
+      .toEqual([expect.objectContaining({ text: expect.stringContaining('Hook-added acceptance criteria.') })])
+
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    service.messageHub(run.id).send(lead, { to: '@reviewer', text: 'Review the hook.', delivery: 'quiet' })
+    expect(service.messageHub(run.id).read(reviewer, { conversation: '@lead' }).messages.at(-1)?.text)
+      .toBe('[hook] Review the hook.')
+    expect(service.sendAssistantMessage(launcher as unknown as Agent, {
+      runId: run.id,
+      kind: 'collaboration',
+      text: 'User-facing note.',
+    }).text).toBe('[hook] User-facing note.')
+    expect(events).toContain('work_started')
+    expect(events).toContain('coordination.message')
+
+    service.end(launcher as unknown as Agent, 'Hook lifecycle test complete.', run.id)
+    await service.wait(run.id, 1_000)
+    expect(disposed).toEqual([run.id])
     disconnect()
   })
 

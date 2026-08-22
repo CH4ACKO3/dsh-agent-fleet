@@ -27,6 +27,7 @@ import type {
   ReadMessagesInput,
   ReadMessagesResult,
   SearchMessagesInput,
+  SendMessageDecision,
   SendMessageInput,
   SendMessageResult,
   UpdateChannelInput,
@@ -94,6 +95,7 @@ function directConversation(left: string, right: string): string {
 
 export interface MessageHubOptions {
   readonly validateTaskReference?: (taskId: string, assigneeId?: string) => void
+  readonly beforeSend?: (sender: MessageAgent, input: SendMessageInput) => SendMessageDecision
 }
 
 export class MessageHub {
@@ -489,6 +491,11 @@ export class MessageHub {
   send(sender: MessageAgent, input: SendMessageInput): SendMessageResult {
     this.assertOpen()
     this.requireAgent(sender.id)
+    const target = input.to
+    const decision = this.options.beforeSend?.(sender, snapshot(input)) ?? { kind: 'send', input }
+    if (decision.kind === 'reject') throw new Error(decision.reason.trim() || 'Fleet message was rejected')
+    if (decision.input.to !== target) throw new Error('Fleet message hooks cannot change the sender or target')
+    input = decision.input
     const text = input.text.trim()
     if (text.length === 0) throw new Error('message text cannot be empty')
     if (text.length > MAX_MESSAGE_LENGTH) {
@@ -690,6 +697,12 @@ export class MessageHub {
       ...(hasMore ? { nextOffset } : {}),
       readThrough: Math.min(message.text.length, Math.max(current, nextOffset)),
     }
+  }
+
+  getMessage(sender: MessageAgent, messageId: string): FleetMessage {
+    this.assertOpen()
+    this.requireAgent(sender.id)
+    return snapshot(this.requireVisibleMessage(sender.id, messageId))
   }
 
   search(sender: MessageAgent, input: SearchMessagesInput = {}): FleetMessage[] {

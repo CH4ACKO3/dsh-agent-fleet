@@ -96,6 +96,8 @@ export type FleetWorkStatus = 'running' | 'finished' | 'blocked' | 'failed' | 'c
 export interface FleetWorkRecord {
   readonly id: string
   readonly taskPath: string
+  /** Immutable accepted work text used for restart, without changing the caller's source file. */
+  readonly acceptedTaskPath?: string
   readonly status: FleetWorkStatus
   readonly startedAt: string
   readonly endedAt?: string
@@ -862,14 +864,26 @@ function relocateArchiveEvents(
       })]
     }
     if (event.type === 'work_started') {
-      const data = event.data as { readonly workId: string; readonly taskPath: string }
+      const data = event.data as {
+        readonly workId: string
+        readonly taskPath: string
+        readonly acceptedTaskPath?: string
+      }
+      const currentTaskPath = join(targetRunDirectory, 'current-work.md')
       return [JSON.stringify({
         ...event,
         data: {
           ...data,
           taskPath: data.workId === currentWorkId
-            ? join(targetRunDirectory, 'current-work.md')
+            ? currentTaskPath
             : relocateArchivePath(data.taskPath, sourceRoot, targetRoot, sourceTeamId, targetTeamId),
+          ...(data.acceptedTaskPath === undefined ? {} : {
+            acceptedTaskPath: data.workId === currentWorkId
+              ? currentTaskPath
+              : relocateArchivePath(
+                data.acceptedTaskPath, sourceRoot, targetRoot, sourceTeamId, targetTeamId,
+              ),
+          }),
         },
       })]
     }
@@ -924,12 +938,20 @@ function migrateLegacyRunEvents(source: string, legacyRun: string, runDirectory:
       })]
     }
     if (event.type === 'work_started') {
-      const data = event.data as { readonly taskPath: string }
+      const data = event.data as { readonly taskPath: string; readonly acceptedTaskPath?: string }
       return [JSON.stringify({
         ...event,
-        data: { ...data, taskPath: pathInside(legacyRun, data.taskPath)
-          ? resolve(runDirectory, relative(legacyRun, data.taskPath))
-          : data.taskPath },
+        data: {
+          ...data,
+          taskPath: pathInside(legacyRun, data.taskPath)
+            ? resolve(runDirectory, relative(legacyRun, data.taskPath))
+            : data.taskPath,
+          ...(data.acceptedTaskPath === undefined ? {} : {
+            acceptedTaskPath: pathInside(legacyRun, data.acceptedTaskPath)
+              ? resolve(runDirectory, relative(legacyRun, data.acceptedTaskPath))
+              : data.acceptedTaskPath,
+          }),
+        },
       })]
     }
     if (event.type === 'resource.resource_added') {
@@ -1262,10 +1284,20 @@ async function installMemberTools(
   runtime: FleetCollaborationTeam,
   member: string,
   exposeHostFleetTools = false,
+  source?: 'create' | 'resume',
 ): Promise<void> {
   await childCtx.inject(['fs', 'tools'], (scope) => {
     return runtime.installTools(scope, member, { exposeHostFleetTools })
   })
+  if (source !== undefined) {
+    if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
+    await runtime.events.serial('fleet/member/setup', {
+      member,
+      source,
+      agent: childCtx.agent,
+      ctx: childCtx,
+    })
+  }
 }
 
 /**
@@ -1604,7 +1636,7 @@ export class FleetRunService {
             ? {}
             : { reasoningEffort: ReasoningEffortId(member.reasoningEffort) }),
           ...(memberMaxTokens === undefined ? {} : { maxTokens: memberMaxTokens }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.id),
+          setup: childCtx => installMemberTools(childCtx, runtime, member.id, false, 'create'),
         })
         created.push(member.id)
         runtime.memberIdsByName.set(member.id, agent.id)
@@ -1662,6 +1694,7 @@ export class FleetRunService {
       const idle = this.replaceRecord(record.id, { status: 'idle' })
       this.appendEvent(record.id, 'team_status', { status: 'idle' })
       runtime.activateProductivity()
+      runtime.events.emit('fleet/team/session-start', { source: 'create' })
       return this.describeRecord(idle)
     } catch (error) {
       for (const name of created.reverse()) {
@@ -1701,14 +1734,30 @@ export class FleetRunService {
     if (task.length === 0) throw new Error('Fleet work cannot be empty')
     const available = record.members.filter(member => this.memberCanReply(member))
     if (available.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
+    const decision = this.requireRuntime(record.id).events.waterfall(
+      'fleet/work/pre-start',
+      { proposal: { taskPath, task } },
+      () => ({ kind: 'start', task }),
+    )
+    if (decision.kind === 'reject') throw new Error(decision.reason.trim() || 'Fleet work was rejected')
+    const acceptedTask = decision.task.trim()
+    if (acceptedTask.length === 0) throw new Error('Fleet work hook produced an empty work description')
+    const workId = `work_${randomUUID()}`
+    const workDirectory = join(this.runDirectory(record), 'work')
+    const acceptedTaskPath = join(workDirectory, `${workId}.md`)
+    mkdirSync(workDirectory, { recursive: true })
+    const temporaryTaskPath = join(workDirectory, `.${workId}.${process.pid}.tmp`)
+    writeFileSync(temporaryTaskPath, `${acceptedTask}\n`, 'utf8')
+    renameSync(temporaryTaskPath, acceptedTaskPath)
     const work: FleetWorkRecord = {
-      id: `work_${randomUUID()}`,
+      id: workId,
       taskPath,
+      acceptedTaskPath,
       status: 'running',
       startedAt: new Date().toISOString(),
     }
     const running = this.replaceRecord(record.id, { status: 'running', work })
-    this.appendEvent(record.id, 'work_started', { workId: work.id, taskPath })
+    this.appendEvent(record.id, 'work_started', { workId: work.id, taskPath, acceptedTaskPath })
 
     const roster = record.members
       .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
@@ -1722,7 +1771,7 @@ export class FleetRunService {
           `Team: ${record.name}`,
           `Your Fleet identity: @${member.displayName ?? member.name}`,
           `Members:\n${roster}`,
-          `Work:\n${task}`,
+          `Work:\n${acceptedTask}`,
         ].join('\n\n'),
         delivery: 'wakeup',
         coalesceKey: `work-start:${work.id}`,
@@ -1853,7 +1902,7 @@ export class FleetRunService {
             ...memberTemplate,
             name: member.displayName ?? memberTemplate.name,
           }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.name),
+          setup: childCtx => installMemberTools(childCtx, runtime, member.name, false, 'resume'),
           ...memberAgentOptions,
         })
         runtime.memberIdsByName.set(member.name, resumed.id)
@@ -1891,7 +1940,7 @@ export class FleetRunService {
             role: memberTemplate.role,
             cwd: record.projectRoot,
             persona: persona(effectiveTemplate, memberTemplate),
-            setup: childCtx => installMemberTools(childCtx, runtime, memberTemplate.id),
+            setup: childCtx => installMemberTools(childCtx, runtime, memberTemplate.id, false, 'create'),
             ...memberAgentOptions,
           })
           const member: FleetRunMember = {
@@ -1946,7 +1995,7 @@ export class FleetRunService {
         && (record.status === 'running' || record.status === 'starting')
         && record.work?.status === 'running'
       ) {
-        const task = readFileSync(record.work.taskPath, 'utf8').trim()
+        const task = this.readWorkTask(record)
         const roster = members
           .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
           .join('\n')
@@ -2005,6 +2054,7 @@ export class FleetRunService {
         teamPausedMembers: [],
       })
       runtime.activateProductivity()
+      runtime.events.emit('fleet/team/session-start', { source: 'resume' })
       if (approvedWorkVote !== undefined && approvedWorkVote.type === 'vote') {
         const initiatorSessionId = this.restoredSessionId(events, approvedWorkVote.vote.initiator)
         const participants = this.participants(record)
@@ -2206,8 +2256,9 @@ export class FleetRunService {
         mkdirSync(stagedShared, { recursive: true })
       }
       cpSync(record.configPath, join(fleetDirectory, 'team.json'))
-      if (record.work !== undefined && existsSync(record.work.taskPath)) {
-        cpSync(record.work.taskPath, join(fleetDirectory, 'current-work.md'))
+      const currentWorkPath = record.work?.acceptedTaskPath ?? record.work?.taskPath
+      if (currentWorkPath !== undefined && existsSync(currentWorkPath)) {
+        cpSync(currentWorkPath, join(fleetDirectory, 'current-work.md'))
       }
 
       const sessionsDirectory = join(staging, 'sessions')
@@ -2414,7 +2465,7 @@ export class FleetRunService {
         })),
         status: 'paused',
         ...(archivedRecord.work === undefined ? {} : {
-          work: { ...archivedRecord.work, taskPath: finalTaskPath },
+          work: { ...archivedRecord.work, taskPath: finalTaskPath, acceptedTaskPath: finalTaskPath },
         }),
       }
       const eventsPath = join(preparedRunDirectory, 'events.jsonl')
@@ -2568,7 +2619,7 @@ export class FleetRunService {
         cwd: record.projectRoot,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'create'),
       })
       created = true
       runtime.attachMember(agent.id, view)
@@ -2583,7 +2634,7 @@ export class FleetRunService {
       record = this.replaceRecord(record.id, { members: [...record.members, member] })
       this.appendEvent(record.id, 'member_attached', member)
       if (record.status === 'running' && record.work?.status === 'running') {
-        const work = readFileSync(record.work.taskPath, 'utf8').trim()
+        const work = this.readWorkTask(record)
         runtime.messages.sendSystemNotification(agent.id, {
           kind: 'member_joined',
           text: `[Fleet member joined active work ${record.work.id}.]\n\n${work}`,
@@ -2657,7 +2708,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
       })
       if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
       else runtime.rebindMember(member.sessionId, resumed.id, view)
@@ -2686,7 +2737,7 @@ export class FleetRunService {
           role: currentView.role,
           persona: persona({ ...template, members: this.effectiveMemberViews(record) }, currentView),
           ...this.memberRuntimeOptions(record, currentView),
-          setup: childCtx => installMemberTools(childCtx, runtime, currentView.id),
+          setup: childCtx => installMemberTools(childCtx, runtime, currentView.id, false, 'resume'),
         })
         if (restored.id === member.sessionId) runtime.attachMember(restored.id, currentView)
         else runtime.rebindMember(member.sessionId, restored.id, currentView)
@@ -2970,7 +3021,7 @@ export class FleetRunService {
       role: view.role,
       persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
       ...this.memberRuntimeOptions(record, view),
-      setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+      setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
     })
     if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
     else runtime.rebindMember(member.sessionId, resumed.id, view)
@@ -3139,17 +3190,6 @@ export class FleetRunService {
     }
     const recipients = record.members.filter(member => this.memberCanReply(member)).map(member => member.name)
     if (recipients.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
-    const message: FleetAssistantMessage = {
-      id: `assistant_message_${randomUUID()}`,
-      runId: record.id,
-      kind: input.kind,
-      text: content,
-      recipients,
-      assistantSessionId: String(caller.id),
-      assistantId: assistant.view.id,
-      assistantName: assistant.view.name,
-      createdAt: new Date().toISOString(),
-    }
     const channel = parseTeamTemplate(
       JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
       this.configuration,
@@ -3167,12 +3207,24 @@ export class FleetRunService {
       action: 'message.wakeup',
       resource: { kind: 'conversation', id: `#${channel.id}` },
     })
-    this.requireRuntime(record.id).messages.send(caller, {
+    const messages = this.requireRuntime(record.id).messages
+    const sent = messages.send(caller, {
       to: `#${channel.id}`,
       text: content,
       delivery: input.kind === 'directive' ? 'wakeup' : 'quiet',
       ...(input.kind === 'directive' ? { mentions: recipients.map(member => `@${member}`) } : {}),
     })
+    const message: FleetAssistantMessage = {
+      id: `assistant_message_${randomUUID()}`,
+      runId: record.id,
+      kind: input.kind,
+      text: messages.getMessage(caller, sent.messageId).text,
+      recipients,
+      assistantSessionId: String(caller.id),
+      assistantId: assistant.view.id,
+      assistantName: assistant.view.name,
+      createdAt: new Date().toISOString(),
+    }
     this.appendEvent(record.id, 'assistant_message', message)
     return structuredClone(message)
   }
@@ -4934,6 +4986,9 @@ export class FleetRunService {
       ...(options.member === undefined ? {} : { member: options.member }),
     }
     appendFileSync(join(this.runDirectory(record), 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
+    if (!event.type.startsWith('session.')) {
+      this.collaboration.get(runId)?.events.emit('fleet/team/event', { event: structuredClone(event) })
+    }
     if (event.type === 'member_view_added' || event.type === 'member_view_updated' || event.type === 'member_view_removed') {
       this.memberViewSnapshots.delete(runId)
     }
@@ -4957,6 +5012,11 @@ export class FleetRunService {
       this.teamProjectionEvents.delete(oldest)
       this.memberViewSnapshots.delete(oldest)
     }
+  }
+
+  private readWorkTask(record: FleetRunRecord): string {
+    if (record.work === undefined) throw new Error(`Fleet team ${record.id} has no work description`)
+    return readFileSync(record.work.acceptedTaskPath ?? record.work.taskPath, 'utf8').trim()
   }
 
   private lastStoredSequence(record: FleetRunRecord): number {
@@ -5102,6 +5162,11 @@ export class FleetRunService {
                 taskPath: pathInside(legacyDirectory, legacyRecord.work.taskPath)
                   ? resolve(directory, relative(legacyDirectory, legacyRecord.work.taskPath))
                   : legacyRecord.work.taskPath,
+                ...(legacyRecord.work.acceptedTaskPath === undefined ? {} : {
+                  acceptedTaskPath: pathInside(legacyDirectory, legacyRecord.work.acceptedTaskPath)
+                    ? resolve(directory, relative(legacyDirectory, legacyRecord.work.acceptedTaskPath))
+                    : legacyRecord.work.acceptedTaskPath,
+                }),
               },
             }),
           }
@@ -5306,6 +5371,7 @@ const RUN_WORK_SCHEMA = {
   properties: {
     id: { type: 'string', required: true },
     taskPath: { type: 'string', required: true },
+    acceptedTaskPath: { type: 'string' },
     status: { type: 'string', required: true, enum: ['running', 'finished', 'blocked', 'failed', 'cancelled'] },
     startedAt: { type: 'string', required: true },
     endedAt: { type: 'string' },
