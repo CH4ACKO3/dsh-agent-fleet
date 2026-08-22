@@ -186,12 +186,12 @@ function denyBlocks(denied: FleetAccessLevel, requested: FleetAccessLevel): bool
 
 function builtInLevel(action: string): FleetAccessLevel | undefined {
   if (action === 'message.read' || action === 'resource.read' || action === 'work.read'
-    || action === 'member-status.read' || action === 'access.inspect') return 'read'
+    || action === 'member-status.read' || action === 'access.inspect' || action === 'workspace.read') return 'read'
   if (action === 'message.post' || action === 'resource.write' || action === 'work.claim'
     || action === 'member-status.write') return 'write'
   if (action === 'meeting.join') return 'use'
   if (action === 'team.manage' || action === 'channel.manage' || action === 'meeting.manage'
-    || action === 'vote.create' || action === 'access.manage') return 'manage'
+    || action === 'vote.create' || action === 'access.manage' || action === 'workspace.manage') return 'manage'
   return undefined
 }
 

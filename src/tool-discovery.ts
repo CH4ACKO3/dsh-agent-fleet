@@ -25,6 +25,7 @@ const FLEET_TOOL_CATALOG: readonly FleetToolCatalogEntry[] = [
   { name: 'fleet_shared', group: 'resources', description: 'List, read, and update files in the Team resource directory.', keywords: 'team resource shared file 团队 资源 共享 文件', actions: ['list', 'read', 'write'], privilegedActions: { write: 'resource.write' } },
   { name: 'fleet_work', group: 'resources', description: 'Claim or release workspace paths before editing.', keywords: 'work claim release conflict path workspace 占用 释放 冲突 路径 工作区', actions: ['list', 'claim', 'release'], privilegedActions: { claim: 'resource.write', release: 'resource.write' } },
   { name: 'fleet_resource', group: 'resources', description: 'Add, list, or inspect file and binary resource references.', keywords: 'resource file binary artifact attachment 资源 文件 二进制 产物 附件', actions: ['list', 'get', 'add'], privilegedActions: { add: 'resource.write' } },
+  { name: 'fleet_workspace', group: 'resources', description: 'Inspect or manage Team workspace mounts.', keywords: 'workspace mount allocation access 工作区 挂载 分配 访问', actions: ['list', 'attach', 'detach', 'assign'], privilegedActions: { attach: 'workspace.manage', detach: 'workspace.manage', assign: 'workspace.manage' }, constraints: ['native DSH Session cwd and sandbox remain authoritative'] },
 ] as const
 
 const TOOL_DISCOVERY_RESULT_SCHEMA = {

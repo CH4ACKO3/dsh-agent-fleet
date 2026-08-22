@@ -21,7 +21,7 @@ export type FleetAssistantView = FleetMemberView
 const FLEET_MEMBER_TOOL_NAMES = {
   messages: ['fleet_send', 'fleet_followup', 'fleet_messages', 'fleet_wait'],
   coordination: ['fleet_channel', 'fleet_vote', 'fleet_meeting'],
-  resources: ['fleet_shared', 'fleet_work', 'fleet_resource'],
+  resources: ['fleet_shared', 'fleet_work', 'fleet_resource', 'fleet_workspace'],
   status: ['fleet_member_status'],
 } as const
 
