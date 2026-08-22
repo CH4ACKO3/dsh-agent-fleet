@@ -39,6 +39,7 @@ function baseline(resource = true): FleetAuthorizationBaseline {
 }
 
 const subject = { kind: 'member' as const, id: 'alice' }
+const privateGroup = { kind: 'group' as const, id: fleetPrivateGroupId('alice') }
 
 describe('FleetAccessService', () => {
   it('inherits feature defaults until a resource kind is restricted', () => {
@@ -49,17 +50,17 @@ describe('FleetAccessService', () => {
     }
 
     expect(access.authorize(input, true)).toBe(true)
-    access.setMode('team-1', subject, 'file', 'restricted')
+    access.setMode('team-1', privateGroup, 'file', 'restricted')
     expect(access.authorize(input, true)).toBe(false)
-    access.setMode('team-1', subject, 'file', 'inherit')
+    access.setMode('team-1', privateGroup, 'file', 'inherit')
     expect(access.authorize(input, true)).toBe(true)
   })
 
   it('applies tree grants and lets a more specific deny win', () => {
     const { access } = fixture()
-    access.setMode('team-1', subject, 'file', 'restricted')
+    access.setMode('team-1', privateGroup, 'file', 'restricted')
     access.putRule('team-1', {
-      id: 'source-tree', subject, resource: { kind: 'file', id: '/project/one/src' },
+      id: 'source-tree', principal: privateGroup, resource: { kind: 'file', id: '/project/one/src' },
       scope: 'tree', effect: 'allow', levels: ['write'],
     })
 
@@ -75,7 +76,7 @@ describe('FleetAccessService', () => {
     }, false)).toBe(false)
 
     access.putRule('team-1', {
-      id: 'generated-deny', subject, resource: { kind: 'file', id: '/project/one/src/generated' },
+      id: 'generated-deny', principal: privateGroup, resource: { kind: 'file', id: '/project/one/src/generated' },
       scope: 'tree', effect: 'deny', levels: ['read'],
     })
     expect(access.authorize({
@@ -90,9 +91,9 @@ describe('FleetAccessService', () => {
       levelFor: action => action === 'secret.use' ? 'use' : action === 'secret.read' ? 'read' : undefined,
       normalize: (_teamId, id) => id,
     })
-    access.setMode('team-1', subject, 'secret', 'restricted')
+    access.setMode('team-1', privateGroup, 'secret', 'restricted')
     access.putRule('team-1', {
-      id: 'use-build-key', subject, resource: { kind: 'secret', id: 'build-key' },
+      id: 'use-build-key', principal: privateGroup, resource: { kind: 'secret', id: 'build-key' },
       effect: 'allow', levels: ['use'],
     })
 
@@ -113,7 +114,7 @@ describe('FleetAccessService', () => {
       scope: 'tree', effect: 'allow', levels: ['write'],
     })
     access.putRule('team-1', {
-      id: 'personal-generated-deny', subject,
+      id: 'personal-generated-deny', principal: privateGroup,
       resource: { kind: 'file', id: '/project/one/src/generated' },
       scope: 'tree', effect: 'deny', levels: ['read'],
     })
@@ -158,13 +159,13 @@ describe('FleetAccessService', () => {
 
   it('persists keycards and keeps project paths portable across an imported Team', () => {
     const first = fixture({ 'team-1': '/project/old', 'team-2': '/project/new' })
-    first.access.setMode('team-1', subject, 'file', 'restricted')
+    first.access.setMode('team-1', privateGroup, 'file', 'restricted')
     first.access.putRule('team-1', {
-      id: 'portable-source', subject, resource: { kind: 'file', id: '/project/old/src' },
+      id: 'portable-source', principal: privateGroup, resource: { kind: 'file', id: '/project/old/src' },
       scope: 'tree', effect: 'allow', levels: ['read'],
     })
     first.access.putRule('team-1', {
-      id: 'portable-shared', subject,
+      id: 'portable-shared', principal: privateGroup,
       resource: { kind: 'file', id: '/project/old/.fleet/team-1/notes' },
       scope: 'tree', effect: 'allow', levels: ['write'],
     })
@@ -205,7 +206,7 @@ describe('FleetAccessService', () => {
     })).toBe(false)
     authorization.registerResourceKind({ kind: 'dataset', authorizeBaseline: () => true })
     access.putRule('team-1', {
-      id: 'deny-private', subject, resource: { kind: 'dataset', id: 'private' },
+      id: 'deny-private', principal: privateGroup, resource: { kind: 'dataset', id: 'private' },
       effect: 'deny', levels: ['use'],
     })
     expect(authorization.authorize({
@@ -221,25 +222,6 @@ describe('FleetAccessService', () => {
     const { runs, stored } = fixture()
     stored.set('team-1:access', { version: 1, modes: [], rules: [{ id: 'broken' }] })
     expect(() => new FleetAccessService(runs, new FleetGroupService(runs)).state('team-1')).toThrow(/resource/)
-  })
-
-  it('maps legacy subject keycards onto the subject private group', () => {
-    const { access, stored } = fixture()
-    stored.set('team-1:access', {
-      version: 1,
-      modes: [{ subject, resourceKind: 'file', mode: 'restricted' }],
-      rules: [{
-        id: 'legacy-read', subject,
-        resource: { kind: 'file', id: 'workspace:src' },
-        scope: 'tree', effect: 'allow', levels: ['read'],
-      }],
-    })
-
-    expect(access.state('team-1')).toMatchObject({
-      version: 2,
-      modes: [{ principal: { kind: 'group', id: fleetPrivateGroupId('alice') } }],
-      rules: [{ principal: { kind: 'group', id: fleetPrivateGroupId('alice') } }],
-    })
   })
 
   it('registers the optional Access policy and action namespace with Fleet', async () => {

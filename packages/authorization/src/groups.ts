@@ -3,8 +3,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type { FleetRunService } from 'dsh-agent-fleet'
 
 export const FLEET_GROUPS_STATE_NAMESPACE = 'groups'
-export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/permissions'
-export const FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-permissions'
+export const FLEET_GROUPS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/groups'
 
 export interface FleetAuthorizationGroup {
   readonly id: string
@@ -77,24 +76,8 @@ function parseState(value: JsonValue | undefined): FleetGroupState {
   return { version: 1, groups, members }
 }
 
-function legacyState(value: JsonValue | undefined): FleetGroupState | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const input = value as Record<string, JsonValue>
-  const groups = Array.isArray(input.groups) ? input.groups.flatMap(entry => {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return []
-    const group = entry as Record<string, JsonValue>
-    if (typeof group.id !== 'string' || !ID.test(group.id) || typeof group.name !== 'string') return []
-    return [{ id: group.id, name: group.name, parents: unique(strings(group.parents)) }]
-  }) : []
-  const members = typeof input.members === 'object' && input.members !== null && !Array.isArray(input.members)
-    ? Object.fromEntries(Object.entries(input.members as Record<string, JsonValue>).flatMap(([member, entry]) => {
-        if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return []
-        return [[member, unique(strings((entry as Record<string, JsonValue>).groups))]]
-      }))
-    : {}
-  return groups.length === 0 && Object.values(members).every(groupIds => groupIds.length === 0)
-    ? undefined
-    : { version: 1, groups, members }
+export function parseFleetGroupConfiguration(value: unknown): FleetGroupState {
+  return parseState(value as JsonValue)
 }
 
 export class FleetGroupService {
@@ -107,12 +90,9 @@ export class FleetGroupService {
     let state = this.states.get(teamId)
     if (state === undefined) {
       const persisted = this.runs.readExtensionState(teamId, FLEET_GROUPS_STATE_NAMESPACE)
-      state = persisted === undefined ? this.migrate(teamId) : parseState(persisted)
+      state = persisted === undefined ? this.configurationState(teamId) : parseState(persisted)
       this.validate(state)
       this.states.set(teamId, state)
-      if (persisted === undefined && (state.groups.length > 0 || Object.keys(state.members).length > 0)) {
-        this.runs.writeExtensionState(teamId, FLEET_GROUPS_STATE_NAMESPACE, state as unknown as JsonValue)
-      }
     }
     return structuredClone(state)
   }
@@ -198,16 +178,12 @@ export class FleetGroupService {
     return () => { this.listeners.delete(listener) }
   }
 
-  private migrate(teamId: string): FleetGroupState {
-    const persisted = legacyState(this.runs.readExtensionState(teamId, 'permissions'))
-    if (persisted !== undefined) return persisted
+  private configurationState(teamId: string): FleetGroupState {
     const configuration = this.runs.exportConfiguration(teamId)
     const modules = configuration.modules
     if (typeof modules !== 'object' || modules === null || Array.isArray(modules)) return structuredClone(EMPTY_STATE)
-    const values = modules as Record<string, unknown>
-    return legacyState((values[FLEET_PERMISSIONS_CONFIGURATION_MODULE]
-      ?? values[FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE]) as JsonValue | undefined)
-      ?? structuredClone(EMPTY_STATE)
+    const configured = (modules as Record<string, unknown>)[FLEET_GROUPS_CONFIGURATION_MODULE]
+    return configured === undefined ? structuredClone(EMPTY_STATE) : parseFleetGroupConfiguration(configured)
   }
 
   private validate(state: FleetGroupState): void {
@@ -240,8 +216,12 @@ export class FleetGroupService {
 }
 
 export function applyGroups(ctx: Context): void {
-  ctx.inject(['fleetRuns'], scope => {
+  ctx.inject(['fleetRuns', 'fleetConfiguration'], scope => {
     scope.provide('fleetGroups', new FleetGroupService(scope.fleetRuns))
+    return scope.fleetConfiguration.register({
+      id: FLEET_GROUPS_CONFIGURATION_MODULE,
+      parse: parseFleetGroupConfiguration,
+    })
   })
 }
 

@@ -10,4 +10,4 @@ The package contains three deliberately separate modules behind one installation
 
 All modules feed Fleet Core's single `fleetAuthorization.authorize(...)` decision path. Rules from a member's private and supplementary groups are combined, with explicit deny taking precedence. An Access grant cannot restore an action denied by Permissions, and OP grants actions without bypassing resource access, the DSH sandbox, or an external platform's ACL.
 
-Existing `permissions` and `access` data is migrated into `groups`, `permissions`, and `access` state on first use, and the legacy permissions configuration module id remains accepted. Feature plugins register their own action namespaces and resource adapters; Git repositories, external chats, datasets, and secrets are not hard-coded here.
+Groups, permission assignments, and access keycards are stored independently in their current versioned formats. Feature plugins register their own action namespaces and resource adapters; Git repositories, external chats, datasets, and secrets are not hard-coded here.

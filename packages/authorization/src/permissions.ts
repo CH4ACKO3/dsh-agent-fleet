@@ -14,14 +14,12 @@ import {
   type FleetRunService,
 } from 'dsh-agent-fleet'
 import {
-  FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE,
-  FLEET_PERMISSIONS_CONFIGURATION_MODULE,
   fleetPrivateGroupId,
   type FleetAuthorizationGroup,
   type FleetGroupService,
 } from './groups.js'
 
-export { FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE, FLEET_PERMISSIONS_CONFIGURATION_MODULE } from './groups.js'
+export const FLEET_PERMISSIONS_CONFIGURATION_MODULE = '@ch4acko3/dsh-agent-fleet-authorization/permissions'
 
 export interface FleetPermissionAssignment {
   readonly grants: readonly string[]
@@ -44,11 +42,11 @@ export interface FleetMemberAccess extends FleetPermissionAssignment {
 }
 
 export interface FleetPermissionState {
-  readonly version: 3
+  readonly version: 1
   readonly groups: Readonly<Record<string, FleetPermissionAssignment>>
 }
 
-const EMPTY_STATE: FleetPermissionState = { version: 3, groups: {} }
+const EMPTY_STATE: FleetPermissionState = { version: 1, groups: {} }
 
 export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
   {
@@ -141,8 +139,7 @@ function assignment(value: JsonValue): FleetPermissionAssignment {
     ? (input[key] as JsonValue[]).filter((entry): entry is string => typeof entry === 'string')
     : []
   return {
-    grants: strings('grants').length > 0 ? strings('grants')
-      : strings('actions').length > 0 ? strings('actions') : strings('permissions'),
+    grants: strings('grants'),
     denies: strings('denies'),
     toolGroups: strings('toolGroups'),
     denyToolGroups: strings('denyToolGroups'),
@@ -156,35 +153,19 @@ function assignments(value: JsonValue | undefined): Record<string, FleetPermissi
 }
 
 function parseState(value: JsonValue | undefined): FleetPermissionState {
-  if (value === undefined || value === null || typeof value !== 'object' || Array.isArray(value)) return cloneState(EMPTY_STATE)
-  const input = value as Record<string, JsonValue>
-  if (input.version === 3) return { version: 3, groups: assignments(input.groups) }
-  const groups: Record<string, FleetPermissionAssignment> = input.version === 2
-    ? assignments(input.groups)
-    : Array.isArray(input.groups)
-    ? Object.fromEntries(input.groups.flatMap(entry => {
-        if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return []
-        const group = entry as Record<string, JsonValue>
-        return typeof group.id === 'string' ? [[group.id, assignment(group)]] : []
-      }))
-    : {}
-  for (const [member, access] of Object.entries(assignments(input.members))) {
-    groups[fleetPrivateGroupId(member)] = access
+  if (value === undefined) return cloneState(EMPTY_STATE)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Fleet Permission state must be an object')
   }
-  return { version: 3, groups }
+  const input = value as Record<string, JsonValue>
+  if (input.version !== 1 || typeof input.groups !== 'object'
+    || input.groups === null || Array.isArray(input.groups)) {
+    throw new Error('Fleet Permission state must contain version 1 groups')
+  }
+  return { version: 1, groups: assignments(input.groups) }
 }
 
 export function parseFleetPermissionConfiguration(value: unknown): FleetPermissionState {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`${FLEET_PERMISSIONS_CONFIGURATION_MODULE} must be an object`)
-  }
-  const input = value as Record<string, unknown>
-  if (input.version !== undefined && input.version !== 1 && input.version !== 2 && input.version !== 3) {
-    throw new Error(`${FLEET_PERMISSIONS_CONFIGURATION_MODULE}.version must be from 1 through 3`)
-  }
-  if (input.version !== 3 && (typeof input.members !== 'object' || input.members === null || Array.isArray(input.members))) {
-    throw new Error(`${FLEET_PERMISSIONS_CONFIGURATION_MODULE}.members must be an object`)
-  }
   return parseState(value as JsonValue)
 }
 
@@ -383,8 +364,7 @@ export class FleetPermissionService implements FleetActionPolicy {
     const modules = configuration.modules
     if (typeof modules !== 'object' || modules === null || Array.isArray(modules)) return undefined
     const configured = modules as Record<string, unknown>
-    return (configured[FLEET_PERMISSIONS_CONFIGURATION_MODULE]
-      ?? configured[FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE]) as JsonValue | undefined
+    return configured[FLEET_PERMISSIONS_CONFIGURATION_MODULE] as JsonValue | undefined
   }
 
   private save(teamId: string, state: FleetPermissionState): void {
@@ -498,10 +478,6 @@ export function applyPermissions(ctx: Context): void {
       id: FLEET_PERMISSIONS_CONFIGURATION_MODULE,
       parse: parseFleetPermissionConfiguration,
     })
-    const stopLegacyConfiguration = scope.fleetConfiguration.register({
-      id: FLEET_LEGACY_PERMISSIONS_CONFIGURATION_MODULE,
-      parse: parseFleetPermissionConfiguration,
-    })
     const stopPolicy = scope.fleetAuthorization.installActionPolicy(service)
     const stopNamespace = scope.fleetAuthorization.registerNamespace({
       namespace: 'permissions',
@@ -515,7 +491,6 @@ export function applyPermissions(ctx: Context): void {
       stopNamespace()
       stopPolicy()
       stopGroups()
-      stopLegacyConfiguration()
       stopConfiguration()
     }
   })

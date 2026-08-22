@@ -7,12 +7,15 @@ import {
   type FleetRunService,
 } from 'dsh-agent-fleet'
 import {
-  FLEET_PERMISSIONS_CONFIGURATION_MODULE,
   FLEET_PERMISSION_PRESETS,
   FleetPermissionService,
   parseFleetPermissionConfiguration,
 } from '../src/permissions.js'
-import { FleetGroupService, fleetPrivateGroupId } from '../src/groups.js'
+import {
+  FLEET_GROUPS_CONFIGURATION_MODULE,
+  FleetGroupService,
+  fleetPrivateGroupId,
+} from '../src/groups.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -69,9 +72,9 @@ describe('FleetPermissionService', () => {
   })
 
   it('rejects malformed Team permission modules instead of silently widening access', () => {
-    expect(() => parseFleetPermissionConfiguration({})).toThrow(/members must be an object/)
-    expect(() => parseFleetPermissionConfiguration({ version: 4, members: {} })).toThrow(/version must be/)
-    expect(parseFleetPermissionConfiguration({ members: {} })).toEqual({ version: 3, groups: {} })
+    expect(() => parseFleetPermissionConfiguration({})).toThrow(/version 1 groups/)
+    expect(() => parseFleetPermissionConfiguration({ version: 2, groups: {} })).toThrow(/version 1 groups/)
+    expect(parseFleetPermissionConfiguration({ version: 1, groups: {} })).toEqual({ version: 1, groups: {} })
   })
 
   it('adapts a native fixed profile without changing its effective access', () => {
@@ -93,11 +96,11 @@ describe('FleetPermissionService', () => {
     })
   })
 
-  it('loads an initial assignment from the Authorization configuration module', () => {
+  it('loads initial supplementary membership from the Groups configuration module', () => {
     const { authorization } = fixture({
       modules: {
-        [FLEET_PERMISSIONS_CONFIGURATION_MODULE]: {
-          members: { alice: { groups: ['observer'] } },
+        [FLEET_GROUPS_CONFIGURATION_MODULE]: {
+          version: 1, groups: [], members: { alice: ['observer'] },
         },
       },
     })
@@ -106,17 +109,6 @@ describe('FleetPermissionService', () => {
       actions: expect.arrayContaining(['message.read', 'message.post', 'member-status.read', 'member-status.write', 'resource.read']),
       op: false,
     })
-  })
-
-  it('continues to load the legacy Permissions configuration module', () => {
-    const { authorization } = fixture({
-      modules: {
-        '@ch4acko3/dsh-agent-fleet-permissions': {
-          members: { alice: { groups: ['observer'] } },
-        },
-      },
-    })
-    expect(authorization.resolve('team-1', alice).toolGroups).toEqual(['messages', 'status', 'resources'])
   })
 
   it('uses preset inheritance as a complete dynamic profile', () => {
@@ -224,31 +216,6 @@ describe('FleetPermissionService', () => {
     expect(second.authorization.resolve('team-1', alice).actions).toContain('vote.create')
   })
 
-  it('migrates legacy member and group assignments into private and supplementary groups', () => {
-    const storage: PermissionStorage = { values: new Map([['team-1:permissions', {
-      groups: [{
-        id: 'legacy-builders', name: 'Legacy builders', parents: ['member'],
-        toolGroups: [], actions: ['team.manage'],
-      }],
-      members: {
-        alice: {
-          groups: ['legacy-builders'], grants: ['vote.create'], denies: [],
-          toolGroups: [], denyToolGroups: [],
-        },
-      },
-    }]]) }
-    const { authorization, groups, permissions } = fixture({}, [alice], storage)
-
-    expect(groups.membership('team-1', 'alice')).toEqual(['legacy-builders'])
-    expect(permissions.state('team-1').groups[fleetPrivateGroupId('alice')]).toMatchObject({
-      grants: ['vote.create'],
-    })
-    expect(authorization.resolve('team-1', alice).actions).toEqual(expect.arrayContaining([
-      'team.manage', 'vote.create',
-    ]))
-    expect(storage.values?.has('team-1:groups')).toBe(true)
-  })
-
   it('allows registered plugin actions and rejects them after the plugin unregisters', () => {
     const { authorization, permissions } = fixture()
     authorization.installBaseline({
@@ -297,15 +264,6 @@ describe('FleetPermissionService', () => {
     expect(authorization.authorize({
       ...request, resource: { kind: 'file', id: '/workspace/restricted.md' },
     })).toBe(false)
-  })
-
-  it('reads legacy custom group action fields without writing a second access model', () => {
-    expect(parseFleetPermissionConfiguration({
-      members: {},
-      groups: [{
-        id: 'legacy', name: 'Legacy', parents: [], toolGroups: [], permissions: ['team.manage'],
-      }],
-    }).groups.legacy).toMatchObject({ grants: ['team.manage'] })
   })
 
   it('rejects cyclic custom group inheritance', () => {

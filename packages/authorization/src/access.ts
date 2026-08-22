@@ -8,7 +8,6 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type {
   FleetAuthorizationInput,
   FleetAuthorizationService,
-  FleetAuthorizationSubject,
   FleetMemberView,
   FleetResourcePolicy,
   FleetRunService,
@@ -46,28 +45,23 @@ export interface FleetAccessRule {
 }
 
 export interface FleetAccessState {
-  readonly version: 2
+  readonly version: 1
   readonly modes: readonly FleetAccessMode[]
   readonly rules: readonly FleetAccessRule[]
 }
 
-interface PutFleetAccessRuleBase {
+export interface PutFleetAccessRule {
   readonly id?: string
+  readonly principal: FleetAccessPrincipal
   readonly resource: { readonly kind: string; readonly id: string }
   readonly scope?: FleetAccessScope
   readonly effect: FleetAccessEffect
   readonly levels: readonly FleetAccessLevel[]
 }
 
-export type PutFleetAccessRule = PutFleetAccessRuleBase & (
-  { readonly principal: FleetAccessPrincipal; readonly subject?: never }
-  | { readonly subject: FleetAuthorizationSubject; readonly principal?: never }
-)
-
-const EMPTY_STATE: FleetAccessState = { version: 2, modes: [], rules: [] }
+const EMPTY_STATE: FleetAccessState = { version: 1, modes: [], rules: [] }
 const KIND = /^[a-z][a-z0-9-]*$/u
 const RULE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u
-const SUBJECT_KINDS = new Set(['member', 'assistant', 'external', 'system'])
 const LEVELS = new Set<string>(FLEET_ACCESS_LEVELS)
 
 function cloneState(state: FleetAccessState): FleetAccessState {
@@ -89,12 +83,7 @@ function principal(value: unknown, label: string): FleetAccessPrincipal {
   const kind = text(input.kind, `${label}.kind`)
   const id = text(input.id, `${label}.id`)
   if (kind === 'group') return { kind, id }
-  if (!SUBJECT_KINDS.has(kind)) throw new Error(`${label}.kind is unknown`)
-  return { kind: 'group', id: fleetPrivateGroupId(id) }
-}
-
-function asPrincipal(value: FleetAccessPrincipal | FleetAuthorizationSubject): FleetAccessPrincipal {
-  return value.kind === 'group' ? value : { kind: 'group', id: fleetPrivateGroupId(value.id) }
+  throw new Error(`${label}.kind must be group`)
 }
 
 function levels(value: unknown, label: string): FleetAccessLevel[] {
@@ -107,7 +96,7 @@ function levels(value: unknown, label: string): FleetAccessLevel[] {
 function parseState(value: JsonValue | undefined): FleetAccessState {
   if (value === undefined) return cloneState(EMPTY_STATE)
   const input = object(value, 'Fleet Access state')
-  if (input.version !== 1 && input.version !== 2) throw new Error('Fleet Access state version must be 1 or 2')
+  if (input.version !== 1) throw new Error('Fleet Access state version must be 1')
   if (!Array.isArray(input.modes) || !Array.isArray(input.rules)) {
     throw new Error('Fleet Access state modes and rules must be arrays')
   }
@@ -117,7 +106,7 @@ function parseState(value: JsonValue | undefined): FleetAccessState {
     if (!KIND.test(resourceKind)) throw new Error(`invalid Fleet Access resource kind ${resourceKind}`)
     if (item.mode !== 'restricted') throw new Error('persisted Fleet Access mode must be restricted')
     return {
-      principal: principal(item.principal ?? item.subject, `Fleet Access mode[${String(index)}].principal`),
+      principal: principal(item.principal, `Fleet Access mode[${String(index)}].principal`),
       resourceKind,
       mode: 'restricted',
     }
@@ -135,7 +124,7 @@ function parseState(value: JsonValue | undefined): FleetAccessState {
     if (!RULE_ID.test(id)) throw new Error(`invalid Fleet Access rule id ${id}`)
     return {
       id,
-      principal: principal(item.principal ?? item.subject, `Fleet Access rule[${String(index)}].principal`),
+      principal: principal(item.principal, `Fleet Access rule[${String(index)}].principal`),
       resource: { kind, id: text(resource.id, `Fleet Access rule[${String(index)}].resource.id`) },
       scope: item.scope,
       effect: item.effect,
@@ -143,7 +132,7 @@ function parseState(value: JsonValue | undefined): FleetAccessState {
     }
   })
   if (new Set(rules.map(rule => rule.id)).size !== rules.length) throw new Error('Fleet Access state contains duplicate rule ids')
-  return { version: 2, modes, rules }
+  return { version: 1, modes, rules }
 }
 
 function asJson(state: FleetAccessState): JsonValue {
@@ -254,10 +243,9 @@ export class FleetAccessService implements FleetResourcePolicy {
 
   mode(
     teamId: string,
-    value: FleetAccessPrincipal | FleetAuthorizationSubject,
+    principalValue: FleetAccessPrincipal,
     resourceKind: string,
   ): 'inherit' | 'restricted' {
-    const principalValue = asPrincipal(value)
     return this.state(teamId).modes.some(mode =>
       samePrincipal(mode.principal, principalValue) && mode.resourceKind === resourceKind)
       ? 'restricted'
@@ -266,12 +254,11 @@ export class FleetAccessService implements FleetResourcePolicy {
 
   setMode(
     teamId: string,
-    value: FleetAccessPrincipal | FleetAuthorizationSubject,
+    principalValue: FleetAccessPrincipal,
     resourceKind: string,
     mode: 'inherit' | 'restricted',
   ): void {
     this.requireAdapter(resourceKind)
-    const principalValue = asPrincipal(value)
     this.requirePrincipal(teamId, principalValue)
     const state = this.state(teamId)
     const modes = state.modes.filter(candidate =>
@@ -280,8 +267,7 @@ export class FleetAccessService implements FleetResourcePolicy {
     this.save(teamId, { ...state, modes })
   }
 
-  rules(teamId: string, value?: FleetAccessPrincipal | FleetAuthorizationSubject): FleetAccessRule[] {
-    const principalValue = value === undefined ? undefined : asPrincipal(value)
+  rules(teamId: string, principalValue?: FleetAccessPrincipal): FleetAccessRule[] {
     return this.state(teamId).rules
       .filter(rule => principalValue === undefined || samePrincipal(rule.principal, principalValue))
       .map(rule => structuredClone(rule))
@@ -294,9 +280,7 @@ export class FleetAccessService implements FleetResourcePolicy {
     }
     const id = input.id?.trim() || randomUUID()
     if (!RULE_ID.test(id)) throw new Error('Fleet Access rule id contains unsupported characters')
-    const principalValue = asPrincipal(
-      'principal' in input && input.principal !== undefined ? input.principal : input.subject,
-    )
+    const principalValue = input.principal
     this.requirePrincipal(teamId, principalValue)
     const rule: FleetAccessRule = {
       id,
@@ -411,9 +395,7 @@ function installAccessTool(
       action: { type: 'string', required: true, enum: manage
         ? ['get', 'explain', 'set_mode', 'grant', 'deny', 'remove_rule'] as const
         : ['get', 'explain'] as const },
-      subject_kind: { type: 'string', enum: ['member', 'assistant', 'external', 'system'] },
-      subject_id: { type: 'string' },
-      group_id: { type: 'string', description: 'Target an authorization group instead of one subject.' },
+      group_id: { type: 'string', description: 'Authorization group; defaults to the caller private group.' },
       action_id: { type: 'string', description: 'Registered Fleet action for explain.' },
       resource_kind: { type: 'string' },
       resource_id: { type: 'string' },
@@ -430,15 +412,9 @@ function installAccessTool(
       if (actor === undefined || actor.teamId !== teamId || actor.subject.id !== installedMember.id) {
         throw new Error('fleet_access caller is not the installed Fleet participant')
       }
-      const targetSubject: FleetAuthorizationSubject | undefined = args.group_id !== undefined
-        ? undefined
-        : args.subject_id === undefined ? actor.subject : {
-            kind: (args.subject_kind ?? actor.subject.kind) as FleetAuthorizationSubject['kind'],
-            id: args.subject_id,
-          }
       const target: FleetAccessPrincipal = args.group_id !== undefined
         ? { kind: 'group', id: args.group_id }
-        : asPrincipal(targetSubject as FleetAuthorizationSubject)
+        : { kind: 'group', id: fleetPrivateGroupId(actor.subject.id) }
       const requireInspect = (): void => authorization.require({
         teamId,
         subject: actor.subject,
@@ -448,7 +424,7 @@ function installAccessTool(
         const action = authorization.has(teamId, installedMember, 'access.manage') ? 'access.manage' : 'team.manage'
         authorization.require({ teamId, subject: actor.subject, action })
       }
-      if (!samePrincipal(target, asPrincipal(actor.subject))) requireManage()
+      if (target.id !== fleetPrivateGroupId(actor.subject.id)) requireManage()
       let result: unknown
       if (args.action === 'get') {
         requireInspect()
@@ -463,13 +439,13 @@ function installAccessTool(
         if (args.action_id === undefined || args.resource_kind === undefined || args.resource_id === undefined) {
           throw new Error('fleet_access explain requires action_id, resource_kind, and resource_id')
         }
-        if (targetSubject === undefined) throw new Error('fleet_access explain requires a concrete subject')
+        if (args.group_id !== undefined) throw new Error('fleet_access explain checks the calling member only')
         result = {
-          subject: targetSubject,
+          subject: actor.subject,
           action: args.action_id,
           resource: { kind: args.resource_kind, id: args.resource_id },
           allowed: authorization.authorize({
-            teamId, subject: targetSubject, action: args.action_id,
+            teamId, subject: actor.subject, action: args.action_id,
             resource: { kind: args.resource_kind, id: args.resource_id },
           }),
         }
