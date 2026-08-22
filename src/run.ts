@@ -70,6 +70,18 @@ import {
   FLEET_MEMBER_TOOL_GROUPS,
   fleetMemberCanAccessChannel,
 } from './member-view.js'
+import {
+  FLEET_TASK_STATE_NAMESPACE,
+  parseFleetTaskState,
+} from './productivity/task.js'
+import {
+  FLEET_SCHEDULE_STATE_NAMESPACE,
+  parseFleetScheduleState,
+} from './productivity/schedule.js'
+import {
+  FLEET_CALENDAR_STATE_NAMESPACE,
+  parseFleetCalendarState,
+} from './productivity/calendar.js'
 import type {
   FleetMemberContacts,
   FleetMemberPermission,
@@ -1412,6 +1424,7 @@ export class FleetRunService {
 
       const idle = this.replaceRecord(record.id, { status: 'idle' })
       this.appendEvent(record.id, 'team_status', { status: 'idle' })
+      runtime.activateProductivity()
       return this.describeRecord(idle)
     } catch (error) {
       for (const name of created.reverse()) {
@@ -1750,6 +1763,7 @@ export class FleetRunService {
         status: restoredStatus,
         teamPausedMembers: [],
       })
+      runtime.activateProductivity()
       if (approvedWorkVote !== undefined && approvedWorkVote.type === 'vote') {
         const initiatorSessionId = this.restoredSessionId(events, approvedWorkVote.vote.initiator)
         const participants = this.participants(record)
@@ -2507,6 +2521,7 @@ export class FleetRunService {
       this.appendEvent(record.id, 'team_status', { status: 'paused', members: teamPausedMembers, phase: 'pausing' })
       this.notify(record)
     }
+    this.requireRuntime(record.id).pauseProductivity()
     for (const memberName of teamPausedMembers) {
       const member = this.requireRecord(record.id).members.find(candidate => candidate.name === memberName)
       if (member !== undefined && this.memberCanReply(member)) await this.pauseMember(caller, record.id, memberName)
@@ -2527,6 +2542,7 @@ export class FleetRunService {
     }
     const status: FleetRunStatus = record.work?.status === 'running' ? 'running' : 'idle'
     const resumed = this.replaceRecord(record.id, { status, teamPausedMembers: [] })
+    this.requireRuntime(record.id).activateProductivity()
     this.appendEvent(record.id, 'team_status', { status, resumedFrom: 'paused' })
     this.notify(resumed)
     return this.describeRecord(resumed)
@@ -2624,6 +2640,7 @@ export class FleetRunService {
       members: record.members.map(candidate => candidate.name === member.name ? active : candidate),
     })
     this.appendEvent(record.id, 'member_resumed', active)
+    runtime.calendar.retryPendingStarts()
     return structuredClone(active)
   }
 
@@ -3736,6 +3753,7 @@ export class FleetRunService {
     const terminalSummary = summary.trim()
     if (terminalSummary.length === 0) throw new Error('Fleet team close summary cannot be empty')
     this.clearRunNetworkRecoveries(runId)
+    this.collaboration.get(runId)?.pauseProductivity()
     const endedAt = new Date().toISOString()
     const record = this.replaceRecord(runId, {
       status: 'closed',
@@ -3944,6 +3962,23 @@ export class FleetRunService {
       onMemberStatus: event => {
         this.appendEvent(record.id, `member_status.${event.action}`, event)
       },
+      onTask: (event, state) => {
+        this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
+        this.appendEvent(record.id, `task.${event.action}`, event)
+      },
+      onSchedule: (event, state) => {
+        this.writeExtensionState(record.id, FLEET_SCHEDULE_STATE_NAMESPACE, state as unknown as JsonValue)
+        this.appendEvent(record.id, `schedule.${event.action}`, event)
+      },
+      onCalendar: (event, state) => {
+        this.writeExtensionState(record.id, FLEET_CALENDAR_STATE_NAMESPACE, state as unknown as JsonValue)
+        this.appendEvent(record.id, `calendar.${event.action}`, event)
+      },
+    })
+    team.restoreProductivity({
+      tasks: parseFleetTaskState(this.readExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE)),
+      schedules: parseFleetScheduleState(this.readExtensionState(record.id, FLEET_SCHEDULE_STATE_NAMESPACE)),
+      calendar: parseFleetCalendarState(this.readExtensionState(record.id, FLEET_CALENDAR_STATE_NAMESPACE)),
     })
     return team
   }
