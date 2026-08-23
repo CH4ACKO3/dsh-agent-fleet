@@ -1,13 +1,28 @@
 import type { ComponentType, ReactElement } from 'react'
-import { useEffect, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 import { clearFleetActivation, stageFleetActivation } from './activation.js'
-import { isChineseLocale } from './locale.js'
+import { FleetMark } from './fleet-mark.js'
+import {
+  FLEET_LOCALE_NAMESPACE,
+  type FleetLocaleRuntime,
+  type FleetLocaleKey,
+  fleetLocaleDictionaries,
+  isChineseLocale,
+} from './locale.js'
 
 const STYLE_ID = 'dsh-agent-fleet-meta-assistant'
 const SESSION_KEY = 'dsh-agent-fleet:meta-session:v1'
 const COLLAPSED_KEY = 'dsh-agent-fleet:meta-collapsed:v1'
+const WELCOME_KEY_PREFIX = 'dsh-agent-fleet:meta-welcome:v1:'
+
+export interface FleetMetaWelcomeState {
+  readonly sessionId: string
+  readonly text: string
+  readonly streaming: boolean
+  readonly time: number
+}
 
 const styles = `
 .dsh-fleet-meta-pinned {
@@ -15,9 +30,15 @@ const styles = `
   height: 34px;
   margin: 0 0 4px -4px;
   padding-left: 4px;
+  border-radius: 8px;
   flex: none;
   align-items: center;
   display: flex;
+}
+
+.dsh-fleet-meta-pinned:hover,
+.dsh-fleet-meta-pinned[data-selected="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 [class*="_rail"] > .dsh-fleet-meta-pinned {
@@ -42,37 +63,21 @@ const styles = `
   display: flex;
 }
 
-.dsh-fleet-meta-session::before,
-.dsh-fleet-meta-header-button::before {
-  box-sizing: border-box;
+.dsh-fleet-meta-session > svg,
+.dsh-fleet-meta-header-button > svg {
   width: 16px;
   height: 16px;
   color: var(--dsw-alias-label-secondary);
-  content: "F";
-  border: 1.5px solid color-mix(in srgb, currentColor 42%, transparent);
-  border-radius: 5px;
   flex: none;
-  place-items: center;
-  font-size: 9px;
-  font-weight: 650;
-  line-height: 1;
-  display: grid;
 }
 
-.dsh-fleet-meta-session:hover::before,
-.dsh-fleet-meta-header-button:hover::before {
+.dsh-fleet-meta-session > svg {
+  transform: translateY(-.5px);
+}
+
+.dsh-fleet-meta-session:hover > svg,
+.dsh-fleet-meta-header-button:hover > svg {
   color: var(--dsw-alias-label-primary);
-}
-
-.dsh-fleet-meta-session::after {
-  min-width: 0;
-  color: var(--dsw-alias-label-tertiary);
-  content: attr(data-caption);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  line-height: 20px;
-  overflow: hidden;
 }
 
 .dsh-fleet-meta-title {
@@ -85,11 +90,6 @@ const styles = `
   font-size: 14px;
   line-height: 20px;
   overflow: hidden;
-}
-
-.dsh-fleet-meta-session:hover,
-.dsh-fleet-meta-pinned[data-selected="true"] .dsh-fleet-meta-session {
-  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .dsh-fleet-meta-session:focus-visible,
@@ -169,6 +169,8 @@ interface MetaAssistantSnapshot {
 
 let sessions: FleetMetaClientSessions | undefined
 let workspaces: FleetMetaClientWorkspaces | undefined
+let locale: FleetLocaleRuntime | undefined
+let translateFleet: ((key: FleetLocaleKey) => string) | undefined
 let removeSessionSubscription: (() => void) | undefined
 const listeners = new Set<() => void>()
 
@@ -220,6 +222,11 @@ export function configureFleetMetaAssistantClient(
   syncCurrentSession()
 }
 
+export function configureFleetMetaAssistantLocale(nextLocale: FleetLocaleRuntime | undefined): void {
+  locale = nextLocale
+  translateFleet = locale?.bind(FLEET_LOCALE_NAMESPACE)
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener)
   return () => listeners.delete(listener)
@@ -227,6 +234,79 @@ function subscribe(listener: () => void): () => void {
 
 function getSnapshot(): MetaAssistantSnapshot {
   return snapshot
+}
+
+function subscribeLocale(listener: () => void): () => void {
+  return locale?.subscribe(listener) ?? (() => {})
+}
+
+function getLocaleRevision(): number {
+  return locale?.getSnapshot().revision ?? -1
+}
+
+export function useFleetMetaText(key: FleetLocaleKey): string {
+  useSyncExternalStore(subscribeLocale, getLocaleRevision, getLocaleRevision)
+  return translateFleet?.(key)
+    ?? fleetLocaleDictionaries[isChineseLocale() ? 'zh' : 'en'][key]
+}
+
+export function useFleetMetaWelcome(): FleetMetaWelcomeState | null {
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const active = state.sessionId !== undefined && state.currentSessionId === state.sessionId
+  const sessionId = active ? state.sessionId : undefined
+  const copy = useFleetMetaText('welcome.message')
+  const welcomeKey = sessionId === undefined ? '' : `${WELCOME_KEY_PREFIX}${sessionId}`
+  const initialSeen = welcomeKey !== '' && storageGet(welcomeKey) === 'true'
+  const [text, setText] = useState(initialSeen ? copy : '')
+  const [streaming, setStreaming] = useState(active && !initialSeen)
+  const identity = useRef({ sessionId, time: Date.now() })
+  if (identity.current.sessionId !== sessionId) identity.current = { sessionId, time: Date.now() }
+
+  useEffect(() => {
+    if (!active || welcomeKey === '') {
+      setText('')
+      setStreaming(false)
+      return
+    }
+    const alreadySeen = storageGet(welcomeKey) === 'true'
+    const reduceMotion = typeof matchMedia === 'function'
+      && matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (alreadySeen || reduceMotion) {
+      setText(copy)
+      setStreaming(false)
+      storageSet(welcomeKey, 'true')
+      return
+    }
+
+    const characters = Array.from(copy)
+    let offset = 0
+    let interval: ReturnType<typeof setInterval> | undefined
+    setText('')
+    setStreaming(true)
+    const delay = setTimeout(() => {
+      interval = setInterval(() => {
+        offset = Math.min(characters.length, offset + 2)
+        setText(characters.slice(0, offset).join(''))
+        if (offset < characters.length) return
+        if (interval !== undefined) clearInterval(interval)
+        setStreaming(false)
+        storageSet(welcomeKey, 'true')
+      }, 22)
+    }, 180)
+
+    return () => {
+      clearTimeout(delay)
+      if (interval !== undefined) clearInterval(interval)
+    }
+  }, [active, copy, welcomeKey])
+
+  if (!active || sessionId === undefined) return null
+  return {
+    sessionId,
+    text,
+    streaming,
+    time: identity.current.time,
+  }
 }
 
 function setCollapsed(collapsed: boolean): void {
@@ -249,11 +329,10 @@ async function openMetaAssistant(): Promise<void> {
       const availableCwd = currentCwd ?? Object.values(list.byId)
         .find(record => record.cwd !== undefined && record.cwd !== '')?.cwd
       sessionId = await sessions.create({ cwd: availableCwd ?? '.' })
-      const title = isChineseLocale() ? 'Fleet 助理' : 'Fleet Help'
-      await sessions.binding(sessionId)?.session.rename(title)
       storageSet(SESSION_KEY, sessionId)
     }
     if (sessionId === undefined) throw new Error('Fleet Meta assistant Session could not be resolved')
+    await sessions.binding(sessionId)?.session.rename('Agent Fleet')
     sessions.open(sessionId)
     const { error: _error, ...withoutError } = snapshot
     publish({
@@ -284,29 +363,31 @@ export function FleetMetaAssistantPinnedRow(): ReactElement | null {
   const chinese = isChineseLocale()
   const failure = state.error === undefined
     ? undefined
-    : `${chinese ? '无法打开 Fleet 助理' : 'Unable to open Fleet Help'}: ${state.error}`
+    : `${chinese ? '无法打开 Agent Fleet' : 'Unable to open Agent Fleet'}: ${state.error}`
   return jsxs('div', {
     className: 'dsh-fleet-meta-pinned',
     'data-selected': selected ? 'true' : 'false',
     'data-opening': state.opening ? 'true' : 'false',
     children: [
-      jsx('button', {
+      jsxs('button', {
         type: 'button',
         className: 'dsh-fleet-meta-session',
-        'aria-label': chinese ? 'Fleet 助理' : 'Fleet Help',
+        'aria-label': 'Agent Fleet',
         'aria-busy': state.opening ? 'true' : 'false',
-        'data-caption': chinese ? '插件帮助' : 'Plugin guide',
-        title: failure ?? (chinese ? '了解和使用 Fleet 团队插件' : 'Learn and use the Fleet Team plugin'),
+        title: failure ?? (chinese ? '打开 Agent Fleet' : 'Open Agent Fleet'),
         onClick: () => { void openMetaAssistant() },
-        children: jsx('span', {
-          className: 'dsh-fleet-meta-title',
-          children: chinese ? 'Fleet 助理' : 'Fleet Help',
-        }),
+        children: [
+          jsx(FleetMark, {}),
+          jsx('span', {
+            className: 'dsh-fleet-meta-title',
+            children: 'Agent Fleet',
+          }),
+        ],
       }),
       jsx('button', {
         type: 'button',
         className: 'dsh-fleet-meta-collapse',
-        'aria-label': chinese ? '收起 Fleet 助理' : 'Collapse Fleet Help',
+        'aria-label': chinese ? '收起 Agent Fleet' : 'Collapse Agent Fleet',
         onClick: () => setCollapsed(true),
         children: '⌃',
       }),
@@ -321,10 +402,10 @@ export function FleetMetaAssistantHeaderButton(): ReactElement | null {
   return jsx('button', {
     type: 'button',
     className: 'dsh-fleet-meta-header-button',
-    'aria-label': chinese ? '展开 Fleet 助理' : 'Expand Fleet Help',
-    title: chinese ? '展开 Fleet 助理' : 'Expand Fleet Help',
+    'aria-label': chinese ? '展开 Agent Fleet' : 'Expand Agent Fleet',
+    title: chinese ? '展开 Agent Fleet' : 'Expand Agent Fleet',
     onClick: () => setCollapsed(false),
-    children: null,
+    children: jsx(FleetMark, {}),
   })
 }
 
@@ -388,6 +469,10 @@ type NativeUseSession = <Selection>(
   equality?: (left: Selection, right: Selection) => boolean,
 ) => Selection
 
+type NativeUseStore = <Selection>(
+  selector: (snapshot: { readonly view?: string }) => Selection,
+) => Selection
+
 let cachedSessionSource: NativeSessionSnapshot | undefined
 let cachedEstablishedSession: NativeSessionSnapshot | undefined
 
@@ -405,12 +490,7 @@ export function withFleetMetaConversationRoot(
 ): ComponentType<Record<string, unknown>> {
   function FleetMetaConversationRoot(props: Record<string, unknown>): ReactElement {
     const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-    const propSessionId = typeof props.sessionId === 'string' ? props.sessionId : undefined
-    const meta = state.sessionId !== undefined && (
-      propSessionId === undefined
-        ? state.currentSessionId === state.sessionId
-        : propSessionId === state.sessionId
-    )
+    const meta = state.sessionId !== undefined && state.currentSessionId === state.sessionId
     const useSession = props.useSession as NativeUseSession
     const decoratedUseSession: NativeUseSession = (selector, equality) => useSession(
       source => selector(meta ? establishedMetaSession(source) : source),
@@ -424,6 +504,44 @@ export function withFleetMetaConversationRoot(
 
   FleetMetaConversationRoot.displayName = `withFleetMetaConversationRoot(${ConversationRoot.displayName ?? ConversationRoot.name ?? 'ConversationRoot'})`
   return FleetMetaConversationRoot
+}
+
+/** Keep the native new-Session Hero, but expose its global view tabs so Fleet is reachable there. */
+export function withFleetGlobalConversationHeader(
+  ConversationHeader: ComponentType<Record<string, unknown>>,
+): ComponentType<Record<string, unknown>> {
+  function FleetGlobalConversationHeader(props: Record<string, unknown>): ReactElement {
+    const useSession = props.useSession as NativeUseSession
+    const decoratedUseSession: NativeUseSession = (selector, equality) => useSession(
+      source => selector(establishedMetaSession(source)),
+      equality,
+    )
+    return jsx(ConversationHeader, { ...props, useSession: decoratedUseSession })
+  }
+
+  FleetGlobalConversationHeader.displayName = `withFleetGlobalConversationHeader(${ConversationHeader.displayName ?? ConversationHeader.name ?? 'ConversationSessionHeader'})`
+  return FleetGlobalConversationHeader
+}
+
+/** Mount the same global Fleet view from any Session, including an otherwise blank new Session. */
+export function withFleetGlobalConversationView(
+  ConversationSession: ComponentType<Record<string, unknown>>,
+): ComponentType<Record<string, unknown>> {
+  function FleetGlobalConversationView(props: Record<string, unknown>): ReactElement {
+    const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+    const meta = state.sessionId !== undefined && state.currentSessionId === state.sessionId
+    const useStore = props.useStore as NativeUseStore
+    const fleetSelected = useStore(source => source.view) === 'fleet'
+    const useSession = props.useSession as NativeUseSession
+    const decoratedUseSession: NativeUseSession = (selector, equality) => useSession(
+      source => selector(meta || fleetSelected ? establishedMetaSession(source) : source),
+      equality,
+    )
+    return jsx(ConversationSession, { ...props, useSession: decoratedUseSession })
+  }
+
+  FleetGlobalConversationView.displayName = `withFleetGlobalConversationView(${ConversationSession.displayName ?? ConversationSession.name ?? 'ConversationSession'})`
+  return FleetGlobalConversationView
 }
 
 function installStyles(): void {

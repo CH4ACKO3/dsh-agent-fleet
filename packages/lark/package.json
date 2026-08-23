@@ -1,7 +1,7 @@
 {
-  "name": "@ch4acko3/dsh-agent-fleet-permissions",
+  "name": "@ch4acko3/dsh-agent-fleet-lark",
   "version": "0.1.0",
-  "description": "Dynamic permission groups and capability namespaces for Agent Fleet",
+  "description": "Lark and Feishu connector for Agent Fleet Gateway",
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"
@@ -22,19 +22,19 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "pnpm --filter dsh-agent-fleet build:host && tsc -p tsconfig.json --noEmit",
+    "typecheck": "pnpm --filter dsh-agent-fleet build:host && pnpm --filter @ch4acko3/dsh-agent-fleet-gateway build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dsh": {
     "plugin": {
       "schemaVersion": 1,
       "displayName": {
-        "en": "Agent Fleet Permissions",
-        "zh-CN": "Agent Fleet 权限组"
+        "en": "Agent Fleet Lark",
+        "zh-CN": "Agent Fleet 飞书"
       },
       "summary": {
-        "en": "Optional dynamic groups, presets, OP, and namespaced permissions for Fleet Teams.",
-        "zh-CN": "为 Fleet Team 提供可选的动态权限组、预设、OP 与命名空间权限。"
+        "en": "Connect Lark and Feishu to Agent Fleet through Fleet Gateway.",
+        "zh-CN": "通过 Fleet Gateway 将飞书和 Lark 接入 Agent Fleet。"
       },
       "category": "development"
     },
@@ -43,15 +43,18 @@
     }
   },
   "peerDependencies": {
+    "@ch4acko3/dsh-agent-fleet-gateway": "^0.1.0",
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
     "dsh-agent-fleet": "^0.1.0"
   },
+  "dependencies": {
+    "@larksuite/channel": "^0.5.0"
+  },
   "devDependencies": {
+    "@ch4acko3/dsh-agent-fleet-gateway": "workspace:*",
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": ">=0.1.1-rc.1 <0.1.2-0",
-    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
     "@types/node": "^22.20.0",
     "dsh-agent-fleet": "workspace:*",
     "typescript": "^6.0.3",

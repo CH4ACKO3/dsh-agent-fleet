@@ -70,6 +70,18 @@ import {
   FLEET_MEMBER_TOOL_GROUPS,
   fleetMemberCanAccessChannel,
 } from './member-view.js'
+import {
+  FLEET_TASK_STATE_NAMESPACE,
+  parseFleetTaskState,
+} from './productivity/task.js'
+import {
+  FLEET_SCHEDULE_STATE_NAMESPACE,
+  parseFleetScheduleState,
+} from './productivity/schedule.js'
+import {
+  FLEET_CALENDAR_STATE_NAMESPACE,
+  parseFleetCalendarState,
+} from './productivity/calendar.js'
 import type {
   FleetMemberContacts,
   FleetMemberPermission,
@@ -142,6 +154,7 @@ export interface FleetTraceEvent {
   readonly createdAt: string
   readonly scope: 'team' | 'member'
   readonly member?: string
+  readonly sessionId?: string
   readonly sourceSequence?: number
   readonly type: string
   readonly data: string
@@ -162,6 +175,23 @@ export interface FleetTeamProjection {
   readonly memberViews: FleetMemberView[]
   readonly events: FleetJournalEvent[]
   readonly hasMore: boolean
+}
+
+export interface FleetConversationProjection extends FleetTeamProjection {
+  readonly previousSequence?: number
+}
+
+export interface FleetMemberTracePage {
+  readonly runId: string
+  readonly member: string
+  readonly events: FleetTraceEvent[]
+  readonly hasMore: boolean
+  readonly targetSessionId?: string
+  readonly targetSequence?: number
+  readonly previous?: {
+    readonly segment: number
+    readonly beforeSeq: number
+  }
 }
 
 export interface FleetMemberProjection {
@@ -286,10 +316,6 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
     const id = projectionEntityId(event.data, 'resource')
     return id === undefined ? undefined : `resource:${id}`
   }
-  if (event.type.startsWith('resource.document_')) {
-    const id = projectionEntityId(event.data, 'document')
-    return id === undefined ? undefined : `document:${id}`
-  }
   if (event.type === 'workspace.assigned') {
     const member = typeof event.data === 'object' && event.data !== null
       ? (event.data as Record<string, unknown>).member
@@ -310,11 +336,21 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
       : undefined
     return typeof member === 'string' && member.length > 0 ? `member-status:${member}` : undefined
   }
+  if (event.type === 'member_session_rotated') {
+    const previous = typeof event.data === 'object' && event.data !== null
+      ? (event.data as Record<string, unknown>).previousSessionId
+      : undefined
+    return typeof previous === 'string' && previous.length > 0 ? `member-session:${previous}` : undefined
+  }
   return undefined
 }
 
 function isProjectionActivity(event: StoredFleetEvent): boolean {
   return event.type.startsWith('resource.')
+    || event.type.startsWith('workspace.')
+    || event.type.startsWith('task.')
+    || event.type.startsWith('schedule.')
+    || event.type.startsWith('calendar.')
     || event.type === 'coordination.vote'
     || event.type.startsWith('work_')
     || event.type === 'team_status'
@@ -325,7 +361,9 @@ function isProjectionActivity(event: StoredFleetEvent): boolean {
 function projectionReceiptMessageId(event: StoredFleetEvent): string | undefined {
   if (event.type !== 'coordination.inbox' || typeof event.data !== 'object' || event.data === null) return undefined
   const data = event.data as Record<string, unknown>
-  return data.type === 'inbox' && data.action === 'acknowledged' && typeof data.messageId === 'string'
+  return data.type === 'inbox'
+    && (data.action === 'delivered' || data.action === 'acknowledged')
+    && typeof data.messageId === 'string'
     ? data.messageId
     : undefined
 }
@@ -400,6 +438,24 @@ interface SessionPersistenceLike {
   list?(): Promise<SessionHeader[]>
   create?(meta: SessionHeader): Promise<void>
   append?(id: ReturnType<typeof SessionId>, events: readonly SessionEvent[]): Promise<void>
+}
+
+interface FleetSessionArchiveLike {
+  find(logicalId: string): Promise<{
+    readonly activeSessionId: string
+    readonly segments: readonly { readonly sessionId: string }[]
+  } | undefined>
+  readPage(logicalId: string, options: {
+    readonly cursor?: { readonly segment: number; readonly beforeSeq: number }
+    readonly limit?: number
+    readonly signal?: AbortSignal
+  }): Promise<{
+    readonly items: readonly {
+      readonly sessionId: string
+      readonly event: SessionEventLike
+    }[]
+    readonly previous?: { readonly segment: number; readonly beforeSeq: number }
+  }>
 }
 
 interface RunWaiter {
@@ -1014,6 +1070,7 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     `Use display names such as @${member.name} when addressing teammates; member ids are internal stable identifiers.`,
     'No member is your parent. Use Fleet Channels, direct messages, Meetings, Votes, shared files, and resource references to coordinate.',
     'No Fleet member is a default coordinator. Claim work, negotiate ownership, and ask the relevant peers for review directly.',
+    'When another member is clearly doing work that belongs to your responsibility and is clearly outside theirs, send that member one private reminder about the responsibility boundary. Do not police ambiguous overlap.',
     'Keep your short Fleet member status text current when the work you are doing meaningfully changes. Clear it when the note is no longer useful. This self-declared text is separate from automatic runtime state.',
     '## Member view',
     `Configured Fleet tool groups: ${member.toolGroups.join(', ') || 'none'}. Optional groups are available only when their sub-plugin is installed.`,
@@ -1148,6 +1205,7 @@ export class FleetRunService {
   private readonly memberToolActivity = new Map<string, MemberToolActivity>()
   private readonly waitingSessionIds = new Set<string>()
   private readonly abnormalSessionIds = new Set<string>()
+  private readonly changeListeners = new Set<() => void>()
   private readonly registryDirectory: string
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
@@ -1165,6 +1223,11 @@ export class FleetRunService {
     this.authorization = options.authorization
     this.configuration = options.configuration ?? new FleetConfigurationRegistry()
     this.loadPersistedTeams()
+  }
+
+  subscribeChanges(listener: () => void): () => void {
+    this.changeListeners.add(listener)
+    return () => { this.changeListeners.delete(listener) }
   }
 
   authorizationBaseline(): FleetAuthorizationBaseline {
@@ -1194,7 +1257,7 @@ export class FleetRunService {
       },
       authorizeAction: input => input.subject.kind === 'external'
         && input.subject.id === `fleet-user:${input.teamId}`
-        && input.action === 'message.post',
+        && ['message.post', 'message.wakeup', 'message.interrupt'].includes(input.action),
       authorizeResource: input => {
         const record = this.records.get(input.teamId)
         const resource = input.resource
@@ -1416,6 +1479,7 @@ export class FleetRunService {
 
       const idle = this.replaceRecord(record.id, { status: 'idle' })
       this.appendEvent(record.id, 'team_status', { status: 'idle' })
+      runtime.activateProductivity()
       return this.describeRecord(idle)
     } catch (error) {
       for (const name of created.reverse()) {
@@ -1448,7 +1512,7 @@ export class FleetRunService {
     const record = this.requireRecord(input.runId, input.projectRoot)
     this.requireRuntime(record.id)
     if (record.status !== 'idle') throw new Error(`Fleet team ${record.id} cannot start work while ${record.status}`)
-    this.requireParticipant(record, launcher)
+    this.requireLifecycleControl(record, launcher)
 
     const taskPath = isAbsolute(input.taskPath) ? input.taskPath : resolve(input.projectRoot, input.taskPath)
     const task = readFileSync(taskPath, 'utf8').trim()
@@ -1754,19 +1818,19 @@ export class FleetRunService {
         status: restoredStatus,
         teamPausedMembers: [],
       })
+      runtime.activateProductivity()
       if (approvedWorkVote !== undefined && approvedWorkVote.type === 'vote') {
         const initiatorSessionId = this.restoredSessionId(events, approvedWorkVote.vote.initiator)
         const participants = this.participants(record)
         const initiator = participants.find(member => member.sessionId === initiatorSessionId)
         const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
           ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
-        if (caller !== undefined) {
-          return this.finish(
-            caller,
-            approvedWorkVote.vote.kind === 'finish' ? 'finished' : 'blocked',
-            approvedWorkVote.vote.statement,
-          )
-        }
+        if (caller !== undefined) return this.finishWork(
+          record,
+          approvedWorkVote.vote.kind === 'finish' ? 'finished' : 'blocked',
+          approvedWorkVote.vote.statement,
+          String(caller.id),
+        )
       }
       return this.describeRecord(restored)
     } catch (error) {
@@ -2511,6 +2575,7 @@ export class FleetRunService {
       this.appendEvent(record.id, 'team_status', { status: 'paused', members: teamPausedMembers, phase: 'pausing' })
       this.notify(record)
     }
+    this.requireRuntime(record.id).pauseProductivity()
     for (const memberName of teamPausedMembers) {
       const member = this.requireRecord(record.id).members.find(candidate => candidate.name === memberName)
       if (member !== undefined && this.memberCanReply(member)) await this.pauseMember(caller, record.id, memberName)
@@ -2531,6 +2596,7 @@ export class FleetRunService {
     }
     const status: FleetRunStatus = record.work?.status === 'running' ? 'running' : 'idle'
     const resumed = this.replaceRecord(record.id, { status, teamPausedMembers: [] })
+    this.requireRuntime(record.id).activateProductivity()
     this.appendEvent(record.id, 'team_status', { status, resumedFrom: 'paused' })
     this.notify(resumed)
     return this.describeRecord(resumed)
@@ -2628,6 +2694,7 @@ export class FleetRunService {
       members: record.members.map(candidate => candidate.name === member.name ? active : candidate),
     })
     this.appendEvent(record.id, 'member_resumed', active)
+    runtime.calendar.retryPendingStarts()
     return structuredClone(active)
   }
 
@@ -2649,6 +2716,13 @@ export class FleetRunService {
       })
     }
     return view
+  }
+
+  private requireLifecycleControl(record: FleetRunRecord, caller: Agent): void {
+    this.requireParticipant(record, caller)
+    if (record.assistants.some(assistant => assistant.sessionId === String(caller.id))) {
+      this.requireFleetPermission(record, caller, 'team.manage')
+    }
   }
 
   async attachAssistant(caller: Agent, input: AttachAssistantInput = {}): Promise<{
@@ -2705,8 +2779,8 @@ export class FleetRunService {
       ...((input.model ?? caller.options.model) === undefined
         ? {}
         : { model: input.model ?? caller.options.model }),
-      toolGroups: input.toolGroups === undefined ? [...FLEET_MEMBER_TOOL_GROUPS] : [...input.toolGroups],
-      permissions: input.permissions === undefined ? [...FLEET_MEMBER_PERMISSIONS] : [...input.permissions],
+      toolGroups: input.toolGroups === undefined ? ['messages', 'status', 'resources'] : [...input.toolGroups],
+      permissions: input.permissions === undefined ? [] : [...input.permissions],
       contacts: input.contacts === undefined
         ? { members: '*', channels: '*' }
         : structuredClone(input.contacts),
@@ -2789,6 +2863,18 @@ export class FleetRunService {
       this.configuration,
     ).channels[0]
     if (channel === undefined) throw new Error(`Fleet team ${record.id} has no Team Channel`)
+    this.authorization?.require({
+      teamId: record.id,
+      subject: { kind: 'assistant', id: assistant.view.id },
+      action: 'message.post',
+      resource: { kind: 'conversation', id: `#${channel.id}` },
+    })
+    if (input.kind === 'directive') this.authorization?.require({
+      teamId: record.id,
+      subject: { kind: 'assistant', id: assistant.view.id },
+      action: 'message.wakeup',
+      resource: { kind: 'conversation', id: `#${channel.id}` },
+    })
     this.requireRuntime(record.id).messages.send(caller, {
       to: `#${channel.id}`,
       text: content,
@@ -2804,10 +2890,20 @@ export class FleetRunService {
     this.requireAssistantConnection(caller, record.id)
     const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
     if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+    const subject = {
+      kind: record.assistants.some(assistant => assistant.sessionId === String(caller.id)) ? 'assistant' as const : 'member' as const,
+      id: participant.name,
+    }
     this.authorization?.require({
       teamId: record.id,
-      subject: { kind: record.assistants.some(assistant => assistant.sessionId === String(caller.id)) ? 'assistant' : 'member', id: participant.name },
+      subject,
       action: 'message.post',
+      resource: { kind: 'conversation', id: input.to },
+    })
+    if (input.delivery !== 'quiet') this.authorization?.require({
+      teamId: record.id,
+      subject,
+      action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
     return this.requireRuntime(record.id).messages.send(caller, {
@@ -2822,10 +2918,17 @@ export class FleetRunService {
 
   sendUserConversationMessage(input: SendFleetConversationMessageInput): SendMessageResult {
     const record = this.requireMutableRecord(input.runId)
+    const subject = { kind: 'external' as const, id: `fleet-user:${record.id}` }
     this.authorization?.require({
       teamId: record.id,
-      subject: { kind: 'external', id: `fleet-user:${record.id}` },
+      subject,
       action: 'message.post',
+      resource: { kind: 'conversation', id: input.to },
+    })
+    if (input.delivery !== 'quiet') this.authorization?.require({
+      teamId: record.id,
+      subject,
+      action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
     return this.requireRuntime(record.id).sendUserMessage({
@@ -2912,15 +3015,23 @@ export class FleetRunService {
     runId?: string,
   ): FleetRunRecord {
     const record = this.requireCallerRecord(caller, runId)
+    this.requireLifecycleControl(record, caller)
+    return this.finishWork(record, status, summary, String(caller.id))
+  }
+
+  private finishWork(
+    record: FleetRunRecord,
+    status: Exclude<FleetWorkStatus, 'running'>,
+    summary: string,
+    callerId: string,
+  ): FleetRunRecord {
     const runtime = this.requireRuntime(record.id)
-    this.requireParticipant(record, caller)
     if (record.status !== 'running' || record.work === undefined) {
       throw new Error(`Fleet team ${record.id} has no active work to finish`)
     }
     const terminalSummary = summary.trim()
     if (terminalSummary.length === 0) throw new Error('Fleet work terminal summary cannot be empty')
     this.clearRunNetworkRecoveries(record.id)
-    const callerId = String(caller.id)
     for (const member of record.members) {
       try {
         this.core.cancelManaged(this.runtimeMemberName(record.id, member.name), callerId)
@@ -2955,7 +3066,7 @@ export class FleetRunService {
 
   end(caller: Agent, summary: string, runId?: string): FleetRunRecord {
     const record = this.requireCallerRecord(caller, runId)
-    this.requireParticipant(record, caller)
+    this.requireLifecycleControl(record, caller)
     return this.setTerminal(record.id, summary, String(caller.id))
   }
 
@@ -2989,9 +3100,12 @@ export class FleetRunService {
           const initiator = participants.find(member => member.sessionId === vote.initiator)
           const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
             ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
-          if (caller !== undefined) {
-            this.finish(caller, vote.kind === 'finish' ? 'finished' : 'blocked', vote.statement, runId)
-          }
+          if (caller !== undefined) this.finishWork(
+            current,
+            vote.kind === 'finish' ? 'finished' : 'blocked',
+            vote.statement,
+            String(caller.id),
+          )
         })
       }
     }
@@ -3026,9 +3140,30 @@ export class FleetRunService {
         })}\n`,
         'utf8',
       )
+      this.appendEvent(runId, 'resource.resource_revised', {
+        type: event.type,
+        revision: {
+          id: event.revision.id,
+          resourceId: event.revision.resourceId,
+          updatedBy: event.revision.updatedBy,
+          updatedAt: event.revision.updatedAt,
+          available,
+          size,
+        },
+      })
       return
     }
     this.appendEvent(runId, `resource.${event.type}`, event)
+  }
+
+  recordDataEvent(
+    runId: string,
+    type:
+      | `resource.document_${'created' | 'updated' | 'commented' | 'resolved' | 'reverted'}`
+      | `workspace.${'attached' | 'detached' | 'assigned'}`,
+    data: unknown,
+  ): void {
+    this.appendEvent(runId, type, data)
   }
 
   private clearMemberActivity(sessionId: string): void {
@@ -3090,17 +3225,17 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const member = runtime.memberNamesById.get(sessionId)
     if (member === undefined || this.records.get(runId) === undefined) return
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    runtime.messages.observeSessionEvent(sessionId, event, agent?.session.events ?? [])
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     if (event.type === 'assistant/chunk') return
     if (event.type !== 'turn/end') return
     const reason = event.data.reason
     if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
-      const agent = this.ctx.agents.get(SessionId(sessionId))
       if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
       return
     }
-    const agent = this.ctx.agents.get(SessionId(sessionId))
     const route = agent === undefined ? undefined : this.networkRoute(agent)
     this.clearNetworkRecovery(sessionId)
     if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
@@ -3175,6 +3310,14 @@ export class FleetRunService {
         reason: 'team_quiescent',
       })
     }
+  }
+
+  agentStatusChanged(agent: Agent): void {
+    const agentId = String(agent.id)
+    if ([...this.records.values()].some(record => this.participants(record).some(member => member.sessionId === agentId))) {
+      this.emitChange()
+    }
+    if (agent.status === 'idle') this.agentIdle(agent)
   }
 
   agentDisconnected(agentId: string): void {
@@ -3330,6 +3473,71 @@ export class FleetRunService {
     }
   }
 
+  readConversationProjection(
+    runId: string,
+    conversationId: string,
+    beforeSequence: number,
+    limit: number,
+  ): FleetConversationProjection {
+    const record = this.requireRecord(runId)
+    const stored = this.storedEvents(record)
+    const memberBySession = new Map(record.members.map(member => [member.sessionId, member.name]))
+    for (const event of stored) {
+      if (event.type !== 'member_session_rotated') continue
+      const data = event.data as { readonly member?: unknown; readonly previousSessionId?: unknown; readonly sessionId?: unknown }
+      if (typeof data.member !== 'string') continue
+      if (typeof data.previousSessionId === 'string') memberBySession.set(data.previousSessionId, data.member)
+      if (typeof data.sessionId === 'string') memberBySession.set(data.sessionId, data.member)
+    }
+    const currentSessionByMember = new Map(record.members.map(member => [member.name, member.sessionId]))
+    const projectedConversation = (event: StoredFleetEvent): string | undefined => {
+      if (event.type !== 'coordination.message' || typeof event.data !== 'object' || event.data === null) return undefined
+      const coordination = event.data as { readonly message?: { readonly conversation?: unknown; readonly from?: unknown } }
+      const target = coordination.message?.conversation
+      const from = coordination.message?.from
+      if (typeof target !== 'string' || typeof from !== 'string' || !target.startsWith('@')) {
+        return typeof target === 'string' ? target : undefined
+      }
+      const recipient = target.slice(1)
+      const participants = [...new Set([from, recipient])]
+      const memberNames = [...new Set(participants.flatMap(sessionId => {
+        const member = memberBySession.get(sessionId)
+        return member === undefined ? [] : [member]
+      }))]
+      const fleetUsers = participants.filter(sessionId => sessionId.startsWith('fleet-user:'))
+      if (participants.length === 2 && memberNames.length === 1 && fleetUsers.length === 1) {
+        const currentSession = currentSessionByMember.get(memberNames[0] ?? '')
+        return currentSession === undefined ? undefined : `@${currentSession}`
+      }
+      const stableParticipants = participants.map(sessionId => {
+        const member = memberBySession.get(sessionId)
+        return member === undefined ? sessionId : `member:${member}`
+      })
+      return `dm:${stableParticipants.toSorted().join(':')}`
+    }
+    const messages = stored.filter(event => event.sequence < beforeSequence
+      && projectedConversation(event) === conversationId)
+    const selectedMessages = messages.slice(-limit)
+    const selectedIds = new Set(selectedMessages.flatMap(event => {
+      if (typeof event.data !== 'object' || event.data === null) return []
+      const message = (event.data as { readonly message?: { readonly id?: unknown } }).message
+      return typeof message?.id === 'string' ? [message.id] : []
+    }))
+    const receipts = stored.filter(event => {
+      if (event.type !== 'coordination.inbox' || typeof event.data !== 'object' || event.data === null) return false
+      const messageId = (event.data as { readonly messageId?: unknown }).messageId
+      return typeof messageId === 'string' && selectedIds.has(messageId)
+    })
+    const events = [...selectedMessages, ...receipts].sort((left, right) => left.sequence - right.sequence)
+    return {
+      run: this.describeRecord(record),
+      memberViews: this.memberViews(runId),
+      events: events.map(event => this.journalEvent(event)),
+      hasMore: messages.length > selectedMessages.length,
+      ...(selectedMessages[0] === undefined ? {} : { previousSequence: selectedMessages[0].sequence }),
+    }
+  }
+
   async readResourcePreview(
     runId: string,
     resourceId: string,
@@ -3420,6 +3628,7 @@ export class FleetRunService {
         createdAt: new Date(event.time).toISOString(),
         scope: 'member' as const,
         member: member.name,
+        sessionId: member.sessionId,
         sourceSequence: event.seq,
         type: `session.${event.type}`,
         data: JSON.stringify(event.data),
@@ -3466,11 +3675,108 @@ export class FleetRunService {
         createdAt: new Date(event.time).toISOString(),
         scope: 'member' as const,
         member: member.name,
+        sessionId: member.sessionId,
         sourceSequence: event.seq,
         type: `session.${event.type}`,
         data: JSON.stringify(event.data),
       })),
       hasMore,
+    }
+  }
+
+  async readMemberTracePage(
+    runId: string,
+    memberName: string,
+    limit: number,
+    cursor?: { readonly segment: number; readonly beforeSeq: number },
+    signal?: AbortSignal,
+  ): Promise<FleetMemberTracePage> {
+    const record = this.requireRecord(runId)
+    const member = this.participants(record).find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
+    const archive = this.ctx.get('sessionArchive', false) as FleetSessionArchiveLike | undefined
+    const logicalId = this.memberArchiveId(record.id, member.name)
+    const timeline = archive === undefined ? undefined : await archive.find(logicalId)
+    if (archive === undefined || timeline === undefined) {
+      return this.readMemberTraceTail(record.id, member.name, limit)
+    }
+    const page = await archive.readPage(logicalId, {
+      limit,
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const items = page.items.filter(item => item.event.type !== 'assistant/chunk'
+      && item.event.type !== 'session/end-seed')
+    return {
+      runId: record.id,
+      member: member.name,
+      events: items.map(item => ({
+        sequence: item.event.seq,
+        createdAt: new Date(item.event.time).toISOString(),
+        scope: 'member',
+        member: member.name,
+        sessionId: item.sessionId,
+        sourceSequence: item.event.seq,
+        type: `session.${item.event.type}`,
+        data: JSON.stringify(item.event.data),
+      })),
+      hasMore: page.previous !== undefined,
+      ...(page.previous === undefined ? {} : { previous: page.previous }),
+    }
+  }
+
+  async readMemberSourceTrace(
+    runId: string,
+    memberName: string,
+    sourceSessionId: string,
+    contextMessageId: string,
+    limit: number,
+  ): Promise<FleetMemberTracePage> {
+    const record = this.requireRecord(runId)
+    const member = this.participants(record).find(candidate => candidate.name === memberName)
+    if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
+    const memberSessions = new Set([member.sessionId])
+    for (const event of this.storedEvents(record)) {
+      if (event.type !== 'member_session_rotated' || typeof event.data !== 'object' || event.data === null) continue
+      const data = event.data as { readonly member?: unknown; readonly previousSessionId?: unknown; readonly sessionId?: unknown }
+      if (data.member !== member.name) continue
+      if (typeof data.previousSessionId === 'string') memberSessions.add(data.previousSessionId)
+      if (typeof data.sessionId === 'string') memberSessions.add(data.sessionId)
+    }
+    if (!memberSessions.has(sourceSessionId)) {
+      throw new Error(`Session ${sourceSessionId} does not belong to Fleet member ${memberName}`)
+    }
+    const live = this.ctx.agents.get(SessionId(sourceSessionId))
+    const events: readonly SessionEventLike[] = live === undefined
+      ? (await this.requirePersistence().inspect(SessionId(sourceSessionId))).events
+      : live.session.events
+    const targetIndex = events.findIndex(event => {
+      if (typeof event.data !== 'object' || event.data === null) return false
+      const data = event.data as { readonly id?: unknown; readonly message?: { readonly id?: unknown } }
+      return data.id === contextMessageId || data.message?.id === contextMessageId
+    })
+    if (targetIndex < 0) throw new Error(`Context message ${contextMessageId} was not found in Session ${sourceSessionId}`)
+    const before = Math.floor((limit - 1) / 2)
+    const start = Math.max(0, targetIndex - before)
+    const selected = events.slice(start, Math.min(events.length, start + limit))
+      .filter(event => event.type !== 'assistant/chunk' && event.type !== 'session/end-seed')
+    const target = events[targetIndex]
+    return {
+      runId: record.id,
+      member: member.name,
+      events: selected.map(event => ({
+        sequence: event.seq,
+        createdAt: new Date(event.time).toISOString(),
+        scope: 'member',
+        member: member.name,
+        sessionId: sourceSessionId,
+        sourceSequence: event.seq,
+        type: `session.${event.type}`,
+        data: JSON.stringify(event.data),
+      })),
+      hasMore: start > 0 || start + limit < events.length,
+      targetSessionId: sourceSessionId,
+      ...(target === undefined ? {} : { targetSequence: target.seq }),
     }
   }
 
@@ -3653,11 +3959,44 @@ export class FleetRunService {
     if (event.type === 'activity.acknowledged') {
       return (event.data as { readonly member: string }).member === view.id
     }
-    if (event.type.startsWith('resource.document_')) return view.toolGroups.includes('documents')
-    if (event.type.startsWith('resource.')) return view.toolGroups.includes('resources')
-    if (event.type.startsWith('task.')) return view.toolGroups.includes('tasks')
-    if (event.type.startsWith('calendar.')) return view.toolGroups.includes('calendar')
-    if (event.type.startsWith('schedule.')) return view.toolGroups.includes('schedule')
+    const subject = {
+      kind: record.assistants.some(assistant => assistant.view.id === view.id) ? 'assistant' as const : 'member' as const,
+      id: view.id,
+    }
+    if (event.type.startsWith('resource.document_')) {
+      const documentId = (event.data as { readonly document?: { readonly id?: string } }).document?.id
+      return this.authorization?.authorize({
+        teamId: record.id,
+        subject,
+        action: 'document.read',
+        ...(documentId === undefined ? {} : { resource: { kind: 'document', id: documentId } }),
+      }) ?? view.toolGroups.includes('documents')
+    }
+    if (event.type.startsWith('resource.work_')) {
+      return this.authorization?.has(record.id, view, 'work.read') ?? view.toolGroups.includes('resources')
+    }
+    if (event.type.startsWith('resource.resource_')) {
+      const data = event.data as {
+        readonly resource?: { readonly id?: string }
+        readonly revision?: { readonly resourceId?: string }
+      }
+      const resourceId = data.resource?.id ?? data.revision?.resourceId
+      return this.authorization?.authorize({
+        teamId: record.id,
+        subject,
+        action: 'resource.read',
+        ...(resourceId === undefined ? {} : { resource: { kind: 'resource', id: resourceId } }),
+      }) ?? view.toolGroups.includes('resources')
+    }
+    if (event.type.startsWith('workspace.')) {
+      return this.authorization?.has(record.id, view, 'workspace.read') ?? view.toolGroups.includes('resources')
+    }
+    if (event.type.startsWith('member_status.')) {
+      return this.authorization?.has(record.id, view, 'member-status.read') ?? view.toolGroups.includes('status')
+    }
+    if (event.type.startsWith('task.')) return this.authorization?.has(record.id, view, 'task.read') ?? view.toolGroups.includes('tasks')
+    if (event.type.startsWith('calendar.')) return this.authorization?.has(record.id, view, 'calendar.read') ?? view.toolGroups.includes('calendar')
+    if (event.type.startsWith('schedule.')) return this.authorization?.has(record.id, view, 'schedule.read') ?? view.toolGroups.includes('schedule')
     if (event.type === 'assistant_message') {
       const message = event.data as FleetAssistantMessage
       return message.recipients?.includes(view.id) === true
@@ -3709,6 +4048,7 @@ export class FleetRunService {
     this.dormantRunIds.clear()
     this.teamProjectionEvents.clear()
     this.memberViewSnapshots.clear()
+    this.changeListeners.clear()
   }
 
   private async settleFinishedWork(record: FleetRunRecord): Promise<void> {
@@ -3740,6 +4080,7 @@ export class FleetRunService {
     const terminalSummary = summary.trim()
     if (terminalSummary.length === 0) throw new Error('Fleet team close summary cannot be empty')
     this.clearRunNetworkRecoveries(runId)
+    this.collaboration.get(runId)?.pauseProductivity()
     const endedAt = new Date().toISOString()
     const record = this.replaceRecord(runId, {
       status: 'closed',
@@ -3941,6 +4282,7 @@ export class FleetRunService {
         ...memberViews,
         ...record.assistants.map(assistant => assistant.view),
       ],
+      defaultVoters: memberViews.filter(view => view.canVote !== false).map(view => view.id),
       projectRoot: record.projectRoot,
       sharedDirectory: `.fleet/${record.id}`,
       onCoordination: event => { this.recordCoordination(record.id, event) },
@@ -3948,6 +4290,23 @@ export class FleetRunService {
       onMemberStatus: event => {
         this.appendEvent(record.id, `member_status.${event.action}`, event)
       },
+      onTask: (event, state) => {
+        this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
+        if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
+      },
+      onSchedule: (event, state) => {
+        this.writeExtensionState(record.id, FLEET_SCHEDULE_STATE_NAMESPACE, state as unknown as JsonValue)
+        if (event.action !== 'notification') this.appendEvent(record.id, `schedule.${event.action}`, event)
+      },
+      onCalendar: (event, state) => {
+        this.writeExtensionState(record.id, FLEET_CALENDAR_STATE_NAMESPACE, state as unknown as JsonValue)
+        this.appendEvent(record.id, `calendar.${event.action}`, event)
+      },
+    })
+    team.restoreProductivity({
+      tasks: parseFleetTaskState(this.readExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE)),
+      schedules: parseFleetScheduleState(this.readExtensionState(record.id, FLEET_SCHEDULE_STATE_NAMESPACE)),
+      calendar: parseFleetCalendarState(this.readExtensionState(record.id, FLEET_CALENDAR_STATE_NAMESPACE)),
     })
     return team
   }
@@ -4027,6 +4386,11 @@ export class FleetRunService {
     if (projection !== undefined && !event.type.startsWith('session.')) {
       this.cacheTeamProjection(runId, compactTeamProjectionEvents([...projection, event]))
     }
+    this.emitChange()
+  }
+
+  private emitChange(): void {
+    for (const listener of [...this.changeListeners]) listener()
   }
 
   private cacheTeamProjection(runId: string, projection: StoredFleetEvent[]): void {

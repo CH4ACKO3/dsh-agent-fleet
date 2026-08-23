@@ -240,4 +240,12 @@ export type FleetCoordinationEvent =
   | { readonly type: 'vote'; readonly action: 'opened' | 'updated' | 'cast' | 'closed'; readonly vote: FleetVote }
   | { readonly type: 'reaction'; readonly action: 'updated' | 'removed'; readonly reaction: FleetMessageReaction }
   | { readonly type: 'pin'; readonly action: 'pinned' | 'unpinned'; readonly pin: FleetMessagePin }
+  | {
+      readonly type: 'inbox'
+      readonly action: 'delivered'
+      readonly agentId: string
+      readonly messageId: string
+      /** Native DSH UserMessage id injected into this Agent's context. */
+      readonly contextMessageId: string
+    }
   | { readonly type: 'inbox'; readonly action: 'acknowledged'; readonly agentId: string; readonly messageId: string }

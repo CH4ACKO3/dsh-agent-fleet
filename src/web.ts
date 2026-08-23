@@ -18,17 +18,23 @@ import {
 } from '@dsh-agent-fleet/core/web'
 
 import type { FleetMemberView } from './member-view.js'
+import type { FleetPermissionService } from './authorization/permissions.js'
 import type { FleetRunService, FleetWorkStatus } from './run.js'
 import type { FleetSetupService } from './setup.js'
 
 export interface FleetWebProjectInput {
   readonly teamId: string
-  readonly view?: 'team' | 'member' | 'trace' | 'resource' | 'configuration'
+  readonly view?: 'team' | 'member' | 'trace' | 'conversation' | 'resource' | 'configuration'
   readonly member?: string
+  readonly conversation?: string
   readonly resource?: string
   readonly revision?: string
   readonly tail?: boolean
   readonly afterSequence?: number
+  readonly beforeSequence?: number
+  readonly archiveCursor?: { readonly segment: number; readonly beforeSeq: number }
+  readonly sourceSessionId?: string
+  readonly contextMessageId?: string
   readonly limit?: number
 }
 
@@ -47,9 +53,10 @@ export interface FleetWebSendInput {
 export interface FleetWebMemberInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'add' | 'update' | 'pause' | 'resume' | 'remove'
+  readonly action: 'add' | 'update' | 'pause' | 'resume' | 'remove' | 'permissions' | 'reset_permissions'
   readonly member?: string
   readonly view?: FleetMemberView
+  readonly groups?: readonly string[]
 }
 
 export interface FleetWebControlInput {
@@ -116,6 +123,7 @@ export class FleetWebRemote extends TypertRemoteService {
     private readonly host: Context,
     private readonly runs: FleetRunService,
     private readonly setups: FleetSetupService,
+    private readonly permissions?: FleetPermissionService,
   ) {
     super(host, 'fleetWeb', { namespace: 'fleet' })
     host.effect(() => () => {
@@ -145,11 +153,36 @@ export class FleetWebRemote extends TypertRemoteService {
     if (input.view === 'configuration') return this.runs.exportConfiguration(teamId)
     if (input.view === 'trace') {
       const member = required(input.member, 'member')
-      return input.tail === true
-        ? this.runs.readMemberTraceTail(teamId, member, limit)
+      if (input.sourceSessionId !== undefined || input.contextMessageId !== undefined) {
+        return this.runs.readMemberSourceTrace(
+          teamId,
+          member,
+          required(input.sourceSessionId, 'sourceSessionId'),
+          required(input.contextMessageId, 'contextMessageId'),
+          limit,
+        )
+      }
+      return input.tail === true || input.archiveCursor !== undefined
+        ? this.runs.readMemberTracePage(teamId, member, limit, input.archiveCursor, signal)
         : this.runs.readMemberTrace(teamId, member, after, limit)
     }
-    if (input.view === 'member') return this.runs.readMemberProjection(teamId, required(input.member, 'member'), after, limit)
+    if (input.view === 'conversation') {
+      const before = input.beforeSequence ?? Number.MAX_SAFE_INTEGER
+      if (!Number.isSafeInteger(before) || before < 1) throw new Error('beforeSequence must be a positive safe integer')
+      return this.runs.readConversationProjection(
+        teamId,
+        required(input.conversation, 'conversation'),
+        before,
+        limit,
+      )
+    }
+    if (input.view === 'member') {
+      const member = required(input.member, 'member')
+      const projection = this.runs.readMemberProjection(teamId, member, after, limit)
+      return this.permissions === undefined
+        ? projection
+        : { ...projection, authorization: this.permissions.inspectMember(teamId, member) }
+    }
     if (input.view === undefined || input.view === 'team') return this.runs.readWebTeamProjection(teamId, after, limit)
     throw new Error(`unknown Fleet project view ${String(input.view)}`)
   }
@@ -181,7 +214,7 @@ export class FleetWebRemote extends TypertRemoteService {
     signal.throwIfAborted()
     const caller = this.caller(input.sessionId)
     const teamId = required(input.teamId, 'teamId')
-    this.runs.requireAssistantConnection(caller, teamId)
+    const assistant = this.runs.requireAssistantConnection(caller, teamId)
     if (input.action === 'resume' && this.runs.status(teamId).status === 'paused') {
       throw new Error('resume the Fleet Team before resuming an individual member')
     }
@@ -197,6 +230,22 @@ export class FleetWebRemote extends TypertRemoteService {
       case 'pause': return this.runs.pauseMember(caller, teamId, required(input.member, 'member'))
       case 'resume': return this.runs.resumeMember(caller, teamId, required(input.member, 'member'))
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))
+      case 'permissions': {
+        if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
+        if (!this.permissions.canManage(teamId, assistant.view)) {
+          throw new Error(`Fleet assistant ${assistant.view.id} cannot manage permissions`)
+        }
+        return this.permissions.setMemberGroups(teamId, required(input.member, 'member'), input.groups ?? [])
+      }
+      case 'reset_permissions': {
+        if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
+        if (!this.permissions.canManage(teamId, assistant.view)) {
+          throw new Error(`Fleet assistant ${assistant.view.id} cannot manage permissions`)
+        }
+        const member = required(input.member, 'member')
+        this.permissions.resetMember(teamId, member)
+        return this.permissions.inspectMember(teamId, member)
+      }
       default: throw new Error(`unknown Fleet member action ${String(input.action)}`)
     }
   }

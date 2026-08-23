@@ -1,12 +1,13 @@
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { FleetWebClient } from '@dsh-agent-fleet/core/web'
-import type { FleetChatContentBlock, FleetChatMember } from './runtime-chat.js'
+import type { FleetChatContentBlock, FleetChatMember, FleetChatReceiptSource } from './runtime-chat.js'
 import { encodeFleetFile } from './web-client.js'
 import {
   type FleetPanelActivity,
   type FleetPanelArchiveFile,
   type FleetPanelConversation,
   type FleetPanelMember,
+  type FleetPanelMemberAuthorization,
   type FleetPanelMemberTrace,
   type FleetPanelMessage,
   type FleetPanelResource,
@@ -18,7 +19,6 @@ import {
   type FleetPanelWorkspace,
 } from './team-panel.js'
 
-const POLL_INTERVAL_MS = 2_000
 const PAGE_SIZE = 500
 const MAX_TEAM_MESSAGES = 500
 const MAX_TEAM_ACTIVITY = 250
@@ -66,7 +66,16 @@ interface WireMember {
 
 interface WireAssistant {
   readonly sessionId: string
-  readonly view?: { readonly id?: string; readonly name?: string; readonly role?: string; readonly color?: string }
+  readonly view?: {
+    readonly id?: string
+    readonly name?: string
+    readonly role?: string
+    readonly responsibility?: string
+    readonly color?: string
+    readonly provider?: string
+    readonly model?: string
+  }
+  readonly status?: 'idle' | 'running' | 'offline'
 }
 
 interface WireRun {
@@ -97,6 +106,7 @@ interface WireMemberView {
 
 interface WireEvent {
   readonly sequence: number
+  readonly sessionId?: string
   readonly createdAt: string
   readonly type: string
   readonly data: unknown
@@ -107,11 +117,15 @@ interface WireProjection {
   readonly memberViews: readonly WireMemberView[]
   readonly events: readonly WireEvent[]
   readonly hasMore: boolean
+  readonly previousSequence?: number
 }
 
 interface WireTraceProjection {
   readonly events: readonly WireEvent[]
   readonly hasMore: boolean
+  readonly previous?: { readonly segment: number; readonly beforeSeq: number }
+  readonly targetSessionId?: string
+  readonly targetSequence?: number
 }
 
 interface ProjectionCache {
@@ -180,6 +194,43 @@ function wireProjection(value: unknown): WireProjection {
     memberViews: value.memberViews as unknown as readonly WireMemberView[],
     events: value.events as unknown as readonly WireEvent[],
     hasMore: value.hasMore,
+    ...(typeof value.previousSequence === 'number' ? { previousSequence: value.previousSequence } : {}),
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function memberAuthorization(value: unknown): FleetPanelMemberAuthorization {
+  const container = asRecord(value)
+  const authorization = asRecord(container?.authorization ?? value)
+  const assignment = asRecord(authorization?.assignment)
+  const effective = asRecord(authorization?.effective)
+  if (authorization === undefined || assignment === undefined || effective === undefined
+    || !Array.isArray(authorization.groups)) {
+    throw new Error('Fleet 返回了无效的成员权限配置')
+  }
+  const groups = authorization.groups.flatMap((candidate): FleetPanelMemberAuthorization['groups'] => {
+    const group = asRecord(candidate)
+    const id = string(group?.id)
+    const name = string(group?.name)
+    if (id === undefined || name === undefined) return []
+    return [{
+      id,
+      name,
+      parents: stringList(group?.parents),
+      preset: group?.preset === true,
+      ...(group?.op === true ? { op: true } : {}),
+    }]
+  })
+  return {
+    groups,
+    selectedGroups: stringList(assignment.groups),
+    effectiveActions: stringList(effective.actions),
+    effectiveToolGroups: stringList(effective.toolGroups),
+    op: effective.op === true,
+    configured: authorization.configured === true,
   }
 }
 
@@ -231,8 +282,9 @@ function formatBytes(size: number | undefined): string | undefined {
 
 function activityKind(type: string): FleetPanelActivity['kind'] | undefined {
   if (type === 'coordination.message') return 'message'
-  if (type.startsWith('resource.')) return 'resource'
-  if (type === 'coordination.vote' || type.startsWith('work_') || type === 'team_status') return 'decision'
+  if (type.startsWith('resource.') || type.startsWith('workspace.')) return 'resource'
+  if (type === 'coordination.vote' || type.startsWith('work_') || type === 'team_status'
+    || type.startsWith('task.') || type.startsWith('schedule.') || type.startsWith('calendar.')) return 'decision'
   if (type.startsWith('member_') || type.startsWith('assistant_')) return 'member'
   return undefined
 }
@@ -250,10 +302,6 @@ function stateEventKey(event: WireEvent): string | undefined {
     const id = string(nestedRecord(event.data, 'resource')?.id)
     return id === undefined ? undefined : `resource:${id}`
   }
-  if (event.type.startsWith('resource.document_')) {
-    const id = string(nestedRecord(event.data, 'document')?.id)
-    return id === undefined ? undefined : `document:${id}`
-  }
   if (event.type === 'workspace.assigned') {
     const member = string(asRecord(event.data)?.member)
     return member === undefined ? undefined : `workspace:${member}`
@@ -266,13 +314,17 @@ function stateEventKey(event: WireEvent): string | undefined {
     const member = string(asRecord(event.data)?.member)
     return member === undefined ? undefined : `member-status:${member}`
   }
+  if (event.type === 'member_session_rotated') {
+    const previous = string(asRecord(event.data)?.previousSessionId)
+    return previous === undefined ? undefined : `member-session:${previous}`
+  }
   return undefined
 }
 
 function receiptMessageId(event: WireEvent): string | undefined {
   if (event.type !== 'coordination.inbox') return undefined
   const data = asRecord(event.data)
-  return data?.type === 'inbox' && data.action === 'acknowledged'
+  return data?.type === 'inbox' && (data.action === 'delivered' || data.action === 'acknowledged')
     ? string(data.messageId)
     : undefined
 }
@@ -320,6 +372,13 @@ function traceProjection(value: unknown): WireTraceProjection {
   return {
     events: value.events as unknown as readonly WireEvent[],
     hasMore: value.hasMore,
+    ...(isRecord(value.previous)
+      && typeof value.previous.segment === 'number'
+      && typeof value.previous.beforeSeq === 'number'
+      ? { previous: { segment: value.previous.segment, beforeSeq: value.previous.beforeSeq } }
+      : {}),
+    ...(typeof value.targetSessionId === 'string' ? { targetSessionId: value.targetSessionId } : {}),
+    ...(typeof value.targetSequence === 'number' ? { targetSequence: value.targetSequence } : {}),
   }
 }
 
@@ -392,6 +451,24 @@ function runDirectorySignature(runs: readonly WireRun[]): string {
   ]))
 }
 
+function activityAction(value: unknown): string {
+  const action = string(value)
+  return action === undefined ? '更新' : ({
+    created: '创建',
+    updated: '更新',
+    commented: '评论',
+    progressed: '更新进度',
+    completed: '完成',
+    reopened: '重新打开',
+    due: '到期',
+    triggered: '触发',
+    cancelled: '取消',
+    rsvp: '回复',
+    started: '开始',
+    closed: '结束',
+  } as Readonly<Record<string, string>>)[action] ?? action
+}
+
 function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, FleetPanelMember>): string {
   const data = asRecord(event.data)
   if (event.type === 'member_status.updated') {
@@ -411,9 +488,32 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
     const resource = nestedRecord(event.data, 'resource')
     return `添加了共享资源 ${string(resource?.label) ?? basename(string(resource?.path) ?? '文件')}`
   }
+  if (event.type === 'resource.resource_revised') {
+    const revision = nestedRecord(event.data, 'revision')
+    return `更新了共享资源 ${string(revision?.resourceId) ?? '文件'}`
+  }
   if (event.type.startsWith('resource.document_')) {
     const document = nestedRecord(event.data, 'document')
     return `更新了团队文档 ${string(document?.title) ?? string(document?.name) ?? '文档'}`
+  }
+  if (event.type.startsWith('workspace.')) {
+    const workspace = nestedRecord(event.data, 'workspace')
+    const member = string(data?.member)
+    if (event.type === 'workspace.assigned') return `更新了 ${member ?? '团队成员'} 的工作区挂载`
+    if (event.type === 'workspace.detached') return `移除了工作区 ${string(workspace?.name) ?? string(data?.workspaceId) ?? ''}`.trim()
+    return `挂载了工作区 ${string(workspace?.name) ?? string(workspace?.path) ?? ''}`.trim()
+  }
+  if (event.type.startsWith('task.')) {
+    const task = nestedRecord(event.data, 'task')
+    return `任务已${activityAction(data?.action)}：${string(task?.title) ?? string(task?.id) ?? '未命名任务'}`
+  }
+  if (event.type.startsWith('schedule.')) {
+    const task = nestedRecord(event.data, 'task')
+    return `计划已${activityAction(data?.action)}：${string(task?.title) ?? string(task?.id) ?? '未命名计划'}`
+  }
+  if (event.type.startsWith('calendar.')) {
+    const calendar = nestedRecord(event.data, 'event')
+    return `日程已${activityAction(data?.action)}：${string(calendar?.title) ?? string(calendar?.id) ?? '未命名日程'}`
   }
   if (event.type === 'coordination.vote') {
     const vote = nestedRecord(event.data, 'vote')
@@ -431,13 +531,19 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
 
 function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const views = new Map(cache.memberViews.map(view => [view.id, view]))
-  const statusTexts = new Map<string, string>()
+  const statusTexts = new Map<string, { readonly message: string; readonly updatedAt?: string }>()
   for (const event of cache.events) {
     if (event.type === 'member_status.updated') {
       const status = nestedRecord(event.data, 'status')
       const member = string(status?.member)
       const message = string(status?.message)
-      if (member !== undefined && message !== undefined && message.length > 0) statusTexts.set(member, message)
+      const updatedAt = string(status?.updatedAt)
+      if (member !== undefined && message !== undefined && message.length > 0) {
+        statusTexts.set(member, {
+          message,
+          ...(updatedAt === undefined ? {} : { updatedAt }),
+        })
+      }
     } else if (event.type === 'member_status.cleared') {
       const member = string(asRecord(event.data)?.member)
       if (member !== undefined) statusTexts.delete(member)
@@ -447,7 +553,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     const view = views.get(member.name)
     const provider = member.provider ?? view?.provider
     const model = member.model ?? view?.model
-    const statusText = statusTexts.get(member.name)
+    const memberStatus = statusTexts.get(member.name)
     return {
       id: member.name,
       name: member.displayName ?? view?.name ?? member.name,
@@ -456,16 +562,47 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       color: member.color ?? view?.color ?? color(`${cache.run.id}:${member.name}`),
       presence: presence(member.status),
       runtimeStatus: member.status ?? 'unknown',
-      ...(statusText === undefined ? {} : { statusText }),
+      ...(memberStatus === undefined ? {} : {
+        statusText: memberStatus.message,
+        ...(memberStatus.updatedAt === undefined ? {} : { statusUpdatedAt: memberStatus.updatedAt }),
+      }),
       ...(provider === undefined ? {} : { provider }),
       ...(model === undefined ? {} : { model }),
       sessionId: member.sessionId,
+    }
+  })
+  const assistants: FleetPanelMember[] = (cache.run.assistants ?? []).map(assistant => {
+    const id = assistant.view?.id ?? `assistant-${assistant.sessionId}`
+    const role = assistant.view?.role ?? 'Team Assistant'
+    return {
+      id,
+      name: assistant.view?.name ?? id,
+      role,
+      responsibility: assistant.view?.responsibility ?? role,
+      color: assistant.view?.color ?? color(`${cache.run.id}:${id}`),
+      presence: presence(assistant.status ?? 'offline'),
+      runtimeStatus: assistant.status ?? 'offline',
+      ...(assistant.view?.provider === undefined ? {} : { provider: assistant.view.provider }),
+      ...(assistant.view?.model === undefined ? {} : { model: assistant.view.model }),
+      sessionId: assistant.sessionId,
+      operator: true,
     }
   })
   const membersBySession = new Map(cache.run.members.flatMap((member, index) => {
     const projected = members[index]
     return projected === undefined ? [] : [[member.sessionId, projected] as const]
   }))
+  for (const event of cache.events) {
+    if (event.type !== 'member_session_rotated') continue
+    const data = asRecord(event.data)
+    const memberId = string(data?.member)
+    const projected = memberId === undefined ? undefined : members.find(member => member.id === memberId)
+    if (projected === undefined) continue
+    const previousSessionId = string(data?.previousSessionId)
+    const sessionId = string(data?.sessionId)
+    if (previousSessionId !== undefined) membersBySession.set(previousSessionId, projected)
+    if (sessionId !== undefined) membersBySession.set(sessionId, projected)
+  }
   const assistantsBySession = new Map((cache.run.assistants ?? []).map(assistant => [assistant.sessionId, assistant]))
   const channels = new Map<string, FleetPanelConversation>()
   const meetings = new Map<string, FleetPanelConversation>()
@@ -476,9 +613,25 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const rawMessages: Array<{ readonly event: WireEvent; readonly message: Readonly<Record<string, unknown>> }> = []
   const channelVisibleSessions = new Map<string, readonly string[]>()
   const meetingParticipants = new Map<string, readonly string[]>()
-  const acknowledgedSessionsByMessage = new Map<string, Set<string>>()
+  const acknowledgedMembersByMessage = new Map<string, Set<string>>()
+  const contextSourcesByMessage = new Map<string, Map<string, FleetChatReceiptSource>>()
 
   for (const event of cache.events) {
+    if (event.type === 'workspace.assigned') {
+      const data = asRecord(event.data)
+      const member = string(data?.member)
+      const assigned = Array.isArray(data?.workspaces) ? data.workspaces.flatMap(candidate => {
+        const workspace = asRecord(candidate)
+        const name = string(workspace?.name)
+        const path = string(workspace?.path)
+        const access = string(workspace?.access)
+        return name === undefined || path === undefined || (access !== 'read' && access !== 'write')
+          ? []
+          : [{ name, path, access: access as 'read' | 'write' }]
+      }) : []
+      if (member !== undefined) memberWorkspaces.set(member, assigned)
+      continue
+    }
     if (event.type === 'coordination.channel') {
       const channel = nestedRecord(event.data, 'channel')
       const id = string(channel?.id)
@@ -537,10 +690,20 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const data = asRecord(event.data)
       const messageId = string(data?.messageId)
       const agentId = string(data?.agentId)
-      if (data?.type !== 'inbox' || data.action !== 'acknowledged' || messageId === undefined || agentId === undefined) continue
-      const readers = acknowledgedSessionsByMessage.get(messageId) ?? new Set<string>()
-      readers.add(agentId)
-      acknowledgedSessionsByMessage.set(messageId, readers)
+      if (data?.type !== 'inbox' || messageId === undefined || agentId === undefined) continue
+      const member = membersBySession.get(agentId)
+      if (member === undefined) continue
+      if (data.action === 'delivered') {
+        const contextMessageId = string(data.contextMessageId)
+        if (contextMessageId === undefined) continue
+        const sources = contextSourcesByMessage.get(messageId) ?? new Map<string, FleetChatReceiptSource>()
+        sources.set(member.id, { memberId: member.id, sessionId: agentId, contextMessageId })
+        contextSourcesByMessage.set(messageId, sources)
+      } else if (data.action === 'acknowledged') {
+        const readers = acknowledgedMembersByMessage.get(messageId) ?? new Set<string>()
+        readers.add(member.id)
+        acknowledgedMembersByMessage.set(messageId, readers)
+      }
       continue
     }
     if (event.type === 'resource.resource_added') {
@@ -621,12 +784,20 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     if (target.startsWith('@')) {
       const recipient = target.slice(1)
       const participants = [...new Set([from, recipient])]
-      const formal = participants.filter(participant => membersBySession.has(participant))
+      const formal = [...new Map(participants.flatMap(participant => {
+        const member = membersBySession.get(participant)
+        return member === undefined ? [] : [[member.id, member] as const]
+      })).values()]
       const fleetUsers = participants.filter(isFleetUser)
       if (participants.length === 2 && formal.length === 1 && fleetUsers.length === 1) {
-        conversationId = `@${formal[0]}`
+        const currentSession = cache.run.members.find(member => member.name === formal[0]?.id)?.sessionId
+        conversationId = `@${currentSession ?? recipient}`
       } else {
-        conversationId = `dm:${participants.toSorted().join(':')}`
+        const stableParticipants = participants.map(participant => {
+          const member = membersBySession.get(participant)
+          return member === undefined ? participant : `member:${member.id}`
+        })
+        conversationId = `dm:${stableParticipants.toSorted().join(':')}`
         if (!channels.has(conversationId)) {
           const labels = participants.map(participant => senderFace(participant).name)
           const participantIds = participants.flatMap(participant => {
@@ -642,7 +813,12 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
           })
         }
       }
-      directParticipants.set(conversationId, participants)
+      directParticipants.set(conversationId, participants.map(participant => {
+        const member = membersBySession.get(participant)
+        return member === undefined
+          ? participant
+          : cache.run.members.find(candidate => candidate.name === member.id)?.sessionId ?? participant
+      }))
       if (conversationId.startsWith('dm:')) privateMessageSequences.add(event.sequence)
     } else if (target.startsWith('#') && !channels.has(target)) {
       channels.set(target, { id: target, kind: 'channel', name: target.slice(1), topic: '团队频道' })
@@ -671,9 +847,15 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       })
     }
     const sender = senderFace(from, string(message.fromName))
+    const senderMember = membersBySession.get(from)
+    const directRecipientMember = target.startsWith('@') ? membersBySession.get(target.slice(1)) : undefined
     const visibleSessions = cache.run.members.flatMap(runMember => {
-      if (runMember.sessionId === from) return []
-      if (target.startsWith('@')) return target.slice(1) === runMember.sessionId ? [runMember.sessionId] : []
+      if (runMember.sessionId === from || senderMember?.id === runMember.name) return []
+      if (target.startsWith('@')) {
+        return target.slice(1) === runMember.sessionId || directRecipientMember?.id === runMember.name
+          ? [runMember.sessionId]
+          : []
+      }
       if (target.startsWith('meeting:')) {
         return meetingParticipants.get(target)?.includes(runMember.sessionId) === true ? [runMember.sessionId] : []
       }
@@ -684,18 +866,24 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const contacts = views.get(runMember.name)?.contacts?.channels
       return contacts === '*' || contacts?.includes(channel) === true ? [runMember.sessionId] : []
     })
-    const readSessions = acknowledgedSessionsByMessage.get(id) ?? new Set<string>()
+    const readMembers = acknowledgedMembersByMessage.get(id) ?? new Set<string>()
     const visibleMemberIds = visibleSessions.flatMap(sessionId => {
       const member = membersBySession.get(sessionId)
       return member === undefined ? [] : [member.id]
     })
     const readMemberIds = visibleSessions.flatMap(sessionId => {
       const member = membersBySession.get(sessionId)
-      return member !== undefined && readSessions.has(sessionId) ? [member.id] : []
+      return member !== undefined && readMembers.has(member.id) ? [member.id] : []
     })
     const readMemberIdSet = new Set(readMemberIds)
+    const sources = visibleSessions.flatMap(sessionId => {
+      const member = membersBySession.get(sessionId)
+      const source = member === undefined ? undefined : contextSourcesByMessage.get(id)?.get(member.id)
+      return source === undefined ? [] : [source]
+    })
     return [{
       id,
+      sequence: event.sequence,
       conversationId,
       senderId: sender.id,
       sender,
@@ -706,6 +894,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
           visibleMemberIds,
           readMemberIds,
           unreadMemberIds: visibleMemberIds.filter(memberId => !readMemberIdSet.has(memberId)),
+          ...(sources.length === 0 ? {} : { sources }),
         },
       }),
     }]
@@ -751,6 +940,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     ...(cache.run.runtimeState === undefined ? {} : { runtimeState: cache.run.runtimeState }),
     conversations,
     members: projectedMembers,
+    assistants,
     messages,
     resources: [...resources.values()],
     workspaces: [...workspacesByPath.values()],
@@ -780,16 +970,16 @@ function directory(runs: readonly WireRun[]): FleetPanelTeamDirectory {
 
 export interface FleetWebPanelSource extends FleetPanelSource {
   refresh(): Promise<void>
+  invalidate(): Promise<void>
   dispose(): void
 }
 
-/** Pull projection used until Fleet exposes a client event stream. Polling only runs while UI subscribers exist. */
+/** Cursor-based projection refreshed by the Fleet browser-peer notification channel. */
 export function createFleetWebPanelSource(
   getClient: (signal?: AbortSignal) => Promise<FleetWebClient>,
 ): FleetWebPanelSource {
   let snapshot: FleetPanelSnapshot = { directory: EMPTY_DIRECTORY, connection: { status: 'loading' } }
   let selectedTeamId: string | undefined
-  let timer: ReturnType<typeof setTimeout> | undefined
   let refreshing: Promise<void> | undefined
   let refreshAgain = false
   let disposed = false
@@ -817,13 +1007,6 @@ export function createFleetWebPanelSource(
     signature = nextSignature
     snapshot = next
     emit()
-  }
-  const schedule = (): void => {
-    if (disposed || listeners.size === 0 || timer !== undefined) return
-    timer = setTimeout(() => {
-      timer = undefined
-      void refresh()
-    }, POLL_INTERVAL_MS)
   }
   const loadProjection = async (client: FleetWebClient, teamId: string): Promise<ProjectionCache> => {
     const current = projections.get(teamId)
@@ -905,8 +1088,6 @@ export function createFleetWebPanelSource(
         if (refreshAgain) {
           refreshAgain = false
           void refresh()
-        } else {
-          schedule()
         }
       })
     return refreshing
@@ -919,12 +1100,9 @@ export function createFleetWebPanelSource(
       if (listeners.size === 1) void refresh()
       return () => {
         listeners.delete(listener)
-        if (listeners.size === 0 && timer !== undefined) {
-          clearTimeout(timer)
-          timer = undefined
-        }
       }
     },
+    invalidate: () => listeners.size > 0 ? refresh() : Promise.resolve(),
     selectTeam: teamId => {
       if (teamId === selectedTeamId) return
       selectedTeamId = teamId
@@ -945,13 +1123,18 @@ export function createFleetWebPanelSource(
       }, `loading:${dataSignature}`)
       return refresh()
     },
-    loadMemberTrace: async (teamId, memberId, signal) => {
+    loadMemberTrace: async (teamId, memberId, signal, request) => {
       const client = await getClient(signal)
       const page = traceProjection(unwrap(await client.project({
         teamId,
         view: 'trace',
         member: memberId,
-        tail: true,
+        ...(request?.source === undefined
+          ? { tail: true, ...(request?.cursor === undefined ? {} : { archiveCursor: request.cursor }) }
+          : {
+              sourceSessionId: request.source.sessionId,
+              contextMessageId: request.source.contextMessageId,
+            }),
         afterSequence: -1,
         limit: MAX_MEMBER_TRACE_EVENTS,
       }, signal)))
@@ -961,12 +1144,56 @@ export function createFleetWebPanelSource(
       return {
         events: recent.map(event => ({
           sequence: event.sequence,
+          ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
           createdAt: event.createdAt,
           type: event.type,
           data: typeof event.data === 'string' ? event.data : JSON.stringify(event.data),
+          target: page.targetSequence === event.sequence
+            && (page.targetSessionId === undefined || page.targetSessionId === event.sessionId),
         })),
         truncated: page.hasMore || page.events.length > recent.length,
+        ...(page.previous === undefined ? {} : { previous: page.previous }),
       } satisfies FleetPanelMemberTrace
+    },
+    loadConversationMessages: async (teamId, conversationId, beforeSequence, signal) => {
+      const client = await getClient(signal ?? lifetime.signal)
+      const page = wireProjection(unwrap(await client.project({
+        teamId,
+        view: 'conversation',
+        conversation: conversationId,
+        beforeSequence,
+        limit: 100,
+      }, signal ?? lifetime.signal)))
+      const current = projections.get(teamId) ?? await loadProjection(client, teamId)
+      const known = new Set<number>()
+      const events = [...current.events, ...page.events].filter(event => {
+        if (known.has(event.sequence)) return false
+        known.add(event.sequence)
+        return true
+      }).toSorted((left, right) => left.sequence - right.sequence)
+      const pageMessageSequences = new Set(page.events
+        .filter(event => event.type === 'coordination.message')
+        .map(event => event.sequence))
+      const projected = projectTeam({
+        run: page.run,
+        memberViews: page.memberViews,
+        events,
+        lastSequence: current.lastSequence,
+      })
+      return {
+        messages: projected.messages.filter(message => message.sequence !== undefined
+          && pageMessageSequences.has(message.sequence)),
+        hasMore: page.hasMore,
+        ...(page.previousSequence === undefined ? {} : { previousSequence: page.previousSequence }),
+      }
+    },
+    loadMemberAuthorization: async (teamId, memberId, signal) => {
+      const client = await getClient(signal ?? lifetime.signal)
+      return memberAuthorization(unwrap(await client.project({
+        teamId,
+        view: 'member',
+        member: memberId,
+      }, signal ?? lifetime.signal)))
     },
     loadResource: async (teamId, resourceId, signal, revisionId) => {
       const client = await getClient(signal ?? lifetime.signal)
@@ -1119,13 +1346,23 @@ export function createFleetWebPanelSource(
       }, lifetime.signal))
       await refresh()
     },
+    updateMemberPermissions: async input => {
+      const client = await getClient(lifetime.signal)
+      const value = unwrap(await client.member({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        action: input.reset === true ? 'reset_permissions' : 'permissions',
+        member: input.memberId,
+        ...(input.groups === undefined ? {} : { groups: input.groups }),
+      }, lifetime.signal))
+      await refresh()
+      return memberAuthorization(value)
+    },
     refresh,
     dispose: () => {
       if (disposed) return
       disposed = true
       lifetime.abort(new Error('Fleet panel source disposed'))
-      if (timer !== undefined) clearTimeout(timer)
-      timer = undefined
       listeners.clear()
     },
   }

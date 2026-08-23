@@ -2,7 +2,7 @@
 
 const { component, element } = require('dsh-harmony-react')
 
-const DSH_CLIENT_VERSION = '0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0'
+const DSH_CLIENT_VERSION = '^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0'
 
 function replaceExactly(context, before, after) {
   const first = context.source.indexOf(before)
@@ -126,8 +126,8 @@ module.exports = [
     },
   }),
   component({
-    id: 'fleet-meta-assistant-empty-session-view',
-    description: 'Keeps the native Session view region mounted for an established but message-free Fleet Help Session.',
+    id: 'fleet-global-empty-session-view',
+    description: 'Makes the same global Fleet panel reachable from any Session, including an otherwise blank new Session.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
       version: DSH_CLIENT_VERSION,
@@ -139,7 +139,7 @@ module.exports = [
       kind: 'decorate',
       with: {
         module: 'dsh-agent-fleet',
-        export: 'withFleetMetaConversationRoot',
+        export: 'withFleetGlobalConversationView',
       },
     },
   }),
@@ -221,8 +221,8 @@ module.exports = [
     },
   }),
   component({
-    id: 'fleet-meta-assistant-session-header',
-    description: 'Keeps the native Session title and view tabs visible for an empty Fleet Help conversation.',
+    id: 'fleet-global-session-header',
+    description: 'Keeps global view tabs reachable while the native new-Session Hero remains blank.',
     target: {
       package: '@deepseek-ai/dsh-client-ui-conversation',
       version: DSH_CLIENT_VERSION,
@@ -234,7 +234,7 @@ module.exports = [
       kind: 'decorate',
       with: {
         module: 'dsh-agent-fleet',
-        export: 'withFleetMetaConversationRoot',
+        export: 'withFleetGlobalConversationHeader',
       },
     },
   }),

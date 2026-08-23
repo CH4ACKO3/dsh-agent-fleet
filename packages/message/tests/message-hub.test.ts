@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 import { MessageHub } from '../src/hub.js'
 import { installMessageTools } from '../src/index.js'
@@ -112,8 +113,21 @@ describe('MessageHub', () => {
       text: 'Please confirm the interface boundary.',
       delivery: 'quiet',
     })
+    expect(events).toContainEqual({
+      type: 'inbox',
+      action: 'delivered',
+      agentId: reviewer.id,
+      messageId: direct.messageId,
+      contextMessageId: reviewer.inbox.nextStep[0]?.id,
+    })
     expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'inbox', agentId: reviewer.id, messageId: direct.messageId,
+      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: direct.messageId,
+    }))
+    const restored = setup()
+    restored.hub.restore(events)
+    expect(restored.hub.inbox(restored.reviewer)).toContainEqual(expect.objectContaining({
+      acknowledged: false,
+      message: expect.objectContaining({ id: direct.messageId }),
     }))
 
     hub.send(reviewer, {
@@ -131,11 +145,85 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'inbox', agentId: qa.id, messageId: channel.messageId,
+      type: 'inbox', action: 'acknowledged', agentId: qa.id, messageId: channel.messageId,
     }))
     hub.read(qa, { conversation: '#general' })
     expect(events).toContainEqual({
       type: 'inbox', action: 'acknowledged', agentId: qa.id, messageId: channel.messageId,
+    })
+  })
+
+  it('acknowledges an entered delivery only after one complete model output', () => {
+    const { hub, lead, reviewer } = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    hub.onEvent(event => { events.push(event) })
+    const sent = hub.send(lead, {
+      to: '@reviewer',
+      text: 'Check this before continuing.',
+      delivery: 'quiet',
+    })
+    const context = reviewer.inbox.nextStep[0]
+    if (context === undefined) throw new Error('expected delivered context')
+    const entered = {
+      type: 'user/message', seq: 1, time: 1, data: context,
+    } as SessionEvent
+    hub.observeSessionEvent(reviewer.id, entered, [entered])
+    hub.observeSessionEvent(reviewer.id, {
+      type: 'assistant/chunk', seq: 2, time: 2,
+      data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'checking' } },
+    } as SessionEvent, [entered])
+    hub.observeSessionEvent(reviewer.id, {
+      type: 'assistant/message', seq: 3, time: 3,
+      data: {
+        turn: 1,
+        step: 1,
+        interrupted: true,
+        message: { id: 'partial', role: 'assistant', content: [{ type: 'reasoning', text: 'checking' }], source: { kind: 'model', provider: 'test', model: 'test' } },
+      },
+    } as SessionEvent, [entered])
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: sent.messageId,
+    }))
+
+    const complete = {
+      type: 'tool/call', seq: 4, time: 4,
+      data: { turn: 1, step: 1, callId: 'call-1', name: 'fleet_messages', arguments: '{}' },
+    } as SessionEvent
+    hub.observeSessionEvent(reviewer.id, complete, [entered, complete])
+    expect(events).toContainEqual({
+      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: sent.messageId,
+    })
+  })
+
+  it('restores delivery sources and acknowledges complete reasoning after restart', () => {
+    const first = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    first.hub.onEvent(event => { events.push(event) })
+    const sent = first.hub.send(first.lead, {
+      to: '@reviewer',
+      text: 'Resume this review after restart.',
+      delivery: 'quiet',
+    })
+    const context = first.reviewer.inbox.nextStep[0]
+    if (context === undefined) throw new Error('expected delivered context')
+    const entered = { type: 'user/message', seq: 7, time: 7, data: context } as SessionEvent
+    const complete = {
+      type: 'assistant/message', seq: 8, time: 8,
+      data: {
+        turn: 2,
+        step: 1,
+        message: { id: 'reasoned', role: 'assistant', content: [{ type: 'reasoning', text: 'Reviewed.' }], source: { kind: 'model', provider: 'test', model: 'test' } },
+      },
+    } as SessionEvent
+    const second = setup()
+    const restoredEvents = [...events]
+    second.hub.restore(restoredEvents)
+    second.hub.onEvent(event => { restoredEvents.push(event) })
+
+    second.hub.observeSessionEvent(second.reviewer.id, complete, [entered, complete])
+
+    expect(restoredEvents).toContainEqual({
+      type: 'inbox', action: 'acknowledged', agentId: second.reviewer.id, messageId: sent.messageId,
     })
   })
 
@@ -710,6 +798,31 @@ describe('MessageHub', () => {
       totalLength: 5_000,
       hasMore: false,
     })
+  })
+
+  it('checks current action authorization when a previously visible tool executes', async () => {
+    const { hub, lead } = setup()
+    const registered: Array<{
+      readonly name: string
+      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
+    }> = []
+    const allowed = new Set(['message.read', 'message.post'])
+    installMessageTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+    } as never, hub, {
+      coordination: false,
+      authorize: (_agentId, action) => allowed.has(action),
+    })
+    const send = registered.find(candidate => candidate.name === 'fleet_send')
+    if (send === undefined) throw new Error('expected fleet_send')
+
+    await expect(send.execute({ to: '#general', message: 'Allowed once.' }, { agent: lead }))
+      .resolves.toMatchObject({ recipients: expect.any(Number) })
+    allowed.delete('message.post')
+    await expect(async () => send.execute(
+      { to: '#general', message: 'Must now be denied.' },
+      { agent: lead },
+    )).rejects.toThrow('not authorized for message.post')
   })
 
   it('excludes connected observers that are not default voters', () => {

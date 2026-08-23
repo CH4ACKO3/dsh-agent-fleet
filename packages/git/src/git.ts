@@ -40,6 +40,29 @@ export interface FleetGitCommit {
   readonly decorations: readonly string[]
 }
 
+export interface FleetGitCommitFile {
+  readonly path: string
+  readonly oldPath?: string
+  readonly status: string
+  readonly additions?: number
+  readonly deletions?: number
+  readonly binary: boolean
+}
+
+export interface FleetGitCommitDetails extends FleetGitCommit {
+  readonly committerName: string
+  readonly committerEmail: string
+  readonly committedAt: string
+  readonly body: string
+  readonly files: readonly FleetGitCommitFile[]
+}
+
+export interface FleetGitStash {
+  readonly ref: string
+  readonly hash: string
+  readonly subject: string
+}
+
 export interface FleetGitDiff {
   readonly path?: string
   readonly staged: boolean
@@ -51,6 +74,8 @@ export interface FleetGitSnapshot {
   readonly status: FleetGitStatus
   readonly branches: readonly FleetGitBranch[]
   readonly commits: readonly FleetGitCommit[]
+  readonly stashes?: readonly FleetGitStash[]
+  readonly attributions?: Readonly<Record<string, string>>
 }
 
 export interface FleetGitFileDelta {
@@ -152,6 +177,13 @@ export interface FleetGitEvent {
   readonly branch: string
 }
 
+export class FleetGitNotRepositoryError extends Error {
+  constructor(readonly path: string) {
+    super(`Fleet workspace is not a Git repository: ${path}`)
+    this.name = 'FleetGitNotRepositoryError'
+  }
+}
+
 export interface FleetGitAuthorization {
   require(input: {
     readonly teamId: string
@@ -218,6 +250,13 @@ function gitBoundedOutput(cwd: string, args: readonly string[], maxBytes: number
 
 function gitSucceeds(cwd: string, args: readonly string[]): boolean {
   return spawnSync('git', ['-C', cwd, ...args], { stdio: 'ignore' }).status === 0
+}
+
+function reflogCreatesCommit(subject: string): boolean {
+  if (/^commit(?: \([^)]*\))?:/u.test(subject)) return true
+  if (/^(?:am|cherry-pick|revert):/u.test(subject)) return true
+  if (/^rebase \((?:edit|fixup|pick|reword|squash)\):/u.test(subject)) return true
+  return /^(?:merge|pull)(?: .*?)?:/u.test(subject) && !/Fast-forward/iu.test(subject)
 }
 
 function inside(root: string, path: string): boolean {
@@ -314,6 +353,60 @@ function parseNumstat(output: string): FleetGitFileDelta[] {
   })
 }
 
+function parseStashes(output: string): FleetGitStash[] {
+  const fields = output.split('\0')
+  const stashes: FleetGitStash[] = []
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const ref = fields[index] ?? ''
+    const hash = fields[index + 1] ?? ''
+    const subject = fields[index + 2] ?? ''
+    if (ref.length > 0 && hash.length > 0) stashes.push({ ref, hash, subject })
+  }
+  return stashes
+}
+
+function parseCommitFiles(nameStatusOutput: string, numstatOutput: string): FleetGitCommitFile[] {
+  const stats = new Map<string, { readonly additions?: number; readonly deletions?: number; readonly binary: boolean }>()
+  const numstatRecords = numstatOutput.split('\0')
+  for (let index = 0; index < numstatRecords.length; index += 1) {
+    const record = numstatRecords[index] ?? ''
+    if (record.length === 0) continue
+    const [additionsValue = '', deletionsValue = '', recordPath = ''] = record.split('\t')
+    let path = recordPath
+    if (path.length === 0) {
+      path = numstatRecords[index + 2] ?? ''
+      index += 2
+    }
+    if (path.length === 0) continue
+    const binary = additionsValue === '-' || deletionsValue === '-'
+    stats.set(path, {
+      ...(binary ? {} : { additions: Number(additionsValue), deletions: Number(deletionsValue) }),
+      binary,
+    })
+  }
+
+  const records = nameStatusOutput.split('\0')
+  const files: FleetGitCommitFile[] = []
+  for (let index = 0; index < records.length;) {
+    const statusValue = records[index++] ?? ''
+    if (statusValue.length === 0) continue
+    const firstPath = records[index++] ?? ''
+    const renamed = statusValue.startsWith('R') || statusValue.startsWith('C')
+    const path = renamed ? records[index++] ?? '' : firstPath
+    if (path.length === 0) continue
+    const stat = stats.get(path)
+    files.push({
+      path,
+      ...(renamed ? { oldPath: firstPath } : {}),
+      status: statusValue[0] ?? statusValue,
+      ...(stat?.additions === undefined ? {} : { additions: stat.additions }),
+      ...(stat?.deletions === undefined ? {} : { deletions: stat.deletions }),
+      binary: stat?.binary ?? false,
+    })
+  }
+  return files
+}
+
 export class FleetGit {
   constructor(
     readonly projectRoot: string,
@@ -325,7 +418,7 @@ export class FleetGit {
 
   get root(): string {
     const root = git(this.projectRoot, ['rev-parse', '--show-toplevel'], true)
-    if (root.length === 0) throw new Error(`Fleet project is not inside a Git repository: ${this.projectRoot}`)
+    if (root.length === 0) throw new FleetGitNotRepositoryError(this.projectRoot)
     return root
   }
 
@@ -421,11 +514,12 @@ export class FleetGit {
     ]), current)
   }
 
-  log(cwd = this.projectRoot, limit = 200): FleetGitCommit[] {
+  log(cwd = this.projectRoot, limit = 200, additionalHeads: readonly string[] = []): FleetGitCommit[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error('Git log limit must be from 1 through 500')
     return parseCommits(gitOutput(cwd, [
       'log',
       '--all',
+      ...additionalHeads,
       '--topo-order',
       '--date-order',
       `--max-count=${String(limit)}`,
@@ -563,6 +657,38 @@ export class FleetGit {
     }
   }
 
+  stashes(cwd = this.projectRoot): FleetGitStash[] {
+    return parseStashes(gitOutput(cwd, ['stash', 'list', '--format=%gd%x00%H%x00%gs', '-z']))
+  }
+
+  commit(cwd = this.projectRoot, hash: string): FleetGitCommitDetails {
+    if (!/^[0-9a-f]{7,64}$/iu.test(hash)) throw new Error('Git commit hash is invalid')
+    const metadata = gitOutput(cwd, [
+      'show', '-s', '--no-show-signature',
+      '--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b',
+      hash,
+    ]).trimEnd()
+    const [fullHash = '', parents = '', authorName = '', authorEmail = '', authoredAt = '', committerName = '', committerEmail = '', committedAt = '', decorations = '', subject = '', body = ''] = metadata.split('\x1f')
+    const nameStatus = gitOutput(cwd, ['diff-tree', '--root', '--no-commit-id', '--name-status', '-z', '-r', '--find-renames', fullHash])
+    const numstat = gitOutput(cwd, ['diff-tree', '--root', '--no-commit-id', '--numstat', '-z', '-r', '--find-renames', fullHash])
+    return {
+      hash: fullHash,
+      parents: parents.length === 0 ? [] : parents.split(' '),
+      authorName,
+      authorEmail,
+      authoredAt,
+      committerName,
+      committerEmail,
+      committedAt,
+      subject,
+      body: body.trim(),
+      decorations: decorations.length === 0
+        ? []
+        : decorations.split(', ').map(value => value.replace(/^HEAD -> /, '')).filter(Boolean),
+      files: parseCommitFiles(nameStatus, numstat),
+    }
+  }
+
   diff(cwd = this.projectRoot, path?: string, staged = false, maxBytes = 512 * 1024): FleetGitDiff {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 8 * 1024 * 1024) {
       throw new Error('Git diff maxBytes must be from 1 through 8388608')
@@ -580,7 +706,39 @@ export class FleetGit {
   }
 
   snapshot(cwd = this.projectRoot, limit = 200): FleetGitSnapshot {
-    return { status: this.status(cwd), branches: this.branches(cwd), commits: this.log(cwd, limit) }
+    void this.root
+    const stashes = this.stashes(cwd)
+    const commits = this.log(cwd, limit, stashes.map(stash => stash.hash)).map(commit => {
+      const stashRefs = stashes.filter(stash => stash.hash === commit.hash).map(stash => stash.ref)
+      if (stashRefs.length === 0) return commit
+      return {
+        ...commit,
+        decorations: [...commit.decorations.filter(decoration => decoration !== 'refs/stash'), ...stashRefs],
+      }
+    })
+    return { status: this.status(cwd), branches: this.branches(cwd), commits, stashes }
+  }
+
+  fetch(cwd = this.projectRoot): void {
+    void this.root
+    git(cwd, ['fetch', '--all', '--prune'])
+  }
+
+  reflogMarker(cwd: string): string | undefined {
+    return git(cwd, ['reflog', 'show', '-n', '1', '--format=%H%x00%gs%x00%ct'], true) || undefined
+  }
+
+  attributedCommitsSinceReflog(cwd: string, marker: string | undefined): string[] {
+    const commits: string[] = []
+    const seen = new Set<string>()
+    for (const record of git(cwd, ['reflog', 'show', '-n', '4096', '--format=%H%x00%gs%x00%ct'], true).split('\n')) {
+      if (record.length === 0 || record === marker) break
+      const [hash = '', subject = ''] = record.split('\0')
+      if (hash.length === 0 || seen.has(hash) || !reflogCreatesCommit(subject)) continue
+      seen.add(hash)
+      commits.push(hash)
+    }
+    return commits.reverse()
   }
 
   worktree(member: string): FleetGitWorktree | undefined {

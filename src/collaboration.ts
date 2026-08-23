@@ -27,12 +27,33 @@ import type { FleetMemberView } from './member-view.js'
 import type { FleetMemberToolGroup } from './member-view.js'
 import { installFleetToolDiscovery } from './tool-discovery.js'
 import type { FleetAuthorizationChange, FleetAuthorizationService } from './authorization.js'
+import {
+  FleetTaskBoard,
+  installTaskTools,
+  type FleetProjectTaskEvent,
+  type FleetTaskState,
+} from './productivity/task.js'
+import {
+  FleetScheduler,
+  installScheduleTools,
+  type FleetScheduleState,
+  type FleetScheduledTaskEvent,
+} from './productivity/schedule.js'
+import {
+  FleetCalendar,
+  installCalendarTools,
+  type FleetCalendarEventChange,
+  type FleetCalendarState,
+} from './productivity/calendar.js'
 
 export interface FleetCollaborationTeam {
   readonly id: string
   readonly messages: MessageHub
   readonly resources: FleetResources
   readonly memberStatuses: FleetMemberStatusBoard
+  readonly tasks: FleetTaskBoard
+  readonly scheduler: FleetScheduler
+  readonly calendar: FleetCalendar
   readonly memberViews: ReadonlyMap<string, FleetMemberView>
   readonly memberIdsByName: Map<string, string>
   readonly memberNamesById: Map<string, string>
@@ -50,6 +71,13 @@ export interface FleetCollaborationTeam {
   sendUserMessage(input: SendMessageInput): SendMessageResult
   installTools(ctx: Context, member: string, options?: { readonly exposeHostFleetTools?: boolean }): () => void
   refreshAccess(member?: string): void
+  activateProductivity(): void
+  pauseProductivity(): void
+  restoreProductivity(input: {
+    readonly tasks: FleetTaskState
+    readonly schedules: FleetScheduleState
+    readonly calendar: FleetCalendarState
+  }): void
   restore(input: {
     readonly coordination: readonly FleetCoordinationEvent[]
     readonly resources: Parameters<FleetResources['restoreResources']>[0]
@@ -61,26 +89,144 @@ export interface FleetCollaborationTeam {
 export interface OpenFleetCollaborationTeamInput {
   readonly id: string
   readonly memberViews: readonly FleetMemberView[]
+  readonly defaultVoters: readonly string[]
   readonly projectRoot: string
   readonly sharedDirectory: string
   readonly onCoordination: (event: FleetCoordinationEvent) => void
   readonly onResource: (event: FleetResourceEvent) => void
   readonly onMemberStatus: (event: FleetMemberStatusEvent) => void
+  readonly onTask?: (event: FleetProjectTaskEvent, state: FleetTaskState) => void
+  readonly onSchedule?: (event: FleetScheduledTaskEvent, state: FleetScheduleState) => void
+  readonly onCalendar?: (event: FleetCalendarEventChange, state: FleetCalendarState) => void
 }
 
 export class FleetCollaborationService {
   private readonly teams = new Map<string, FleetCollaborationTeam>()
+  private readonly pendingAccessRefresh = new Map<string, Set<string>>()
   private readonly stopAccess: () => void
+  private readonly stopStatus: () => void
+  private readonly stopStep: () => void
+  private readonly stopNamespaces: Array<() => void>
 
   constructor(private readonly ctx: Context, private readonly authorization: FleetAuthorizationService) {
-    this.stopAccess = authorization.onChange(change => this.refreshAccess(change))
+    this.stopNamespaces = [
+      authorization.registerNamespace({
+        namespace: 'message',
+        actions: [
+          { id: 'wakeup', description: 'Wake a Fleet participant with a follow-up message.' },
+          { id: 'interrupt', description: 'Interrupt a Fleet participant with an urgent message.' },
+        ],
+        defaultActions: ({ member }) => [
+          ...(member.toolGroups.includes('coordination') ? ['wakeup'] : []),
+          ...(member.permissions.includes('message.interrupt') ? ['interrupt'] : []),
+        ],
+      }),
+      authorization.registerNamespace({
+        namespace: 'task',
+        actions: [
+          { id: 'read', description: 'Read Team tasks.' },
+          { id: 'create', description: 'Create Team tasks.' },
+          { id: 'update', description: 'Update responsible Team tasks.' },
+          { id: 'comment', description: 'Comment on Team tasks.' },
+          { id: 'progress', description: 'Add Team task progress.' },
+          { id: 'manage', description: 'Manage any Team task.' },
+        ],
+        defaultActions: ({ member }) => member.toolGroups.includes('coordination')
+          ? ['read', 'create', 'update', 'comment', 'progress']
+          : ['read'],
+        installTools: (toolCtx, input) => installTaskTools(
+          toolCtx,
+          this.require(input.teamId).tasks,
+          (agentId, action) => this.authorizeMember(input.teamId, agentId, action),
+        ),
+      }),
+      authorization.registerNamespace({
+        namespace: 'schedule',
+        actions: [
+          { id: 'read', description: 'Read Team schedules.' },
+          { id: 'create', description: 'Create Team schedules.' },
+          { id: 'update', description: 'Update, pause, resume, complete, or cancel responsible Team schedules.' },
+          { id: 'manage', description: 'Manage any Team schedule.' },
+        ],
+        defaultActions: ({ member }) => member.toolGroups.includes('coordination')
+          ? ['read', 'create', 'update']
+          : ['read'],
+        installTools: (toolCtx, input) => installScheduleTools(
+          toolCtx,
+          this.require(input.teamId).scheduler,
+          (agentId, action) => this.authorizeMember(input.teamId, agentId, action),
+        ),
+      }),
+      authorization.registerNamespace({
+        namespace: 'calendar',
+        actions: [
+          { id: 'read', description: 'Read Team calendar events and free/busy.' },
+          { id: 'create', description: 'Create Team calendar events.' },
+          { id: 'update', description: 'Update owned Team calendar events.' },
+          { id: 'rsvp', description: 'RSVP to invited Team calendar events.' },
+          { id: 'manage', description: 'Manage any Team calendar event.' },
+        ],
+        defaultActions: ({ member }) => member.toolGroups.includes('coordination')
+          ? ['read', 'create', 'update', 'rsvp']
+          : ['read', 'rsvp'],
+        installTools: (toolCtx, input) => installCalendarTools(
+          toolCtx,
+          this.require(input.teamId).calendar,
+          (agentId, action) => this.authorizeMember(input.teamId, agentId, action),
+        ),
+      }),
+    ]
+    this.stopAccess = authorization.onChange(change => this.scheduleAccessRefresh(change))
+    this.stopStatus = ctx.on('agent/status', ({ agent, status }) => {
+      if (status !== 'idle') return
+      this.flushAccessRefresh(String(agent.id))
+    })
+    this.stopStep = ctx.on('session/event', (session, event) => {
+      if (event.type === 'step/end') this.flushAccessRefresh(String(session.id))
+    })
   }
 
-  private refreshAccess(change: FleetAuthorizationChange): void {
+  private authorizeMember(teamId: string, agentId: string, action: string): boolean {
+    const team = this.teams.get(teamId)
+    const member = team?.memberNamesById.get(agentId)
+    if (team === undefined || member === undefined) return false
+    const actor = this.authorization.actorForAgent(agentId)
+    return this.authorization.authorize({
+      teamId,
+      subject: actor?.teamId === teamId ? actor.subject : { kind: 'member', id: member },
+      action,
+    })
+  }
+
+  private scheduleAccessRefresh(change: FleetAuthorizationChange): void {
     for (const [teamId, team] of this.teams) {
       if (change.teamId !== undefined && change.teamId !== teamId) continue
-      if (change.members === undefined || change.members.length === 0) team.refreshAccess()
-      else for (const member of change.members) team.refreshAccess(member)
+      const members = change.members === undefined || change.members.length === 0
+        ? [...team.memberIdsByName.keys()]
+        : change.members
+      for (const member of members) {
+        const agentId = team.memberIdsByName.get(member)
+        if (agentId !== undefined && this.ctx.agents.get(SessionId(agentId))?.status === 'idle') {
+          team.refreshAccess(member)
+          continue
+        }
+        let pending = this.pendingAccessRefresh.get(teamId)
+        if (pending === undefined) {
+          pending = new Set()
+          this.pendingAccessRefresh.set(teamId, pending)
+        }
+        pending.add(member)
+      }
+    }
+  }
+
+  private flushAccessRefresh(agentId: string): void {
+    for (const [teamId, pending] of this.pendingAccessRefresh) {
+      const team = this.teams.get(teamId)
+      const member = team?.memberNamesById.get(agentId)
+      if (team === undefined || member === undefined || !pending.delete(member)) continue
+      team.refreshAccess(member)
+      if (pending.size === 0) this.pendingAccessRefresh.delete(teamId)
     }
   }
 
@@ -90,11 +236,19 @@ export class FleetCollaborationService {
     const memberIdsByName = new Map<string, string>()
     const memberNamesById = new Map<string, string>()
     const memberViews = new Map(input.memberViews.map(view => [view.id, structuredClone(view)]))
-    const defaultVoterNames = new Set(input.memberViews
-      .filter(view => view.canVote !== false)
-      .map(view => view.id))
+    const defaultVoterNames = new Set(input.defaultVoters)
+    for (const member of defaultVoterNames) {
+      if (!memberViews.has(member)) throw new Error(`unknown default Fleet voter ${member}`)
+    }
     const user: MessageAgent = {
       id: `fleet-user:${input.id}`,
+      inject: () => {},
+      followup: () => {},
+      steer: () => {},
+      cancel: () => {},
+    }
+    const productivity: MessageAgent = {
+      id: `fleet-productivity:${input.id}`,
       inject: () => {},
       followup: () => {},
       steer: () => {},
@@ -117,6 +271,7 @@ export class FleetCollaborationService {
     const agentDirectory: AgentDirectory = {
       get: id => {
         if (id === user.id) return user
+        if (id === productivity.id) return productivity
         return memberNamesById.has(id) ? this.ctx.agents.get(SessionId(id)) : undefined
       },
       list: () => [...memberNamesById.keys()].flatMap(id => {
@@ -128,8 +283,10 @@ export class FleetCollaborationService {
         const memberId = memberIdsByName.has(reference) ? reference : memberIdForDisplayName(reference)
         return memberId === undefined ? reference : memberIdsByName.get(memberId) ?? reference
       },
-      displayName: id => id === user.id ? 'User' : viewForAgent(id)?.name,
+      displayName: id => id === user.id ? 'User' : id === productivity.id ? 'Fleet' : viewForAgent(id)?.name,
       canContact: (senderId, recipientId) => {
+        if (senderId === productivity.id) return memberNamesById.has(recipientId)
+        if (recipientId === productivity.id) return memberNamesById.has(senderId)
         if (senderId === user.id) return memberNamesById.has(recipientId)
         if (recipientId === user.id) return memberNamesById.has(senderId)
         const sender = viewForAgent(senderId)
@@ -141,14 +298,16 @@ export class FleetCollaborationService {
         const view = viewForAgent(agentId)
         return view !== undefined && fleetMemberCanAccessChannel(view, channelId)
       },
-      hasPermission: (agentId, permission) => agentId !== user.id && hasPermission(agentId, permission),
+      hasPermission: (agentId, permission) => agentId === productivity.id
+        ? permission === 'meeting.manage'
+        : agentId !== user.id && hasPermission(agentId, permission),
       defaultVoter: agentId => {
-        if (agentId === user.id) return false
+        if (agentId === user.id || agentId === productivity.id) return false
         const name = memberNamesById.get(agentId)
         return name !== undefined && defaultVoterNames.has(name)
       },
       canVote: agentId => {
-        if (agentId === user.id) return false
+        if (agentId === user.id || agentId === productivity.id) return false
         const name = memberNamesById.get(agentId)
         return name !== undefined && defaultVoterNames.has(name)
       },
@@ -167,10 +326,104 @@ export class FleetCollaborationService {
     const resources = new FleetResources(this.ctx.fs)
     const memberStatuses = new FleetMemberStatusBoard(memberDirectory)
     const messages = new MessageHub(agentDirectory)
+    const canManage = (agentId: string, namespace: string): boolean => {
+      const member = memberNamesById.get(agentId)
+      if (member === undefined) return false
+      const subject = { kind: defaultVoterNames.has(member) ? 'member' as const : 'assistant' as const, id: member }
+      return this.authorization.authorize({ teamId: input.id, subject, action: `${namespace}.manage` })
+        || this.authorization.authorize({ teamId: input.id, subject, action: 'team.manage' })
+    }
+    const notifyMembers = (
+      members: readonly string[],
+      text: string,
+      kind: 'task_notification' | 'calendar_notification',
+      delivery: 'quiet' | 'wakeup' = 'quiet',
+    ): string[] => {
+      const delivered: string[] = []
+      for (const member of new Set(members)) {
+        const agentId = memberIdsByName.get(member)
+        if (agentId === undefined || agentDirectory.get(agentId) === undefined) continue
+        try {
+          messages.send(productivity, { to: `@${agentId}`, text, delivery, kind })
+          delivered.push(member)
+        } catch {}
+      }
+      return delivered
+    }
+    const tasks = new FleetTaskBoard(memberDirectory, agentId => canManage(agentId, 'task'), (task, recipients) =>
+      notifyMembers(
+        recipients,
+        `[Fleet task due] ${task.title} (${task.id})`,
+        'task_notification',
+        'wakeup',
+      ))
+    const scheduler = new FleetScheduler(memberDirectory, agentId => canManage(agentId, 'schedule'), (task, recipients) =>
+      notifyMembers(
+        recipients,
+        `[Fleet schedule due] ${task.title}\n${task.instructions}`.trim(),
+        'task_notification',
+        'wakeup',
+      ))
+    const calendar = new FleetCalendar(memberDirectory, event => {
+      const participants = [event.organizer, ...event.attendees]
+        .filter(member => event.rsvps[member] !== 'declined')
+        .flatMap(member => {
+          const agentId = memberIdsByName.get(member)
+          return agentId === undefined || agentDirectory.get(agentId) === undefined ? [] : [`@${agentId}`]
+        })
+      if (participants.length === 0) return undefined
+      const meetingId = `calendar-${event.id.slice(-12)}-${event.occurrence}`.replace(/[^a-z0-9]+/gu, '-')
+      try {
+        return messages.openMeeting(productivity, {
+          id: meetingId,
+          title: event.title,
+          agenda: event.agenda,
+          participants,
+        }).id
+      } catch (error) {
+        this.ctx.logger('dsh-agent-fleet').warn(
+          `Failed to open Meeting for Fleet calendar event ${event.id}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        return undefined
+      }
+    }, agentId => canManage(agentId, 'calendar'))
     const stops = [
-      messages.onEvent(input.onCoordination),
+      messages.onEvent(event => {
+        input.onCoordination(event)
+        if (event.type === 'meeting' && event.action === 'closed') {
+          calendar.closeLinkedMeeting(event.meeting.id, event.meeting.closedAt)
+        }
+      }),
       resources.onEvent(input.onResource),
       memberStatuses.onEvent(input.onMemberStatus),
+      tasks.onEvent(event => {
+        input.onTask?.(event, tasks.state())
+        if (event.action !== 'due' && event.action !== 'notification') {
+          const recipients = [...event.task.assignees, ...event.task.reviewers, ...event.task.followers]
+            .filter(member => member !== event.actor)
+          notifyMembers(
+            recipients,
+            `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`,
+            'task_notification',
+            event.action === 'created' || event.action === 'completed' ? 'wakeup' : 'quiet',
+          )
+        }
+      }),
+      scheduler.onEvent(event => {
+        input.onSchedule?.(event, scheduler.state())
+        if (event.action !== 'triggered' && event.action !== 'notification') {
+          notifyMembers(
+            event.task.assignees.filter(member => member !== event.actor),
+            `[Fleet schedule ${event.action}] ${event.task.title} (${event.task.id})`,
+            'task_notification',
+          )
+        }
+      }),
+      calendar.onEvent(event => {
+        input.onCalendar?.(event, calendar.state())
+        const recipients = [event.event.organizer, ...event.event.attendees].filter(member => member !== event.actor)
+        notifyMembers(recipients, `[Fleet calendar ${event.action}] ${event.event.title} (${event.event.id})`, 'calendar_notification')
+      }),
     ]
     interface ToolBinding {
       readonly ctx: Context
@@ -192,6 +445,20 @@ export class FleetCollaborationService {
       const effective = this.authorization.resolve(input.id, view)
       const tools = new Set(effective.toolGroups)
       const permissions = new Set(effective.actions)
+      const authorize = (
+        agentId: string,
+        action: string,
+        resource?: { readonly kind: string; readonly id: string },
+      ): boolean => {
+        const actor = memberNamesById.get(agentId)
+        if (actor === undefined) return false
+        return this.authorization.authorize({
+          teamId: input.id,
+          subject: { kind: defaultVoterNames.has(actor) ? 'member' : 'assistant', id: actor },
+          action,
+          resource: resource ?? { kind: 'team', id: input.id },
+        })
+      }
       const messagePermissions = new Set<FleetMessagePermission>(
         effective.actions.filter((permission): permission is FleetMessagePermission =>
           permission === 'channel.manage' || permission === 'meeting.manage' || permission === 'vote.create'),
@@ -208,39 +475,38 @@ export class FleetCollaborationService {
             messages: false,
             coordination: true,
             permissions: messagePermissions,
+            authorize,
           })
         }
         if (group === 'resources') {
           return installResourceTools(ctx, resources, {
             projectRoot: input.projectRoot,
             sharedDirectory: input.sharedDirectory,
-            canRead: (agentId, kind, id) => this.authorization.authorize({
-              teamId: input.id,
-              subject: { kind: 'member', id: memberNamesById.get(agentId) ?? agentId },
-              action: kind === 'work' ? 'work.read' : 'resource.read',
-              resource: kind === 'work'
-                ? { kind: 'team', id: input.id }
+            canRead: (agentId, kind, id) => authorize(
+              agentId,
+              kind === 'work' ? 'work.read' : 'resource.read',
+              kind === 'work'
+                ? undefined
                 : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
-            }),
-            canWrite: (agentId, kind, id) => this.authorization.authorize({
-              teamId: input.id,
-              subject: { kind: 'member', id: memberNamesById.get(agentId) ?? agentId },
-              action: kind === 'work' ? 'work.claim' : 'resource.write',
-              resource: kind === 'work'
-                ? { kind: 'team', id: input.id }
+            ),
+            canWrite: (agentId, kind, id) => authorize(
+              agentId,
+              kind === 'work' ? 'work.claim' : 'resource.write',
+              kind === 'work'
+                ? undefined
                 : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
-            }),
+            ),
             resourceWrite: permissions.has('resource.write'),
           })
         }
       }
       try {
         if (tools.has('messages')) {
-          add(installMessageTools(ctx, messages, { messages: true, coordination: false }))
+          add(installMessageTools(ctx, messages, { messages: true, coordination: false, authorize }))
           loaded.add('messages')
         }
         if (tools.has('status')) {
-          add(installCollaborationTools(ctx, memberStatuses))
+          add(installCollaborationTools(ctx, memberStatuses, { authorize }))
           loaded.add('status')
         }
         add(installFleetToolDiscovery(ctx, {
@@ -290,6 +556,9 @@ export class FleetCollaborationService {
       messages,
       resources,
       memberStatuses,
+      tasks,
+      scheduler,
+      calendar,
       memberViews,
       memberIdsByName,
       memberNamesById,
@@ -297,6 +566,8 @@ export class FleetCollaborationService {
         memberViews.set(view.id, structuredClone(view))
         memberIdsByName.set(view.id, agentId)
         memberNamesById.set(agentId, view.id)
+        tasks.replayPending(view.id)
+        scheduler.replayPending(view.id)
       },
       rebindMember: (previousAgentId, agentId, view) => {
         disposeMemberBindings(view.id)
@@ -305,6 +576,8 @@ export class FleetCollaborationService {
         memberIdsByName.set(view.id, agentId)
         memberNamesById.set(agentId, view.id)
         messages.rebindAgent(previousAgentId, agentId)
+        tasks.replayPending(view.id)
+        scheduler.replayPending(view.id)
       },
       detachMember: (agentId) => {
         const name = memberNamesById.get(agentId)
@@ -322,6 +595,9 @@ export class FleetCollaborationService {
         messages.retireAgent(agentId, successorAgentId)
         memberStatuses.retireMember(member)
         resources.release(agentId)
+        tasks.retireMember(member, successor)
+        scheduler.retireMember(member, successor)
+        calendar.retireMember(member, successor)
       },
       removeMemberView: (member) => {
         disposeMemberBindings(member)
@@ -356,6 +632,22 @@ export class FleetCollaborationService {
           if (member === undefined || binding.member === member) refreshBinding(binding)
         }
       },
+      activateProductivity: () => {
+        tasks.activate()
+        scheduler.activate()
+        calendar.activate()
+        calendar.retryPendingStarts()
+      },
+      pauseProductivity: () => {
+        tasks.pause()
+        scheduler.pause()
+        calendar.pause()
+      },
+      restoreProductivity: state => {
+        tasks.restore(state.tasks)
+        scheduler.restore(state.schedules)
+        calendar.restore(state.calendar)
+      },
       restore: (state) => {
         messages.restore(state.coordination)
         resources.restoreResources(state.resources)
@@ -371,6 +663,9 @@ export class FleetCollaborationService {
         for (const stop of stops) stop()
         messages.close()
         resources.reset()
+        tasks.close()
+        scheduler.close()
+        calendar.close()
       },
     }
     this.teams.set(input.id, team)
@@ -402,11 +697,16 @@ export class FleetCollaborationService {
   closeTeam(id: string): void {
     this.teams.get(id)?.close()
     this.teams.delete(id)
+    this.pendingAccessRefresh.delete(id)
   }
 
   close(): void {
     for (const team of this.teams.values()) team.close()
     this.teams.clear()
+    this.pendingAccessRefresh.clear()
+    this.stopStep()
+    this.stopStatus()
     this.stopAccess()
+    for (const stop of this.stopNamespaces.reverse()) stop()
   }
 }

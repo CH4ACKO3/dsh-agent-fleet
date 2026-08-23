@@ -6,9 +6,11 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FleetAuthorizationService } from 'dsh-agent-fleet'
+import type { FleetRunService } from 'dsh-agent-fleet'
+import { FleetAccessService, FleetGroupService } from 'dsh-agent-fleet'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
-import { FLEET_GIT_PERMISSIONS, FleetGitWebRemote, apply } from '../src/index.js'
+import { FLEET_GIT_PERMISSIONS, FleetGitAttributionStore, FleetGitWebRemote, apply } from '../src/index.js'
 
 const roots: string[] = []
 
@@ -29,39 +31,113 @@ function repository(): string {
 describe('FleetGitWebRemote', () => {
   it('publishes the Git capability namespace used by dynamic permission groups', () => {
     expect(FLEET_GIT_PERMISSIONS.map(permission => permission.id)).toEqual([
-      'inspect', 'scope-check', 'worktree-create', 'worktree-manage',
+      'inspect', 'scope-check', 'history-rewrite', 'publish', 'repository-manage',
+      'worktree-create', 'worktree-manage',
     ])
   })
 
   it('registers Fleet actions, resource defaults, and member tools', async () => {
     const ctx = new Context()
     const access = new FleetAuthorizationService()
+    const runs = {
+      status: () => ({ projectRoot: '/project' }),
+      readExtensionState: () => undefined,
+      writeExtensionState: () => {},
+      exportConfiguration: () => ({ modules: {} }),
+    } as unknown as FleetRunService
+    const resourceAccess = new FleetAccessService(runs, new FleetGroupService(runs))
     apply(ctx)
     ctx.provide('fleetAuthorization', access)
-    await Promise.resolve()
+    ctx.provide('fleetRuns', runs)
+    ctx.provide('fleetAccess', resourceAccess)
+    await new Promise<void>(resolve => { setImmediate(resolve) })
     expect(access.actionIds()).toEqual(expect.arrayContaining([
-      'git.inspect', 'git.scope-check', 'git.worktree-create', 'git.worktree-manage',
+      'git.inspect', 'git.scope-check', 'git.history-rewrite', 'git.publish', 'git.repository-manage',
+      'git.worktree-create', 'git.worktree-manage',
     ]))
     expect(access.resourceKindIds()).toContain('git-repository')
+    expect(resourceAccess.adapterKinds()).toContain('git-repository')
     const namespace = access.namespaces().find(candidate => candidate.namespace === 'git')
     expect(namespace?.installTools).toBeTypeOf('function')
+
+    const principal = { kind: 'group' as const, id: 'member:builder' }
+    const allowed = (action: string): boolean => resourceAccess.authorize({
+      teamId: 'team-1', subject: { kind: 'member', id: 'builder' }, action,
+      resource: { kind: 'git-repository', id: '/project' },
+    }, true)
+    resourceAccess.setMode('team-1', principal, 'git-repository', 'restricted')
+    resourceAccess.putRule('team-1', {
+      id: 'read-repository', principal, resource: { kind: 'git-repository', id: '/project' },
+      effect: 'allow', levels: ['read'],
+    })
+    expect(allowed('git.inspect')).toBe(true)
+    for (const action of ['git.scope-check', 'git.history-rewrite', 'git.publish', 'git.worktree-create']) {
+      expect(allowed(action), action).toBe(false)
+    }
+    resourceAccess.putRule('team-1', {
+      id: 'write-repository', principal, resource: { kind: 'git-repository', id: '/project' },
+      effect: 'allow', levels: ['write'],
+    })
+    for (const action of ['git.scope-check', 'git.history-rewrite', 'git.publish', 'git.worktree-create']) {
+      expect(allowed(action), action).toBe(true)
+    }
+    expect(allowed('git.repository-manage')).toBe(false)
+    expect(allowed('git.worktree-manage')).toBe(false)
   })
 
-  it('exposes strict snapshot and diff invocations', () => {
+  it('exposes strict snapshot, diff, commit, and fetch invocations', () => {
     const root = repository()
     writeFileSync(join(root, 'README.md'), '# Fleet\n\nChanged\n')
     const remote = new FleetGitWebRemote(new Context())
     const signal = new AbortController().signal
 
-    expect(remote.snapshot({ root, limit: 20 }, signal)).toMatchObject({
+    const snapshot = remote.snapshot({ root, limit: 20 }, signal)
+    expect(snapshot).toMatchObject({
       status: { root: realpathSync(root), changes: [expect.objectContaining({ path: 'README.md', worktree: 'M' })] },
       commits: [expect.objectContaining({ subject: 'Initial commit' })],
     })
+    const hash = snapshot?.commits[0]?.hash ?? ''
+    expect(remote.commit({ root, hash }, signal)).toMatchObject({
+      hash,
+      files: [{ path: 'README.md', additions: 1, deletions: 0 }],
+    })
     expect(remote.diff({ root, path: 'README.md' }, signal)).toMatchObject({ staged: false, truncated: false })
+    expect(remote.fetch({ root }, signal)).toMatchObject({
+      status: { root: realpathSync(root) },
+      commits: [expect.objectContaining({ subject: 'Initial commit' })],
+    })
     expect(FLEET_GIT_WEB_REMOTE.descriptors.every(descriptor =>
       descriptor.result.mode === 'strict'
       && descriptor.parameters.every(parameter => parameter.codec.mode === 'strict'),
     )).toBe(true)
+  })
+
+  it('projects only the selected Team commit attributions without changing Git metadata', () => {
+    const root = repository()
+    const hash = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    let state: unknown
+    const attributions = new FleetGitAttributionStore({
+      readExtensionState: () => state as never,
+      writeExtensionState: (_teamId, _namespace, value) => { state = value },
+    })
+    attributions.record('team-1', [hash], 'core-engineer')
+    const remote = new FleetGitWebRemote(new Context(), attributions)
+
+    expect(remote.snapshot({ root, teamId: 'team-1' }, new AbortController().signal)).toMatchObject({
+      commits: [expect.objectContaining({ hash, authorName: 'Fleet' })],
+      attributions: { [hash]: 'core-engineer' },
+    })
+    expect(remote.snapshot({ root, teamId: 'team-2' }, new AbortController().signal)).toMatchObject({
+      attributions: {},
+    })
+  })
+
+  it('returns an ordinary empty state for a workspace that is not a Git repository', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fleet-git-non-repository-'))
+    roots.push(root)
+
+    const remote = new FleetGitWebRemote(new Context())
+    expect(remote.snapshot({ root, limit: 20 }, new AbortController().signal)).toBeNull()
   })
 
   it('rejects unbounded history requests', () => {

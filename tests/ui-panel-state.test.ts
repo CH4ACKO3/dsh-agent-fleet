@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   activeFleetMentionQuery,
+  decorateFleetMetaWelcomeSnapshot,
+  expandFleetTargetFold,
+  fleetNativeContextNodeKey,
   fleetPanelTeamRunControl,
   fleetResourcePreviewKind,
   insertFleetMemberMention,
@@ -10,6 +13,163 @@ import {
   splitFleetMemberMentions,
   type FleetPanelTeamSnapshot,
 } from '../packages/ui/src/team-panel.js'
+import { projectAgentFleetPrivateMessages } from '../packages/ui/src/assistant-private-chat.js'
+
+describe('Agent Fleet welcome message', () => {
+  it('prepends one chat row without replacing existing conversation nodes', () => {
+    const existing = { key: 'message:1', kind: 'user' }
+    const nodes = {
+      get: (key: string) => key === existing.key ? existing : undefined,
+      values: () => [existing],
+    }
+    const source = {
+      chat: {
+        order: [existing.key],
+        nodes,
+        timeline: { turns: new Map() },
+      },
+    }
+    const decorated = decorateFleetMetaWelcomeSnapshot(source, {
+      sessionId: 'meta-session',
+      text: 'Welcome',
+      streaming: true,
+      time: 42,
+    })
+
+    expect(decorated.chat.order).toEqual(['fleet-meta-welcome:meta-session', existing.key])
+    expect(decorated.chat.nodes.get(existing.key)).toBe(existing)
+    expect(decorated.chat.nodes.values()).toHaveLength(2)
+    expect(decorated.chat.nodes.get('fleet-meta-welcome:meta-session')).toMatchObject({
+      kind: 'fleet-meta-welcome',
+      anchorSeq: -1,
+      data: {
+        text: 'Welcome',
+        streaming: true,
+        time: 42,
+      },
+    })
+    expect(source.chat.order).toEqual([existing.key])
+  })
+})
+
+describe('Agent Fleet private-chat projection', () => {
+  it('keeps human-visible text and images while excluding reasoning, tools, and context', () => {
+    const nodes = new Map<string, unknown>([
+      ['user:1', {
+        key: 'user:1',
+        kind: 'user',
+        visibility: 'visible',
+        data: {
+          time: 100,
+          content: [
+            { type: 'text', text: 'Build a Team' },
+            { type: 'reasoning', text: 'not user-visible' },
+            { type: 'image', attachment: {
+              attachmentId: 'image-1', mediaType: 'image/png', bytes: 12, width: 4, height: 3,
+            } },
+          ],
+        },
+      }],
+      ['context:1', {
+        key: 'context:1',
+        kind: 'context',
+        visibility: 'visible',
+        data: { time: 150, content: [{ type: 'text', text: 'hidden system context' }] },
+      }],
+      ['assistant:1', {
+        key: 'assistant:1',
+        kind: 'assistant-step',
+        visibility: 'visible',
+        data: {
+          time: 200,
+          status: 'settled',
+          blocks: [
+            { kind: 'reasoning', text: 'hidden chain of thought' },
+            { kind: 'tool-call', name: 'fleet_setup', callId: 'call-1', argsRaw: '{}' },
+            { kind: 'text', text: 'Let us configure it.' },
+          ],
+        },
+      }],
+    ])
+
+    const projected = projectAgentFleetPrivateMessages({
+      order: ['user:1', 'context:1', 'assistant:1'],
+      nodes: { get: key => nodes.get(key) },
+    })
+
+    expect(projected).toHaveLength(2)
+    expect(projected[0]).toMatchObject({
+      id: 'user:1',
+      sender: 'operator',
+      read: true,
+      content: [
+        { type: 'text', text: 'Build a Team' },
+        { type: 'image', attachmentId: 'image-1', mediaType: 'image/png' },
+      ],
+    })
+    expect(projected[1]).toMatchObject({
+      id: 'assistant:1',
+      sender: 'assistant',
+      content: [{ type: 'text', text: 'Let us configure it.' }],
+      streaming: false,
+    })
+    expect(JSON.stringify(projected)).not.toContain('chain of thought')
+    expect(JSON.stringify(projected)).not.toContain('fleet_setup')
+    expect(JSON.stringify(projected)).not.toContain('system context')
+  })
+
+  it('marks an operator message read only after a complete assistant output', () => {
+    const user = {
+      key: 'user:1',
+      kind: 'user',
+      visibility: 'visible',
+      data: { time: 100, content: [{ type: 'text', text: 'Hello' }] },
+    }
+    const streamingReasoning = {
+      key: 'assistant:reasoning',
+      kind: 'assistant-step',
+      visibility: 'visible',
+      data: { time: 200, status: 'running', blocks: [{ kind: 'reasoning', text: 'working' }] },
+    }
+    const toolCall = {
+      key: 'assistant:tool',
+      kind: 'assistant-step',
+      visibility: 'visible',
+      data: { time: 300, status: 'running', blocks: [{ kind: 'tool-call', name: 'fleet_setup' }] },
+    }
+    const nodes = new Map([[user.key, user], [streamingReasoning.key, streamingReasoning], [toolCall.key, toolCall]])
+
+    expect(projectAgentFleetPrivateMessages({
+      order: [user.key, streamingReasoning.key],
+      nodes: { get: key => nodes.get(key) },
+    })[0]).toMatchObject({ sender: 'operator', read: false })
+
+    expect(projectAgentFleetPrivateMessages({
+      order: [user.key, streamingReasoning.key, toolCall.key],
+      nodes: { get: key => nodes.get(key) },
+    })[0]).toMatchObject({ sender: 'operator', read: true })
+  })
+
+  it('preserves a streaming assistant row without requiring an iterable node store', () => {
+    const node = {
+      key: 'assistant:stream',
+      kind: 'assistant-step',
+      visibility: 'visible',
+      data: { time: 300, status: 'running', blocks: [{ kind: 'reasoning', text: 'working' }] },
+    }
+    const projected = projectAgentFleetPrivateMessages({
+      order: [node.key],
+      nodes: { get: key => key === node.key ? node : undefined },
+    })
+
+    expect(projected).toMatchObject([{
+      id: node.key,
+      sender: 'assistant',
+      content: [{ type: 'text', text: '' }],
+      streaming: true,
+    }])
+  })
+})
 
 const team: FleetPanelTeamSnapshot = {
   teamId: 'fleet-one',
@@ -129,6 +289,45 @@ describe('Fleet resource previews', () => {
 })
 
 describe('Fleet native Agent context memory', () => {
+  it('maps a persisted context message id back to its native ChatView row key', () => {
+    const snapshot = {
+      chat: {
+        nodes: {
+          values: () => [
+            { id: 'other-message', key: 'input-message:other-message' },
+            { id: 'context-message', key: 'input-message:context-message' },
+          ],
+        },
+      },
+    }
+
+    expect(fleetNativeContextNodeKey(snapshot, 'context-message')).toBe('input-message:context-message')
+    expect(fleetNativeContextNodeKey(snapshot, 'missing-message')).toBeUndefined()
+  })
+
+  it('opens the folded turn triggered by a visible upstream message', () => {
+    const click = vi.fn()
+    const selectors: string[] = []
+    const fold = {
+      dataset: {
+        dshFoldKeys: JSON.stringify(['reasoning', 'tool-call']),
+        dshFoldTriggerKeys: JSON.stringify(['input-message:context-message']),
+      },
+      querySelector: (selector: string) => {
+        selectors.push(selector)
+        return { click }
+      },
+    }
+    const container = { querySelectorAll: () => [fold] }
+
+    expandFleetTargetFold(container as unknown as HTMLElement, 'input-message:context-message')
+
+    expect(click).toHaveBeenCalledOnce()
+    expect(selectors).toEqual([
+      'button[aria-expanded="false"], [role="button"][aria-expanded="false"]',
+    ])
+  })
+
   it('returns an extra opened Session to a cold, bounded window', () => {
     const replaced: unknown[][] = []
     let dirty = 0

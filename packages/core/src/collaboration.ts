@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
-export const FLEET_MEMBER_STATUS_MAX_LENGTH = 240
+export const FLEET_MEMBER_STATUS_MAX_LENGTH = 100
 
 export interface FleetMemberStatus {
   readonly member: string
@@ -126,7 +126,15 @@ function callingAgent(agent: Agent | undefined): Agent {
   return agent
 }
 
-export function installCollaborationTools(ctx: Context, statuses: FleetMemberStatusBoard): () => void {
+export interface FleetCollaborationToolOptions {
+  readonly authorize?: (agentId: string, action: 'member-status.read' | 'member-status.write') => boolean
+}
+
+export function installCollaborationTools(
+  ctx: Context,
+  statuses: FleetMemberStatusBoard,
+  options: FleetCollaborationToolOptions = {},
+): () => void {
   const stop = ctx.tools.register(defineTool({
     name: 'fleet_member_status',
     description: `Read Team members' current work, or update your own short status text. Status text is limited to ${FLEET_MEMBER_STATUS_MAX_LENGTH} characters.`,
@@ -139,6 +147,12 @@ export function installCollaborationTools(ctx: Context, statuses: FleetMemberSta
     async execute(args, exec) {
       const caller = callingAgent(exec.agent)
       const callerId = String(caller.id)
+      const action = args.action === 'set' || args.action === 'clear'
+        ? 'member-status.write' as const
+        : 'member-status.read' as const
+      if (options.authorize?.(callerId, action) === false) {
+        throw new Error(`Agent ${callerId} is not authorized for ${action}`)
+      }
       if (args.action === 'list') return { action: 'list' as const, statuses: statuses.list(callerId) }
       if (args.action === 'get') {
         if (args.member === undefined) throw new Error('fleet_member_status get requires member')

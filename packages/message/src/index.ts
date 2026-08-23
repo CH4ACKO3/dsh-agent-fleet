@@ -382,6 +382,11 @@ export interface FleetMessageToolOptions {
   readonly messages?: boolean
   readonly coordination?: boolean
   readonly permissions?: ReadonlySet<import('./types.js').FleetMessagePermission>
+  readonly authorize?: (
+    agentId: string,
+    action: string,
+    resource?: { readonly kind: 'team' | 'conversation'; readonly id: string },
+  ) => boolean
 }
 
 export function installMessageTools(
@@ -392,6 +397,15 @@ export function installMessageTools(
   const stops: Array<() => void> = []
   const register = (tool: Parameters<typeof ctx.tools.register>[0]): void => {
     stops.push(ctx.tools.register(tool))
+  }
+  const requireAction = (
+    agent: Agent,
+    action: string,
+    resource?: { readonly kind: 'team' | 'conversation'; readonly id: string },
+  ): void => {
+    if (options.authorize?.(String(agent.id), action, resource) === false) {
+      throw new Error(`Agent ${String(agent.id)} is not authorized for ${action}`)
+    }
   }
   if (options.messages !== false) {
   register(defineTool({
@@ -405,7 +419,9 @@ export function installMessageTools(
     },
     output: jsonOutput(SEND_SCHEMA),
     execute(args, exec) {
-      return Promise.resolve(hub.send(callingAgent(exec.agent, 'fleet_send'), {
+      const caller = callingAgent(exec.agent, 'fleet_send')
+      requireAction(caller, 'message.post', { kind: 'conversation', id: args.to })
+      return Promise.resolve(hub.send(caller, {
         to: args.to as FleetTarget,
         text: args.message,
         delivery: 'quiet',
@@ -428,7 +444,14 @@ export function installMessageTools(
     },
     output: jsonOutput(SEND_SCHEMA),
     execute(args, exec) {
-      return Promise.resolve(hub.send(callingAgent(exec.agent, 'fleet_followup'), {
+      const caller = callingAgent(exec.agent, 'fleet_followup')
+      requireAction(caller, 'message.post', { kind: 'conversation', id: args.to })
+      requireAction(
+        caller,
+        args.interrupt === true ? 'message.interrupt' : 'message.wakeup',
+        { kind: 'conversation', id: args.to },
+      )
+      return Promise.resolve(hub.send(caller, {
         to: args.to as FleetTarget,
         text: args.message,
         delivery: args.interrupt === true ? 'interrupt' : 'wakeup',
@@ -460,6 +483,11 @@ export function installMessageTools(
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_messages')
       const action = args.action ?? 'read'
+      requireAction(
+        caller,
+        action === 'react' || action === 'pin' || action === 'unpin' ? 'message.post' : 'message.read',
+        args.conversation === undefined ? undefined : { kind: 'conversation', id: args.conversation },
+      )
       if (action === 'read') {
         if (args.conversation === undefined) throw new Error('fleet_messages read requires conversation')
         return Promise.resolve(hub.read(caller, {
@@ -524,6 +552,7 @@ export function installMessageTools(
         throw new Error('timeout_ms must be an integer from 1000 through 5000')
       }
       const caller = callingAgent(exec.agent, 'fleet_wait')
+      requireAction(caller, 'message.read')
       return hub.wait(caller, args.after_revision, timeoutMs, exec.signal)
     },
   }))
@@ -551,6 +580,11 @@ export function installMessageTools(
     output: jsonOutput(CHANNEL_RESULT_SCHEMA),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_channel')
+      requireAction(
+        caller,
+        args.action === 'list' ? 'message.read' : 'channel.manage',
+        args.name === undefined ? undefined : { kind: 'conversation', id: `#${args.name}` },
+      )
       if (args.action === 'list') {
         return Promise.resolve({ action: 'list' as const, channels: hub.listChannels(caller) })
       }
@@ -604,6 +638,15 @@ export function installMessageTools(
     output: voteOutput(),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_vote')
+      requireAction(
+        caller,
+        args.action === 'create'
+          ? 'vote.create'
+          : args.action === 'cast'
+            ? 'message.post'
+            : 'message.read',
+        args.channel === undefined ? undefined : { kind: 'conversation', id: args.channel },
+      )
       if (args.action === 'list') {
         return Promise.resolve({
           action: 'list' as const,
@@ -665,6 +708,15 @@ export function installMessageTools(
     output: jsonOutput(MEETING_RESULT_SCHEMA),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_meeting')
+      requireAction(
+        caller,
+        args.action === 'open' || args.action === 'close'
+          ? 'meeting.manage'
+          : args.action === 'join' || args.action === 'leave'
+            ? 'meeting.join'
+            : 'message.read',
+        args.id === undefined ? undefined : { kind: 'conversation', id: `meeting:${args.id}` },
+      )
       if (args.action === 'list') {
         return Promise.resolve({ action: 'list' as const, meetings: hub.listMeetings(caller) })
       }

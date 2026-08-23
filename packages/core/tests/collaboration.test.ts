@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { FleetMemberStatusBoard } from '../src/collaboration.js'
+import { FleetMemberStatusBoard, installCollaborationTools } from '../src/collaboration.js'
 import type { FleetMemberDirectory, FleetMemberStatusEvent } from '../src/collaboration.js'
 
 const members = [
@@ -20,9 +20,11 @@ const directory: FleetMemberDirectory = {
 describe('FleetMemberStatusBoard', () => {
   it('lets members maintain their own status while peers can read it', () => {
     const board = new FleetMemberStatusBoard(directory)
-    expect(board.set('agent-lead', 'Preparing the release plan')).toMatchObject({
-      member: 'lead', message: 'Preparing the release plan',
+    const status = board.set('agent-lead', 'Preparing the release plan')
+    expect(status).toMatchObject({
+      member: 'lead', message: 'Preparing the release plan', updatedAt: expect.any(String),
     })
+    expect(Number.isNaN(Date.parse(status.updatedAt ?? ''))).toBe(false)
     expect(board.get('agent-reviewer', '@lead')).toMatchObject({
       member: 'lead', message: 'Preparing the release plan',
     })
@@ -31,7 +33,7 @@ describe('FleetMemberStatusBoard', () => {
       { member: 'reviewer', message: '' },
     ]))
     expect(() => board.set('outsider', 'Working elsewhere')).toThrow('not a member')
-    expect(() => board.set('agent-lead', 'x'.repeat(241))).toThrow('cannot exceed 240 characters')
+    expect(() => board.set('agent-lead', 'x'.repeat(101))).toThrow('cannot exceed 100 characters')
   })
 
   it('restores updates and clears without re-emitting them', () => {
@@ -61,5 +63,35 @@ describe('FleetMemberStatusBoard', () => {
     expect(board.get('agent-reviewer', 'lead')).toEqual({
       member: 'lead', message: 'Reviewing the solver output', updatedAt: '2026-08-22T00:00:00.000Z',
     })
+  })
+
+  it('checks current status authorization when a visible tool executes', async () => {
+    const board = new FleetMemberStatusBoard(directory)
+    const registered: Array<{
+      readonly name: string
+      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
+    }> = []
+    const allowed = new Set(['member-status.read', 'member-status.write'])
+    installCollaborationTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+    } as never, board, {
+      authorize: (_agentId, action) => allowed.has(action),
+    })
+    const status = registered.find(candidate => candidate.name === 'fleet_member_status')
+    if (status === undefined) throw new Error('expected fleet_member_status')
+
+    await expect(status.execute(
+      { action: 'set', message: 'Working' },
+      { agent: { id: 'agent-lead' } },
+    )).resolves.toMatchObject({ action: 'set' })
+    allowed.delete('member-status.write')
+    await expect(async () => status.execute(
+      { action: 'clear' },
+      { agent: { id: 'agent-lead' } },
+    )).rejects.toThrow('not authorized for member-status.write')
+    await expect(status.execute(
+      { action: 'get', member: 'lead' },
+      { agent: { id: 'agent-reviewer' } },
+    )).resolves.toMatchObject({ action: 'get' })
   })
 })

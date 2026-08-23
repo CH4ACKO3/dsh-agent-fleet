@@ -154,7 +154,7 @@ describe('FleetAssistantRuntime', () => {
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('More than one assistant can be attached to the same Team')
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('Do not run the Team-building guide')
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('Use `fleet_send`, `fleet_followup`, and `fleet_messages`')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('organize Meetings')
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('not a default worker or coordinator')
   })
 
   it('leaves plugin-owned tools to the native DSH tool registry', () => {

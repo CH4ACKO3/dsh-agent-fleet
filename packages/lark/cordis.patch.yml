@@ -1,0 +1,11 @@
+- insert:
+    - id: ch4acko3-dsh-agent-fleet-lark
+      name: '@ch4acko3/dsh-agent-fleet-lark'
+      config:
+        bot:
+          appId: !!js process.env.LARK_APP_ID
+          appSecretRef: LARK_APP_SECRET
+          domain: !!js process.env.LARK_DOMAIN ?? 'feishu'
+        cli:
+          executable: !!js process.env.LARK_CLI_PATH ?? 'lark-cli'
+          profile: !!js process.env.LARK_CLI_PROFILE

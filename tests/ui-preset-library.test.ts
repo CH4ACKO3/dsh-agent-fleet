@@ -5,7 +5,7 @@ import {
   mergeFieldPresetImport,
   parseFieldPresetImport,
 } from '../packages/ui/src/field-presets.js'
-import { resolveChineseLocale } from '../packages/ui/src/locale.js'
+import { fleetLocaleDictionaries, resolveChineseLocale } from '../packages/ui/src/locale.js'
 
 const current: FieldPresetCollection = {
   positioning: [],
@@ -24,6 +24,12 @@ describe('Fleet UI locale', () => {
     expect(resolveChineseLocale('zh-CN', 'en-US')).toBe(true)
     expect(resolveChineseLocale('en-US', 'zh-CN')).toBe(false)
     expect(resolveChineseLocale('', 'zh-CN')).toBe(true)
+  })
+
+  it('keeps the Agent Fleet dictionaries bilingual and key-compatible', () => {
+    expect(Object.keys(fleetLocaleDictionaries.en)).toEqual(Object.keys(fleetLocaleDictionaries.zh))
+    expect(fleetLocaleDictionaries.zh['welcome.message']).toContain('欢迎使用 Agent Fleet')
+    expect(fleetLocaleDictionaries.en['welcome.message']).toContain('Welcome to Agent Fleet')
   })
 })
 

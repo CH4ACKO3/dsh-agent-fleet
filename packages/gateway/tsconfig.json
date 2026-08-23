@@ -4,8 +4,8 @@
     "rootDir": "src",
     "outDir": "lib",
     "declaration": true,
-    "emitDeclarationOnly": false,
-    "noEmit": false
+    "declarationMap": true,
+    "sourceMap": true
   },
   "include": ["src/**/*.ts"]
 }

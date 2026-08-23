@@ -2,9 +2,12 @@ import type { CSSProperties, ReactElement, ReactNode } from 'react'
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { HoverHintStack } from './hint-stack.js'
+import { currentHoverHintLocale, resolveHoverHintLocaleCopy } from './locale.js'
+import { hasSeenHint, markHintSeen, subscribeSeenHints } from './seen-marker.js'
 
 const STYLE_ID = 'dsh-hover-hint-style'
 const HOVER_DELAY_MS = 300
+const SEEN_HOVER_DELAY_MS = 2_000
 const CHARGE_DURATION_MS = 500
 const openHints = new HoverHintStack()
 
@@ -29,6 +32,10 @@ const styles = `
   text-align: left;
   display: inline-flex;
   position: relative;
+}
+
+.dsh-hover-hint[data-seen="true"] .dsh-hover-hint-trigger {
+  cursor: default;
 }
 
 .dsh-hover-hint-trigger:hover,
@@ -317,6 +324,9 @@ export interface HoverHintProps {
   readonly children: ReactNode
   readonly footer?: ReactNode
   readonly closeLabel?: string
+  readonly locale?: string
+  /** Persistently marks this hint as seen after the pointer enters its open panel. */
+  readonly seenMarker?: string
 }
 
 function HoverHintRing({ className }: { readonly className: string }): ReactElement {
@@ -349,7 +359,9 @@ export function HoverHint({
   triggerContent,
   children,
   footer,
-  closeLabel = '关闭说明',
+  closeLabel,
+  locale,
+  seenMarker,
 }: HoverHintProps): ReactElement {
   const root = useRef<HTMLSpanElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -360,13 +372,16 @@ export function HoverHint({
   const phaseValue = useRef<HoverHintPhase>('idle')
   const revealedValue = useRef(false)
   const pinnedValue = useRef(false)
+  const seenValue = useRef(hasSeenHint(seenMarker))
   const [phase, setPhaseState] = useState<HoverHintPhase>('idle')
   const [revealed, setRevealedState] = useState(false)
   const [pinned, setPinnedState] = useState(false)
+  const [seen, setSeenState] = useState(seenValue.current)
   const [position, setPosition] = useState<{ readonly side: 'top' | 'bottom'; readonly style: HoverHintPosition }>()
   const bubbleId = useId()
   const titleId = useId()
   const hintId = useId()
+  const localeCopy = resolveHoverHintLocaleCopy(locale ?? currentHoverHintLocale())
 
   const reducedMotion = (): boolean => window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const clearDelay = (): void => {
@@ -390,6 +405,10 @@ export function HoverHint({
   const setPinned = (next: boolean): void => {
     pinnedValue.current = next
     setPinnedState(next)
+  }
+  const setSeen = (next: boolean): void => {
+    seenValue.current = next
+    setSeenState(next)
   }
   const hide = (): void => {
     clearDelay()
@@ -428,6 +447,12 @@ export function HoverHint({
   }
 
   useLayoutEffect(() => { installHoverHintStyles() }, [])
+
+  useEffect(() => {
+    const syncSeen = (): void => { setSeen(hasSeenHint(seenMarker)) }
+    syncSeen()
+    return subscribeSeenHints(syncSeen)
+  }, [seenMarker])
 
   useEffect(() => () => {
     clearDelay()
@@ -513,6 +538,7 @@ export function HoverHint({
     'data-phase': phase,
     'data-revealed': revealed ? 'true' : undefined,
     'data-pinned': pinned ? 'true' : undefined,
+    'data-seen': seen ? 'true' : undefined,
     onPointerEnter: () => {
       inside.current = true
       clearPhaseTimer()
@@ -526,7 +552,7 @@ export function HoverHint({
       delayTimer.current = window.setTimeout(() => {
         delayTimer.current = undefined
         if (inside.current) charge()
-      }, HOVER_DELAY_MS)
+      }, seenValue.current ? SEEN_HOVER_DELAY_MS : HOVER_DELAY_MS)
     },
     onPointerLeave: () => {
       inside.current = false
@@ -566,6 +592,13 @@ export function HoverHint({
         className: 'dsh-hover-hint-bubble',
         'data-side': position?.side ?? 'bottom',
         style: position?.style ?? { visibility: 'hidden' },
+        onPointerEnter: () => {
+          inside.current = true
+          if (seenMarker !== undefined && !seenValue.current) {
+            markHintSeen(seenMarker)
+            setSeen(true)
+          }
+        },
         children: [
           jsxs('span', {
             className: 'dsh-hover-hint-header',
@@ -575,7 +608,7 @@ export function HoverHint({
               jsx('button', {
                 type: 'button',
                 className: 'dsh-hover-hint-close',
-                'aria-label': closeLabel,
+                'aria-label': closeLabel ?? localeCopy.closeLabel,
                 onClick: () => {
                   hide()
                   trigger.current?.focus()
@@ -599,7 +632,7 @@ export function HoverHint({
           jsx('span', { className: 'dsh-hover-hint-body', children }),
           jsx('span', {
             className: 'dsh-hover-hint-footer',
-            children: footer ?? '悬停预览；点击可以固定此窗口。',
+            children: footer ?? localeCopy.footer,
           }),
         ],
       }),
