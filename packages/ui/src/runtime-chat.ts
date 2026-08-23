@@ -160,6 +160,26 @@ const runtimeChatStyles = `
   display: flex;
 }
 
+.dsh-fleet-chat-message-sender,
+.dsh-fleet-chat-message-delivery {
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+  display: flex;
+}
+
+.dsh-fleet-chat-message-sender {
+  flex: 0 1 auto;
+}
+
+.dsh-fleet-chat-message-sender .dsh-fleet-chat-message-name {
+  max-width: min(220px, 40vw);
+}
+
+.dsh-fleet-chat-message-delivery {
+  flex: 1;
+}
+
 .dsh-fleet-chat-message-name {
   min-width: 0;
   max-width: 45%;
@@ -319,16 +339,16 @@ const runtimeChatStyles = `
 
 .dsh-fleet-message-receipt-column {
   min-width: 0;
-  padding-inline: 3px 12px;
 }
 
 .dsh-fleet-message-receipt-column + .dsh-fleet-message-receipt-column {
   border-left: 1px solid var(--dsw-alias-border-l3);
-  padding-inline: 12px 3px;
+  padding-inline: 8px 0;
 }
 
 .dsh-fleet-message-receipt-heading {
   margin: 0 0 7px;
+  padding-inline: 4px;
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xs-strong-13, var(--dsw-font-xs-13));
   font-size: 12px;
@@ -348,15 +368,17 @@ const runtimeChatStyles = `
 .dsh-fleet-message-receipt-member-seat {
   align-items: center;
   gap: 4px;
+  padding-inline-end: 4px;
   display: flex;
 }
 
 .dsh-fleet-message-receipt-member {
   box-sizing: border-box;
-  width: 100%;
+  width: auto;
   min-width: 0;
   min-height: 38px;
   align-items: center;
+  flex: 1;
   gap: 8px;
   padding: 4px;
   display: flex;
@@ -401,8 +423,10 @@ const runtimeChatStyles = `
   border: 0;
   border-radius: 5px;
   flex: none;
+  margin-left: auto;
   padding: 4px 5px;
   font: var(--dsw-font-xxs-12, inherit);
+  white-space: nowrap;
 }
 
 .dsh-fleet-message-receipt-source:hover {
@@ -950,8 +974,9 @@ function FleetReceiptMemberList({ members, sources, renderMember, onOpenSource }
             source !== undefined && onOpenSource !== undefined && jsx('button', {
               type: 'button',
               className: 'dsh-fleet-message-receipt-source',
+              'aria-label': `查看 ${member.name} 收到这条消息的位置`,
               onClick: () => { onOpenSource(source) },
-              children: '查看上下文',
+              children: '消息位置',
             }),
           ],
         }, member.id)
@@ -1153,17 +1178,27 @@ export function FleetChatMessage({
           !compact && jsxs('div', {
             className: 'dsh-fleet-chat-message-meta',
             children: [
-              jsx('span', { className: 'dsh-fleet-chat-message-name', children: sender.name }),
-              jsx('span', { className: 'dsh-fleet-chat-message-role', children: sender.role }),
-              jsx('time', {
-                className: 'dsh-fleet-chat-message-time',
-                dateTime: sentAt,
-                children: timeLabel,
+              jsxs('span', {
+                className: 'dsh-fleet-chat-message-sender',
+                children: [
+                  jsx('span', { className: 'dsh-fleet-chat-message-name', children: sender.name }),
+                  jsx('span', { className: 'dsh-fleet-chat-message-role', children: sender.role }),
+                ],
               }),
-              receipt !== undefined && jsx(FleetChatReadReceipt, receipt),
-              actions !== undefined && jsx('span', {
-                className: 'dsh-fleet-chat-message-actions',
-                children: actions,
+              jsxs('span', {
+                className: 'dsh-fleet-chat-message-delivery',
+                children: [
+                  jsx('time', {
+                    className: 'dsh-fleet-chat-message-time',
+                    dateTime: sentAt,
+                    children: timeLabel,
+                  }),
+                  receipt !== undefined && jsx(FleetChatReadReceipt, receipt),
+                  actions !== undefined && jsx('span', {
+                    className: 'dsh-fleet-chat-message-actions',
+                    children: actions,
+                  }),
+                ],
               }),
             ],
           }),

@@ -32,9 +32,9 @@ describe('Fleet tutorial Team projection', () => {
     expect(projected.team).toMatchObject({
       tutorial: true,
       members: [
-        { name: 'Nova', presence: 'busy' },
-        { name: 'Mina', presence: 'waiting' },
-        { name: 'Rowan', presence: 'active' },
+        { name: 'Nova', presence: 'busy', statusUpdatedAt: '2026-08-22T21:37:52.620Z' },
+        { name: 'Mina', presence: 'waiting', statusUpdatedAt: '2026-08-22T21:39:58.102Z' },
+        { name: 'Rowan', presence: 'active', statusUpdatedAt: '2026-08-22T21:38:31.811Z' },
       ],
     })
     expect(projected.team?.messages.some(message => message.receipt !== undefined)).toBe(true)
@@ -77,6 +77,22 @@ describe('Fleet tutorial Team projection', () => {
       content: [{ type: 'text', text: 'hello' }],
     })).rejects.toThrow(/只读演示|read-only/u)
     expect(sendMessage).not.toHaveBeenCalled()
+
+    const trace = await source.loadMemberTrace?.(FLEET_TUTORIAL_TEAM_ID, 'tutorial:mina', undefined, {
+      source: {
+        memberId: 'tutorial:mina',
+        sessionId: '2a84e284-ac87-4fdc-9944-83c323d4753d',
+        contextMessageId: 'b5eff5d0-ab97-44f5-81ab-1e3e8ac9742e',
+      },
+    })
+    expect(trace?.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'session.user/message',
+        target: true,
+        data: expect.stringContaining('b5eff5d0-ab97-44f5-81ab-1e3e8ac9742e'),
+      }),
+      expect.objectContaining({ type: 'session.assistant/message' }),
+    ]))
 
     snapshot = {
       ...emptyConnected,

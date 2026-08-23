@@ -494,13 +494,19 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
 
 function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const views = new Map(cache.memberViews.map(view => [view.id, view]))
-  const statusTexts = new Map<string, string>()
+  const statusTexts = new Map<string, { readonly message: string; readonly updatedAt?: string }>()
   for (const event of cache.events) {
     if (event.type === 'member_status.updated') {
       const status = nestedRecord(event.data, 'status')
       const member = string(status?.member)
       const message = string(status?.message)
-      if (member !== undefined && message !== undefined && message.length > 0) statusTexts.set(member, message)
+      const updatedAt = string(status?.updatedAt)
+      if (member !== undefined && message !== undefined && message.length > 0) {
+        statusTexts.set(member, {
+          message,
+          ...(updatedAt === undefined ? {} : { updatedAt }),
+        })
+      }
     } else if (event.type === 'member_status.cleared') {
       const member = string(asRecord(event.data)?.member)
       if (member !== undefined) statusTexts.delete(member)
@@ -510,7 +516,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     const view = views.get(member.name)
     const provider = member.provider ?? view?.provider
     const model = member.model ?? view?.model
-    const statusText = statusTexts.get(member.name)
+    const memberStatus = statusTexts.get(member.name)
     return {
       id: member.name,
       name: member.displayName ?? view?.name ?? member.name,
@@ -519,7 +525,10 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       color: member.color ?? view?.color ?? color(`${cache.run.id}:${member.name}`),
       presence: presence(member.status),
       runtimeStatus: member.status ?? 'unknown',
-      ...(statusText === undefined ? {} : { statusText }),
+      ...(memberStatus === undefined ? {} : {
+        statusText: memberStatus.message,
+        ...(memberStatus.updatedAt === undefined ? {} : { statusUpdatedAt: memberStatus.updatedAt }),
+      }),
       ...(provider === undefined ? {} : { provider }),
       ...(model === undefined ? {} : { model }),
       sessionId: member.sessionId,

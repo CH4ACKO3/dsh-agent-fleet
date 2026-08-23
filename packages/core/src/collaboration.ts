@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
-export const FLEET_MEMBER_STATUS_MAX_LENGTH = 240
+export const FLEET_MEMBER_STATUS_MAX_LENGTH = 100
 
 export interface FleetMemberStatus {
   readonly member: string

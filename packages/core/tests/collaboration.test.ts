@@ -20,9 +20,11 @@ const directory: FleetMemberDirectory = {
 describe('FleetMemberStatusBoard', () => {
   it('lets members maintain their own status while peers can read it', () => {
     const board = new FleetMemberStatusBoard(directory)
-    expect(board.set('agent-lead', 'Preparing the release plan')).toMatchObject({
-      member: 'lead', message: 'Preparing the release plan',
+    const status = board.set('agent-lead', 'Preparing the release plan')
+    expect(status).toMatchObject({
+      member: 'lead', message: 'Preparing the release plan', updatedAt: expect.any(String),
     })
+    expect(Number.isNaN(Date.parse(status.updatedAt ?? ''))).toBe(false)
     expect(board.get('agent-reviewer', '@lead')).toMatchObject({
       member: 'lead', message: 'Preparing the release plan',
     })
@@ -31,7 +33,7 @@ describe('FleetMemberStatusBoard', () => {
       { member: 'reviewer', message: '' },
     ]))
     expect(() => board.set('outsider', 'Working elsewhere')).toThrow('not a member')
-    expect(() => board.set('agent-lead', 'x'.repeat(241))).toThrow('cannot exceed 240 characters')
+    expect(() => board.set('agent-lead', 'x'.repeat(101))).toThrow('cannot exceed 100 characters')
   })
 
   it('restores updates and clears without re-emitting them', () => {

@@ -3174,17 +3174,17 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const member = runtime.memberNamesById.get(sessionId)
     if (member === undefined || this.records.get(runId) === undefined) return
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    runtime.messages.observeSessionEvent(sessionId, event, agent?.session.events ?? [])
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     if (event.type === 'assistant/chunk') return
     if (event.type !== 'turn/end') return
     const reason = event.data.reason
     if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
-      const agent = this.ctx.agents.get(SessionId(sessionId))
       if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
       return
     }
-    const agent = this.ctx.agents.get(SessionId(sessionId))
     const route = agent === undefined ? undefined : this.networkRoute(agent)
     this.clearNetworkRecovery(sessionId)
     if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {

@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   activeFleetMentionQuery,
   decorateFleetMetaWelcomeSnapshot,
+  expandFleetTargetFold,
+  fleetNativeContextNodeKey,
   fleetPanelTeamRunControl,
   fleetResourcePreviewKind,
   insertFleetMemberMention,
@@ -99,6 +101,7 @@ describe('Agent Fleet private-chat projection', () => {
     expect(projected[0]).toMatchObject({
       id: 'user:1',
       sender: 'operator',
+      read: true,
       content: [
         { type: 'text', text: 'Build a Team' },
         { type: 'image', attachmentId: 'image-1', mediaType: 'image/png' },
@@ -113,6 +116,38 @@ describe('Agent Fleet private-chat projection', () => {
     expect(JSON.stringify(projected)).not.toContain('chain of thought')
     expect(JSON.stringify(projected)).not.toContain('fleet_setup')
     expect(JSON.stringify(projected)).not.toContain('system context')
+  })
+
+  it('marks an operator message read only after a complete assistant output', () => {
+    const user = {
+      key: 'user:1',
+      kind: 'user',
+      visibility: 'visible',
+      data: { time: 100, content: [{ type: 'text', text: 'Hello' }] },
+    }
+    const streamingReasoning = {
+      key: 'assistant:reasoning',
+      kind: 'assistant-step',
+      visibility: 'visible',
+      data: { time: 200, status: 'running', blocks: [{ kind: 'reasoning', text: 'working' }] },
+    }
+    const toolCall = {
+      key: 'assistant:tool',
+      kind: 'assistant-step',
+      visibility: 'visible',
+      data: { time: 300, status: 'running', blocks: [{ kind: 'tool-call', name: 'fleet_setup' }] },
+    }
+    const nodes = new Map([[user.key, user], [streamingReasoning.key, streamingReasoning], [toolCall.key, toolCall]])
+
+    expect(projectAgentFleetPrivateMessages({
+      order: [user.key, streamingReasoning.key],
+      nodes: { get: key => nodes.get(key) },
+    })[0]).toMatchObject({ sender: 'operator', read: false })
+
+    expect(projectAgentFleetPrivateMessages({
+      order: [user.key, streamingReasoning.key, toolCall.key],
+      nodes: { get: key => nodes.get(key) },
+    })[0]).toMatchObject({ sender: 'operator', read: true })
   })
 
   it('preserves a streaming assistant row without requiring an iterable node store', () => {
@@ -254,6 +289,45 @@ describe('Fleet resource previews', () => {
 })
 
 describe('Fleet native Agent context memory', () => {
+  it('maps a persisted context message id back to its native ChatView row key', () => {
+    const snapshot = {
+      chat: {
+        nodes: {
+          values: () => [
+            { id: 'other-message', key: 'input-message:other-message' },
+            { id: 'context-message', key: 'input-message:context-message' },
+          ],
+        },
+      },
+    }
+
+    expect(fleetNativeContextNodeKey(snapshot, 'context-message')).toBe('input-message:context-message')
+    expect(fleetNativeContextNodeKey(snapshot, 'missing-message')).toBeUndefined()
+  })
+
+  it('opens the folded turn triggered by a visible upstream message', () => {
+    const click = vi.fn()
+    const selectors: string[] = []
+    const fold = {
+      dataset: {
+        dshFoldKeys: JSON.stringify(['reasoning', 'tool-call']),
+        dshFoldTriggerKeys: JSON.stringify(['input-message:context-message']),
+      },
+      querySelector: (selector: string) => {
+        selectors.push(selector)
+        return { click }
+      },
+    }
+    const container = { querySelectorAll: () => [fold] }
+
+    expandFleetTargetFold(container as unknown as HTMLElement, 'input-message:context-message')
+
+    expect(click).toHaveBeenCalledOnce()
+    expect(selectors).toEqual([
+      'button[aria-expanded="false"], [role="button"][aria-expanded="false"]',
+    ])
+  })
+
   it('returns an extra opened Session to a cold, bounded window', () => {
     const replaced: unknown[][] = []
     let dirty = 0

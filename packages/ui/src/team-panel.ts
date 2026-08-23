@@ -156,6 +156,7 @@ const panelStyles = `
 
 .dsh-fleet-panel-receipt-member-anchor {
   min-width: 0;
+  flex: 1;
 }
 
 .dsh-fleet-panel-receipt-member-trigger {
@@ -298,9 +299,23 @@ const panelStyles = `
   padding-top: 10px;
 }
 
+.dsh-fleet-panel-member-popover-self-status-head {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  display: flex;
+}
+
 .dsh-fleet-panel-member-popover-self-status-label {
   color: var(--dsw-alias-label-secondary);
   font-size: 11px;
+  line-height: 16px;
+}
+
+.dsh-fleet-panel-member-status-updated {
+  color: var(--dsw-alias-label-caption);
+  white-space: nowrap;
+  font-size: 10px;
   line-height: 16px;
 }
 
@@ -318,21 +333,27 @@ const panelStyles = `
   color: var(--dsw-alias-label-secondary);
 }
 
+.dsh-fleet-panel-member-popover-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 13px;
+  display: grid;
+}
+
 .dsh-fleet-panel-member-popover-detail {
-  width: 100%;
+  min-width: 0;
   min-height: 34px;
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
-  background: var(--dsw-alias-bg-layer-2);
+  background: var(--dsw-alias-interactive-bg-hover-solid);
   border: 0;
   border-radius: 8px;
-  margin-top: 13px;
   padding: 0 12px;
   font: var(--dsw-font-s-strong-14);
 }
 
 .dsh-fleet-panel-member-popover-detail:hover {
-  background: var(--dsw-alias-interactive-bg-hover-solid);
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 10%, var(--dsw-alias-bg-layer-1));
 }
 
 .dsh-fleet-panel-member-popover-detail:focus-visible {
@@ -1910,15 +1931,44 @@ button.dsh-fleet-panel-team-title:focus-visible {
 
 .dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-main {
   min-width: 0;
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, var(--dsw-alias-bg-layer-1));
-  border-radius: 11px;
+  width: fit-content;
+  max-width: 100%;
   grid-column: 1;
   grid-row: 1;
-  padding: 8px 10px;
+  justify-self: end;
+  align-items: flex-end;
+  flex-direction: column;
+  padding-top: 18px;
+  display: flex;
+  position: relative;
 }
 
 .dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-meta {
+  display: contents;
+}
+
+.dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-sender {
+  width: max-content;
+  max-width: min(320px, calc(100vw - 96px));
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-end: 0;
+}
+
+.dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-delivery {
+  flex: none;
+  align-self: flex-start;
   gap: 4px;
+  margin-bottom: 2px;
+}
+
+.dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-body {
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, var(--dsw-alias-bg-layer-1));
+  border-radius: 11px;
+  padding: 8px 10px;
 }
 
 .dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-time {
@@ -1936,12 +1986,16 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-role {
+  order: 5;
+}
+
+.dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-name {
   order: 4;
   margin-left: auto;
 }
 
-.dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-name {
-  order: 5;
+.dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-state {
+  align-self: flex-end;
 }
 
 .dsh-fleet-panel-agent-readonly {
@@ -1955,6 +2009,7 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-native-context {
+  position: relative;
   min-width: 0;
   min-height: 0;
   flex: 1;
@@ -1972,6 +2027,28 @@ button.dsh-fleet-panel-team-title:focus-visible {
 
 .dsh-fleet-panel-native-context-scroll > * {
   min-height: 100%;
+}
+
+.dsh-fleet-panel-native-context [data-fleet-context-target="true"] {
+  border-radius: 10px;
+  outline: 2px solid var(--dsw-static-deepseek-500, #3370ff);
+  outline-offset: 2px;
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--dsw-static-deepseek-500, #3370ff) 16%, transparent);
+}
+
+.dsh-fleet-panel-native-context-locate {
+  position: absolute;
+  z-index: 2;
+  inset-block-start: 10px;
+  inset-inline-end: 12px;
+  max-width: min(320px, calc(100% - 24px));
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--dsw-alias-label-primary) 12%, transparent);
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 17px;
 }
 
 .dsh-fleet-panel-trace {
@@ -2010,8 +2087,14 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-trace-event[data-target="true"] {
-  outline: 2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 42%, transparent);
-  outline-offset: -1px;
+  border-radius: 11px;
+  outline: 2px solid var(--dsw-static-deepseek-500, #3370ff);
+  outline-offset: 2px;
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--dsw-static-deepseek-500, #3370ff) 16%, transparent);
+}
+
+.dsh-fleet-panel-trace-event[data-target="true"] .dsh-fleet-panel-trace-event-body {
+  background: color-mix(in srgb, var(--dsw-static-deepseek-500, #3370ff) 9%, var(--dsw-alias-bg-layer-1));
 }
 
 .dsh-fleet-panel-trace-event-meta {
@@ -2026,6 +2109,11 @@ button.dsh-fleet-panel-team-title:focus-visible {
 
 .dsh-fleet-panel-trace-event-time {
   margin-inline-start: auto;
+}
+
+.dsh-fleet-panel-trace-target-label {
+  color: var(--dsw-static-deepseek-500, #3370ff);
+  font-weight: 600;
 }
 
 .dsh-fleet-panel-trace-event-body {
@@ -2211,6 +2299,15 @@ button.dsh-fleet-panel-team-title:focus-visible {
   min-width: 0;
   overflow-wrap: anywhere;
   font-size: 13px;
+}
+
+.dsh-fleet-panel-member-self-status-detail {
+  gap: 3px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-self-status-detail .dsh-fleet-panel-member-status-updated {
+  justify-self: start;
 }
 
 .dsh-fleet-panel-resource-body {
@@ -2979,6 +3076,8 @@ export interface FleetPanelMember extends FleetChatMember {
   readonly responsibility: string
   /** Short, self-declared description of the work this member is currently doing. */
   readonly statusText?: string
+  /** ISO timestamp of the latest self-declared status update. */
+  readonly statusUpdatedAt?: string
   readonly provider?: string
   readonly model?: string
   /** The native DSH Session owned by this persistent Fleet member. */
@@ -3509,6 +3608,7 @@ export interface FleetPanelPaneOwner {
   readonly activeItem: string
   readonly selectItem: (item: string) => void
   readonly showMemberDetails: (memberId: string) => void
+  readonly showMemberContext: (memberId: string) => void
   readonly openResource: (resourceId: string) => void
   readonly uploadResource?: (file: File) => Promise<void>
   readonly controlTeam?: (action: FleetPanelTeamControlInput['action'], summary?: string) => Promise<void>
@@ -3748,9 +3848,11 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
     const content = welcome === null
       ? jsx(ChatView, props)
       : jsx(AgentFleetPrivateChat, {
+          key: welcome.sessionId,
           useSession: decoratedUseSession,
           loadOlder: props.loadOlder as () => void,
           loadImage: props.loadImage as (attachment: unknown) => Promise<string>,
+          renderContext: () => jsx(ChatView, props),
         })
     return jsx(FleetMetaWelcomeBoundary, {
       fallback: jsx(ChatView, props),
@@ -3870,6 +3972,40 @@ function boundFleetNativeSessionWindow(session: FleetNativeSessionFace, snapshot
 
 function useNativeChatStore<Selection>(selector: (snapshot: typeof EMPTY_NATIVE_CHAT_STORE) => Selection): Selection {
   return selector(EMPTY_NATIVE_CHAT_STORE)
+}
+
+export function fleetNativeContextNodeKey(snapshot: any, contextMessageId: string): string | undefined {
+  const nodes = snapshot?.chat?.nodes
+  if (nodes === undefined || typeof nodes.values !== 'function') return undefined
+  for (const candidate of nodes.values() as Iterable<any>) {
+    if (candidate?.id === contextMessageId && typeof candidate.key === 'string') return candidate.key
+  }
+  return undefined
+}
+
+function nativeContextNodeCount(snapshot: any): number {
+  const order = snapshot?.chat?.order
+  return Array.isArray(order) ? order.length : 0
+}
+
+async function loadFleetNativeContextTarget(
+  session: FleetNativeSessionFace,
+  contextMessageId: string,
+): Promise<string | undefined> {
+  await session.open?.()
+  let previousWindow: string | undefined
+  while (true) {
+    const snapshot = session.getSnapshot()
+    const target = fleetNativeContextNodeKey(snapshot, contextMessageId)
+    if (target !== undefined) return target
+    const count = nativeContextNodeCount(snapshot)
+    if (snapshot?.hasMore !== true || count >= MAX_NATIVE_CONTEXT_NODES) return undefined
+    const first = Array.isArray(snapshot?.chat?.order) ? snapshot.chat.order[0] : undefined
+    const window = `${String(first)}:${String(count)}`
+    if (window === previousWindow) return undefined
+    previousWindow = window
+    await session.loadOlder()
+  }
 }
 
 function usePanelSnapshot(source: FleetPanelSource | undefined): FleetPanelSnapshot {
@@ -4162,6 +4298,16 @@ export function FleetTeamPanel({
     setActiveTool('team')
     setNavigationOpen(false)
   }
+  const showMemberContext = (memberId: string): void => {
+    if (activeTeam === undefined || !activeTeam.members.some(member => member.id === memberId)) return
+    setContextSource(undefined)
+    setItems(current => ({
+      ...current,
+      [`${activeTeam.teamId}:agent`]: agentViewItem(memberId, AGENT_CONTEXT_ITEM_ID),
+    }))
+    setActiveTool('agent')
+    setNavigationOpen(false)
+  }
   const openMessageSource = (messageSource: FleetChatReceiptSource): void => {
     if (activeTeam === undefined || !activeTeam.members.some(member => member.id === messageSource.memberId)) return
     setContextSource(messageSource)
@@ -4237,6 +4383,7 @@ export function FleetTeamPanel({
     activeItem,
     selectItem,
     showMemberDetails,
+    showMemberContext,
     openResource,
     ...(tutorial || source?.uploadResource === undefined ? {} : {
       uploadResource: (file: File) => source.uploadResource?.({ sessionId, teamId: activeTeam.teamId, file }) ?? Promise.resolve(),
@@ -4268,7 +4415,7 @@ export function FleetTeamPanel({
       }))
     },
     sendMessage,
-    ...(tutorial || source?.loadMemberTrace === undefined ? {} : { loadMemberTrace: source.loadMemberTrace }),
+    ...(source?.loadMemberTrace === undefined ? {} : { loadMemberTrace: source.loadMemberTrace }),
     ...(tutorial || source?.loadConversationMessages === undefined ? {} : {
       loadConversationMessages: source.loadConversationMessages,
     }),
@@ -5302,6 +5449,7 @@ function FleetPlainMessageText({ owner, text }: {
           member: segment.member,
           label: segment.text,
           showDetails: owner.showMemberDetails,
+          showContext: owner.showMemberContext,
         }, index)),
   })
 }
@@ -5326,6 +5474,7 @@ function renderMemberMention(owner: FleetPanelPaneOwner, mention: FleetChatMenti
     member,
     label: `@${mention.label}`,
     showDetails: owner.showMemberDetails,
+    showContext: owner.showMemberContext,
   })
 }
 
@@ -5333,6 +5482,7 @@ function messageReadReceipt(
   snapshot: FleetPanelTeamSnapshot,
   receipt: NonNullable<FleetPanelMessage['receipt']>,
   showDetails: (memberId: string) => void,
+  showContext: (memberId: string) => void,
   openSource: (source: FleetChatReceiptSource) => void,
 ) {
   const members = new Map(snapshot.members.map(member => [member.id, member]))
@@ -5351,7 +5501,7 @@ function messageReadReceipt(
       const panelMember = members.get(member.id)
       return panelMember === undefined
         ? undefined
-        : jsx(FleetReceiptMemberPopover, { member: panelMember, showDetails })
+        : jsx(FleetReceiptMemberPopover, { member: panelMember, showDetails, showContext })
     },
   }
 }
@@ -6053,10 +6203,11 @@ function useFleetMemberPopover() {
   return { popover, nameId, popoverId, open, openAt, close, toggleAt }
 }
 
-function FleetMemberPopoverCard({ member, controller, showDetails }: {
+function FleetMemberPopoverCard({ member, controller, showDetails, showContext }: {
   readonly member: FleetPanelMember
   readonly controller: ReturnType<typeof useFleetMemberPopover>
   readonly showDetails: (memberId: string) => void
+  readonly showContext: (memberId: string) => void
 }): ReactElement {
   return jsxs('div', {
     ref: controller.popover,
@@ -6095,29 +6246,50 @@ function FleetMemberPopoverCard({ member, controller, showDetails }: {
         className: 'dsh-fleet-panel-member-popover-self-status',
         'data-empty': member.statusText === undefined ? 'true' : undefined,
         children: [
-          jsx('div', { className: 'dsh-fleet-panel-member-popover-self-status-label', children: '成员自述' }),
+          jsxs('div', {
+            className: 'dsh-fleet-panel-member-popover-self-status-head',
+            children: [
+              jsx('div', { className: 'dsh-fleet-panel-member-popover-self-status-label', children: '成员自述' }),
+              jsx(MemberStatusUpdatedAt, { member }),
+            ],
+          }),
           jsx('p', {
             className: 'dsh-fleet-panel-member-popover-self-status-text',
             children: member.statusText ?? '暂未填写工作状态',
           }),
         ],
       }),
-      jsx('button', {
-        type: 'button',
-        className: 'dsh-fleet-panel-member-popover-detail',
-        onClick: () => {
-          controller.close()
-          showDetails(member.id)
-        },
-        children: '详细信息',
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-popover-actions',
+        children: [
+          jsx('button', {
+            type: 'button',
+            className: 'dsh-fleet-panel-member-popover-detail',
+            onClick: () => {
+              controller.close()
+              showDetails(member.id)
+            },
+            children: '详细信息',
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'dsh-fleet-panel-member-popover-detail',
+            onClick: () => {
+              controller.close()
+              showContext(member.id)
+            },
+            children: '上下文',
+          }),
+        ],
       }),
     ],
   })
 }
 
-function FleetMemberAvatarPopover({ member, showDetails }: {
+function FleetMemberAvatarPopover({ member, showDetails, showContext }: {
   readonly member: FleetPanelMember
   readonly showDetails: (memberId: string) => void
+  readonly showContext: (memberId: string) => void
 }): ReactElement {
   const controller = useFleetMemberPopover()
   return jsxs('div', {
@@ -6133,14 +6305,15 @@ function FleetMemberAvatarPopover({ member, showDetails }: {
         onClick: (event: { readonly currentTarget: Element }) => { controller.toggleAt(event.currentTarget) },
         children: jsx(FleetChatAvatar, { member }),
       }),
-      jsx(FleetMemberPopoverCard, { member, controller, showDetails }),
+      jsx(FleetMemberPopoverCard, { member, controller, showDetails, showContext }),
     ],
   })
 }
 
-function FleetReceiptMemberPopover({ member, showDetails }: {
+function FleetReceiptMemberPopover({ member, showDetails, showContext }: {
   readonly member: FleetPanelMember
   readonly showDetails: (memberId: string) => void
+  readonly showContext: (memberId: string) => void
 }): ReactElement {
   const controller = useFleetMemberPopover()
   return jsxs('div', {
@@ -6165,15 +6338,16 @@ function FleetReceiptMemberPopover({ member, showDetails }: {
           }),
         ],
       }),
-      jsx(FleetMemberPopoverCard, { member, controller, showDetails }),
+      jsx(FleetMemberPopoverCard, { member, controller, showDetails, showContext }),
     ],
   })
 }
 
-function FleetMemberMentionPopover({ member, label, showDetails }: {
+function FleetMemberMentionPopover({ member, label, showDetails, showContext }: {
   readonly member: FleetPanelMember
   readonly label: string
   readonly showDetails: (memberId: string) => void
+  readonly showContext: (memberId: string) => void
 }): ReactElement {
   const controller = useFleetMemberPopover()
   return jsxs(Fragment, {
@@ -6189,7 +6363,7 @@ function FleetMemberMentionPopover({ member, label, showDetails }: {
         onClick: (event: { readonly currentTarget: Element }) => { controller.toggleAt(event.currentTarget) },
         children: label,
       }),
-      jsx(FleetMemberPopoverCard, { member, controller, showDetails }),
+      jsx(FleetMemberPopoverCard, { member, controller, showDetails, showContext }),
     ],
   })
 }
@@ -6279,33 +6453,42 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
                 if (sender === undefined) return null
                 const member = owner.snapshot.members.find(candidate => candidate.id === sender.id)
                 const messageOwner: FleetPanelMessageOwner = { panel: owner, conversation, message, sender }
-                return jsx(FleetChatMessage, {
-                  id: message.id,
-                  sender,
-                  sentAt: message.sentAt,
-                  content: message.content,
-                  ...(message.receipt === undefined ? {} : {
-                    receipt: messageReadReceipt(
-                      owner.snapshot,
-                      message.receipt,
-                      owner.showMemberDetails,
-                      owner.openMessageSource,
+                return jsx('div', {
+                  className: 'dsh-fleet-panel-agent-message-row',
+                  'data-self': sender.operator === true ? 'true' : 'false',
+                  children: jsx(FleetChatMessage, {
+                    id: message.id,
+                    sender,
+                    sentAt: message.sentAt,
+                    content: message.content,
+                    ...(message.receipt === undefined ? {} : {
+                      receipt: messageReadReceipt(
+                        owner.snapshot,
+                        message.receipt,
+                        owner.showMemberDetails,
+                        owner.showMemberContext,
+                        owner.openMessageSource,
+                      ),
+                    }),
+                    ...(member === undefined ? {} : {
+                      avatar: jsx(FleetMemberAvatarPopover, {
+                        member,
+                        showDetails: owner.showMemberDetails,
+                        showContext: owner.showMemberContext,
+                      }),
+                    }),
+                    actions: owner.renderPanelSlot(
+                      FLEET_PANEL_SLOTS.messageAction,
+                      messageOwner as unknown as Record<string, unknown>,
                     ),
+                    renderText: (text: string) => renderMessageText(owner, messageOwner, text),
+                    renderMention: (mention: FleetChatMentionBlock) => renderMemberMention(owner, mention),
+                    onOpenResource: (resource: FleetChatResourceBlock) => { owner.openResource(resource.id) },
+                    renderBlock: (block: FleetChatContentBlock, index: number) => {
+                      const blockOwner: FleetPanelMessageBlockOwner = { ...messageOwner, block, index }
+                      return renderMessageBlockExtension(owner, blockOwner)
+                    },
                   }),
-                  ...(member === undefined ? {} : {
-                    avatar: jsx(FleetMemberAvatarPopover, { member, showDetails: owner.showMemberDetails }),
-                  }),
-                  actions: owner.renderPanelSlot(
-                    FLEET_PANEL_SLOTS.messageAction,
-                    messageOwner as unknown as Record<string, unknown>,
-                  ),
-                  renderText: (text: string) => renderMessageText(owner, messageOwner, text),
-                  renderMention: (mention: FleetChatMentionBlock) => renderMemberMention(owner, mention),
-                  onOpenResource: (resource: FleetChatResourceBlock) => { owner.openResource(resource.id) },
-                  renderBlock: (block: FleetChatContentBlock, index: number) => {
-                    const blockOwner: FleetPanelMessageBlockOwner = { ...messageOwner, block, index }
-                    return renderMessageBlockExtension(owner, blockOwner)
-                  },
                 }, message.id)
               }),
         }),
@@ -6498,6 +6681,36 @@ function Fact({ label, value }: { readonly label: string; readonly value: ReactN
       jsx('span', { className: 'dsh-fleet-panel-fact-label', children: label }),
       jsx('span', { className: 'dsh-fleet-panel-fact-value', children: value }),
     ],
+  })
+}
+
+function MemberStatusUpdatedAt({ member }: { readonly member: FleetPanelMember }): ReactElement | null {
+  if (member.statusText === undefined) return null
+  const updatedAt = member.statusUpdatedAt
+  if (updatedAt === undefined) {
+    return jsx('span', {
+      className: 'dsh-fleet-panel-member-status-updated',
+      children: panelText('更新时间未知', 'Update time unavailable'),
+    })
+  }
+  const date = new Date(updatedAt)
+  if (Number.isNaN(date.getTime())) {
+    return jsx('span', {
+      className: 'dsh-fleet-panel-member-status-updated',
+      children: panelText('更新时间未知', 'Update time unavailable'),
+    })
+  }
+  const compact = date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+  return jsx('time', {
+    className: 'dsh-fleet-panel-member-status-updated',
+    dateTime: updatedAt,
+    title: date.toLocaleString(),
+    children: panelText(`更新于 ${compact}`, `Updated ${compact}`),
   })
 }
 
@@ -6736,7 +6949,16 @@ function TeamMain(owner: FleetPanelPaneOwner): ReactElement {
           className: 'dsh-fleet-panel-facts',
           children: [
             jsx(Fact, { label: '当前状态', value: jsx(MemberState, { member }) }),
-            jsx(Fact, { label: '成员自述', value: member.statusText ?? '暂未填写工作状态' }),
+            jsx(Fact, {
+              label: '成员自述',
+              value: jsxs('span', {
+                className: 'dsh-fleet-panel-member-self-status-detail',
+                children: [
+                  jsx('span', { children: member.statusText ?? '暂未填写工作状态' }),
+                  jsx(MemberStatusUpdatedAt, { member }),
+                ],
+              }),
+            }),
             jsx(Fact, { label: '使用模型', value: member.model ?? '由 Agent 配置决定' }),
             jsx(Fact, { label: '模型提供方', value: member.provider ?? '由 Agent 配置决定' }),
             jsx(Fact, { label: '成员标识', value: member.id }),
@@ -6769,14 +6991,20 @@ function TeamMain(owner: FleetPanelPaneOwner): ReactElement {
   })
 }
 
-function FleetNativeMemberChat({ owner, member, session }: {
+function FleetNativeMemberChat({ owner, session, sessionId, source }: {
   readonly owner: FleetPanelPaneOwner
-  readonly member: FleetPanelMember
   readonly session: FleetNativeSessionFace
+  readonly sessionId: string
+  readonly source?: FleetChatReceiptSource
 }): ReactElement {
-  const scrollKey = `${owner.snapshot.teamId}:${member.sessionId ?? member.id}`
+  const scrollKey = `${owner.snapshot.teamId}:${sessionId}`
+  const root = useRef<HTMLDivElement>(null)
+  const [target, setTarget] = useState<
+    | { readonly status: 'idle' | 'loading' | 'missing' }
+    | { readonly status: 'found'; readonly key: string }
+  >({ status: source === undefined ? 'idle' : 'loading' })
   const nativeCurrentRef = useRef(false)
-  nativeCurrentRef.current = owner.useSessions(state => state.current === member.sessionId)
+  nativeCurrentRef.current = owner.useSessions(state => state.current === sessionId)
   useEffect(() => {
     // DSH lazily opens history only for the foreground Session. Fleet renders a
     // different listed Session in-place, so explicitly open its idempotent
@@ -6791,43 +7019,158 @@ function FleetNativeMemberChat({ owner, member, session }: {
   const getSnapshot = useCallback(() => session.getSnapshot(), [session])
   const useMemberSession: FleetSnapshotSelectorHook = selector => {
     const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-    useEffect(() => { boundFleetNativeSessionWindow(session, snapshot) }, [snapshot])
+    useEffect(() => {
+      if (source === undefined) boundFleetNativeSessionWindow(session, snapshot)
+    }, [session, snapshot, source])
     return selector(snapshot)
   }
+  useEffect(() => {
+    if (source === undefined) {
+      setTarget({ status: 'idle' })
+      return
+    }
+    let disposed = false
+    setTarget({ status: 'loading' })
+    void loadFleetNativeContextTarget(session, source.contextMessageId).then(key => {
+      if (!disposed) setTarget(key === undefined ? { status: 'missing' } : { status: 'found', key })
+    }).catch(() => {
+      if (!disposed) setTarget({ status: 'missing' })
+    })
+    return () => { disposed = true }
+  }, [session, source?.contextMessageId])
+  useLayoutEffect(() => {
+    if (target.status !== 'found') return
+    let row: HTMLElement | undefined
+    let locationObserver: MutationObserver | undefined
+    let resizeObserver: ResizeObserver | undefined
+    let centerFrame: number | undefined
+    const clearSelection = (): void => { setTarget({ status: 'idle' }) }
+    const scheduleCenter = (scrollport: HTMLElement, targetRow: HTMLElement): void => {
+      if (centerFrame !== undefined) window.cancelAnimationFrame(centerFrame)
+      centerFrame = window.requestAnimationFrame(() => {
+        centerFrame = undefined
+        centerFleetContextTarget(scrollport, targetRow)
+      })
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const container = root.current
+      if (container === null) return
+      const locateTarget = (): void => {
+        expandFleetTargetFold(container, target.key)
+        for (const candidate of container.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
+          if (candidate.dataset.chatAnchorKey !== target.key) continue
+          row = candidate
+          row.dataset.fleetContextTarget = 'true'
+          locationObserver?.disconnect()
+          locationObserver = undefined
+          const scrollport = container.querySelector<HTMLElement>('.dsh-fleet-panel-native-context-scroll')
+          if (scrollport !== null) {
+            centerFleetContextTarget(scrollport, row)
+            if (typeof ResizeObserver !== 'undefined') {
+              resizeObserver = new ResizeObserver(() => { scheduleCenter(scrollport, row!) })
+              resizeObserver.observe(scrollport)
+              resizeObserver.observe(row)
+              const content = scrollport.firstElementChild
+              if (content instanceof HTMLElement) resizeObserver.observe(content)
+            }
+          }
+          document.addEventListener('pointerdown', clearSelection, { capture: true, once: true })
+          return
+        }
+      }
+      if (typeof MutationObserver !== 'undefined') {
+        locationObserver = new MutationObserver(locateTarget)
+        locationObserver.observe(container, {
+          attributes: true,
+          attributeFilter: ['aria-expanded'],
+          childList: true,
+          subtree: true,
+        })
+      }
+      locateTarget()
+    })
+    return () => {
+      window.cancelAnimationFrame(frame)
+      if (centerFrame !== undefined) window.cancelAnimationFrame(centerFrame)
+      locationObserver?.disconnect()
+      resizeObserver?.disconnect()
+      document.removeEventListener('pointerdown', clearSelection, { capture: true })
+      delete row?.dataset.fleetContextTarget
+    }
+  }, [target])
   const ChatView = NativeChatView
   const runtime = nativeChatRuntime
-  if (ChatView === undefined || runtime === undefined || member.sessionId === undefined) {
+  if (ChatView === undefined || runtime === undefined) {
     return jsx(PanelUnavailable, { label: '正在载入原生 ChatView…' })
   }
-  const memberSessionId = member.sessionId
   return jsx('div', {
+    ref: root,
     className: 'dsh-fleet-panel-native-context',
-    children: jsx('div', {
-      className: 'dsh-fleet-panel-native-context-scroll',
-      'data-conversation-scroll': '',
-      children: jsx(ChatView, {
-        useSession: useMemberSession,
-        useSessions: runtime.useSessions,
-        useStore: runtime.useStore ?? useNativeChatStore,
-        renderSlot: runtime.renderSlot,
-        sessionId: memberSessionId,
-        openFile: (path: string) => owner.nativeContext.openFile(memberSessionId, path),
-        loadOlder: () => { void session.loadOlder() },
-        loadImage: (attachment: unknown) => owner.nativeContext.loadImage(memberSessionId, attachment),
-        inspectCall: () => {},
-        chatScroll: {
-          save: (position: unknown) => {
-            if (position === null) nativeChatScroll.delete(scrollKey)
-            else rememberBounded(nativeChatScroll, scrollKey, position)
+    children: [
+      jsx('div', {
+        className: 'dsh-fleet-panel-native-context-scroll',
+        'data-conversation-scroll': '',
+        children: jsx(ChatView, {
+          useSession: useMemberSession,
+          useSessions: runtime.useSessions,
+          useStore: runtime.useStore ?? useNativeChatStore,
+          renderSlot: runtime.renderSlot,
+          sessionId,
+          openFile: (path: string) => owner.nativeContext.openFile(sessionId, path),
+          loadOlder: () => { void session.loadOlder() },
+          loadImage: (attachment: unknown) => owner.nativeContext.loadImage(sessionId, attachment),
+          inspectCall: () => {},
+          chatScroll: {
+            save: (position: unknown) => {
+              if (position === null) nativeChatScroll.delete(scrollKey)
+              else rememberBounded(nativeChatScroll, scrollKey, position)
+            },
+            read: () => nativeChatScroll.get(scrollKey) ?? null,
           },
-          read: () => nativeChatScroll.get(scrollKey) ?? null,
-        },
-        forkAt: () => {},
-        fileMentions: (target: unknown) => owner.nativeContext.fileMentions(target),
-        t: runtime.t ?? owner.t,
+          forkAt: () => {},
+          fileMentions: (value: unknown) => owner.nativeContext.fileMentions(value),
+          t: runtime.t ?? owner.t,
+        }),
       }),
-    }),
+      (target.status === 'loading' || target.status === 'missing') && jsx('div', {
+        className: 'dsh-fleet-panel-native-context-locate',
+        role: 'status',
+        children: target.status === 'loading'
+          ? panelText('正在加载消息位置…', 'Loading message position…')
+          : panelText('未能在已加载范围内精确定位，现已显示原生上下文', 'The exact position was not found in the loaded range; showing the native context'),
+      }),
+    ],
   })
+}
+
+function centerFleetContextTarget(scrollport: HTMLElement, target: HTMLElement): void {
+  const targetBounds = target.getBoundingClientRect()
+  const scrollBounds = scrollport.getBoundingClientRect()
+  const targetCenter = targetBounds.top + targetBounds.height / 2
+  const viewportCenter = scrollBounds.top + scrollport.clientHeight / 2
+  const nextTop = scrollport.scrollTop + targetCenter - viewportCenter
+  if (Math.abs(nextTop - scrollport.scrollTop) < 0.5) return
+  scrollport.scrollTop = Math.max(0, nextTop)
+}
+
+export function expandFleetTargetFold(container: HTMLElement, targetKey: string): void {
+  const folds = [...container.querySelectorAll<HTMLElement>('[data-dsh-fold-keys], [data-dsh-fold-trigger-keys]')]
+  for (let index = folds.length - 1; index >= 0; index -= 1) {
+    const fold = folds[index]
+    if (fold === undefined) continue
+    try {
+      const keys = JSON.parse(fold.dataset.dshFoldKeys ?? '') as unknown
+      const triggerKeys = JSON.parse(fold.dataset.dshFoldTriggerKeys ?? '[]') as unknown
+      if (
+        (!Array.isArray(keys) || !keys.includes(targetKey))
+        && (!Array.isArray(triggerKeys) || !triggerKeys.includes(targetKey))
+      ) continue
+      fold.querySelector<HTMLElement>(
+        'button[aria-expanded="false"], [role="button"][aria-expanded="false"]',
+      )?.click()
+      return
+    } catch {}
+  }
 }
 
 function traceMessageText(value: unknown): string {
@@ -6896,11 +7239,53 @@ function FleetPersistedMemberTrace({ owner, member, source }: {
   const [attempt, setAttempt] = useState(0)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [targetVisible, setTargetVisible] = useState(source !== undefined)
+  const traceRoot = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<
     | { readonly status: 'loading' }
     | { readonly status: 'ready'; readonly trace: FleetPanelMemberTrace }
     | { readonly status: 'error'; readonly message: string }
   >({ status: 'loading' })
+
+  useEffect(() => {
+    setTargetVisible(source !== undefined)
+  }, [source?.contextMessageId, source?.sessionId])
+
+  useLayoutEffect(() => {
+    if (state.status !== 'ready' || source === undefined || !targetVisible) return
+    let target: HTMLElement | null = null
+    let resizeObserver: ResizeObserver | undefined
+    let centerFrame: number | undefined
+    const clearSelection = (): void => { setTargetVisible(false) }
+    const scheduleCenter = (scrollport: HTMLElement, targetRow: HTMLElement): void => {
+      if (centerFrame !== undefined) window.cancelAnimationFrame(centerFrame)
+      centerFrame = window.requestAnimationFrame(() => {
+        centerFrame = undefined
+        centerFleetContextTarget(scrollport, targetRow)
+      })
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const scrollport = traceRoot.current
+      if (scrollport === null) return
+      target = scrollport.querySelector<HTMLElement>('[data-target="true"]')
+      if (target === null) return
+      centerFleetContextTarget(scrollport, target)
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(() => { scheduleCenter(scrollport, target!) })
+        resizeObserver.observe(scrollport)
+        resizeObserver.observe(target)
+        const content = scrollport.firstElementChild
+        if (content instanceof HTMLElement) resizeObserver.observe(content)
+      }
+      document.addEventListener('pointerdown', clearSelection, { capture: true, once: true })
+    })
+    return () => {
+      window.cancelAnimationFrame(frame)
+      if (centerFrame !== undefined) window.cancelAnimationFrame(centerFrame)
+      resizeObserver?.disconnect()
+      document.removeEventListener('pointerdown', clearSelection, { capture: true })
+    }
+  }, [source, state, targetVisible])
 
   useEffect(() => {
     const load = owner.loadMemberTrace
@@ -6971,6 +7356,7 @@ function FleetPersistedMemberTrace({ owner, member, source }: {
     })
   }
   return jsxs('div', {
+    ref: traceRoot,
     className: 'dsh-fleet-panel-trace',
     children: [
       jsx('p', {
@@ -6999,12 +7385,16 @@ function FleetPersistedMemberTrace({ owner, member, source }: {
               return jsxs('article', {
                 className: 'dsh-fleet-panel-trace-event',
                 'data-agent': presentation.agent ? 'true' : 'false',
-                'data-target': event.target ? 'true' : undefined,
+                'data-target': event.target && targetVisible ? 'true' : undefined,
                 children: [
                   jsxs('div', {
                     className: 'dsh-fleet-panel-trace-event-meta',
                     children: [
                       jsx('span', { children: presentation.label }),
+                      event.target && targetVisible && jsx('span', {
+                        className: 'dsh-fleet-panel-trace-target-label',
+                        children: panelText('\u6d88\u606f\u4f4d\u7f6e', 'Message location'),
+                      }),
                       jsx('time', {
                         className: 'dsh-fleet-panel-trace-event-time',
                         dateTime: event.createdAt,
@@ -7026,47 +7416,55 @@ function AgentContextMain({ owner, member }: {
   readonly member: FleetPanelMember
 }): ReactElement {
   if (owner.snapshot.tutorial === true) {
+    const source = owner.contextSource?.memberId === member.id ? owner.contextSource : undefined
     return jsxs('section', {
       className: 'dsh-fleet-panel-chat',
       children: [
         jsx(FleetConversationHeader, {
           kind: 'context',
           name: '执行上下文',
-          description: panelText('演示团队不会创建真实 Agent Session', 'The guided Team does not create real Agent Sessions'),
+          description: source === undefined
+            ? panelText('回放一次真实团队运行中记录的 Agent 上下文', 'Replay Agent context recorded during a real Team run')
+            : panelText('定位这条团队消息进入 Agent 上下文时的录制位置', 'Locate where this Team message entered the recorded Agent context'),
           peer: member,
           meta: jsx(AgentPerspectiveMeta, { member }),
           actions: jsx(NavigationToggle, { owner }),
         }),
-        jsx(PanelUnavailable, {
-          label: panelText(
-            '创建真实团队后，这里会显示成员的原生 ChatView 与持久执行轨迹。',
-            'After you create a real Team, this view shows the member’s native ChatView and persistent execution trace.',
-          ),
-        }),
+        jsx(FleetPersistedMemberTrace, {
+          owner,
+          member,
+          ...(source === undefined ? {} : { source }),
+        }, `${owner.snapshot.teamId}:${member.id}:${source?.contextMessageId ?? ''}`),
         jsx('div', {
           className: 'dsh-fleet-panel-agent-readonly',
           role: 'status',
-          children: panelText(
-            `以 ${member.name} 的视角查看演示数据 · 只读`,
-            `Viewing demo data from ${member.name}’s perspective · Read-only`,
+          children: source === undefined ? panelText(
+            `以 ${member.name} 的视角回放真实记录 · 只读`,
+            `Replaying a real recording from ${member.name}’s perspective · Read-only`,
+          ) : panelText(
+            `正在查看 ${member.name} 的录制消息来源 · 只读`,
+            `Viewing the recorded message source for ${member.name} · Read-only`,
           ),
         }),
       ],
     })
   }
-  const sessionListed = owner.useSessions(state => member.sessionId !== undefined && state.byId[member.sessionId] !== undefined)
-  const session = member.sessionId === undefined || !sessionListed
-    ? undefined
-    : owner.nativeContext.session(member.sessionId)
   const source = owner.contextSource?.memberId === member.id ? owner.contextSource : undefined
+  const contextSessionId = source?.sessionId ?? member.sessionId
+  const sessionListed = owner.useSessions(state => contextSessionId !== undefined && state.byId[contextSessionId] !== undefined)
+  const session = contextSessionId === undefined || !sessionListed
+    ? undefined
+    : owner.nativeContext.session(contextSessionId)
   return jsxs('section', {
     className: 'dsh-fleet-panel-chat',
     children: [
       jsx(FleetConversationHeader, {
         kind: 'context',
         name: '执行上下文',
-        description: source !== undefined
-          ? '定位到这条团队消息进入 Agent 上下文时的实际记录'
+        description: source !== undefined && session === undefined
+          ? '原生 Session 不可用，改从 Fleet 持久轨迹定位消息'
+          : source !== undefined
+          ? '现场加载原生 ChatView，并定位这条团队消息进入 Agent 上下文的位置'
           : session === undefined
           ? '成员离线时从 Fleet 持久轨迹恢复最近上下文'
           : '复用原生 ChatView，只读呈现这个 Agent 的真实 Session',
@@ -7080,18 +7478,25 @@ function AgentContextMain({ owner, member }: {
           ],
         }),
       }),
-      session === undefined || source !== undefined
-        ? jsx(FleetPersistedMemberTrace, { owner, member, ...(source === undefined ? {} : { source }) }, `${owner.snapshot.teamId}:${member.id}:${source?.contextMessageId ?? ''}`)
+      session === undefined || contextSessionId === undefined
+        ? jsx(FleetPersistedMemberTrace, { owner, member, ...(source === undefined ? {} : { source }) }, `${owner.snapshot.teamId}:${member.id}:${source?.sessionId ?? ''}:${source?.contextMessageId ?? ''}`)
         : jsx(owner.SessionProvider, {
-            sessionId: member.sessionId,
+            sessionId: contextSessionId,
             empty: () => jsx(PanelUnavailable, { label: '成员 Session 当前不在 DSH 可见范围内' }),
-            children: () => jsx(FleetNativeMemberChat, { owner, member, session }),
+            children: () => jsx(FleetNativeMemberChat, {
+              owner,
+              session,
+              sessionId: contextSessionId,
+              ...(source === undefined ? {} : { source }),
+            }),
           }),
       jsx('div', {
         className: 'dsh-fleet-panel-agent-readonly',
         role: 'status',
-        children: source !== undefined
-          ? `正在查看 ${member.name} 的消息来源 · 只读`
+        children: source !== undefined && session === undefined
+          ? `正在查看 ${member.name} 的持久消息来源 · 只读`
+          : source !== undefined
+          ? `正在原生 ChatView 中查看 ${member.name} 的消息来源 · 只读`
           : session === undefined
           ? `以 ${member.name} 的视角查看持久轨迹 · 只读`
           : `以 ${member.name} 的视角查看原生 Session · 只读`,
@@ -7166,11 +7571,16 @@ function AgentMain(owner: FleetPanelPaneOwner): ReactElement {
                         owner.snapshot,
                         message.receipt,
                         owner.showMemberDetails,
+                        owner.showMemberContext,
                         owner.openMessageSource,
                       ),
                     }),
                     ...(senderMember === undefined ? {} : {
-                      avatar: jsx(FleetMemberAvatarPopover, { member: senderMember, showDetails: owner.showMemberDetails }),
+                      avatar: jsx(FleetMemberAvatarPopover, {
+                        member: senderMember,
+                        showDetails: owner.showMemberDetails,
+                        showContext: owner.showMemberContext,
+                      }),
                     }),
                     actions: owner.renderPanelSlot(
                       FLEET_PANEL_SLOTS.messageAction,
@@ -7911,6 +8321,7 @@ function FleetRenderEngineMessageText({ panel, text, markdownRenderer }: FleetRe
         member,
         controller,
         showDetails: panel.showMemberDetails,
+        showContext: panel.showMemberContext,
       }),
     ],
   })

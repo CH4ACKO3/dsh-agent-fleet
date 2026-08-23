@@ -262,7 +262,8 @@ describe('Fleet Web panel source', () => {
         teamId: 'team-1',
         members: [{
           id: 'builder', name: 'Avery Stone', responsibility: '实现并验证运行时功能',
-          presence: 'error', statusText: '正在验证团队运行时状态投影', provider: 'deepseek', model: 'deepseek-chat',
+          presence: 'error', statusText: '正在验证团队运行时状态投影',
+          statusUpdatedAt: '2026-08-21T10:06:00.000Z', provider: 'deepseek', model: 'deepseek-chat',
         }],
         assistants: [{
           id: 'assistant', name: 'You', role: '外部观察者', responsibility: '外部观察者',
