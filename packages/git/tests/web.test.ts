@@ -59,6 +59,30 @@ describe('FleetGitWebRemote', () => {
     expect(resourceAccess.adapterKinds()).toContain('git-repository')
     const namespace = access.namespaces().find(candidate => candidate.namespace === 'git')
     expect(namespace?.installTools).toBeTypeOf('function')
+
+    const principal = { kind: 'group' as const, id: 'member:builder' }
+    const allowed = (action: string): boolean => resourceAccess.authorize({
+      teamId: 'team-1', subject: { kind: 'member', id: 'builder' }, action,
+      resource: { kind: 'git-repository', id: '/project' },
+    }, true)
+    resourceAccess.setMode('team-1', principal, 'git-repository', 'restricted')
+    resourceAccess.putRule('team-1', {
+      id: 'read-repository', principal, resource: { kind: 'git-repository', id: '/project' },
+      effect: 'allow', levels: ['read'],
+    })
+    expect(allowed('git.inspect')).toBe(true)
+    for (const action of ['git.scope-check', 'git.history-rewrite', 'git.publish', 'git.worktree-create']) {
+      expect(allowed(action), action).toBe(false)
+    }
+    resourceAccess.putRule('team-1', {
+      id: 'write-repository', principal, resource: { kind: 'git-repository', id: '/project' },
+      effect: 'allow', levels: ['write'],
+    })
+    for (const action of ['git.scope-check', 'git.history-rewrite', 'git.publish', 'git.worktree-create']) {
+      expect(allowed(action), action).toBe(true)
+    }
+    expect(allowed('git.repository-manage')).toBe(false)
+    expect(allowed('git.worktree-manage')).toBe(false)
   })
 
   it('exposes strict snapshot, diff, commit, and fetch invocations', () => {

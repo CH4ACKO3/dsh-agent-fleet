@@ -314,9 +314,10 @@ export function apply(ctx: Context): void {
   ctx.inject(['fleetAccess', 'fleetRuns'], scope => scope.fleetAccess.registerAdapter({
     kind: 'git-repository',
     levelFor: action => {
-      if (action === 'git.inspect' || action === 'git.scope-check') return 'read'
-      if (action === 'git.worktree-create') return 'write'
-      if (action === 'git.worktree-manage') return 'manage'
+      if (action === 'git.inspect') return 'read'
+      if (action === 'git.scope-check' || action === 'git.history-rewrite'
+        || action === 'git.publish' || action === 'git.worktree-create') return 'write'
+      if (action === 'git.repository-manage' || action === 'git.worktree-manage') return 'manage'
       return undefined
     },
     normalize: (teamId, resourceId) => repositoryResourceId(
