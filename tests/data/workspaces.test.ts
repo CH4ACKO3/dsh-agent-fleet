@@ -21,6 +21,7 @@ afterEach(() => {
 
 function fixture(root: string, teamId = 'team-one') {
   const states = new Map<string, unknown>()
+  const events: Array<{ readonly teamId: string; readonly type: string; readonly data: unknown }> = []
   const members = [{ id: 'lead' }, { id: 'reviewer' }]
   const runs = {
     status: (id: string) => {
@@ -35,8 +36,11 @@ function fixture(root: string, teamId = 'team-one') {
     writeExtensionState: (id: string, namespace: string, value: unknown) => {
       states.set(`${id}:${namespace}`, structuredClone(value))
     },
+    recordDataEvent: (id: string, type: string, data: unknown) => {
+      events.push({ teamId: id, type, data: structuredClone(data) })
+    },
   } as unknown as FleetRunService
-  return { runs, states, service: new FleetWorkspaceService(runs) }
+  return { events, runs, states, service: new FleetWorkspaceService(runs) }
 }
 
 describe('FleetWorkspaceService', () => {
@@ -65,9 +69,15 @@ describe('FleetWorkspaceService', () => {
       { id: 'project', access: 'read' },
       { id: attached.id, name: 'research', access: 'write' },
     ])
-    restarted.detach('team-one', attached.id)
+    restarted.detach('team-one', 'lead', attached.id)
     expect(restarted.mounts('team-one', 'reviewer')).toEqual([
       expect.objectContaining({ id: 'project', access: 'read' }),
+    ])
+    expect(source.events.map(event => event.type)).toEqual([
+      'workspace.attached',
+      'workspace.assigned',
+      'workspace.detached',
+      'workspace.assigned',
     ])
   })
 

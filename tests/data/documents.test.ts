@@ -27,11 +27,15 @@ function temporaryRoot(): string {
 
 function fixture(roots: Record<string, string> = { 'team-1': temporaryRoot() }) {
   const stored = new Map<string, unknown>()
+  const events: Array<{ readonly teamId: string; readonly type: string; readonly data: unknown }> = []
   const runs = {
     status: (teamId: string) => ({ id: teamId, projectRoot: roots[teamId] }),
     readExtensionState: (teamId: string, namespace: string) => stored.get(`${teamId}:${namespace}`),
     writeExtensionState: (teamId: string, namespace: string, value: unknown) => {
       stored.set(`${teamId}:${namespace}`, structuredClone(value))
+    },
+    recordDataEvent: (teamId: string, type: string, data: unknown) => {
+      events.push({ teamId, type, data: structuredClone(data) })
     },
   } as unknown as FleetRunService
   const files: FleetDocumentFiles = {
@@ -42,12 +46,12 @@ function fixture(roots: Record<string, string> = { 'team-1': temporaryRoot() }) 
       await writeFile(path, content, 'utf8')
     },
   }
-  return { files, roots, runs, stored, service: new FleetDocumentService(runs) }
+  return { events, files, roots, runs, stored, service: new FleetDocumentService(runs) }
 }
 
 describe('FleetDocumentService', () => {
   it('keeps current content and version history as real Team files', async () => {
-    const { files, roots, service, stored } = fixture()
+    const { events, files, roots, service, stored } = fixture()
     const created = await service.create('team-1', 'alice', {
       name: 'design-notes', title: 'Design notes', content: 'version one unique content',
     }, files)
@@ -71,6 +75,15 @@ describe('FleetDocumentService', () => {
     ), 'utf8')).toBe('version two')
     expect(JSON.stringify(stored.get(`team-1:${FLEET_DOCUMENT_STATE_NAMESPACE}`)))
       .not.toContain('version one unique content')
+    expect(events.map(event => event.type)).toEqual([
+      'resource.document_created',
+      'resource.document_updated',
+      'resource.document_commented',
+      'resource.document_commented',
+      'resource.document_resolved',
+      'resource.document_reverted',
+    ])
+    expect(JSON.stringify(events)).not.toContain('version one unique content')
   })
 
   it('resumes from extension metadata and archived Team files', async () => {

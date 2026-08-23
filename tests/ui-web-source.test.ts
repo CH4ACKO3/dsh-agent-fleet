@@ -173,6 +173,30 @@ describe('Fleet Web panel source', () => {
               },
             },
           },
+          {
+            sequence: 10,
+            createdAt: '2026-08-21T10:07:00.000Z',
+            type: 'task.created',
+            data: { action: 'created', task: { id: 'task-1', title: '接通运行时投影' }, actor: 'builder' },
+          },
+          {
+            sequence: 11,
+            createdAt: '2026-08-21T10:08:00.000Z',
+            type: 'schedule.triggered',
+            data: { action: 'triggered', task: { id: 'schedule-1', title: '检查长跑状态' } },
+          },
+          {
+            sequence: 12,
+            createdAt: '2026-08-21T10:09:00.000Z',
+            type: 'calendar.started',
+            data: { action: 'started', event: { id: 'calendar-1', title: '团队同步' } },
+          },
+          {
+            sequence: 13,
+            createdAt: '2026-08-21T10:10:00.000Z',
+            type: 'resource.document_updated',
+            data: { action: 'updated', document: { id: 'doc-1', name: 'plan', title: '执行计划' }, actor: 'builder' },
+          },
         ],
           hasMore: false,
         })
@@ -223,7 +247,7 @@ describe('Fleet Web panel source', () => {
           presence: 'error', statusText: '正在验证团队运行时状态投影', provider: 'deepseek', model: 'deepseek-chat',
         }],
         resources: [{ id: 'plan', name: 'plan.md', kind: 'plan', path: '/workspace/fleet/.fleet/plan.md' }],
-        workspaces: [{ id: 'workspace:/workspace/fleet', name: 'project', path: '/workspace/fleet' }],
+        workspaces: [{ id: 'workspace:/workspace/fleet/src', name: 'source', path: '/workspace/fleet/src' }],
         messages: expect.arrayContaining([
           expect.objectContaining({ id: 'message-1', conversationId: '#general', senderId: 'builder' }),
         ]),
@@ -250,6 +274,12 @@ describe('Fleet Web panel source', () => {
         receipt: { visibleMemberIds: ['builder'], readMemberIds: [], unreadMemberIds: ['builder'] },
       }),
       expect.objectContaining({ id: 'message-reply', conversationId: '@member-session', senderId: 'builder' }),
+    ]))
+    expect(snapshot.team?.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'decision', text: '任务已创建：接通运行时投影' }),
+      expect.objectContaining({ kind: 'decision', text: '计划已触发：检查长跑状态' }),
+      expect.objectContaining({ kind: 'decision', text: '日程已开始：团队同步' }),
+      expect.objectContaining({ kind: 'resource', text: '更新了团队文档 执行计划' }),
     ]))
     const updatesAfterInitialProjection = snapshotUpdates
     await source.refresh()
@@ -401,6 +431,41 @@ describe('Fleet Web panel source', () => {
       directory: { teams: [{ teamId: 'team-1' }] },
       connection: { status: 'connected' },
     })
+    source.dispose()
+  })
+
+  it('refreshes an active projection when the browser peer invalidates it', async () => {
+    const run = {
+      id: 'team-1', name: 'Runtime Team', projectRoot: '/workspace/fleet', status: 'idle',
+      startedAt: '2026-08-21T10:00:00.000Z', members: [], assistants: [],
+    }
+    let lists = 0
+    const remote = {
+      list: async () => {
+        lists += 1
+        return ok([run])
+      },
+      project: async () => ok({ run, memberViews: [], events: [], hasMore: false }),
+      send: async () => ok({}),
+      member: async () => ok({}),
+      control: async () => ok({}),
+      upload: async () => ok({}),
+      uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const source = createFleetWebPanelSource(() => Promise.resolve(remote))
+
+    await source.refresh()
+    await source.invalidate()
+    expect(lists).toBe(1)
+
+    const unsubscribe = source.subscribe(() => undefined)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const beforeInvalidate = lists
+    await source.invalidate()
+    expect(lists).toBe(beforeInvalidate + 1)
+
+    unsubscribe()
     source.dispose()
   })
 

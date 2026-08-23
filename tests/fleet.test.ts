@@ -3,7 +3,7 @@ import { FleetCore } from '@dsh-agent-fleet/core'
 import type { AgentRuntime, RuntimeAgent } from '@dsh-agent-fleet/core'
 import { MessageHub } from '@dsh-agent-fleet/message'
 import type { MessageAgent } from '@dsh-agent-fleet/message'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { apply } from '../src/index.js'
 
@@ -54,6 +54,63 @@ describe('dsh-agent-fleet', () => {
       ['fleetAuthorization', 'fleetRuns', 'fleetGroups'],
       ['fleetAuthorization', 'fleetAccess', 'fleetRuns', 'fs'],
     ]))
+  })
+
+  it('coalesces Fleet changes and wakes newly connected browser peers', async () => {
+    const injections: Array<{
+      dependencies: readonly string[]
+      callback: (ctx: unknown) => unknown
+    }> = []
+    const ctx = {
+      plugin: () => undefined,
+      inject(dependencies: readonly string[], callback: (scope: unknown) => unknown) {
+        injections.push({ dependencies, callback })
+      },
+    } as unknown as Context
+    apply(ctx)
+    const binding = injections.find(candidate => (
+      candidate.dependencies.join(',') === 'fleetRuns,remote,connection'
+    ))
+    if (binding === undefined) throw new Error('expected Fleet browser binding injection')
+
+    const browser = { id: 'browser-1', kind: 'browser' as const }
+    const node = { id: 'node-1', kind: 'node' as const }
+    let changeListener: (() => void) | undefined
+    let peerListener: ((change: { type: 'added'; peer: typeof browser }) => void) | undefined
+    const invalidate = vi.fn(async () => ({ ok: true, value: true }))
+    const disposeRemote = vi.fn(async () => undefined)
+    const cleanup = await binding.callback({
+      fleetRuns: {
+        subscribeChanges(listener: () => void) {
+          changeListener = listener
+          return () => { changeListener = undefined }
+        },
+      },
+      remote: {
+        $mount: async () => disposeRemote,
+        for: () => ({ fleetWebPeer: { invalidate } }),
+      },
+      connection: {
+        peers: {
+          list: () => [browser, node],
+          subscribe(listener: typeof peerListener) {
+            peerListener = listener
+            return () => { peerListener = undefined }
+          },
+        },
+      },
+    }) as () => Promise<void>
+
+    changeListener?.()
+    changeListener?.()
+    await Promise.resolve()
+    expect(invalidate).toHaveBeenCalledTimes(1)
+
+    peerListener?.({ type: 'added', peer: browser })
+    expect(invalidate).toHaveBeenCalledTimes(2)
+
+    await cleanup()
+    expect(disposeRemote).toHaveBeenCalledOnce()
   })
 
   it('uses a Core Fleet name to address a Message recipient', () => {

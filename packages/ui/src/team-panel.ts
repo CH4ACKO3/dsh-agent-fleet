@@ -1,7 +1,13 @@
 import type { ChangeEvent, ComponentType, CSSProperties, FocusEvent, KeyboardEvent, PointerEvent, ReactElement, ReactNode } from 'react'
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
-import { FLEET_WEB_REMOTE, type FleetWebClient } from '@dsh-agent-fleet/core/web'
+import type { Context } from '@deepseek-ai/cordis'
+import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import {
+  FLEET_WEB_PEER_LOCAL,
+  FLEET_WEB_REMOTE,
+  type FleetWebClient,
+} from '@dsh-agent-fleet/core/web'
 import {
   FleetChatAvatar,
   FleetChatMessage,
@@ -3232,7 +3238,6 @@ const SIDEBAR_MAX_WIDTH = 360
 const CHAT_COLUMN_DEFAULT_WIDTH = 760
 const CHAT_COLUMN_MIN_WIDTH = 360
 const CHAT_COLUMN_MAX_WIDTH = 1600
-const MEMBER_TRACE_REFRESH_INTERVAL_MS = 5_000
 const MAIN_MIN_WIDTH = 360
 const PANEL_PREFERENCES_KEY = 'dsh-agent-fleet.panel-preferences.v1'
 
@@ -6460,14 +6465,6 @@ function FleetPersistedMemberTrace({ owner, member }: {
     return () => { controller.abort(new Error('Agent trace view changed')) }
   }, [attempt, member.id, owner.loadMemberTrace, owner.snapshot.teamId])
 
-  useEffect(() => {
-    if (state.status !== 'ready') return
-    const timer = window.setTimeout(() => {
-      setAttempt(current => current + 1)
-    }, MEMBER_TRACE_REFRESH_INTERVAL_MS)
-    return () => { window.clearTimeout(timer) }
-  }, [state])
-
   if (state.status !== 'ready') {
     return jsxs('div', {
       className: 'dsh-fleet-panel-trace-state',
@@ -7430,12 +7427,27 @@ interface FleetPanelClientContext {
   readonly remote?: {
     $mount(contribution: typeof FLEET_WEB_REMOTE): Promise<() => Promise<void>>
   }
+  readonly typert: {
+    register(contribution: typeof FLEET_WEB_PEER_LOCAL): () => Promise<void>
+  }
   inject<T extends object>(
     services: readonly string[],
     callback: (ctx: FleetPanelClientContext & T) => void,
   ): unknown
   get?(name: string): unknown
   provide?(name: string, value: unknown): () => void
+}
+
+class FleetWebPeerRemote extends TypertRemoteService {
+  constructor(ctx: Context, private readonly source: FleetPanelSource) {
+    super(ctx, 'fleetWebPeer', { namespace: 'fleetWebPeer' })
+  }
+
+  invalidate(signal: AbortSignal): boolean {
+    signal.throwIfAborted()
+    if ('invalidate' in this.source && typeof this.source.invalidate === 'function') void this.source.invalidate()
+    return true
+  }
 }
 
 export interface FleetModelCatalogModel {
@@ -7517,7 +7529,7 @@ function createFleetNativeContext(ctx: FleetPanelClientContext): FleetNativeCont
   }
 }
 
-export const inject = ['slots', 'sessions', 'workspaces', 'remote'] as const
+export const inject = ['slots', 'sessions', 'workspaces', 'remote', 'typert'] as const
 
 export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise<void>> {
   const disposeConfigurationModules = ctx.provide?.('fleetConfigurationModules', fleetConfigurationModules)
@@ -7541,6 +7553,8 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
   configureFleetWebClient(fleetWeb)
   const injectedSource = ctx.get?.(FLEET_PANEL_SOURCE_SERVICE) as FleetPanelSource | undefined
   const source = injectedSource ?? createFleetWebPanelSource(() => Promise.resolve(fleetWeb))
+  new FleetWebPeerRemote(ctx as unknown as Context, source)
+  const disposePeerLocal = ctx.typert.register(FLEET_WEB_PEER_LOCAL)
   teamDirectorySource = source
   const nativeContext = createFleetNativeContext(ctx)
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
@@ -7632,6 +7646,7 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
     configureFleetWebClient(undefined)
     if (teamDirectorySource === source) teamDirectorySource = undefined
     if (injectedSource === undefined && 'dispose' in source && typeof source.dispose === 'function') source.dispose()
+    await disposePeerLocal()
     await disposeRemote()
   }
 }

@@ -18,7 +18,6 @@ import {
   type FleetPanelWorkspace,
 } from './team-panel.js'
 
-const POLL_INTERVAL_MS = 2_000
 const PAGE_SIZE = 500
 const MAX_TEAM_MESSAGES = 500
 const MAX_TEAM_ACTIVITY = 250
@@ -231,8 +230,9 @@ function formatBytes(size: number | undefined): string | undefined {
 
 function activityKind(type: string): FleetPanelActivity['kind'] | undefined {
   if (type === 'coordination.message') return 'message'
-  if (type.startsWith('resource.')) return 'resource'
-  if (type === 'coordination.vote' || type.startsWith('work_') || type === 'team_status') return 'decision'
+  if (type.startsWith('resource.') || type.startsWith('workspace.')) return 'resource'
+  if (type === 'coordination.vote' || type.startsWith('work_') || type === 'team_status'
+    || type.startsWith('task.') || type.startsWith('schedule.') || type.startsWith('calendar.')) return 'decision'
   if (type.startsWith('member_') || type.startsWith('assistant_')) return 'member'
   return undefined
 }
@@ -249,10 +249,6 @@ function stateEventKey(event: WireEvent): string | undefined {
   if (event.type === 'resource.resource_added') {
     const id = string(nestedRecord(event.data, 'resource')?.id)
     return id === undefined ? undefined : `resource:${id}`
-  }
-  if (event.type.startsWith('resource.document_')) {
-    const id = string(nestedRecord(event.data, 'document')?.id)
-    return id === undefined ? undefined : `document:${id}`
   }
   if (event.type === 'workspace.assigned') {
     const member = string(asRecord(event.data)?.member)
@@ -392,6 +388,24 @@ function runDirectorySignature(runs: readonly WireRun[]): string {
   ]))
 }
 
+function activityAction(value: unknown): string {
+  const action = string(value)
+  return action === undefined ? '更新' : ({
+    created: '创建',
+    updated: '更新',
+    commented: '评论',
+    progressed: '更新进度',
+    completed: '完成',
+    reopened: '重新打开',
+    due: '到期',
+    triggered: '触发',
+    cancelled: '取消',
+    rsvp: '回复',
+    started: '开始',
+    closed: '结束',
+  } as Readonly<Record<string, string>>)[action] ?? action
+}
+
 function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, FleetPanelMember>): string {
   const data = asRecord(event.data)
   if (event.type === 'member_status.updated') {
@@ -411,9 +425,32 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
     const resource = nestedRecord(event.data, 'resource')
     return `添加了共享资源 ${string(resource?.label) ?? basename(string(resource?.path) ?? '文件')}`
   }
+  if (event.type === 'resource.resource_revised') {
+    const revision = nestedRecord(event.data, 'revision')
+    return `更新了共享资源 ${string(revision?.resourceId) ?? '文件'}`
+  }
   if (event.type.startsWith('resource.document_')) {
     const document = nestedRecord(event.data, 'document')
     return `更新了团队文档 ${string(document?.title) ?? string(document?.name) ?? '文档'}`
+  }
+  if (event.type.startsWith('workspace.')) {
+    const workspace = nestedRecord(event.data, 'workspace')
+    const member = string(data?.member)
+    if (event.type === 'workspace.assigned') return `更新了 ${member ?? '团队成员'} 的工作区挂载`
+    if (event.type === 'workspace.detached') return `移除了工作区 ${string(workspace?.name) ?? string(data?.workspaceId) ?? ''}`.trim()
+    return `挂载了工作区 ${string(workspace?.name) ?? string(workspace?.path) ?? ''}`.trim()
+  }
+  if (event.type.startsWith('task.')) {
+    const task = nestedRecord(event.data, 'task')
+    return `任务已${activityAction(data?.action)}：${string(task?.title) ?? string(task?.id) ?? '未命名任务'}`
+  }
+  if (event.type.startsWith('schedule.')) {
+    const task = nestedRecord(event.data, 'task')
+    return `计划已${activityAction(data?.action)}：${string(task?.title) ?? string(task?.id) ?? '未命名计划'}`
+  }
+  if (event.type.startsWith('calendar.')) {
+    const calendar = nestedRecord(event.data, 'event')
+    return `日程已${activityAction(data?.action)}：${string(calendar?.title) ?? string(calendar?.id) ?? '未命名日程'}`
   }
   if (event.type === 'coordination.vote') {
     const vote = nestedRecord(event.data, 'vote')
@@ -479,6 +516,21 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const acknowledgedSessionsByMessage = new Map<string, Set<string>>()
 
   for (const event of cache.events) {
+    if (event.type === 'workspace.assigned') {
+      const data = asRecord(event.data)
+      const member = string(data?.member)
+      const assigned = Array.isArray(data?.workspaces) ? data.workspaces.flatMap(candidate => {
+        const workspace = asRecord(candidate)
+        const name = string(workspace?.name)
+        const path = string(workspace?.path)
+        const access = string(workspace?.access)
+        return name === undefined || path === undefined || (access !== 'read' && access !== 'write')
+          ? []
+          : [{ name, path, access: access as 'read' | 'write' }]
+      }) : []
+      if (member !== undefined) memberWorkspaces.set(member, assigned)
+      continue
+    }
     if (event.type === 'coordination.channel') {
       const channel = nestedRecord(event.data, 'channel')
       const id = string(channel?.id)
@@ -780,16 +832,16 @@ function directory(runs: readonly WireRun[]): FleetPanelTeamDirectory {
 
 export interface FleetWebPanelSource extends FleetPanelSource {
   refresh(): Promise<void>
+  invalidate(): Promise<void>
   dispose(): void
 }
 
-/** Pull projection used until Fleet exposes a client event stream. Polling only runs while UI subscribers exist. */
+/** Cursor-based projection refreshed by the Fleet browser-peer notification channel. */
 export function createFleetWebPanelSource(
   getClient: (signal?: AbortSignal) => Promise<FleetWebClient>,
 ): FleetWebPanelSource {
   let snapshot: FleetPanelSnapshot = { directory: EMPTY_DIRECTORY, connection: { status: 'loading' } }
   let selectedTeamId: string | undefined
-  let timer: ReturnType<typeof setTimeout> | undefined
   let refreshing: Promise<void> | undefined
   let refreshAgain = false
   let disposed = false
@@ -817,13 +869,6 @@ export function createFleetWebPanelSource(
     signature = nextSignature
     snapshot = next
     emit()
-  }
-  const schedule = (): void => {
-    if (disposed || listeners.size === 0 || timer !== undefined) return
-    timer = setTimeout(() => {
-      timer = undefined
-      void refresh()
-    }, POLL_INTERVAL_MS)
   }
   const loadProjection = async (client: FleetWebClient, teamId: string): Promise<ProjectionCache> => {
     const current = projections.get(teamId)
@@ -905,8 +950,6 @@ export function createFleetWebPanelSource(
         if (refreshAgain) {
           refreshAgain = false
           void refresh()
-        } else {
-          schedule()
         }
       })
     return refreshing
@@ -919,12 +962,9 @@ export function createFleetWebPanelSource(
       if (listeners.size === 1) void refresh()
       return () => {
         listeners.delete(listener)
-        if (listeners.size === 0 && timer !== undefined) {
-          clearTimeout(timer)
-          timer = undefined
-        }
       }
     },
+    invalidate: () => listeners.size > 0 ? refresh() : Promise.resolve(),
     selectTeam: teamId => {
       if (teamId === selectedTeamId) return
       selectedTeamId = teamId
@@ -1124,8 +1164,6 @@ export function createFleetWebPanelSource(
       if (disposed) return
       disposed = true
       lifetime.abort(new Error('Fleet panel source disposed'))
-      if (timer !== undefined) clearTimeout(timer)
-      timer = undefined
       listeners.clear()
     },
   }

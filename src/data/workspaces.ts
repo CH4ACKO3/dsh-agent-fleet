@@ -188,13 +188,15 @@ export class FleetWorkspaceService {
       createdAt: new Date().toISOString(),
     }
     this.save(teamId, { ...state, workspaces: [...state.workspaces, workspace] })
+    this.runs.recordDataEvent(teamId, 'workspace.attached', { actor, workspace })
     return structuredClone(workspace)
   }
 
-  detach(teamId: string, workspaceId: string): void {
+  detach(teamId: string, actor: string, workspaceId: string): void {
     if (workspaceId === PROJECT_WORKSPACE_ID) throw new Error('the Team project workspace cannot be detached')
     const state = this.state(teamId)
-    if (!state.workspaces.some(workspace => workspace.id === workspaceId)) {
+    const workspace = state.workspaces.find(candidate => candidate.id === workspaceId)
+    if (workspace === undefined) {
       throw new Error(`unknown Fleet workspace ${workspaceId}`)
     }
     const members = Object.fromEntries(Object.entries(state.members).map(([member, mounts]) => [
@@ -206,9 +208,22 @@ export class FleetWorkspaceService {
       workspaces: state.workspaces.filter(workspace => workspace.id !== workspaceId),
       members,
     })
+    this.runs.recordDataEvent(teamId, 'workspace.detached', { actor, workspace })
+    for (const member of Object.keys(members)) {
+      this.runs.recordDataEvent(teamId, 'workspace.assigned', {
+        actor,
+        member,
+        workspaces: this.mounts(teamId, member),
+      })
+    }
   }
 
-  assign(teamId: string, member: string, mounts: readonly FleetWorkspaceMount[]): FleetResolvedWorkspaceMount[] {
+  assign(
+    teamId: string,
+    member: string,
+    mounts: readonly FleetWorkspaceMount[],
+    actor = member,
+  ): FleetResolvedWorkspaceMount[] {
     this.requireMember(teamId, member)
     const state = this.state(teamId)
     const known = new Set([PROJECT_WORKSPACE_ID, ...state.workspaces.map(workspace => workspace.id)])
@@ -223,7 +238,9 @@ export class FleetWorkspaceService {
       ...state,
       members: { ...state.members, [member]: mounts.map(mount => ({ ...mount })) },
     })
-    return this.mounts(teamId, member)
+    const resolved = this.mounts(teamId, member)
+    this.runs.recordDataEvent(teamId, 'workspace.assigned', { actor, member, workspaces: resolved })
+    return resolved
   }
 
   restore(teamId: string, state: FleetWorkspaceState): void {
@@ -335,7 +352,7 @@ function installWorkspaceTool(
       if (args.action === 'detach') {
         if (args.workspace_id === undefined) throw new Error('fleet_workspace detach requires workspace_id')
         requireWorkspace(service.workspace(teamId, args.workspace_id).path, 'manage')
-        service.detach(teamId, args.workspace_id)
+        service.detach(teamId, actor.subject.id, args.workspace_id)
         return Promise.resolve({ action: 'detach' as const, workspaces: [] })
       }
       if (args.member === undefined || args.mounts === undefined) throw new Error('fleet_workspace assign requires member and mounts')
@@ -343,7 +360,7 @@ function installWorkspaceTool(
       const workspaces = service.assign(teamId, args.member, args.mounts.map(mount => ({
         workspaceId: mount.workspace_id,
         access: mount.access,
-      })))
+      })), actor.subject.id)
       return Promise.resolve({ action: 'assign' as const, member: args.member, workspaces })
     },
   }))

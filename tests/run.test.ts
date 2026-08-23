@@ -357,6 +357,31 @@ function setup(root: string, options?: {
 }
 
 describe('FleetRunService', () => {
+  it('notifies web observers after durable and live member changes', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    let changes = 0
+    const unsubscribe = service.subscribeChanges(() => { changes += 1 })
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    expect(changes).toBeGreaterThan(0)
+
+    const member = runtime.get(run.members[0]?.sessionId ?? '')
+    if (member === undefined) throw new Error('expected Fleet member')
+    const afterCreate = changes
+    member.status = 'running'
+    service.agentStatusChanged(member as unknown as Agent)
+    expect(changes).toBe(afterCreate + 1)
+
+    unsubscribe()
+    service.agentStatusChanged(member as unknown as Agent)
+    expect(changes).toBe(afterCreate + 1)
+    disconnect()
+  })
+
   it('uses member display names in messages and accepts them as message targets', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
@@ -1396,6 +1421,16 @@ describe('FleetRunService', () => {
     if (reviewer === undefined) throw new Error('expected live Fleet reviewer')
     service.readWebTeamProjection(run.id, 0, 1_000)
     service.memberStatusBoard(run.id).set(String(lead.id), 'Reviewing the long-running projection')
+    service.recordDataEvent(run.id, 'resource.document_updated', {
+      action: 'updated',
+      document: { id: 'doc-1', name: 'plan', title: 'Execution plan' },
+      actor: 'lead',
+    })
+    service.recordDataEvent(run.id, 'workspace.assigned', {
+      member: 'lead',
+      workspaces: [{ name: 'source', path: join(root, 'src'), access: 'write' }],
+      actor: 'lead',
+    })
     const internal = service as unknown as { storedEvents: (record: unknown) => unknown[] }
     const storedEvents = internal.storedEvents.bind(service)
     let journalReads = 0
@@ -1437,6 +1472,10 @@ describe('FleetRunService', () => {
         status: expect.objectContaining({ member: 'lead', message: 'Reviewing the long-running projection' }),
       }),
     }))
+    expect(projection.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'resource.document_updated' }),
+      expect.objectContaining({ type: 'workspace.assigned' }),
+    ]))
     expect(projection.events.some(event => event.type.startsWith('session.'))).toBe(false)
     expect(readFileSync(join(root, '.fleet-registry', run.id, 'events.jsonl'), 'utf8')).not.toContain('"type":"session.')
 

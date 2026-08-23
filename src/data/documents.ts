@@ -210,7 +210,9 @@ export class FleetDocumentService {
       await files.write(this.versionPath(teamId, metadata, 1), content, signal)
       await files.write(main, content, signal)
       this.save(teamId, { version: 1, documents: [...state.documents, metadata] })
-      return this.materialize(teamId, metadata, files, signal)
+      const document = await this.materialize(teamId, metadata, files, signal)
+      this.recordChange(teamId, 'created', actor, document)
+      return document
     })
   }
 
@@ -242,7 +244,9 @@ export class FleetDocumentService {
       await files.write(this.versionPath(teamId, updated, version), content, signal)
       await files.write(this.documentPath(teamId, updated.name), content, signal)
       this.replace(teamId, updated)
-      return this.materialize(teamId, updated, files, signal)
+      const document = await this.materialize(teamId, updated, files, signal)
+      this.recordChange(teamId, 'updated', actor, document)
+      return document
     })
   }
 
@@ -276,7 +280,9 @@ export class FleetDocumentService {
         updatedAt: now,
       }
       this.replace(teamId, updated)
-      return this.materialize(teamId, updated, files, signal)
+      const document = await this.materialize(teamId, updated, files, signal)
+      this.recordChange(teamId, 'commented', actor, document)
+      return document
     })
   }
 
@@ -302,7 +308,9 @@ export class FleetDocumentService {
         updatedAt: now,
       }
       this.replace(teamId, updated)
-      return this.materialize(teamId, updated, files, signal)
+      const document = await this.materialize(teamId, updated, files, signal)
+      this.recordChange(teamId, 'resolved', actor, document)
+      return document
     })
   }
 
@@ -333,7 +341,27 @@ export class FleetDocumentService {
       await files.write(this.versionPath(teamId, updated, version), content, signal)
       await files.write(this.documentPath(teamId, updated.name), content, signal)
       this.replace(teamId, updated)
-      return this.materialize(teamId, updated, files, signal)
+      const document = await this.materialize(teamId, updated, files, signal)
+      this.recordChange(teamId, 'reverted', actor, document)
+      return document
+    })
+  }
+
+  private recordChange(
+    teamId: string,
+    action: 'created' | 'updated' | 'commented' | 'resolved' | 'reverted',
+    actor: string,
+    document: FleetDocument,
+  ): void {
+    const { content: _content, versions, comments, ...metadata } = document
+    this.runs.recordDataEvent(teamId, `resource.document_${action}`, {
+      action,
+      actor,
+      document: {
+        ...metadata,
+        versionCount: versions.length,
+        commentCount: comments.length,
+      },
     })
   }
 

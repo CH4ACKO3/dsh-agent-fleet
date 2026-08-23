@@ -24,8 +24,8 @@ export default defineConfig({
   sourcemap: true,
   dts: false,
   deps: {
-    alwaysBundle: ['dsh-hover-hint', '@dsh-agent-fleet/core/activation', '@dsh-agent-fleet/core/names', '@dsh-agent-fleet/core/web', 'human-names', 'unique-random-array', 'unique-random'],
-    onlyBundle: ['human-names', 'unique-random-array', 'unique-random', 'zod'],
+    alwaysBundle: ['dsh-hover-hint', '@dsh-agent-fleet/core/activation', '@dsh-agent-fleet/core/names', '@dsh-agent-fleet/core/web', '@deepseek-ai/dsh-typert-protocol', 'human-names', 'unique-random-array', 'unique-random'],
+    onlyBundle: ['@deepseek-ai/dsh-typert-protocol', 'human-names', 'unique-random-array', 'unique-random', 'zod'],
   },
   banner: { js: moduleHeader },
   footer: { js: moduleFooter },

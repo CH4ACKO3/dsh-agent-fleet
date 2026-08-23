@@ -298,10 +298,6 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
     const id = projectionEntityId(event.data, 'resource')
     return id === undefined ? undefined : `resource:${id}`
   }
-  if (event.type.startsWith('resource.document_')) {
-    const id = projectionEntityId(event.data, 'document')
-    return id === undefined ? undefined : `document:${id}`
-  }
   if (event.type === 'workspace.assigned') {
     const member = typeof event.data === 'object' && event.data !== null
       ? (event.data as Record<string, unknown>).member
@@ -327,6 +323,10 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
 
 function isProjectionActivity(event: StoredFleetEvent): boolean {
   return event.type.startsWith('resource.')
+    || event.type.startsWith('workspace.')
+    || event.type.startsWith('task.')
+    || event.type.startsWith('schedule.')
+    || event.type.startsWith('calendar.')
     || event.type === 'coordination.vote'
     || event.type.startsWith('work_')
     || event.type === 'team_status'
@@ -1156,6 +1156,7 @@ export class FleetRunService {
   private readonly memberToolActivity = new Map<string, MemberToolActivity>()
   private readonly waitingSessionIds = new Set<string>()
   private readonly abnormalSessionIds = new Set<string>()
+  private readonly changeListeners = new Set<() => void>()
   private readonly registryDirectory: string
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
@@ -1173,6 +1174,11 @@ export class FleetRunService {
     this.authorization = options.authorization
     this.configuration = options.configuration ?? new FleetConfigurationRegistry()
     this.loadPersistedTeams()
+  }
+
+  subscribeChanges(listener: () => void): () => void {
+    this.changeListeners.add(listener)
+    return () => { this.changeListeners.delete(listener) }
   }
 
   authorizationBaseline(): FleetAuthorizationBaseline {
@@ -3039,9 +3045,30 @@ export class FleetRunService {
         })}\n`,
         'utf8',
       )
+      this.appendEvent(runId, 'resource.resource_revised', {
+        type: event.type,
+        revision: {
+          id: event.revision.id,
+          resourceId: event.revision.resourceId,
+          updatedBy: event.revision.updatedBy,
+          updatedAt: event.revision.updatedAt,
+          available,
+          size,
+        },
+      })
       return
     }
     this.appendEvent(runId, `resource.${event.type}`, event)
+  }
+
+  recordDataEvent(
+    runId: string,
+    type:
+      | `resource.document_${'created' | 'updated' | 'commented' | 'resolved' | 'reverted'}`
+      | `workspace.${'attached' | 'detached' | 'assigned'}`,
+    data: unknown,
+  ): void {
+    this.appendEvent(runId, type, data)
   }
 
   private clearMemberActivity(sessionId: string): void {
@@ -3188,6 +3215,14 @@ export class FleetRunService {
         reason: 'team_quiescent',
       })
     }
+  }
+
+  agentStatusChanged(agent: Agent): void {
+    const agentId = String(agent.id)
+    if ([...this.records.values()].some(record => this.participants(record).some(member => member.sessionId === agentId))) {
+      this.emitChange()
+    }
+    if (agent.status === 'idle') this.agentIdle(agent)
   }
 
   agentDisconnected(agentId: string): void {
@@ -3722,6 +3757,7 @@ export class FleetRunService {
     this.dormantRunIds.clear()
     this.teamProjectionEvents.clear()
     this.memberViewSnapshots.clear()
+    this.changeListeners.clear()
   }
 
   private async settleFinishedWork(record: FleetRunRecord): Promise<void> {
@@ -4058,6 +4094,11 @@ export class FleetRunService {
     if (projection !== undefined && !event.type.startsWith('session.')) {
       this.cacheTeamProjection(runId, compactTeamProjectionEvents([...projection, event]))
     }
+    this.emitChange()
+  }
+
+  private emitChange(): void {
+    for (const listener of [...this.changeListeners]) listener()
   }
 
   private cacheTeamProjection(runId: string, projection: StoredFleetEvent[]): void {
