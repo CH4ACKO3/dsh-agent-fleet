@@ -1908,7 +1908,7 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-agent-message-row > .dsh-fleet-chat-message {
-  width: min(100%, 680px);
+  width: 100%;
 }
 
 .dsh-fleet-panel-agent-message-row[data-self="true"] {

@@ -240,7 +240,7 @@ const styles = `
 }
 
 .dsh-fleet-assistant-private-message > .dsh-fleet-chat-message {
-  width: min(100%, 680px);
+  width: 100%;
 }
 
 .dsh-fleet-assistant-private-message[data-self="true"] {
