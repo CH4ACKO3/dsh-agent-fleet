@@ -45,4 +45,17 @@ describe('complete Team template locales', () => {
       }
     }
   })
+
+  it('keeps the research assistant observational instead of making it a research coordinator', () => {
+    const research = FULL_TEAM_TEMPLATES.find(template => template.id === 'research-full')
+    if (research === undefined) throw new Error('missing research Team template')
+    for (const assistant of [research.configuration.en.core.assistant, research.configuration.zh.core.assistant]) {
+      expect(assistant.toolGroups).toEqual([
+        'messages', 'status', 'resources', 'documents', 'tasks', 'calendar', 'schedule',
+      ])
+      expect(assistant.permissions).toEqual(['message.wakeup', 'team.manage'])
+      expect(assistant.prompt.length).toBeGreaterThan(200)
+      expect(assistant.prompt).toMatch(/not a researcher|不是研究员/u)
+    }
+  })
 })

@@ -118,8 +118,7 @@ export class FleetCollaborationService {
         ],
         defaultActions: ({ member }) => [
           ...(member.toolGroups.includes('coordination') ? ['wakeup'] : []),
-          ...(member.permissions.includes('team.manage') || member.permissions.includes('message.interrupt')
-            ? ['interrupt'] : []),
+          ...(member.permissions.includes('message.interrupt') ? ['interrupt'] : []),
         ],
       }),
       authorization.registerNamespace({

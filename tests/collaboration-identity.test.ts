@@ -13,6 +13,19 @@ const view = (id: string, permissions: string[] = []): FleetMemberView => ({
 afterEach(() => { vi.useRealTimers() })
 
 describe('Fleet collaboration identities', () => {
+  it('does not turn Team lifecycle control into message interruption authority', () => {
+    const authorization = new FleetAuthorizationService()
+    const collaboration = new FleetCollaborationService({ on: () => () => {} } as never, authorization)
+    const assistant = {
+      ...view('assistant', ['message.wakeup', 'team.manage']),
+      toolGroups: ['messages', 'status', 'resources'],
+    }
+
+    expect(authorization.resolve('team-1', assistant).actions).toContain('message.wakeup')
+    expect(authorization.resolve('team-1', assistant).actions).not.toContain('message.interrupt')
+    collaboration.close()
+  })
+
   it('keeps assistants out of default votes and lets Calendar open a system-owned Meeting', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))
