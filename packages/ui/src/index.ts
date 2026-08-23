@@ -2088,6 +2088,7 @@ interface MemberDraft {
   readonly prompt: string
   readonly provider: string
   readonly model: string
+  readonly canVote?: boolean
   readonly toolGroups?: unknown
   readonly permissions?: unknown
   readonly contacts?: unknown
@@ -2372,6 +2373,7 @@ function configuredActor(member: MemberDraft): Record<string, unknown> {
     prompt: member.prompt.trim(),
     provider: member.provider.trim(),
     model: member.model.trim(),
+    ...(member.canVote === undefined ? {} : { canVote: member.canVote }),
     ...(member.toolGroups === undefined ? {} : { toolGroups: structuredClone(member.toolGroups) }),
     ...(member.permissions === undefined ? {} : { permissions: structuredClone(member.permissions) }),
     ...(member.contacts === undefined ? {} : { contacts: structuredClone(member.contacts) }),
@@ -2464,6 +2466,9 @@ function configurationFromPreset(value: unknown): FleetConfigurationDraft {
       throw new Error(`Invalid member ${index + 1}`)
     }
     const member = value as Record<string, unknown>
+    if (member.canVote !== undefined && typeof member.canVote !== 'boolean') {
+      throw new Error(`Invalid member ${index + 1} voting setting`)
+    }
     const configuredName = presetString(member.name, 'member name').trim()
     const configuredColor = presetString(member.color, 'member color').trim()
     const name = configuredName || generateMemberDisplayName(memberNames)
@@ -2481,6 +2486,7 @@ function configurationFromPreset(value: unknown): FleetConfigurationDraft {
       prompt: presetString(member.prompt, 'member prompt'),
       provider: presetString(member.provider, 'member provider'),
       model: presetString(member.model, 'member model'),
+      ...(member.canVote === undefined ? {} : { canVote: member.canVote }),
       ...(member.toolGroups === undefined ? {} : { toolGroups: structuredClone(member.toolGroups) }),
       ...(member.permissions === undefined ? {} : { permissions: structuredClone(member.permissions) }),
       ...(member.contacts === undefined ? {} : { contacts: structuredClone(member.contacts) }),

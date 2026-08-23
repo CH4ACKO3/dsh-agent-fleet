@@ -990,6 +990,7 @@ export class MessageHub {
     for (const voter of voters) {
       if (voter === sender.id) throw new Error('a Vote initiator cannot also be a voter')
       this.requireAgent(voter)
+      if (!(this.agents.canVote?.(voter) ?? true)) throw new Error(`Agent ${voter} is not eligible to vote`)
       if (input.voters !== undefined) this.requireContact(sender.id, voter)
       if (!this.canRead(channel, voter)) throw new Error(`Agent ${voter} cannot access #${channel.id}`)
     }

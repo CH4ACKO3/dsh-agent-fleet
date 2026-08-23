@@ -836,6 +836,9 @@ function normalizedMemberView(value: FleetMemberView, label = 'member'): FleetMe
   const provider = optionalText(raw.provider, `${label}.provider`)
   const model = optionalText(raw.model, `${label}.model`)
   const id = text(raw.id, `${label}.id`)
+  if (raw.canVote !== undefined && typeof raw.canVote !== 'boolean') {
+    throw new Error(`${label}.canVote must be a boolean`)
+  }
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) throw new Error(`${label}.id must use lower-kebab-case`)
   return {
     id,
@@ -846,6 +849,7 @@ function normalizedMemberView(value: FleetMemberView, label = 'member'): FleetMe
     prompt: optionalText(raw.prompt, `${label}.prompt`),
     ...(provider.length === 0 ? {} : { provider }),
     ...(model.length === 0 ? {} : { model }),
+    ...(raw.canVote === undefined ? {} : { canVote: raw.canVote }),
     toolGroups: memberToolGroups(raw.toolGroups, `${label}.toolGroups`),
     permissions: memberPermissions(raw.permissions, `${label}.permissions`),
     contacts: memberContacts(raw.contacts, `${label}.contacts`),
@@ -4318,6 +4322,7 @@ const MEMBER_VIEW_SCHEMA = {
     prompt: { type: 'string', required: true },
     provider: { type: 'string' },
     model: { type: 'string' },
+    canVote: { type: 'boolean' },
     toolGroups: { type: 'array', required: true, items: { type: 'string' } },
     permissions: { type: 'array', required: true, items: { type: 'string' } },
     contacts: {

@@ -729,6 +729,23 @@ describe('MessageHub', () => {
     expect(opened.voters).toEqual([reviewer.id, qa.id])
   })
 
+  it('does not allow a non-voting assistant to be selected explicitly', () => {
+    const { agents, lead, observer } = setup()
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      list: () => [...agents.values()],
+      defaultVoter: id => id !== observer.id,
+      canVote: id => id !== observer.id,
+    })
+
+    expect(() => hub.createVote(lead, {
+      channel: '#general',
+      kind: 'message',
+      statement: 'Do not involve the assistant in this decision.',
+      voters: ['@observer'],
+    })).toThrow('is not eligible to vote')
+  })
+
   it('supports a selected voter set within the visible Channel', () => {
     const { hub, lead, reviewer, qa } = setup()
     const opened = hub.createVote(lead, {

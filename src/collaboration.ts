@@ -90,7 +90,9 @@ export class FleetCollaborationService {
     const memberIdsByName = new Map<string, string>()
     const memberNamesById = new Map<string, string>()
     const memberViews = new Map(input.memberViews.map(view => [view.id, structuredClone(view)]))
-    const defaultVoterNames = new Set(input.memberViews.map(view => view.id))
+    const defaultVoterNames = new Set(input.memberViews
+      .filter(view => view.canVote !== false)
+      .map(view => view.id))
     const user: MessageAgent = {
       id: `fleet-user:${input.id}`,
       inject: () => {},
@@ -141,6 +143,11 @@ export class FleetCollaborationService {
       },
       hasPermission: (agentId, permission) => agentId !== user.id && hasPermission(agentId, permission),
       defaultVoter: agentId => {
+        if (agentId === user.id) return false
+        const name = memberNamesById.get(agentId)
+        return name !== undefined && defaultVoterNames.has(name)
+      },
+      canVote: agentId => {
         if (agentId === user.id) return false
         const name = memberNamesById.get(agentId)
         return name !== undefined && defaultVoterNames.has(name)
