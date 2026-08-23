@@ -2280,7 +2280,7 @@ function newMember(seed: Partial<Omit<MemberDraft, 'key'>> = {}): MemberDraft {
     provider: '',
     model: '',
     toolGroups: [...DEFAULT_MEMBER_TOOL_GROUPS],
-    permissions: [...DEFAULT_MEMBER_PERMISSIONS],
+    permissions: [],
     sourcePresetId: null,
     modified: false,
     ...seed,
@@ -2301,6 +2301,7 @@ function defaultAssistant(existing: readonly MemberDraft[] = []): MemberDraft {
     responsibilities: chinese
       ? '维护面向用户的团队会话，帮助用户观察、控制并与团队协作。'
       : 'Maintain the user-facing Team conversation and help the user observe, control, and collaborate with the Team.',
+    permissions: [...DEFAULT_MEMBER_PERMISSIONS],
   })
 }
 

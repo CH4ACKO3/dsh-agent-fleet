@@ -341,11 +341,14 @@ function setup(root: string, options?: {
       },
     },
   } as unknown as Context
-  const collaboration = new FleetCollaborationService(context, new FleetAuthorizationService())
+  const authorization = new FleetAuthorizationService()
+  const collaboration = new FleetCollaborationService(context, authorization)
   const service = new FleetRunService(context, core, collaboration, {
     registryDirectory: join(root, '.fleet-registry'),
     ...(options?.archives === undefined ? {} : { archives: options.archives }),
+    authorization,
   })
+  authorization.installBaseline(service.authorizationBaseline())
   return {
     service,
     core,
@@ -1072,6 +1075,37 @@ describe('FleetRunService', () => {
       expect.objectContaining({ type: 'text', text: expect.stringContaining('Pause feature expansion') }),
     ])
 
+    const vtuberAssistant = runtime.add('vtuber-assistant', root)
+    const vtuber = await service.attachAssistant(vtuberAssistant as unknown as Agent, {
+      runId: run.id,
+      name: 'Nova',
+      role: 'Live Host',
+      responsibility: 'Observe the Team and present progress to the audience.',
+    })
+    expect(vtuber.assistant.view).toMatchObject({
+      toolGroups: ['messages', 'status', 'resources'],
+      permissions: [],
+    })
+    expect(service.sendAssistantMessage(vtuberAssistant as unknown as Agent, {
+      runId: run.id,
+      kind: 'collaboration',
+      text: 'The live audience can now see the latest Team update.',
+    })).toMatchObject({ assistantName: 'Nova' })
+    expect(() => service.sendAssistantMessage(vtuberAssistant as unknown as Agent, {
+      runId: run.id,
+      kind: 'directive',
+      text: 'Interrupt the Team for the live audience.',
+    })).toThrow(/message\.wakeup/)
+    expect(() => service.sendConversationMessage(vtuberAssistant as unknown as Agent, {
+      runId: run.id,
+      to: '#main',
+      text: 'Wake the Team through the direct conversation route.',
+      delivery: 'wakeup',
+    })).toThrow(/message\.wakeup/)
+    expect(() => service.end(vtuberAssistant as unknown as Agent, 'The host should not close the Team.', run.id))
+      .toThrow(/team\.manage/)
+    service.detachAssistant(vtuberAssistant as unknown as Agent, run.id)
+
     const secondAssistant = runtime.add('other-assistant', root)
     expect(() => service.sendAssistantMessage(secondAssistant as unknown as Agent, {
       runId: run.id,
@@ -1085,8 +1119,10 @@ describe('FleetRunService', () => {
       name: 'Maya',
       role: 'Research Assistant',
       responsibility: 'Keep research questions and Team decisions connected to the user.',
+      toolGroups: ['messages', 'coordination', 'resources', 'status'],
+      permissions: ['meeting.manage', 'vote.create'],
     })
-    expect(attached.run.assistants).toHaveLength(2)
+    expect(attached.run.assistants).toHaveLength(3)
     expect(attached.assistant.view).toMatchObject({
       name: 'Maya',
       role: 'Research Assistant',

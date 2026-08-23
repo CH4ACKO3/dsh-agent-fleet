@@ -79,7 +79,10 @@ describe('FleetWebRemote', () => {
     Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
     const runs = {
       readMemberProjection: vi.fn(() => ({ run: { id: 'team-one' }, view: { id: 'lead' }, events: [], hasMore: false })),
-      requireAssistantConnection: vi.fn(),
+      requireAssistantConnection: vi.fn(() => ({
+        sessionId: 'ui-session',
+        view: { id: 'assistant', toolGroups: [], permissions: [] },
+      })),
     } as unknown as FleetRunService
     const authorization = {
       inspectMember: vi.fn(() => ({
@@ -90,6 +93,7 @@ describe('FleetWebRemote', () => {
       })),
       setMemberGroups: vi.fn(() => ({ configured: true, assignment: { groups: ['observer'] } })),
       resetMember: vi.fn(),
+      canManage: vi.fn(() => true),
     } as unknown as FleetPermissionService
     const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService, authorization)
     const signal = new AbortController().signal
@@ -105,6 +109,13 @@ describe('FleetWebRemote', () => {
     }, signal)
     expect(authorization.resetMember).toHaveBeenCalledWith('team-one', 'lead')
     expect(runs.requireAssistantConnection).toHaveBeenCalledTimes(2)
+    expect(authorization.canManage).toHaveBeenCalledTimes(2)
+
+    authorization.canManage.mockReturnValue(false)
+    expect(() => remote.member({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'permissions', member: 'lead', groups: ['observer'],
+    }, signal)).toThrow('cannot manage permissions')
+    expect(authorization.setMemberGroups).toHaveBeenCalledTimes(1)
   })
 
   it('sends direct UI conversations as the external user without attaching the current Session', () => {

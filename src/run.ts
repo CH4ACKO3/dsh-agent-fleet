@@ -1252,7 +1252,7 @@ export class FleetRunService {
       },
       authorizeAction: input => input.subject.kind === 'external'
         && input.subject.id === `fleet-user:${input.teamId}`
-        && input.action === 'message.post',
+        && ['message.post', 'message.wakeup', 'message.interrupt'].includes(input.action),
       authorizeResource: input => {
         const record = this.records.get(input.teamId)
         const resource = input.resource
@@ -1507,7 +1507,7 @@ export class FleetRunService {
     const record = this.requireRecord(input.runId, input.projectRoot)
     this.requireRuntime(record.id)
     if (record.status !== 'idle') throw new Error(`Fleet team ${record.id} cannot start work while ${record.status}`)
-    this.requireParticipant(record, launcher)
+    this.requireLifecycleControl(record, launcher)
 
     const taskPath = isAbsolute(input.taskPath) ? input.taskPath : resolve(input.projectRoot, input.taskPath)
     const task = readFileSync(taskPath, 'utf8').trim()
@@ -1820,13 +1820,12 @@ export class FleetRunService {
         const initiator = participants.find(member => member.sessionId === initiatorSessionId)
         const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
           ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
-        if (caller !== undefined) {
-          return this.finish(
-            caller,
-            approvedWorkVote.vote.kind === 'finish' ? 'finished' : 'blocked',
-            approvedWorkVote.vote.statement,
-          )
-        }
+        if (caller !== undefined) return this.finishWork(
+          record,
+          approvedWorkVote.vote.kind === 'finish' ? 'finished' : 'blocked',
+          approvedWorkVote.vote.statement,
+          String(caller.id),
+        )
       }
       return this.describeRecord(restored)
     } catch (error) {
@@ -2714,6 +2713,13 @@ export class FleetRunService {
     return view
   }
 
+  private requireLifecycleControl(record: FleetRunRecord, caller: Agent): void {
+    this.requireParticipant(record, caller)
+    if (record.assistants.some(assistant => assistant.sessionId === String(caller.id))) {
+      this.requireFleetPermission(record, caller, 'team.manage')
+    }
+  }
+
   async attachAssistant(caller: Agent, input: AttachAssistantInput = {}): Promise<{
     readonly run: FleetRunRecord
     readonly assistant: FleetRunAssistant
@@ -2768,8 +2774,8 @@ export class FleetRunService {
       ...((input.model ?? caller.options.model) === undefined
         ? {}
         : { model: input.model ?? caller.options.model }),
-      toolGroups: input.toolGroups === undefined ? [...FLEET_MEMBER_TOOL_GROUPS] : [...input.toolGroups],
-      permissions: input.permissions === undefined ? [...FLEET_MEMBER_PERMISSIONS] : [...input.permissions],
+      toolGroups: input.toolGroups === undefined ? ['messages', 'status', 'resources'] : [...input.toolGroups],
+      permissions: input.permissions === undefined ? [] : [...input.permissions],
       contacts: input.contacts === undefined
         ? { members: '*', channels: '*' }
         : structuredClone(input.contacts),
@@ -2852,6 +2858,18 @@ export class FleetRunService {
       this.configuration,
     ).channels[0]
     if (channel === undefined) throw new Error(`Fleet team ${record.id} has no Team Channel`)
+    this.authorization?.require({
+      teamId: record.id,
+      subject: { kind: 'assistant', id: assistant.view.id },
+      action: 'message.post',
+      resource: { kind: 'conversation', id: `#${channel.id}` },
+    })
+    if (input.kind === 'directive') this.authorization?.require({
+      teamId: record.id,
+      subject: { kind: 'assistant', id: assistant.view.id },
+      action: 'message.wakeup',
+      resource: { kind: 'conversation', id: `#${channel.id}` },
+    })
     this.requireRuntime(record.id).messages.send(caller, {
       to: `#${channel.id}`,
       text: content,
@@ -2867,10 +2885,20 @@ export class FleetRunService {
     this.requireAssistantConnection(caller, record.id)
     const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
     if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+    const subject = {
+      kind: record.assistants.some(assistant => assistant.sessionId === String(caller.id)) ? 'assistant' as const : 'member' as const,
+      id: participant.name,
+    }
     this.authorization?.require({
       teamId: record.id,
-      subject: { kind: record.assistants.some(assistant => assistant.sessionId === String(caller.id)) ? 'assistant' : 'member', id: participant.name },
+      subject,
       action: 'message.post',
+      resource: { kind: 'conversation', id: input.to },
+    })
+    if (input.delivery !== 'quiet') this.authorization?.require({
+      teamId: record.id,
+      subject,
+      action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
     return this.requireRuntime(record.id).messages.send(caller, {
@@ -2885,10 +2913,17 @@ export class FleetRunService {
 
   sendUserConversationMessage(input: SendFleetConversationMessageInput): SendMessageResult {
     const record = this.requireMutableRecord(input.runId)
+    const subject = { kind: 'external' as const, id: `fleet-user:${record.id}` }
     this.authorization?.require({
       teamId: record.id,
-      subject: { kind: 'external', id: `fleet-user:${record.id}` },
+      subject,
       action: 'message.post',
+      resource: { kind: 'conversation', id: input.to },
+    })
+    if (input.delivery !== 'quiet') this.authorization?.require({
+      teamId: record.id,
+      subject,
+      action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
     return this.requireRuntime(record.id).sendUserMessage({
@@ -2975,15 +3010,23 @@ export class FleetRunService {
     runId?: string,
   ): FleetRunRecord {
     const record = this.requireCallerRecord(caller, runId)
+    this.requireLifecycleControl(record, caller)
+    return this.finishWork(record, status, summary, String(caller.id))
+  }
+
+  private finishWork(
+    record: FleetRunRecord,
+    status: Exclude<FleetWorkStatus, 'running'>,
+    summary: string,
+    callerId: string,
+  ): FleetRunRecord {
     const runtime = this.requireRuntime(record.id)
-    this.requireParticipant(record, caller)
     if (record.status !== 'running' || record.work === undefined) {
       throw new Error(`Fleet team ${record.id} has no active work to finish`)
     }
     const terminalSummary = summary.trim()
     if (terminalSummary.length === 0) throw new Error('Fleet work terminal summary cannot be empty')
     this.clearRunNetworkRecoveries(record.id)
-    const callerId = String(caller.id)
     for (const member of record.members) {
       try {
         this.core.cancelManaged(this.runtimeMemberName(record.id, member.name), callerId)
@@ -3018,7 +3061,7 @@ export class FleetRunService {
 
   end(caller: Agent, summary: string, runId?: string): FleetRunRecord {
     const record = this.requireCallerRecord(caller, runId)
-    this.requireParticipant(record, caller)
+    this.requireLifecycleControl(record, caller)
     return this.setTerminal(record.id, summary, String(caller.id))
   }
 
@@ -3052,9 +3095,12 @@ export class FleetRunService {
           const initiator = participants.find(member => member.sessionId === vote.initiator)
           const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
             ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
-          if (caller !== undefined) {
-            this.finish(caller, vote.kind === 'finish' ? 'finished' : 'blocked', vote.statement, runId)
-          }
+          if (caller !== undefined) this.finishWork(
+            current,
+            vote.kind === 'finish' ? 'finished' : 'blocked',
+            vote.statement,
+            String(caller.id),
+          )
         })
       }
     }

@@ -214,7 +214,7 @@ export class FleetWebRemote extends TypertRemoteService {
     signal.throwIfAborted()
     const caller = this.caller(input.sessionId)
     const teamId = required(input.teamId, 'teamId')
-    this.runs.requireAssistantConnection(caller, teamId)
+    const assistant = this.runs.requireAssistantConnection(caller, teamId)
     if (input.action === 'resume' && this.runs.status(teamId).status === 'paused') {
       throw new Error('resume the Fleet Team before resuming an individual member')
     }
@@ -232,10 +232,16 @@ export class FleetWebRemote extends TypertRemoteService {
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))
       case 'permissions': {
         if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
+        if (!this.permissions.canManage(teamId, assistant.view)) {
+          throw new Error(`Fleet assistant ${assistant.view.id} cannot manage permissions`)
+        }
         return this.permissions.setMemberGroups(teamId, required(input.member, 'member'), input.groups ?? [])
       }
       case 'reset_permissions': {
         if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
+        if (!this.permissions.canManage(teamId, assistant.view)) {
+          throw new Error(`Fleet assistant ${assistant.view.id} cannot manage permissions`)
+        }
         const member = required(input.member, 'member')
         this.permissions.resetMember(teamId, member)
         return this.permissions.inspectMember(teamId, member)
