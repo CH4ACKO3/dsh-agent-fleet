@@ -44,6 +44,8 @@ export interface FleetActorProfile {
 
 /** Serializable source of truth for one Fleet member's runtime view. */
 export interface FleetMemberView extends FleetActorProfile {
+  /** False for non-voting assistants and observers represented inside the Team runtime. */
+  readonly canVote?: boolean
   readonly toolGroups: FleetMemberToolGroup[]
   readonly permissions: FleetMemberPermission[]
   readonly contacts: FleetMemberContacts

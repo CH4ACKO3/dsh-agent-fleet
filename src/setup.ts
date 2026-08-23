@@ -100,6 +100,17 @@ function optionalStringField(
   return value.length === 0 ? {} : { [key]: value }
 }
 
+function optionalBooleanField(
+  source: Record<string, unknown>,
+  key: string,
+  label: string,
+): Record<string, boolean> {
+  const value = source[key]
+  if (value === undefined) return {}
+  if (typeof value !== 'boolean') throw new Error(`${label} must be a boolean`)
+  return { [key]: value }
+}
+
 function normalizeMember(
   value: unknown,
   index: number,
@@ -120,6 +131,7 @@ function normalizeMember(
     prompt: optionalText(member.prompt, `members[${index}].prompt`),
     ...optionalStringField(member, 'provider', `members[${index}].provider`),
     ...optionalStringField(member, 'model', `members[${index}].model`),
+    ...optionalBooleanField(member, 'canVote', `members[${index}].canVote`),
     ...(member.toolGroups === undefined ? {} : { toolGroups: structuredClone(member.toolGroups) }),
     ...(member.permissions === undefined ? {} : { permissions: structuredClone(member.permissions) }),
     ...(member.contacts === undefined ? {} : { contacts: structuredClone(member.contacts) }),

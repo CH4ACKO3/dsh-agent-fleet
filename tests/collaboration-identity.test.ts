@@ -59,6 +59,9 @@ describe('Fleet collaboration identities', () => {
       channel: '#general', kind: 'message', statement: 'Proceed.',
     })
     expect(vote.voters).toEqual(['agent-reviewer'])
+    expect(() => team.messages.createVote(agents.get('agent-lead') as never, {
+      channel: '#general', kind: 'message', statement: 'Ask the assistant to decide.', voters: ['@assistant'],
+    })).toThrow('is not eligible to vote')
 
     const event = team.calendar.create('agent-lead', {
       title: 'Review', agenda: 'Review the work.', attendees: ['reviewer'],

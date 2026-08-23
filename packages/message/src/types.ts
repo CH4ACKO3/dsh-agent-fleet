@@ -24,6 +24,7 @@ export interface AgentDirectory {
   canAccessChannel?(agentId: string, channelId: string): boolean
   hasPermission?(agentId: string, permission: FleetMessagePermission): boolean
   defaultVoter?(agentId: string): boolean
+  canVote?(agentId: string): boolean
 }
 
 export type FleetMessagePermission = 'channel.manage' | 'meeting.manage' | 'vote.create'

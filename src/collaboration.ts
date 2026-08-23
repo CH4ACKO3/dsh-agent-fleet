@@ -306,6 +306,11 @@ export class FleetCollaborationService {
         const name = memberNamesById.get(agentId)
         return name !== undefined && defaultVoterNames.has(name)
       },
+      canVote: agentId => {
+        if (agentId === user.id || agentId === productivity.id) return false
+        const name = memberNamesById.get(agentId)
+        return name !== undefined && defaultVoterNames.has(name)
+      },
     }
     const memberDirectory: FleetMemberDirectory = {
       list: () => [...memberIdsByName].map(([name, id]) => ({ id, name })),

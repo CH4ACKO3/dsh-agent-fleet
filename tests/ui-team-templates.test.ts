@@ -15,13 +15,14 @@ describe('complete Team template locales', () => {
     }
   })
 
-  it('keeps contributors bounded while giving one maintainer the management capabilities', () => {
+  it('keeps contributors bounded and omits management authority from the livestream interfaces', () => {
     for (const template of FULL_TEAM_TEMPLATES) {
       for (const configuration of [template.configuration.en, template.configuration.zh]) {
         const participants = [configuration.core.assistant, ...configuration.core.members]
         const maintainers = participants.filter(member => member.permissions.includes('team.manage'))
         const contributors = configuration.core.members.filter(member => member.permissions.includes('resource.write'))
-        expect(maintainers.length).toBeGreaterThan(0)
+        if (template.id === 'research-livestream') expect(maintainers).toEqual([])
+        else expect(maintainers.length).toBeGreaterThan(0)
         expect(contributors.some(member => !member.permissions.includes('team.manage'))).toBe(true)
       }
     }
@@ -55,7 +56,35 @@ describe('complete Team template locales', () => {
       ])
       expect(assistant.permissions).toEqual(['message.wakeup', 'team.manage'])
       expect(assistant.prompt.length).toBeGreaterThan(200)
-      expect(assistant.prompt).toMatch(/not a researcher|不是研究员/u)
+      expect(assistant.prompt).toMatch(/default state is quiet|默认保持安静/u)
+      expect(assistant.prompt).toMatch(/Do not interpret|不要解释/u)
+    }
+  })
+
+  it('provides a non-voting VTuber frontend and passive research assistant for livestreams', () => {
+    const livestream = FULL_TEAM_TEMPLATES.find(template => template.id === 'research-livestream')
+    if (livestream === undefined) throw new Error('missing livestream research Team template')
+    for (const configuration of [livestream.configuration.en, livestream.configuration.zh]) {
+      expect(configuration.core.assistant).toMatchObject({
+        id: 'livestream-vtuber',
+        permissions: [],
+        contacts: { members: ['team-assistant'], channels: ['main'] },
+      })
+      const assistant = configuration.core.members.find(member => member.id === 'team-assistant')
+      expect(assistant).toMatchObject({
+        canVote: false,
+        permissions: ['message.wakeup'],
+      })
+      expect(assistant?.toolGroups).not.toContain('coordination')
+      expect(assistant?.prompt).toMatch(/default state is quiet|默认保持安静/u)
+      expect(configuration.core.members.filter(member => member.id !== 'team-assistant').map(member => member.id))
+        .toEqual([
+          'theory-lead',
+          'data-evaluation-scientist',
+          'literature-researcher',
+          'experiment-model-researcher',
+          'reproducibility-engineer',
+        ])
     }
   })
 })
