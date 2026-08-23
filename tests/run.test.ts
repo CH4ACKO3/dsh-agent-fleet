@@ -822,6 +822,7 @@ describe('FleetRunService', () => {
     expect(runtime.creates[0]?.persona).toContain('## Responsibility\n\nOwn lasting product direction.')
     expect(runtime.creates[0]?.persona).toContain('Configured Fleet tool groups: messages, coordination. Optional groups are available only when their sub-plugin is installed.')
     expect(runtime.creates[0]?.persona).toContain('No Fleet member is a default coordinator.')
+    expect(runtime.creates[0]?.persona).toContain('send that member one private reminder about the responsibility boundary')
     expect(service.memberViews(run.id)[0]).toMatchObject({
       id: 'product-lead',
       toolGroups: ['messages', 'coordination'],

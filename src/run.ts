@@ -1066,6 +1066,7 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     `Use display names such as @${member.name} when addressing teammates; member ids are internal stable identifiers.`,
     'No member is your parent. Use Fleet Channels, direct messages, Meetings, Votes, shared files, and resource references to coordinate.',
     'No Fleet member is a default coordinator. Claim work, negotiate ownership, and ask the relevant peers for review directly.',
+    'When another member is clearly doing work that belongs to your responsibility and is clearly outside theirs, send that member one private reminder about the responsibility boundary. Do not police ambiguous overlap.',
     'Keep your short Fleet member status text current when the work you are doing meaningfully changes. Clear it when the note is no longer useful. This self-declared text is separate from automatic runtime state.',
     '## Member view',
     `Configured Fleet tool groups: ${member.toolGroups.join(', ') || 'none'}. Optional groups are available only when their sub-plugin is installed.`,
