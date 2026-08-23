@@ -6,9 +6,36 @@ Core, Message, Resources, and Authorization provide the runtime components. The 
 Team workflows and trace inspection. UI adds the embedded Team entry and startup configuration
 surface to the native DSH Web new-session view.
 
-Load `dsh-agent-fleet` to install all three implemented components together. They can also be loaded separately.
+Load `dsh-agent-fleet` to install all implemented components together. They can also be loaded separately.
 
-Install it as a DSH profile layer with `dsh plugin --profile <profile> add dsh-agent-fleet`.
+## Installation
+
+Fleet installs its compatible Harmony and The Binding of DSH (TBOD) packages. Harmony still needs to own the
+DSH launcher because its patches must run before the profile loads:
+
+```sh
+npm install --global dsh-harmony@^0.8.4
+dsh plugin --profile web add dsh-agent-fleet
+dsh web
+```
+
+Instead of the global command, Harmony can be installed into the profile first; on the next WebUI start, choose
+**Install and restart** in Harmony's first-run dialog. Installing a package with `dsh plugin` does not by itself
+enable its profile bundle, so enable `dsh-harmony` and `dsh-agent-fleet` in DSH's plugin settings when installing
+from the terminal. Fleet activates TBOD through Harmony automatically and reuses an already enabled TBOD bundle.
+
+If pnpm reports `Ignored build scripts: dsh-harmony`, approve that one package in the affected profile and retry:
+
+```sh
+cd "${DSH_HOME:-$HOME/.dsh}/profiles/web"
+pnpm approve-builds dsh-harmony
+pnpm install
+```
+
+After startup, `dsh harmony status --profile web` must report Fleet patches and
+`the-binding-of-dsh/bidirectional-connection` as `bound`. Harmony's first-run gate reports a missing launcher;
+Fleet's plugin compatibility metadata reports unavailable packages and version mismatches. Fleet does not switch
+to a fallback transport.
 
 ## Components
 
