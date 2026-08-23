@@ -399,6 +399,32 @@ describe('MessageHub', () => {
     expect(hub.pendingWakeups(reviewer.id)).toEqual([])
   })
 
+  it('keeps quiet direct and Meeting messages non-waking across restore', () => {
+    const first = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    first.hub.onEvent(event => { events.push(event) })
+    first.hub.openMeeting(first.lead, {
+      id: 'quiet-review', title: 'Quiet review', agenda: 'Share context without waking.', participants: ['@reviewer'],
+    })
+    const opened = first.hub.inbox(first.reviewer).find(item => item.message.kind === 'meeting_opened')
+    if (opened === undefined) throw new Error('expected Meeting invitation')
+    first.hub.acknowledge(first.reviewer, opened.message.id)
+    first.hub.send(first.lead, {
+      to: '@reviewer', text: 'Read this when you next become active.', delivery: 'quiet',
+    })
+    first.hub.send(first.lead, {
+      to: 'meeting:quiet-review', text: 'Meeting context for the next active step.', delivery: 'quiet',
+    })
+
+    expect(first.hub.pendingWakeups(first.reviewer.id)).toEqual([])
+    expect(first.hub.inbox(first.reviewer, { unreadOnly: true })).toHaveLength(2)
+
+    const restored = setup()
+    restored.hub.restore(events)
+    expect(restored.hub.pendingWakeups(restored.reviewer.id)).toEqual([])
+    expect(restored.hub.inbox(restored.reviewer, { unreadOnly: true })).toHaveLength(2)
+  })
+
   it('cancels the current step and steers an urgent direct message while preserving pending work', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {
