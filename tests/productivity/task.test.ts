@@ -30,17 +30,19 @@ describe('FleetTaskBoard', () => {
     board.addEntry('agent-reviewer', task.id, 'progress', 'Review started.')
     board.addEntry('agent-qa', task.id, 'comment', 'Please check the cold start.')
 
-    expect(() => board.complete('agent-qa', task.id)).toThrow('incomplete dependencies')
+    expect(() => board.complete('agent-qa', task.id)).toThrow('cannot manage task')
+    expect(() => board.complete('agent-reviewer', task.id)).toThrow('incomplete dependencies')
     expect(() => board.update('agent-lead', prerequisite.id, { dependencies: [task.id] })).toThrow('create a cycle')
     board.complete('agent-lead', prerequisite.id)
-    expect(board.complete('agent-qa', task.id)).toMatchObject({
+    expect(board.complete('agent-reviewer', task.id)).toMatchObject({
       status: 'completed', entries: [expect.objectContaining({ kind: 'progress' }), expect.objectContaining({ kind: 'comment' })],
     })
 
     const restored = new FleetTaskBoard(directory)
     restored.restore(parseFleetTaskState(board.state() as never))
     expect(restored.get('agent-reviewer', task.id)).toMatchObject({ status: 'completed', reviewers: ['qa'] })
-    expect(restored.reopen('agent-qa', task.id).status).toBe('open')
+    expect(() => restored.reopen('agent-qa', task.id)).toThrow('cannot manage task')
+    expect(restored.reopen('agent-reviewer', task.id).status).toBe('open')
   })
 
   it('transfers active responsibilities when a member retires', () => {
@@ -72,6 +74,28 @@ describe('FleetTaskBoard', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(order.slice(-2)).toEqual(['due', 'wake'])
     expect(board.get('agent-lead', task.id).dueNotifiedAt).toBe('2026-08-21T00:02:00.000Z')
+    board.close()
+  })
+
+  it('persists missed deadline delivery and replays it when the assignee returns', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))
+    let online = false
+    const deliveries: string[][] = []
+    const board = new FleetTaskBoard(directory, () => false, (_task, recipients) => {
+      deliveries.push([...recipients])
+      return online ? recipients : []
+    })
+    const task = board.create('agent-lead', {
+      title: 'Publish report', assignees: ['reviewer'], dueAt: '2026-08-21T00:01:00.000Z',
+    })
+    board.activate()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(board.get('agent-lead', task.id).duePendingFor).toEqual(['reviewer'])
+    online = true
+    board.replayPending('reviewer')
+    expect(deliveries).toEqual([['reviewer'], ['reviewer']])
+    expect(board.get('agent-lead', task.id).duePendingFor).toEqual([])
     board.close()
   })
 })

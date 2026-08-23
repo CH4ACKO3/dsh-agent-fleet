@@ -162,6 +162,7 @@ describe('FleetAuthorizationService', () => {
     const team = collaboration.open({
       id: 'team-1',
       memberViews: [member],
+      defaultVoters: [member.id],
       projectRoot: '/workspace',
       sharedDirectory: '/workspace/.fleet/team-1',
       onCoordination: () => {},

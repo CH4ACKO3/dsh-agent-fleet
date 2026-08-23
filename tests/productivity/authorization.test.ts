@@ -31,6 +31,7 @@ describe('Fleet productivity authorization', () => {
     } as unknown as Context, authorization)
     const team = collaboration.open({
       id: 'team-1', memberViews: [member], projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-1',
+      defaultVoters: [member.id],
       onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
     })
     team.attachMember(agent.id, member)

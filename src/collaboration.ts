@@ -89,6 +89,7 @@ export interface FleetCollaborationTeam {
 export interface OpenFleetCollaborationTeamInput {
   readonly id: string
   readonly memberViews: readonly FleetMemberView[]
+  readonly defaultVoters: readonly string[]
   readonly projectRoot: string
   readonly sharedDirectory: string
   readonly onCoordination: (event: FleetCoordinationEvent) => void
@@ -109,6 +110,18 @@ export class FleetCollaborationService {
 
   constructor(private readonly ctx: Context, private readonly authorization: FleetAuthorizationService) {
     this.stopNamespaces = [
+      authorization.registerNamespace({
+        namespace: 'message',
+        actions: [
+          { id: 'wakeup', description: 'Wake a Fleet participant with a follow-up message.' },
+          { id: 'interrupt', description: 'Interrupt a Fleet participant with an urgent message.' },
+        ],
+        defaultActions: ({ member }) => [
+          ...(member.toolGroups.includes('coordination') ? ['wakeup'] : []),
+          ...(member.permissions.includes('team.manage') || member.permissions.includes('message.interrupt')
+            ? ['interrupt'] : []),
+        ],
+      }),
       authorization.registerNamespace({
         namespace: 'task',
         actions: [
@@ -133,7 +146,7 @@ export class FleetCollaborationService {
         actions: [
           { id: 'read', description: 'Read Team schedules.' },
           { id: 'create', description: 'Create Team schedules.' },
-          { id: 'update', description: 'Complete or cancel responsible Team schedules.' },
+          { id: 'update', description: 'Update, pause, resume, complete, or cancel responsible Team schedules.' },
           { id: 'manage', description: 'Manage any Team schedule.' },
         ],
         defaultActions: ({ member }) => member.toolGroups.includes('coordination')
@@ -224,7 +237,10 @@ export class FleetCollaborationService {
     const memberIdsByName = new Map<string, string>()
     const memberNamesById = new Map<string, string>()
     const memberViews = new Map(input.memberViews.map(view => [view.id, structuredClone(view)]))
-    const defaultVoterNames = new Set(input.memberViews.map(view => view.id))
+    const defaultVoterNames = new Set(input.defaultVoters)
+    for (const member of defaultVoterNames) {
+      if (!memberViews.has(member)) throw new Error(`unknown default Fleet voter ${member}`)
+    }
     const user: MessageAgent = {
       id: `fleet-user:${input.id}`,
       inject: () => {},
@@ -318,51 +334,52 @@ export class FleetCollaborationService {
       text: string,
       kind: 'task_notification' | 'calendar_notification',
       delivery: 'quiet' | 'wakeup' = 'quiet',
-    ): void => {
+    ): string[] => {
+      const delivered: string[] = []
       for (const member of new Set(members)) {
         const agentId = memberIdsByName.get(member)
         if (agentId === undefined || agentDirectory.get(agentId) === undefined) continue
         try {
           messages.send(productivity, { to: `@${agentId}`, text, delivery, kind })
+          delivered.push(member)
         } catch {}
       }
+      return delivered
     }
-    const tasks = new FleetTaskBoard(memberDirectory, agentId => canManage(agentId, 'task'), task => {
+    const tasks = new FleetTaskBoard(memberDirectory, agentId => canManage(agentId, 'task'), (task, recipients) =>
       notifyMembers(
-        [...task.assignees, ...task.reviewers],
+        recipients,
         `[Fleet task due] ${task.title} (${task.id})`,
         'task_notification',
         'wakeup',
-      )
-    })
-    const scheduler = new FleetScheduler(memberDirectory, agentId => canManage(agentId, 'schedule'), task => {
+      ))
+    const scheduler = new FleetScheduler(memberDirectory, agentId => canManage(agentId, 'schedule'), (task, recipients) =>
       notifyMembers(
-        task.assignees,
+        recipients,
         `[Fleet schedule due] ${task.title}\n${task.instructions}`.trim(),
         'task_notification',
         'wakeup',
-      )
-    })
+      ))
     const calendar = new FleetCalendar(memberDirectory, event => {
-      const organizerId = memberIdsByName.get(event.organizer)
-      const organizer = organizerId === undefined ? undefined : agentDirectory.get(organizerId)
-      if (organizer === undefined) return undefined
-      const participants = event.attendees
+      const participants = [event.organizer, ...event.attendees]
         .filter(member => event.rsvps[member] !== 'declined')
         .flatMap(member => {
           const agentId = memberIdsByName.get(member)
-          return agentId === undefined || agentDirectory.get(agentId) === undefined ? [] : [agentId]
+          return agentId === undefined || agentDirectory.get(agentId) === undefined ? [] : [`@${agentId}`]
         })
       if (participants.length === 0) return undefined
       const meetingId = `calendar-${event.id.slice(-12)}-${event.occurrence}`.replace(/[^a-z0-9]+/gu, '-')
       try {
-        return messages.openMeeting(organizer, {
+        return messages.openMeeting(productivity, {
           id: meetingId,
           title: event.title,
           agenda: event.agenda,
           participants,
         }).id
-      } catch {
+      } catch (error) {
+        this.ctx.logger('dsh-agent-fleet').warn(
+          `Failed to open Meeting for Fleet calendar event ${event.id}: ${error instanceof Error ? error.message : String(error)}`,
+        )
         return undefined
       }
     }, agentId => canManage(agentId, 'calendar'))
@@ -377,7 +394,7 @@ export class FleetCollaborationService {
       memberStatuses.onEvent(input.onMemberStatus),
       tasks.onEvent(event => {
         input.onTask?.(event, tasks.state())
-        if (event.action !== 'due') {
+        if (event.action !== 'due' && event.action !== 'notification') {
           const recipients = [...event.task.assignees, ...event.task.reviewers, ...event.task.followers]
             .filter(member => member !== event.actor)
           notifyMembers(
@@ -390,7 +407,7 @@ export class FleetCollaborationService {
       }),
       scheduler.onEvent(event => {
         input.onSchedule?.(event, scheduler.state())
-        if (event.action !== 'triggered') {
+        if (event.action !== 'triggered' && event.action !== 'notification') {
           notifyMembers(
             event.task.assignees.filter(member => member !== event.actor),
             `[Fleet schedule ${event.action}] ${event.task.title} (${event.task.id})`,
@@ -545,6 +562,8 @@ export class FleetCollaborationService {
         memberViews.set(view.id, structuredClone(view))
         memberIdsByName.set(view.id, agentId)
         memberNamesById.set(agentId, view.id)
+        tasks.replayPending(view.id)
+        scheduler.replayPending(view.id)
       },
       rebindMember: (previousAgentId, agentId, view) => {
         disposeMemberBindings(view.id)
@@ -553,6 +572,8 @@ export class FleetCollaborationService {
         memberIdsByName.set(view.id, agentId)
         memberNamesById.set(agentId, view.id)
         messages.rebindAgent(previousAgentId, agentId)
+        tasks.replayPending(view.id)
+        scheduler.replayPending(view.id)
       },
       detachMember: (agentId) => {
         const name = memberNamesById.get(agentId)

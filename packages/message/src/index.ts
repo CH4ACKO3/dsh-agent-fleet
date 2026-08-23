@@ -446,6 +446,11 @@ export function installMessageTools(
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_followup')
       requireAction(caller, 'message.post', { kind: 'conversation', id: args.to })
+      requireAction(
+        caller,
+        args.interrupt === true ? 'message.interrupt' : 'message.wakeup',
+        { kind: 'conversation', id: args.to },
+      )
       return Promise.resolve(hub.send(caller, {
         to: args.to as FleetTarget,
         text: args.message,

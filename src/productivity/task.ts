@@ -39,6 +39,7 @@ export interface FleetProjectTask {
   readonly updatedAt: string
   readonly completedAt?: string
   readonly dueNotifiedAt?: string
+  readonly duePendingFor?: string[]
 }
 
 export interface FleetTaskState {
@@ -47,7 +48,7 @@ export interface FleetTaskState {
 }
 
 export interface FleetProjectTaskEvent {
-  readonly action: 'created' | 'updated' | 'commented' | 'progressed' | 'completed' | 'reopened' | 'due'
+  readonly action: 'created' | 'updated' | 'commented' | 'progressed' | 'completed' | 'reopened' | 'due' | 'notification'
   readonly task: FleetProjectTask
   readonly actor?: string
 }
@@ -116,7 +117,7 @@ export class FleetTaskBoard {
   constructor(
     private readonly directory: FleetMemberDirectory,
     private readonly canManage: (agentId: string) => boolean = () => false,
-    private readonly onDue: (task: FleetProjectTask) => void = () => {},
+    private readonly onDue: (task: FleetProjectTask, recipients: readonly string[]) => readonly string[] | void = () => {},
   ) {}
 
   state(): FleetTaskState {
@@ -141,6 +142,13 @@ export class FleetTaskBoard {
     this.active = false
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
+  }
+
+  replayPending(member: string): void {
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'completed' && task.status !== 'cancelled'
+        && task.duePendingFor?.includes(member) === true) this.deliverDue(task, [member])
+    }
   }
 
   list(callerId: string, input: {
@@ -213,8 +221,12 @@ export class FleetTaskBoard {
       updatedAt: new Date().toISOString(),
     }
     if (input.dueAt !== undefined) {
-      const { dueNotifiedAt: _dueNotifiedAt, ...withoutNotification } = updated
+      const { dueNotifiedAt: _dueNotifiedAt, duePendingFor: _duePendingFor, ...withoutNotification } = updated
       updated = withoutNotification
+    }
+    if (input.status === 'cancelled') {
+      const { duePendingFor: _duePendingFor, ...withoutPending } = updated
+      updated = withoutPending
     }
     this.replace(updated)
     this.emit({ action: 'updated', task: updated, actor: this.member(callerId) })
@@ -245,7 +257,8 @@ export class FleetTaskBoard {
     if (incomplete.length > 0) throw new Error(`Fleet task ${id} has incomplete dependencies: ${incomplete.join(', ')}`)
     if (current.status === 'completed') return snapshot(current)
     const now = new Date().toISOString()
-    const updated: FleetProjectTask = { ...current, status: 'completed', completedAt: now, updatedAt: now }
+    const { duePendingFor: _duePendingFor, ...rest } = current
+    const updated: FleetProjectTask = { ...rest, status: 'completed', completedAt: now, updatedAt: now }
     this.replace(updated)
     this.emit({ action: 'completed', task: updated, actor: this.member(callerId) })
     return snapshot(updated)
@@ -277,6 +290,9 @@ export class FleetTaskBoard {
         assignees: unique(assignees),
         reviewers: unique(reviewers),
         followers: task.followers.filter(value => value !== member),
+        ...(task.duePendingFor === undefined ? {} : {
+          duePendingFor: unique(task.duePendingFor.map(value => value === member ? successor : value)),
+        }),
         updatedAt: new Date().toISOString(),
       }
       this.replace(updated)
@@ -301,10 +317,23 @@ export class FleetTaskBoard {
     if (current === undefined || current.dueAt === undefined || current.dueNotifiedAt !== undefined) return
     if (current.status === 'completed' || current.status === 'cancelled') return
     const now = new Date().toISOString()
-    const updated = { ...current, dueNotifiedAt: now, updatedAt: now }
+    const duePendingFor = unique([...current.assignees, ...current.reviewers])
+    const updated = { ...current, dueNotifiedAt: now, duePendingFor, updatedAt: now }
     this.tasks.set(id, updated)
     this.emit({ action: 'due', task: updated })
-    this.onDue(snapshot(updated))
+    this.deliverDue(updated, duePendingFor)
+  }
+
+  private deliverDue(task: FleetProjectTask, recipients: readonly string[]): void {
+    const delivered = new Set(this.onDue(snapshot(task), recipients) ?? [])
+    if (delivered.size === 0) return
+    const current = this.tasks.get(task.id)
+    if (current === undefined || current.duePendingFor === undefined) return
+    const duePendingFor = current.duePendingFor.filter(member => !delivered.has(member))
+    if (duePendingFor.length === current.duePendingFor.length) return
+    const updated = { ...current, duePendingFor, updatedAt: new Date().toISOString() }
+    this.tasks.set(task.id, updated)
+    this.emit({ action: 'notification', task: updated })
   }
 
   private arm(task: FleetProjectTask): void {
@@ -387,7 +416,7 @@ export class FleetTaskBoard {
 
   private requireResponsible(agentId: string, task: FleetProjectTask): void {
     const name = this.member(agentId)
-    if (name !== task.createdBy && !task.assignees.includes(name) && !task.reviewers.includes(name) && !this.canManage(agentId)) {
+    if (name !== task.createdBy && !task.assignees.includes(name) && !this.canManage(agentId)) {
       throw new Error(`Fleet member ${name} cannot manage task ${task.id}`)
     }
   }
@@ -415,6 +444,7 @@ const TASK_SCHEMA = {
     parentId: { type: 'string' }, dueAt: { type: 'string' }, resources: { type: 'array', required: true, items: { type: 'string' } },
     entries: { type: 'array', required: true, items: ENTRY_SCHEMA }, createdAt: { type: 'string', required: true }, updatedAt: { type: 'string', required: true },
     completedAt: { type: 'string' }, dueNotifiedAt: { type: 'string' },
+    duePendingFor: { type: 'array', items: { type: 'string' } },
   },
 } as const
 

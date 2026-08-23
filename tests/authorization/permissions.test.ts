@@ -75,6 +75,13 @@ describe('FleetPermissionService', () => {
     expect(FLEET_PERMISSION_PRESETS.flatMap(group => group.actions).some(action =>
       action.startsWith('git.') || action.startsWith('lark.') || action.startsWith('memory.'),
     )).toBe(false)
+    const actions = new Set(FLEET_PERMISSION_PRESETS.flatMap(group => group.actions))
+    expect([...actions]).toEqual(expect.arrayContaining([
+      'message.wakeup', 'message.interrupt',
+      'document.read', 'document.write', 'document.comment',
+      'workspace.read', 'workspace.manage',
+      'access.inspect', 'access.manage', 'permissions.manage',
+    ]))
   })
 
   it('rejects malformed Team permission modules instead of silently widening access', () => {

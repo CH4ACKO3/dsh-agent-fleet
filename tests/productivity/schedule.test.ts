@@ -73,4 +73,24 @@ describe('FleetScheduler', () => {
       id: task.id, createdBy: 'lead', assignees: ['lead'],
     }))
   })
+
+  it('updates, pauses, resumes, and replays missed delivery', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))
+    let online = false
+    const scheduler = new FleetScheduler(directory, () => false, (_task, recipients) => online ? recipients : [])
+    const task = scheduler.create('agent-lead', {
+      title: 'Checkpoint', assignees: ['reviewer'], dueAt: '2026-08-21T00:01:00.000Z',
+    })
+    expect(scheduler.update('agent-lead', task.id, { title: 'Updated checkpoint' }).title).toBe('Updated checkpoint')
+    expect(scheduler.pauseTask('agent-lead', task.id).status).toBe('paused')
+    expect(scheduler.resumeTask('agent-lead', task.id, '2026-08-21T00:02:00.000Z').status).toBe('scheduled')
+    scheduler.activate()
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(scheduler.get('agent-lead', task.id)).toMatchObject({ status: 'due', pendingFor: ['reviewer'] })
+    online = true
+    scheduler.replayPending('reviewer')
+    expect(scheduler.get('agent-lead', task.id).pendingFor).toEqual([])
+    scheduler.close()
+  })
 })

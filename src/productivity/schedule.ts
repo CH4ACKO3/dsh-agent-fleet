@@ -8,7 +8,7 @@ import type { FleetMemberDirectory } from '@dsh-agent-fleet/core'
 
 export const FLEET_SCHEDULE_STATE_NAMESPACE = 'productivity-schedules'
 
-export type FleetScheduledTaskStatus = 'scheduled' | 'due' | 'completed' | 'cancelled'
+export type FleetScheduledTaskStatus = 'scheduled' | 'paused' | 'due' | 'completed' | 'cancelled'
 
 export interface FleetScheduledTask {
   readonly id: string
@@ -20,6 +20,7 @@ export interface FleetScheduledTask {
   readonly dueAt: string
   readonly repeatMinutes?: number
   readonly lastTriggeredAt?: string
+  readonly pendingFor?: string[]
   readonly completedAt?: string
   readonly cancelledAt?: string
   readonly createdAt: string
@@ -39,8 +40,16 @@ export interface CreateFleetScheduledTaskInput {
   readonly repeatMinutes?: number
 }
 
+export interface UpdateFleetScheduledTaskInput {
+  readonly title?: string
+  readonly instructions?: string
+  readonly dueAt?: string
+  readonly assignees?: readonly string[]
+  readonly repeatMinutes?: number
+}
+
 export interface FleetScheduledTaskEvent {
-  readonly action: 'created' | 'updated' | 'triggered' | 'completed' | 'cancelled'
+  readonly action: 'created' | 'updated' | 'paused' | 'resumed' | 'triggered' | 'completed' | 'cancelled' | 'notification'
   readonly task: FleetScheduledTask
   readonly actor?: string
 }
@@ -77,7 +86,7 @@ export class FleetScheduler {
   constructor(
     private readonly directory: FleetMemberDirectory,
     private readonly canManage: (agentId: string) => boolean,
-    private readonly onDue: (task: FleetScheduledTask) => void,
+    private readonly onDue: (task: FleetScheduledTask, recipients: readonly string[]) => readonly string[] | void,
   ) {}
 
   state(): FleetScheduleState {
@@ -104,9 +113,21 @@ export class FleetScheduler {
     this.timers.clear()
   }
 
+  replayPending(member: string): void {
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'completed' && task.status !== 'cancelled'
+        && task.pendingFor?.includes(member) === true) this.deliverDue(task, [member])
+    }
+  }
+
   list(callerId: string): FleetScheduledTask[] {
     this.member(callerId)
     return [...this.tasks.values()].sort((left, right) => left.dueAt.localeCompare(right.dueAt)).map(snapshot)
+  }
+
+  get(callerId: string, id: string): FleetScheduledTask {
+    this.member(callerId)
+    return snapshot(this.requireTask(id))
   }
 
   create(callerId: string, input: CreateFleetScheduledTaskInput): FleetScheduledTask {
@@ -136,12 +157,66 @@ export class FleetScheduler {
     return snapshot(task)
   }
 
+  update(callerId: string, id: string, input: UpdateFleetScheduledTaskInput): FleetScheduledTask {
+    const task = this.requireTask(id)
+    this.requireResponsible(callerId, task)
+    if (Object.values(input).every(value => value === undefined)) throw new Error('scheduled task update requires a change')
+    if (task.status === 'completed' || task.status === 'cancelled') throw new Error(`scheduled task ${id} is already ${task.status}`)
+    if (input.repeatMinutes !== undefined && (!Number.isInteger(input.repeatMinutes) || input.repeatMinutes < 1)) {
+      throw new Error('repeat_minutes must be a positive integer')
+    }
+    const assignees = input.assignees === undefined ? undefined : this.resolveAssignees(input.assignees)
+    const updated: FleetScheduledTask = {
+      ...task,
+      ...(input.title === undefined ? {} : { title: requiredText(input.title, 'scheduled task title') }),
+      ...(input.instructions === undefined ? {} : { instructions: input.instructions.trim() }),
+      ...(input.dueAt === undefined ? {} : { dueAt: this.futureDate(input.dueAt) }),
+      ...(assignees === undefined ? {} : { assignees }),
+      ...(input.repeatMinutes === undefined ? {} : { repeatMinutes: input.repeatMinutes }),
+      ...(assignees === undefined || task.pendingFor === undefined ? {} : {
+        pendingFor: assignees,
+      }),
+      updatedAt: new Date().toISOString(),
+    }
+    this.replace(updated)
+    this.emit({ action: 'updated', task: updated, actor: this.member(callerId) })
+    return snapshot(updated)
+  }
+
+  pauseTask(callerId: string, id: string): FleetScheduledTask {
+    const task = this.requireTask(id)
+    this.requireResponsible(callerId, task)
+    if (task.status !== 'scheduled') throw new Error(`scheduled task ${id} is ${task.status}`)
+    const paused = { ...task, status: 'paused' as const, updatedAt: new Date().toISOString() }
+    this.replace(paused)
+    this.emit({ action: 'paused', task: paused, actor: this.member(callerId) })
+    return snapshot(paused)
+  }
+
+  resumeTask(callerId: string, id: string, dueAt?: string): FleetScheduledTask {
+    const task = this.requireTask(id)
+    this.requireResponsible(callerId, task)
+    if (task.status !== 'paused' && task.status !== 'due') throw new Error(`scheduled task ${id} is ${task.status}`)
+    const nextDueAt = dueAt === undefined ? this.futureDate(task.dueAt) : this.futureDate(dueAt)
+    const { pendingFor: _pendingFor, ...rest } = task
+    const resumed: FleetScheduledTask = {
+      ...rest,
+      status: 'scheduled',
+      dueAt: nextDueAt,
+      updatedAt: new Date().toISOString(),
+    }
+    this.replace(resumed)
+    this.emit({ action: 'resumed', task: resumed, actor: this.member(callerId) })
+    return snapshot(resumed)
+  }
+
   complete(callerId: string, id: string): FleetScheduledTask {
     const task = this.requireTask(id)
     this.requireResponsible(callerId, task)
     if (task.status === 'completed' || task.status === 'cancelled') throw new Error(`scheduled task ${id} is already ${task.status}`)
     const now = new Date().toISOString()
-    const completed = { ...task, status: 'completed' as const, completedAt: now, updatedAt: now }
+    const { pendingFor: _pendingFor, ...rest } = task
+    const completed = { ...rest, status: 'completed' as const, completedAt: now, updatedAt: now }
     this.replace(completed)
     this.emit({ action: 'completed', task: completed, actor: this.member(callerId) })
     return snapshot(completed)
@@ -152,7 +227,8 @@ export class FleetScheduler {
     this.requireResponsible(callerId, task)
     if (task.status === 'completed' || task.status === 'cancelled') throw new Error(`scheduled task ${id} is already ${task.status}`)
     const now = new Date().toISOString()
-    const cancelled = { ...task, status: 'cancelled' as const, cancelledAt: now, updatedAt: now }
+    const { pendingFor: _pendingFor, ...rest } = task
+    const cancelled = { ...rest, status: 'cancelled' as const, cancelledAt: now, updatedAt: now }
     this.replace(cancelled)
     this.emit({ action: 'cancelled', task: cancelled, actor: this.member(callerId) })
     return snapshot(cancelled)
@@ -169,6 +245,9 @@ export class FleetScheduler {
         ...task,
         createdBy: task.createdBy === retired ? successor : task.createdBy,
         assignees: [...new Set(assignees)],
+        ...(task.pendingFor === undefined ? {} : {
+          pendingFor: [...new Set(task.pendingFor.map(value => value === retired ? successor : value))],
+        }),
         updatedAt: new Date().toISOString(),
       }
       this.replace(updated)
@@ -200,12 +279,24 @@ export class FleetScheduler {
     }
     const now = new Date().toISOString()
     const triggered: FleetScheduledTask = task.repeatMinutes === undefined
-      ? { ...task, status: 'due', lastTriggeredAt: now, updatedAt: now }
-      : { ...task, dueAt: this.nextOccurrence(due, task.repeatMinutes), lastTriggeredAt: now, updatedAt: now }
+      ? { ...task, status: 'due', lastTriggeredAt: now, pendingFor: [...task.assignees], updatedAt: now }
+      : { ...task, dueAt: this.nextOccurrence(due, task.repeatMinutes), lastTriggeredAt: now, pendingFor: [...task.assignees], updatedAt: now }
     this.tasks.set(id, triggered)
     this.emit({ action: 'triggered', task: triggered })
-    this.onDue(snapshot(triggered))
+    this.deliverDue(triggered, triggered.assignees)
     if (triggered.status === 'scheduled') this.arm(triggered)
+  }
+
+  private deliverDue(task: FleetScheduledTask, recipients: readonly string[]): void {
+    const delivered = new Set(this.onDue(snapshot(task), recipients) ?? [])
+    if (delivered.size === 0) return
+    const current = this.tasks.get(task.id)
+    if (current === undefined || current.pendingFor === undefined) return
+    const pendingFor = current.pendingFor.filter(member => !delivered.has(member))
+    if (pendingFor.length === current.pendingFor.length) return
+    const updated = { ...current, pendingFor, updatedAt: new Date().toISOString() }
+    this.tasks.set(task.id, updated)
+    this.emit({ action: 'notification', task: updated })
   }
 
   private arm(task: FleetScheduledTask): void {
@@ -283,15 +374,16 @@ const TASK_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
     id: { type: 'string', required: true }, title: { type: 'string', required: true }, instructions: { type: 'string', required: true },
     createdBy: { type: 'string', required: true }, assignees: { type: 'array', required: true, items: { type: 'string' } },
-    status: { type: 'string', required: true, enum: ['scheduled', 'due', 'completed', 'cancelled'] }, dueAt: { type: 'string', required: true },
-    repeatMinutes: { type: 'integer' }, lastTriggeredAt: { type: 'string' }, completedAt: { type: 'string' }, cancelledAt: { type: 'string' },
+    status: { type: 'string', required: true, enum: ['scheduled', 'paused', 'due', 'completed', 'cancelled'] }, dueAt: { type: 'string', required: true },
+    repeatMinutes: { type: 'integer' }, lastTriggeredAt: { type: 'string' }, pendingFor: { type: 'array', items: { type: 'string' } },
+    completedAt: { type: 'string' }, cancelledAt: { type: 'string' },
     createdAt: { type: 'string', required: true }, updatedAt: { type: 'string', required: true },
   },
 } as const
 
 const RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
-    action: { type: 'string', required: true, enum: ['list', 'create', 'complete', 'cancel'] },
+    action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'update', 'pause', 'resume', 'complete', 'cancel'] },
     tasks: { type: 'array', items: TASK_SCHEMA }, task: TASK_SCHEMA,
   },
 } as const
@@ -309,7 +401,7 @@ export function installScheduleTools(
     name: 'fleet_schedule',
     description: 'Manage persistent one-shot or recurring Team reminders that wake assigned members at their due time.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['list', 'create', 'complete', 'cancel'] }, id: { type: 'string' },
+      action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'update', 'pause', 'resume', 'complete', 'cancel'] }, id: { type: 'string' },
       title: { type: 'string' }, instructions: { type: 'string' }, due_at: { type: 'string' },
       assignees: { type: 'array', items: { type: 'string' } }, repeat_minutes: { type: 'integer' },
     },
@@ -318,7 +410,8 @@ export function installScheduleTools(
       const agent = exec.agent as Agent | undefined
       if (agent === undefined) throw new Error('fleet_schedule requires a calling Agent')
       const callerId = String(agent.id)
-      const action = args.action === 'list' ? 'schedule.read' : args.action === 'create' ? 'schedule.create' : 'schedule.update'
+      const action = args.action === 'list' || args.action === 'get' ? 'schedule.read'
+        : args.action === 'create' ? 'schedule.create' : 'schedule.update'
       if (!authorize(callerId, action) && !authorize(callerId, 'schedule.manage')) {
         throw new Error(`Agent ${callerId} is not authorized for ${action}`)
       }
@@ -332,6 +425,16 @@ export function installScheduleTools(
         }) })
       }
       if (args.id === undefined) throw new Error(`fleet_schedule ${args.action} requires id`)
+      if (args.action === 'get') return Promise.resolve({ action: 'get' as const, task: scheduler.get(callerId, args.id) })
+      if (args.action === 'update') return Promise.resolve({ action: 'update' as const, task: scheduler.update(callerId, args.id, {
+        ...(args.title === undefined ? {} : { title: args.title }),
+        ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
+        ...(args.due_at === undefined ? {} : { dueAt: args.due_at }),
+        ...(args.assignees === undefined ? {} : { assignees: args.assignees }),
+        ...(args.repeat_minutes === undefined ? {} : { repeatMinutes: args.repeat_minutes }),
+      }) })
+      if (args.action === 'pause') return Promise.resolve({ action: 'pause' as const, task: scheduler.pauseTask(callerId, args.id) })
+      if (args.action === 'resume') return Promise.resolve({ action: 'resume' as const, task: scheduler.resumeTask(callerId, args.id, args.due_at) })
       return Promise.resolve(args.action === 'complete'
         ? { action: 'complete' as const, task: scheduler.complete(callerId, args.id) }
         : { action: 'cancel' as const, task: scheduler.cancel(callerId, args.id) })

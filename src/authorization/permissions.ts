@@ -55,7 +55,10 @@ export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
   {
     id: 'observer', name: 'Observer', parents: [], preset: true,
     toolGroups: ['messages', 'status', 'resources'],
-    actions: ['task.read', 'schedule.read', 'calendar.read', 'calendar.rsvp'],
+    actions: [
+      'task.read', 'schedule.read', 'calendar.read', 'calendar.rsvp',
+      'document.read', 'workspace.read', 'access.inspect',
+    ],
   },
   {
     id: 'member', name: 'Collaborator', parents: ['observer'], preset: true,
@@ -63,22 +66,24 @@ export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
       'task.create', 'task.update', 'task.comment', 'task.progress',
       'schedule.create', 'schedule.update',
       'calendar.create', 'calendar.update',
+      'document.comment', 'message.wakeup',
     ],
   },
   {
     id: 'researcher', name: 'Researcher', parents: ['member'], preset: true,
-    toolGroups: [], actions: ['resource.write'],
+    toolGroups: [], actions: ['resource.write', 'document.write'],
   },
   {
     id: 'facilitator', name: 'Facilitator', parents: ['member'], preset: true,
     toolGroups: [], actions: [
       'channel.manage', 'meeting.manage', 'vote.create',
       'task.manage', 'schedule.manage', 'calendar.manage',
+      'message.interrupt',
     ],
   },
   {
     id: 'maintainer', name: 'Maintainer', parents: ['researcher', 'facilitator'], preset: true,
-    toolGroups: [], actions: ['team.manage'],
+    toolGroups: [], actions: ['team.manage', 'workspace.manage', 'access.manage', 'permissions.manage'],
   },
   {
     id: 'op', name: 'OP', parents: [], preset: true, toolGroups: [], actions: [], op: true,

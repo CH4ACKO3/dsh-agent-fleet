@@ -3908,11 +3908,44 @@ export class FleetRunService {
     if (event.type === 'activity.acknowledged') {
       return (event.data as { readonly member: string }).member === view.id
     }
-    if (event.type.startsWith('resource.document_')) return view.toolGroups.includes('documents')
-    if (event.type.startsWith('resource.')) return view.toolGroups.includes('resources')
-    if (event.type.startsWith('task.')) return view.toolGroups.includes('tasks')
-    if (event.type.startsWith('calendar.')) return view.toolGroups.includes('calendar')
-    if (event.type.startsWith('schedule.')) return view.toolGroups.includes('schedule')
+    const subject = {
+      kind: record.assistants.some(assistant => assistant.view.id === view.id) ? 'assistant' as const : 'member' as const,
+      id: view.id,
+    }
+    if (event.type.startsWith('resource.document_')) {
+      const documentId = (event.data as { readonly document?: { readonly id?: string } }).document?.id
+      return this.authorization?.authorize({
+        teamId: record.id,
+        subject,
+        action: 'document.read',
+        ...(documentId === undefined ? {} : { resource: { kind: 'document', id: documentId } }),
+      }) ?? view.toolGroups.includes('documents')
+    }
+    if (event.type.startsWith('resource.work_')) {
+      return this.authorization?.has(record.id, view, 'work.read') ?? view.toolGroups.includes('resources')
+    }
+    if (event.type.startsWith('resource.resource_')) {
+      const data = event.data as {
+        readonly resource?: { readonly id?: string }
+        readonly revision?: { readonly resourceId?: string }
+      }
+      const resourceId = data.resource?.id ?? data.revision?.resourceId
+      return this.authorization?.authorize({
+        teamId: record.id,
+        subject,
+        action: 'resource.read',
+        ...(resourceId === undefined ? {} : { resource: { kind: 'resource', id: resourceId } }),
+      }) ?? view.toolGroups.includes('resources')
+    }
+    if (event.type.startsWith('workspace.')) {
+      return this.authorization?.has(record.id, view, 'workspace.read') ?? view.toolGroups.includes('resources')
+    }
+    if (event.type.startsWith('member_status.')) {
+      return this.authorization?.has(record.id, view, 'member-status.read') ?? view.toolGroups.includes('status')
+    }
+    if (event.type.startsWith('task.')) return this.authorization?.has(record.id, view, 'task.read') ?? view.toolGroups.includes('tasks')
+    if (event.type.startsWith('calendar.')) return this.authorization?.has(record.id, view, 'calendar.read') ?? view.toolGroups.includes('calendar')
+    if (event.type.startsWith('schedule.')) return this.authorization?.has(record.id, view, 'schedule.read') ?? view.toolGroups.includes('schedule')
     if (event.type === 'assistant_message') {
       const message = event.data as FleetAssistantMessage
       return message.recipients?.includes(view.id) === true
@@ -4198,6 +4231,7 @@ export class FleetRunService {
         ...memberViews,
         ...record.assistants.map(assistant => assistant.view),
       ],
+      defaultVoters: memberViews.map(view => view.id),
       projectRoot: record.projectRoot,
       sharedDirectory: `.fleet/${record.id}`,
       onCoordination: event => { this.recordCoordination(record.id, event) },
@@ -4207,11 +4241,11 @@ export class FleetRunService {
       },
       onTask: (event, state) => {
         this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
-        this.appendEvent(record.id, `task.${event.action}`, event)
+        if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
       },
       onSchedule: (event, state) => {
         this.writeExtensionState(record.id, FLEET_SCHEDULE_STATE_NAMESPACE, state as unknown as JsonValue)
-        this.appendEvent(record.id, `schedule.${event.action}`, event)
+        if (event.action !== 'notification') this.appendEvent(record.id, `schedule.${event.action}`, event)
       },
       onCalendar: (event, state) => {
         this.writeExtensionState(record.id, FLEET_CALENDAR_STATE_NAMESPACE, state as unknown as JsonValue)
