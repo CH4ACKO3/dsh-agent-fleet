@@ -855,4 +855,52 @@ describe('Fleet Web panel source', () => {
     ])
     panel.dispose()
   })
+
+  it('loads and updates member permission groups through Fleet Web', async () => {
+    const memberCalls: unknown[] = []
+    const projection = {
+      run: { id: 'team-1' },
+      view: { id: 'builder' },
+      events: [],
+      hasMore: false,
+      authorization: {
+        configured: false,
+        assignment: {
+          groups: ['observer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
+        },
+        effective: { actions: ['message.read'], toolGroups: ['messages'], op: false },
+        groups: [{
+          id: 'observer', name: 'Observer', parents: [], preset: true,
+          toolGroups: ['messages'], actions: ['message.read'],
+        }],
+      },
+    }
+    const remote = {
+      list: async () => ok([]),
+      project: async () => ok(projection),
+      send: async () => ok({}),
+      member: async input => {
+        memberCalls.push(input)
+        return ok({ ...projection.authorization, configured: true })
+      },
+      control: async () => ok({}),
+      upload: async () => ok({}),
+      uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const source = createFleetWebPanelSource(() => Promise.resolve(remote))
+
+    await expect(source.loadMemberAuthorization?.('team-1', 'builder')).resolves.toMatchObject({
+      selectedGroups: ['observer'],
+      effectiveActions: ['message.read'],
+      groups: [{ id: 'observer', name: 'Observer' }],
+    })
+    await expect(source.updateMemberPermissions?.({
+      sessionId: 'ui-session', teamId: 'team-1', memberId: 'builder', groups: ['observer'],
+    })).resolves.toMatchObject({ configured: true, selectedGroups: ['observer'] })
+    expect(memberCalls).toEqual([{
+      sessionId: 'ui-session', teamId: 'team-1', action: 'permissions', member: 'builder', groups: ['observer'],
+    }])
+    source.dispose()
+  })
 })

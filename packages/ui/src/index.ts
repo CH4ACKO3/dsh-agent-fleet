@@ -2262,6 +2262,11 @@ function memberInsertionIndex(bounds: readonly DOMRect[], clientX: number, clien
 
 let memberKey = 0
 
+const DEFAULT_MEMBER_TOOL_GROUPS = ['messages', 'coordination', 'resources', 'status'] as const
+const DEFAULT_MEMBER_PERMISSIONS = [
+  'channel.manage', 'meeting.manage', 'vote.create', 'resource.write', 'team.manage',
+] as const
+
 function newMember(seed: Partial<Omit<MemberDraft, 'key'>> = {}): MemberDraft {
   memberKey += 1
   return {
@@ -2274,6 +2279,8 @@ function newMember(seed: Partial<Omit<MemberDraft, 'key'>> = {}): MemberDraft {
     prompt: '',
     provider: '',
     model: '',
+    toolGroups: [...DEFAULT_MEMBER_TOOL_GROUPS],
+    permissions: [...DEFAULT_MEMBER_PERMISSIONS],
     sourcePresetId: null,
     modified: false,
     ...seed,
@@ -2740,6 +2747,16 @@ function memberConfigurationChanged(member: MemberDraft, initial: MemberDraft): 
     || member.prompt !== initial.prompt
     || member.provider !== initial.provider
     || member.model !== initial.model
+    || JSON.stringify(member.toolGroups) !== JSON.stringify(initial.toolGroups)
+    || JSON.stringify(member.permissions) !== JSON.stringify(initial.permissions)
+}
+
+function memberPermissionEntries(value: unknown): readonly string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function parseMemberPermissionEntries(value: string): readonly string[] {
+  return [...new Set(value.split(/[\n,]/u).map(item => item.trim()).filter(Boolean))]
 }
 
 function memberHasData(member: MemberDraft): boolean {
@@ -3030,6 +3047,8 @@ function FleetMemberEditor({
     && (preset || /^#[0-9a-fA-F]{6}$/.test(member.color))
     && member.role.trim().length > 0
     && member.responsibilities.trim().length > 0
+    && memberPermissionEntries(member.toolGroups).every(value => /^[a-z][a-z0-9-]*$/u.test(value))
+    && memberPermissionEntries(member.permissions).every(value => /^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/u.test(value))
 
   useEffect(() => {
     cancelButton.current?.focus()
@@ -3180,6 +3199,56 @@ function FleetMemberEditor({
                     value: member.prompt,
                     placeholder: text('补充具体的行为指引或上下文', 'Add specific behavior guidance or context'),
                     onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setMember({ ...member, prompt: event.target.value }),
+                  }),
+                }),
+                !preset && jsx(ConfigurationField, {
+                  label: text('工具组', 'Tool groups'),
+                  wide: true,
+                  children: jsxs('div', {
+                    children: [
+                      jsx('textarea', {
+                        className: 'dsh-fleet-config-textarea',
+                        value: memberPermissionEntries(member.toolGroups).join('\n'),
+                        placeholder: 'messages\nresources\ncoordination',
+                        spellCheck: false,
+                        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setMember({
+                          ...member,
+                          toolGroups: parseMemberPermissionEntries(event.target.value),
+                        }),
+                      }),
+                      jsx('p', {
+                        className: 'dsh-fleet-config-model-status',
+                        children: text(
+                          '每行一个工具组；留空表示不暴露 Fleet 工具。',
+                          'One tool group per line; leave empty to expose no Fleet tools.',
+                        ),
+                      }),
+                    ],
+                  }),
+                }),
+                !preset && jsx(ConfigurationField, {
+                  label: text('操作权限', 'Action permissions'),
+                  wide: true,
+                  children: jsxs('div', {
+                    children: [
+                      jsx('textarea', {
+                        className: 'dsh-fleet-config-textarea',
+                        value: memberPermissionEntries(member.permissions).join('\n'),
+                        placeholder: 'resource.write\nmeeting.manage',
+                        spellCheck: false,
+                        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setMember({
+                          ...member,
+                          permissions: parseMemberPermissionEntries(event.target.value),
+                        }),
+                      }),
+                      jsx('p', {
+                        className: 'dsh-fleet-config-model-status',
+                        children: text(
+                          '每行一个 namespace.action；扩展插件注册的权限也可以在这里填写。',
+                          'One namespace.action per line; permissions registered by extensions are accepted here too.',
+                        ),
+                      }),
+                    ],
                   }),
                 }),
                 jsx(ConfigurationField, {

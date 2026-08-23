@@ -49,6 +49,13 @@ export interface FleetPermissionState {
   readonly groups: Readonly<Record<string, FleetPermissionAssignment>>
 }
 
+export interface FleetMemberPermissionProjection {
+  readonly assignment: FleetMemberAccess
+  readonly configured: boolean
+  readonly effective: FleetEffectiveAuthorization
+  readonly groups: readonly FleetPermissionGroup[]
+}
+
 const EMPTY_STATE: FleetPermissionState = { version: 1, groups: {} }
 
 export const FLEET_PERMISSION_PRESETS: readonly FleetPermissionGroup[] = [
@@ -277,6 +284,34 @@ export class FleetPermissionService implements FleetActionPolicy {
     }
     const view = this.memberView(teamId, member)
     return view === undefined ? undefined : nativeAssignment(view)
+  }
+
+  inspectMember(teamId: string, member: string): FleetMemberPermissionProjection {
+    const view = this.requireMember(teamId, member)
+    const state = this.state(teamId)
+    const configured = state.groups[fleetPrivateGroupId(member)] !== undefined
+      || this.groupService.membership(teamId, member).length > 0
+    const assignment = this.member(teamId, member)
+    if (assignment === undefined) throw new Error(`unknown Fleet member ${member}`)
+    return {
+      assignment,
+      configured,
+      effective: this.authorization.resolve(teamId, view),
+      groups: this.groups(teamId),
+    }
+  }
+
+  setMemberGroups(teamId: string, member: string, groups: readonly string[]): FleetMemberPermissionProjection {
+    const current = this.inspectMember(teamId, member)
+    this.setMember(teamId, member, {
+      groups,
+      grants: current.configured ? current.assignment.grants : [],
+      denies: current.configured ? current.assignment.denies : [],
+      toolGroups: current.configured ? current.assignment.toolGroups : [],
+      denyToolGroups: current.configured ? current.assignment.denyToolGroups : [],
+      ...(current.configured && current.assignment.op === true ? { op: true } : {}),
+    })
+    return this.inspectMember(teamId, member)
   }
 
   memberForAgent(teamId: string, agentId: string): FleetMemberView | undefined {

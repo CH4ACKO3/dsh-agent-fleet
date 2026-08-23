@@ -18,6 +18,7 @@ import {
 } from '@dsh-agent-fleet/core/web'
 
 import type { FleetMemberView } from './member-view.js'
+import type { FleetPermissionService } from './authorization/permissions.js'
 import type { FleetRunService, FleetWorkStatus } from './run.js'
 import type { FleetSetupService } from './setup.js'
 
@@ -52,9 +53,10 @@ export interface FleetWebSendInput {
 export interface FleetWebMemberInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'add' | 'update' | 'pause' | 'resume' | 'remove'
+  readonly action: 'add' | 'update' | 'pause' | 'resume' | 'remove' | 'permissions' | 'reset_permissions'
   readonly member?: string
   readonly view?: FleetMemberView
+  readonly groups?: readonly string[]
 }
 
 export interface FleetWebControlInput {
@@ -121,6 +123,7 @@ export class FleetWebRemote extends TypertRemoteService {
     private readonly host: Context,
     private readonly runs: FleetRunService,
     private readonly setups: FleetSetupService,
+    private readonly permissions?: FleetPermissionService,
   ) {
     super(host, 'fleetWeb', { namespace: 'fleet' })
     host.effect(() => () => {
@@ -173,7 +176,13 @@ export class FleetWebRemote extends TypertRemoteService {
         limit,
       )
     }
-    if (input.view === 'member') return this.runs.readMemberProjection(teamId, required(input.member, 'member'), after, limit)
+    if (input.view === 'member') {
+      const member = required(input.member, 'member')
+      const projection = this.runs.readMemberProjection(teamId, member, after, limit)
+      return this.permissions === undefined
+        ? projection
+        : { ...projection, authorization: this.permissions.inspectMember(teamId, member) }
+    }
     if (input.view === undefined || input.view === 'team') return this.runs.readWebTeamProjection(teamId, after, limit)
     throw new Error(`unknown Fleet project view ${String(input.view)}`)
   }
@@ -221,6 +230,16 @@ export class FleetWebRemote extends TypertRemoteService {
       case 'pause': return this.runs.pauseMember(caller, teamId, required(input.member, 'member'))
       case 'resume': return this.runs.resumeMember(caller, teamId, required(input.member, 'member'))
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))
+      case 'permissions': {
+        if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
+        return this.permissions.setMemberGroups(teamId, required(input.member, 'member'), input.groups ?? [])
+      }
+      case 'reset_permissions': {
+        if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
+        const member = required(input.member, 'member')
+        this.permissions.resetMember(teamId, member)
+        return this.permissions.inspectMember(teamId, member)
+      }
       default: throw new Error(`unknown Fleet member action ${String(input.action)}`)
     }
   }

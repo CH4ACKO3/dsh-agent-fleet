@@ -2203,6 +2203,97 @@ button.dsh-fleet-panel-team-title:focus-visible {
   flex-wrap: wrap;
 }
 
+.dsh-fleet-panel-member-permissions {
+  max-width: 760px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  margin-top: 24px;
+  padding-top: 20px;
+}
+
+.dsh-fleet-panel-member-permissions-head {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-permissions-title {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-m-strong-16);
+}
+
+.dsh-fleet-panel-member-permissions-copy,
+.dsh-fleet-panel-member-permissions-summary {
+  margin: 6px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  line-height: 1.55;
+}
+
+.dsh-fleet-panel-member-permissions-groups {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-permission-group {
+  min-width: 0;
+  cursor: pointer;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-permission-group:has(input:checked) {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, var(--dsw-alias-bg-layer-2));
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 38%, transparent);
+}
+
+.dsh-fleet-panel-member-permission-group input {
+  margin: 2px 0 0;
+  accent-color: var(--dsw-alias-state-business-primary);
+}
+
+.dsh-fleet-panel-member-permission-group-copy {
+  min-width: 0;
+}
+
+.dsh-fleet-panel-member-permission-group-name {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-strong-14);
+}
+
+.dsh-fleet-panel-member-permission-group-detail {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  overflow-wrap: anywhere;
+}
+
+.dsh-fleet-panel-member-permissions-effective {
+  margin-top: 14px;
+}
+
+.dsh-fleet-panel-member-permissions-effective summary {
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permissions-values {
+  margin: 8px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .dsh-fleet-panel-resource-open-error {
   color: var(--dsw-alias-state-error-primary);
   font: var(--dsw-font-xs-13);
@@ -3087,6 +3178,23 @@ export interface FleetPanelMember extends FleetChatMember {
   readonly runtimeStatus?: 'idle' | 'running' | 'waiting' | 'error' | 'offline' | 'paused' | 'unknown'
 }
 
+export interface FleetPanelPermissionGroup {
+  readonly id: string
+  readonly name: string
+  readonly parents: readonly string[]
+  readonly preset: boolean
+  readonly op?: boolean
+}
+
+export interface FleetPanelMemberAuthorization {
+  readonly groups: readonly FleetPanelPermissionGroup[]
+  readonly selectedGroups: readonly string[]
+  readonly effectiveActions: readonly string[]
+  readonly effectiveToolGroups: readonly string[]
+  readonly op: boolean
+  readonly configured: boolean
+}
+
 export interface FleetPanelMessage {
   readonly id: string
   readonly sequence?: number
@@ -3299,6 +3407,14 @@ export interface FleetPanelMemberControlInput {
   readonly action: 'pause' | 'resume'
 }
 
+export interface FleetPanelMemberPermissionInput {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly memberId: string
+  readonly groups?: readonly string[]
+  readonly reset?: boolean
+}
+
 export interface FleetPanelArchiveExportInput {
   readonly sessionId: string
   readonly teamId: string
@@ -3325,6 +3441,8 @@ export interface FleetPanelSource {
   uploadResource?(input: FleetPanelUploadInput): Promise<void>
   controlTeam?(input: FleetPanelTeamControlInput): Promise<void>
   controlMember?(input: FleetPanelMemberControlInput): Promise<void>
+  loadMemberAuthorization?(teamId: string, memberId: string, signal?: AbortSignal): Promise<FleetPanelMemberAuthorization>
+  updateMemberPermissions?(input: FleetPanelMemberPermissionInput): Promise<FleetPanelMemberAuthorization>
   exportTeam?(teamId: string, signal?: AbortSignal): Promise<Record<string, unknown>>
   exportArchive?(input: FleetPanelArchiveExportInput, signal?: AbortSignal): Promise<FleetPanelArchiveFile>
   importArchive?(input: FleetPanelArchiveImportInput, signal?: AbortSignal): Promise<void>
@@ -3613,6 +3731,8 @@ export interface FleetPanelPaneOwner {
   readonly uploadResource?: (file: File) => Promise<void>
   readonly controlTeam?: (action: FleetPanelTeamControlInput['action'], summary?: string) => Promise<void>
   readonly controlMember?: (memberId: string, action: FleetPanelMemberControlInput['action']) => Promise<void>
+  readonly loadMemberAuthorization?: FleetPanelSource['loadMemberAuthorization']
+  readonly updateMemberPermissions?: (memberId: string, groups?: readonly string[], reset?: boolean) => Promise<FleetPanelMemberAuthorization>
   readonly exportTeam?: FleetPanelSource['exportTeam']
   readonly exportArchive?: (teamId: string, includeWorkspace: boolean) => Promise<FleetPanelArchiveFile>
   readonly importArchive?: (file: File, projectRoot: string, mode: 'copy' | 'restore') => Promise<void>
@@ -4391,6 +4511,19 @@ export function FleetTeamPanel({
     ...(tutorial || source?.controlMember === undefined ? {} : {
       controlMember: (memberId: string, action: FleetPanelMemberControlInput['action']) =>
         source.controlMember?.({ sessionId, teamId: activeTeam.teamId, memberId, action }) ?? Promise.resolve(),
+    }),
+    ...(tutorial || source?.loadMemberAuthorization === undefined ? {} : {
+      loadMemberAuthorization: source.loadMemberAuthorization,
+    }),
+    ...(tutorial || source?.updateMemberPermissions === undefined ? {} : {
+      updateMemberPermissions: (memberId: string, groups?: readonly string[], reset?: boolean) =>
+        source.updateMemberPermissions?.({
+          sessionId,
+          teamId: activeTeam.teamId,
+          memberId,
+          ...(groups === undefined ? {} : { groups }),
+          ...(reset === undefined ? {} : { reset }),
+        }) ?? Promise.reject(new Error('Fleet 成员权限接口不可用')),
     }),
     ...(tutorial || source?.controlTeam === undefined ? {} : {
       controlTeam: (action: FleetPanelTeamControlInput['action'], summary?: string) =>
@@ -6920,6 +7053,159 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
   })
 }
 
+function samePermissionGroups(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every(group => right.includes(group))
+}
+
+function MemberPermissions({ owner, member }: {
+  readonly owner: FleetPanelPaneOwner
+  readonly member: FleetPanelMember
+}): ReactElement | null {
+  const load = owner.loadMemberAuthorization
+  const update = owner.updateMemberPermissions
+  const [state, setState] = useState<
+    | { readonly status: 'loading' }
+    | { readonly status: 'ready'; readonly value: FleetPanelMemberAuthorization; readonly selected: readonly string[] }
+    | { readonly status: 'error'; readonly message: string }
+  >({ status: 'loading' })
+  const [saving, setSaving] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+
+  useEffect(() => {
+    if (load === undefined) return
+    const controller = new AbortController()
+    setState({ status: 'loading' })
+    void load(owner.snapshot.teamId, member.id, controller.signal).then(value => {
+      if (!controller.signal.aborted) setState({ status: 'ready', value, selected: value.selectedGroups })
+    }).catch((reason: unknown) => {
+      if (!controller.signal.aborted) setState({
+        status: 'error',
+        message: reason instanceof Error ? reason.message : '无法读取成员权限',
+      })
+    })
+    return () => { controller.abort(new Error('Fleet member permission view changed')) }
+  }, [attempt, load, member.id, owner.snapshot.teamId])
+
+  if (load === undefined || update === undefined) return null
+  if (state.status !== 'ready') return jsxs('section', {
+    className: 'dsh-fleet-panel-member-permissions',
+    children: [
+      jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: '成员权限' }),
+      jsx('p', {
+        className: state.status === 'error'
+          ? 'dsh-fleet-panel-control-error'
+          : 'dsh-fleet-panel-member-permissions-copy',
+        role: state.status === 'error' ? 'alert' : 'status',
+        children: state.status === 'error' ? state.message : '正在读取权限…',
+      }),
+      state.status === 'error' && jsx('button', {
+        type: 'button',
+        className: 'dsh-fleet-panel-control-button',
+        onClick: () => { setAttempt(current => current + 1) },
+        children: '重试',
+      }),
+    ],
+  })
+
+  const dirty = !samePermissionGroups(state.selected, state.value.selectedGroups)
+  const save = (reset = false): void => {
+    if (saving || (!reset && !dirty)) return
+    setSaving(true)
+    void update(member.id, reset ? undefined : state.selected, reset).then(value => {
+      setState({ status: 'ready', value, selected: value.selectedGroups })
+    }).catch((reason: unknown) => {
+      setState({ status: 'error', message: reason instanceof Error ? reason.message : '无法保存成员权限' })
+    }).finally(() => { setSaving(false) })
+  }
+
+  return jsxs('section', {
+    className: 'dsh-fleet-panel-member-permissions',
+    children: [
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permissions-head',
+        children: [
+          jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: '成员权限' }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-permissions-summary',
+            children: state.value.op ? 'OP · 完整权限' : `${state.value.effectiveActions.length} 项有效权限`,
+          }),
+        ],
+      }),
+      jsx('p', {
+        className: 'dsh-fleet-panel-member-permissions-copy',
+        children: state.value.configured
+          ? '一个成员可以属于多个权限组；继承关系会自动生效。'
+          : '当前沿用团队模板中的成员权限。选择权限组并保存后，将改用权限组管理。',
+      }),
+      jsx('div', {
+        className: 'dsh-fleet-panel-member-permissions-groups',
+        children: state.value.groups.map(group => jsxs('label', {
+          className: 'dsh-fleet-panel-member-permission-group',
+          children: [
+            jsx('input', {
+              type: 'checkbox',
+              checked: state.selected.includes(group.id),
+              disabled: saving,
+              onChange: (event: ChangeEvent<HTMLInputElement>) => {
+                const selected = event.currentTarget.checked
+                  ? [...state.selected, group.id]
+                  : state.selected.filter(id => id !== group.id)
+                setState({ ...state, selected })
+              },
+            }),
+            jsxs('span', {
+              className: 'dsh-fleet-panel-member-permission-group-copy',
+              children: [
+                jsx('span', { className: 'dsh-fleet-panel-member-permission-group-name', children: group.name }),
+                jsx('div', {
+                  className: 'dsh-fleet-panel-member-permission-group-detail',
+                  children: group.op === true
+                    ? '不受普通权限限制'
+                    : group.parents.length === 0 ? '基础权限组' : `继承 ${group.parents.join('、')}`,
+                }),
+              ],
+            }),
+          ],
+        }, group.id)),
+      }),
+      jsxs('details', {
+        className: 'dsh-fleet-panel-member-permissions-effective',
+        children: [
+          jsx('summary', { children: '查看当前有效权限' }),
+          jsxs('p', {
+            className: 'dsh-fleet-panel-member-permissions-values',
+            children: [
+              `工具组：${state.value.effectiveToolGroups.join('、') || '无'}`,
+              jsx('br', {}),
+              `操作：${state.value.effectiveActions.join('、') || '无'}`,
+            ],
+          }),
+        ],
+      }),
+      jsxs('div', {
+        className: 'dsh-fleet-panel-overview-actions',
+        children: [
+          jsx('button', {
+            type: 'button',
+            className: 'dsh-fleet-panel-control-button',
+            'data-primary': dirty ? 'true' : undefined,
+            disabled: saving || !dirty,
+            onClick: () => { save() },
+            children: saving ? '正在保存…' : '保存权限',
+          }),
+          state.value.configured && jsx('button', {
+            type: 'button',
+            className: 'dsh-fleet-panel-control-button',
+            disabled: saving,
+            onClick: () => { save(true) },
+            children: '恢复模板默认',
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
 function TeamMain(owner: FleetPanelPaneOwner): ReactElement {
   const [controlBusy, setControlBusy] = useState<'pause' | 'resume'>()
   const [controlError, setControlError] = useState<string>()
@@ -6986,6 +7272,7 @@ function TeamMain(owner: FleetPanelPaneOwner): ReactElement {
             }),
           ],
         }),
+        jsx(MemberPermissions, { owner, member }),
       ],
     }),
   })

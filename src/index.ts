@@ -114,8 +114,8 @@ export function apply(ctx: Context): void {
   })
   Authorization.apply(ctx)
   Data.apply(ctx)
-  ctx.inject(['fleetRuns', 'fleetSetups', 'typert', 'agents'], (scope) => {
-    new FleetWebRemote(scope, scope.fleetRuns, scope.fleetSetups)
+  ctx.inject(['fleetRuns', 'fleetSetups', 'fleetPermissions', 'typert', 'agents'], (scope) => {
+    new FleetWebRemote(scope, scope.fleetRuns, scope.fleetSetups, scope.fleetPermissions)
     return scope.typert.register(FLEET_WEB_LOCAL)
   })
   ctx.inject(['fleetRuns', 'remote', 'connection'], raw => {

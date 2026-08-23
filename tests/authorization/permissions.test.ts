@@ -139,6 +139,28 @@ describe('FleetPermissionService', () => {
     expect(stored()).toBeDefined()
   })
 
+  it('projects and updates member permission groups without retaining an unconfigured template baseline', () => {
+    const { permissions } = fixture()
+    expect(permissions.inspectMember('team-1', 'alice')).toMatchObject({
+      configured: false,
+      assignment: { groups: [], grants: ['resource.write'], toolGroups: ['messages', 'resources'] },
+    })
+
+    const updated = permissions.setMemberGroups('team-1', 'alice', ['observer'])
+    expect(updated).toMatchObject({
+      configured: true,
+      assignment: { groups: ['observer'], grants: [], toolGroups: [] },
+      effective: { op: false },
+    })
+    expect(updated.effective.actions).not.toContain('resource.write')
+
+    permissions.resetMember('team-1', 'alice')
+    expect(permissions.inspectMember('team-1', 'alice')).toMatchObject({
+      configured: false,
+      assignment: { grants: ['resource.write'], toolGroups: ['messages', 'resources'] },
+    })
+  })
+
   it('keeps research roles below Team management authority', () => {
     const { authorization, permissions } = fixture()
     permissions.setMember('team-1', 'alice', {

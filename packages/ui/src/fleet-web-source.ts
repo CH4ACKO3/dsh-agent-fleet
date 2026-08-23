@@ -7,6 +7,7 @@ import {
   type FleetPanelArchiveFile,
   type FleetPanelConversation,
   type FleetPanelMember,
+  type FleetPanelMemberAuthorization,
   type FleetPanelMemberTrace,
   type FleetPanelMessage,
   type FleetPanelResource,
@@ -194,6 +195,42 @@ function wireProjection(value: unknown): WireProjection {
     events: value.events as unknown as readonly WireEvent[],
     hasMore: value.hasMore,
     ...(typeof value.previousSequence === 'number' ? { previousSequence: value.previousSequence } : {}),
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function memberAuthorization(value: unknown): FleetPanelMemberAuthorization {
+  const container = asRecord(value)
+  const authorization = asRecord(container?.authorization ?? value)
+  const assignment = asRecord(authorization?.assignment)
+  const effective = asRecord(authorization?.effective)
+  if (authorization === undefined || assignment === undefined || effective === undefined
+    || !Array.isArray(authorization.groups)) {
+    throw new Error('Fleet 返回了无效的成员权限配置')
+  }
+  const groups = authorization.groups.flatMap((candidate): FleetPanelMemberAuthorization['groups'] => {
+    const group = asRecord(candidate)
+    const id = string(group?.id)
+    const name = string(group?.name)
+    if (id === undefined || name === undefined) return []
+    return [{
+      id,
+      name,
+      parents: stringList(group?.parents),
+      preset: group?.preset === true,
+      ...(group?.op === true ? { op: true } : {}),
+    }]
+  })
+  return {
+    groups,
+    selectedGroups: stringList(assignment.groups),
+    effectiveActions: stringList(effective.actions),
+    effectiveToolGroups: stringList(effective.toolGroups),
+    op: effective.op === true,
+    configured: authorization.configured === true,
   }
 }
 
@@ -1150,6 +1187,14 @@ export function createFleetWebPanelSource(
         ...(page.previousSequence === undefined ? {} : { previousSequence: page.previousSequence }),
       }
     },
+    loadMemberAuthorization: async (teamId, memberId, signal) => {
+      const client = await getClient(signal ?? lifetime.signal)
+      return memberAuthorization(unwrap(await client.project({
+        teamId,
+        view: 'member',
+        member: memberId,
+      }, signal ?? lifetime.signal)))
+    },
     loadResource: async (teamId, resourceId, signal, revisionId) => {
       const client = await getClient(signal ?? lifetime.signal)
       return resourceContent(unwrap(await client.project({
@@ -1300,6 +1345,18 @@ export function createFleetWebPanelSource(
         member: input.memberId,
       }, lifetime.signal))
       await refresh()
+    },
+    updateMemberPermissions: async input => {
+      const client = await getClient(lifetime.signal)
+      const value = unwrap(await client.member({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        action: input.reset === true ? 'reset_permissions' : 'permissions',
+        member: input.memberId,
+        ...(input.groups === undefined ? {} : { groups: input.groups }),
+      }, lifetime.signal))
+      await refresh()
+      return memberAuthorization(value)
     },
     refresh,
     dispose: () => {
