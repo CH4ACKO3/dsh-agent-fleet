@@ -246,6 +246,10 @@ describe('Fleet Web panel source', () => {
           id: 'builder', name: 'Avery Stone', responsibility: '实现并验证运行时功能',
           presence: 'error', statusText: '正在验证团队运行时状态投影', provider: 'deepseek', model: 'deepseek-chat',
         }],
+        assistants: [{
+          id: 'assistant', name: 'You', role: '外部观察者', responsibility: '外部观察者',
+          presence: 'offline', runtimeStatus: 'offline', sessionId: 'observer-session', operator: true,
+        }],
         resources: [{ id: 'plan', name: 'plan.md', kind: 'plan', path: '/workspace/fleet/.fleet/plan.md' }],
         workspaces: [{ id: 'workspace:/workspace/fleet/src', name: 'source', path: '/workspace/fleet/src' }],
         messages: expect.arrayContaining([

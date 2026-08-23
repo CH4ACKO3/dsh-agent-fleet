@@ -65,7 +65,16 @@ interface WireMember {
 
 interface WireAssistant {
   readonly sessionId: string
-  readonly view?: { readonly id?: string; readonly name?: string; readonly role?: string; readonly color?: string }
+  readonly view?: {
+    readonly id?: string
+    readonly name?: string
+    readonly role?: string
+    readonly responsibility?: string
+    readonly color?: string
+    readonly provider?: string
+    readonly model?: string
+  }
+  readonly status?: 'idle' | 'running' | 'offline'
 }
 
 interface WireRun {
@@ -499,6 +508,23 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       sessionId: member.sessionId,
     }
   })
+  const assistants: FleetPanelMember[] = (cache.run.assistants ?? []).map(assistant => {
+    const id = assistant.view?.id ?? `assistant-${assistant.sessionId}`
+    const role = assistant.view?.role ?? 'Team Assistant'
+    return {
+      id,
+      name: assistant.view?.name ?? id,
+      role,
+      responsibility: assistant.view?.responsibility ?? role,
+      color: assistant.view?.color ?? color(`${cache.run.id}:${id}`),
+      presence: presence(assistant.status ?? 'offline'),
+      runtimeStatus: assistant.status ?? 'offline',
+      ...(assistant.view?.provider === undefined ? {} : { provider: assistant.view.provider }),
+      ...(assistant.view?.model === undefined ? {} : { model: assistant.view.model }),
+      sessionId: assistant.sessionId,
+      operator: true,
+    }
+  })
   const membersBySession = new Map(cache.run.members.flatMap((member, index) => {
     const projected = members[index]
     return projected === undefined ? [] : [[member.sessionId, projected] as const]
@@ -803,6 +829,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     ...(cache.run.runtimeState === undefined ? {} : { runtimeState: cache.run.runtimeState }),
     conversations,
     members: projectedMembers,
+    assistants,
     messages,
     resources: [...resources.values()],
     workspaces: [...workspacesByPath.values()],
