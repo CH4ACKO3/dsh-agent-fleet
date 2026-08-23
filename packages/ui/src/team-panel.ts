@@ -3098,6 +3098,312 @@ export const FLEET_PANEL_SLOTS = {
   resourceDiff: 'fleet.resource.diff',
 } as const
 
+type FleetJoyrideValue = null | boolean | number | string | readonly FleetJoyrideValue[] | {
+  readonly [key: string]: FleetJoyrideValue
+}
+
+interface FleetJoyrideAction {
+  readonly id: string
+  readonly label: string
+  readonly scope: 'fleet'
+  readonly description?: string
+  readonly options?: () => FleetJoyrideValue
+  readonly target?: () => HTMLElement | null
+  readonly perform?: (input: FleetJoyrideValue) => FleetJoyrideValue | Promise<FleetJoyrideValue>
+}
+
+interface FleetJoyrideService {
+  register(action: FleetJoyrideAction): () => void
+}
+
+let fleetJoyrideService: FleetJoyrideService | undefined
+const fleetJoyrideListeners = new Set<() => void>()
+
+function configureFleetJoyride(service: FleetJoyrideService | undefined): void {
+  fleetJoyrideService = service
+  for (const listener of fleetJoyrideListeners) listener()
+}
+
+function useFleetJoyride(): FleetJoyrideService | undefined {
+  return useSyncExternalStore(
+    listener => {
+      fleetJoyrideListeners.add(listener)
+      return () => { fleetJoyrideListeners.delete(listener) }
+    },
+    () => fleetJoyrideService,
+    () => fleetJoyrideService,
+  )
+}
+
+const FLEET_VIEW_ACTIONS = {
+  home: 'fleet.view.home',
+  chat: 'fleet.view.messages',
+  team: 'fleet.view.members',
+  agent: 'fleet.view.agent',
+  resources: 'fleet.view.resources',
+  activity: 'fleet.view.activity',
+} as const
+
+function fleetActionTarget(id: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[data-joyride-action="${id}"]`)
+}
+
+function fleetActionId(input: FleetJoyrideValue, field: string): string {
+  if (typeof input === 'string' && input !== '') return input
+  if (input !== null && !Array.isArray(input) && typeof input === 'object') {
+    const value = (input as { readonly [key: string]: FleetJoyrideValue })[field]
+    if (typeof value === 'string' && value !== '') return value
+  }
+  throw new Error(`Fleet action requires a non-empty ${field}`)
+}
+
+function fleetActionRecord(input: FleetJoyrideValue): Readonly<Record<string, FleetJoyrideValue>> {
+  if (input !== null && !Array.isArray(input) && typeof input === 'object') {
+    return input as Readonly<Record<string, FleetJoyrideValue>>
+  }
+  throw new Error('Fleet action requires an object input')
+}
+
+function fleetScrollTarget(area: 'sidebar' | 'main'): HTMLElement | null {
+  const panel = document.querySelector<HTMLElement>('[data-fleet-team-panel]')
+  if (panel === null) return null
+  return area === 'sidebar'
+    ? panel.querySelector<HTMLElement>('.dsh-fleet-panel-sidebar-scroll')
+    : panel.querySelector<HTMLElement>([
+      '.dsh-fleet-panel-chat-log',
+      '.dsh-fleet-panel-detail-scroll',
+      '.dsh-fleet-panel-native-context-scroll',
+      '.dsh-fleet-panel-agent-chat-column',
+    ].join(','))
+}
+
+async function scrollFleetView(input: FleetJoyrideValue): Promise<FleetJoyrideValue> {
+  const record = fleetActionRecord(input)
+  const area = record.area
+  const direction = record.direction
+  if (area !== 'sidebar' && area !== 'main') throw new Error('Fleet scroll area must be sidebar or main')
+  if (typeof direction !== 'string' || !['up', 'down', 'left', 'right', 'top', 'bottom'].includes(direction)) {
+    throw new Error('Fleet scroll direction must be up, down, left, right, top, or bottom')
+  }
+  const target = fleetScrollTarget(area)
+  if (target === null) throw new Error(`Fleet ${area} is not currently scrollable`)
+  if (direction === 'top') target.scrollTo({ top: 0, behavior: 'smooth' })
+  else if (direction === 'bottom') target.scrollTo({ top: target.scrollHeight, behavior: 'smooth' })
+  else target.scrollBy({
+    top: direction === 'up' ? -target.clientHeight * 0.8 : direction === 'down' ? target.clientHeight * 0.8 : 0,
+    left: direction === 'left' ? -target.clientWidth * 0.8 : direction === 'right' ? target.clientWidth * 0.8 : 0,
+    behavior: 'smooth',
+  })
+  await new Promise<void>(resolve => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      target.removeEventListener('scrollend', finish)
+      window.clearTimeout(timeout)
+      resolve()
+    }
+    const timeout = window.setTimeout(finish, 420)
+    target.addEventListener('scrollend', finish, { once: true })
+  })
+  return { area, direction, scrollTop: target.scrollTop, scrollLeft: target.scrollLeft }
+}
+
+const JOYRIDE_MESSAGE_LIMIT = 12
+const JOYRIDE_TEXT_LIMIT = 600
+
+function joyrideText(text: string, limit = JOYRIDE_TEXT_LIMIT): string {
+  return text.length <= limit ? text : `${text.slice(0, limit)}…`
+}
+
+function joyrideMessageBlock(block: FleetChatContentBlock): FleetJoyrideValue {
+  if (block.type === 'text') return { type: 'text', text: joyrideText(block.text) }
+  if (block.type === 'mention') return { type: 'mention', memberId: block.memberId, label: block.label }
+  if (block.type === 'resource') return { type: 'resource', resourceId: block.id, label: block.label }
+  if (block.type === 'image') return {
+    type: 'image', attachmentId: block.attachmentId, name: block.name ?? '', mediaType: block.mediaType,
+  }
+  return { type: block.type }
+}
+
+function visibleFleetMessageIds(conversationId: string): ReadonlySet<string> | undefined {
+  const logs = [...document.querySelectorAll<HTMLElement>('[data-fleet-conversation-id]')]
+  const log = logs.find(candidate => candidate.dataset.fleetConversationId === conversationId)
+  if (log === undefined) return undefined
+  const scroller = log.closest<HTMLElement>('.dsh-fleet-panel-chat-log') ?? log
+  const bounds = scroller.getBoundingClientRect()
+  const viewportTop = Math.max(0, bounds.top)
+  const viewportBottom = Math.min(window.innerHeight, bounds.bottom)
+  const viewportLeft = Math.max(0, bounds.left)
+  const viewportRight = Math.min(window.innerWidth, bounds.right)
+  return new Set([...log.querySelectorAll<HTMLElement>('[data-message-id]')].flatMap(message => {
+    const rect = message.getBoundingClientRect()
+    const visibleHeight = Math.min(rect.bottom, viewportBottom) - Math.max(rect.top, viewportTop)
+    const visibleWidth = Math.min(rect.right, viewportRight) - Math.max(rect.left, viewportLeft)
+    return visibleHeight > 1 && visibleWidth > 1 && message.dataset.messageId !== undefined
+      ? [message.dataset.messageId]
+      : []
+  }))
+}
+
+async function waitForFleetPaint(): Promise<void> {
+  await new Promise<void>(resolve => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      resolve()
+    }
+    const timeout = window.setTimeout(finish, 80)
+    window.requestAnimationFrame(() => { window.requestAnimationFrame(finish) })
+  })
+}
+
+function joyrideConversationFeedback(
+  team: FleetPanelTeamSnapshot,
+  conversationId: string,
+  visibleOnly = false,
+): FleetJoyrideValue {
+  const conversation = team.conversations.find(candidate => candidate.id === conversationId)
+  if (conversation === undefined) return { view: 'chat', conversationId, available: false }
+  const allMessages = team.messages.filter(message => message.conversationId === conversationId)
+  const visibleIds = visibleOnly ? visibleFleetMessageIds(conversationId) : undefined
+  const selectedMessages = visibleOnly
+    ? visibleIds === undefined ? [] : allMessages.filter(message => visibleIds.has(message.id))
+    : allMessages.slice(-JOYRIDE_MESSAGE_LIMIT)
+  const messages = selectedMessages.slice(-JOYRIDE_MESSAGE_LIMIT).map(message => {
+    const sender = message.sender
+      ?? team.members.find(member => member.id === message.senderId)
+      ?? (message.senderId === operator.id ? operator : undefined)
+    return {
+      messageId: message.id,
+      sentAt: message.sentAt,
+      sender: sender === undefined
+        ? { id: message.senderId, name: message.senderId, role: '' }
+        : { id: sender.id, name: sender.name, role: sender.role },
+      content: message.content.map(joyrideMessageBlock),
+      ...(message.receipt === undefined ? {} : {
+        receipt: {
+          read: message.receipt.readMemberIds.length,
+          unread: message.receipt.unreadMemberIds.length,
+        },
+      }),
+    }
+  })
+  return {
+    view: 'chat',
+    conversation: {
+      id: conversation.id,
+      name: conversation.name,
+      kind: conversation.kind,
+      topic: conversation.topic ?? '',
+    },
+    totalMessages: allMessages.length,
+    returnedMessages: messages.length,
+    visibleOnly,
+    pending: visibleOnly && visibleIds === undefined,
+    truncated: visibleOnly
+      ? selectedMessages.length > messages.length
+      : allMessages.length > messages.length,
+    messages,
+  }
+}
+
+function joyrideMemberFeedback(team: FleetPanelTeamSnapshot, memberId: string): FleetJoyrideValue {
+  const member = team.members.find(candidate => candidate.id === memberId)
+  return member === undefined
+    ? { view: 'team', memberId, available: false }
+    : {
+        view: 'team',
+        member: {
+          id: member.id,
+          name: member.name,
+          role: member.role,
+          responsibility: member.responsibility,
+          runtimeStatus: member.runtimeStatus ?? 'unknown',
+          statusText: member.statusText ?? '',
+          provider: member.provider ?? '',
+          model: member.model ?? '',
+        },
+      }
+}
+
+function joyrideResourceFeedback(team: FleetPanelTeamSnapshot, resourceId: string): FleetJoyrideValue {
+  const resource = team.resources.find(candidate => candidate.id === resourceId)
+  if (resource !== undefined) return {
+    view: 'resources',
+    resource: {
+      id: resource.id,
+      name: resource.name,
+      kind: resource.kind,
+      path: resource.path,
+      detail: resource.detail,
+      mediaType: resource.mediaType ?? '',
+      size: resource.size ?? 0,
+      updatedAt: resource.updatedAt ?? '',
+      excerpt: resource.body === undefined ? '' : joyrideText(resource.body, 2_000),
+      truncated: (resource.body?.length ?? 0) > 2_000,
+    },
+  }
+  const workspace = team.workspaces?.find(candidate => candidate.id === resourceId)
+  return workspace === undefined
+    ? { view: 'resources', resourceId, available: false }
+    : {
+        view: 'resources',
+        workspace: {
+          id: workspace.id,
+          name: workspace.name,
+          path: workspace.path,
+          access: workspace.access,
+          members: workspace.members,
+        },
+      }
+}
+
+function joyrideViewFeedback(
+  team: FleetPanelTeamSnapshot,
+  tool: string,
+  item: string,
+  visibleOnly = false,
+): FleetJoyrideValue {
+  if (tool === 'chat') return joyrideConversationFeedback(team, item, visibleOnly)
+  if (tool === 'team') return joyrideMemberFeedback(team, item)
+  if (tool === 'resources') return joyrideResourceFeedback(team, item)
+  if (tool === 'activity') {
+    const activity = (item === 'all' ? team.activity : team.activity.filter(record => record.kind === item)).slice(-20)
+    return {
+      view: 'activity', filter: item, returnedRecords: activity.length,
+      activity: activity.map(record => ({
+        id: record.id, kind: record.kind, text: joyrideText(record.text), createdAt: record.createdAt,
+      })),
+    }
+  }
+  if (tool === 'agent') {
+    const perspective = parseAgentViewItem(team, item)
+    return {
+      view: 'agent',
+      context: perspective.context,
+      member: perspective.member === undefined ? null : {
+        id: perspective.member.id,
+        name: perspective.member.name,
+        role: perspective.member.role,
+        runtimeStatus: perspective.member.runtimeStatus ?? 'unknown',
+        statusText: perspective.member.statusText ?? '',
+      },
+      conversation: perspective.conversation === undefined ? null : {
+        id: perspective.conversation.id,
+        name: perspective.conversation.name,
+        kind: perspective.conversation.kind,
+      },
+      visibleConversations: perspective.conversations.map(conversation => ({
+        id: conversation.id, name: conversation.name, kind: conversation.kind,
+      })),
+    }
+  }
+  return { view: tool }
+}
+
 type PanelIconName = 'chat' | 'team' | 'agent' | 'resources' | 'activity' | 'search' | 'send' | 'channel' | 'menu' | 'settings' | 'chevron' | 'close' | 'copy' | 'download' | 'upload'
 
 function PanelIcon({ name, size = 18 }: { readonly name: PanelIconName; readonly size?: number }): ReactElement {
@@ -3707,6 +4013,7 @@ export function FleetTeamPanel({
   t,
 }: FleetTeamPanelProps): ReactElement {
   const snapshot = usePanelSnapshot(source)
+  const joyride = useFleetJoyride()
   const [activeTool, setActiveTool] = useState<string>(() => readPanelPreferences().activeTool ?? 'home')
   const [homeTeamId, setHomeTeamId] = useState<string | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(() => readPanelPreferences().sidebarWidth ?? SIDEBAR_DEFAULT_WIDTH)
@@ -3880,6 +4187,229 @@ export function FleetTeamPanel({
     setNavigationOpen(false)
   }
 
+  useEffect(() => {
+    if (joyride === undefined) return
+    const dispose: Array<() => void> = []
+    const register = (action: FleetJoyrideAction): void => { dispose.push(joyride.register(action)) }
+    const views: readonly [Exclude<keyof typeof FLEET_VIEW_ACTIONS, 'home'>, string][] = [
+      ['chat', '消息'],
+      ['team', '成员'],
+      ['agent', 'Agent 视角'],
+      ['resources', '共享资源'],
+      ['activity', '团队动态'],
+    ]
+    for (const [tool, label] of views) {
+      const id = FLEET_VIEW_ACTIONS[tool]
+      register({
+        id,
+        label: `打开 Fleet ${label}`,
+        scope: 'fleet',
+        description: `只切换 Agent Fleet 面板内的${label}页面。`,
+        target: () => fleetActionTarget(id),
+        perform: async () => {
+          if (activeTeam === undefined) throw new Error('No Fleet team is selected')
+          selectTool(tool)
+          const item = resolveFleetPanelItem(activeTeam, tool, items[`${activeTeam.teamId}:${tool}`])
+          await waitForFleetPaint()
+          return joyrideViewFeedback(activeTeam, tool, item, true)
+        },
+      })
+    }
+    register({
+      id: 'fleet.inspect',
+      label: '读取 Fleet 当前视图',
+      scope: 'fleet',
+      description: '返回当前 Fleet 页面里可见对象的有界摘要；消息页只返回与当前屏幕相交的消息，并截断长文本。',
+      target: () => fleetScrollTarget('main'),
+      perform: () => {
+        if (activeTeam === undefined) throw new Error('No Fleet team is selected')
+        return joyrideViewFeedback(activeTeam, activeTool, activeItem, true)
+      },
+    })
+    register({
+      id: 'fleet.scroll',
+      label: '滚动 Fleet 当前视图',
+      scope: 'fleet',
+      description: '只滚动当前 Fleet 的 sidebar 或 main。direction 可为 up、down、left、right、top、bottom。',
+      options: () => ({ areas: ['sidebar', 'main'], directions: ['up', 'down', 'left', 'right', 'top', 'bottom'] }),
+      target: () => fleetScrollTarget('main'),
+      perform: async input => {
+        const scroll = await scrollFleetView(input)
+        return {
+          scroll,
+          visible: activeTeam === undefined
+            ? null
+            : joyrideViewFeedback(activeTeam, activeTool, activeItem, true),
+        }
+      },
+    })
+    if (activeTeam !== undefined) {
+      register({
+        id: 'fleet.conversation.select',
+        label: '打开 Fleet 会话',
+        scope: 'fleet',
+        description: '只允许打开当前团队中用户可见的频道或私聊。输入会话 ID 或 {"conversationId":"…"}。',
+        options: () => operatorConversations(activeTeam).map(conversation => ({
+          conversationId: conversation.id,
+          name: conversation.name,
+          kind: conversation.kind,
+        })),
+        perform: async input => {
+          const conversationId = fleetActionId(input, 'conversationId')
+          const conversation = operatorConversations(activeTeam).find(candidate => candidate.id === conversationId)
+          if (conversation === undefined) throw new Error(`Unknown visible Fleet conversation ${JSON.stringify(conversationId)}`)
+          setItems(current => ({ ...current, [`${activeTeam.teamId}:chat`]: conversationId }))
+          setActiveTool('chat')
+          setNavigationOpen(false)
+          await waitForFleetPaint()
+          return joyrideConversationFeedback(activeTeam, conversationId, true)
+        },
+      })
+      register({
+        id: 'fleet.member.select',
+        label: '打开 Fleet 成员资料',
+        scope: 'fleet',
+        description: '只允许打开当前团队中的成员。输入成员 ID 或 {"memberId":"…"}。',
+        options: () => activeTeam.members.map(member => ({ memberId: member.id, name: member.name, role: member.role })),
+        perform: async input => {
+          const memberId = fleetActionId(input, 'memberId')
+          const member = activeTeam.members.find(candidate => candidate.id === memberId)
+          if (member === undefined) throw new Error(`Unknown Fleet member ${JSON.stringify(memberId)}`)
+          showMemberDetails(memberId)
+          return joyrideMemberFeedback(activeTeam, memberId)
+        },
+      })
+      register({
+        id: 'fleet.agent.select',
+        label: '打开 Fleet Agent 内部视角',
+        scope: 'fleet',
+        description: '只允许打开当前团队成员的内部视角。输入成员 ID 或 {"memberId":"…"}。',
+        options: () => activeTeam.members.map(member => ({ memberId: member.id, name: member.name, role: member.role })),
+        perform: async input => {
+          const memberId = fleetActionId(input, 'memberId')
+          const member = activeTeam.members.find(candidate => candidate.id === memberId)
+          if (member === undefined) throw new Error(`Unknown Fleet member ${JSON.stringify(memberId)}`)
+          setItems(current => ({
+            ...current,
+            [`${activeTeam.teamId}:agent`]: agentViewItem(memberId, AGENT_CONTEXT_ITEM_ID),
+          }))
+          setActiveTool('agent')
+          setNavigationOpen(false)
+          return joyrideViewFeedback(activeTeam, 'agent', agentViewItem(memberId, AGENT_CONTEXT_ITEM_ID))
+        },
+      })
+      register({
+        id: 'fleet.agent.conversation.select',
+        label: '打开 Agent 视角中的会话',
+        scope: 'fleet',
+        description: '只允许打开指定成员实际可见的频道或私聊。输入 {"memberId":"…","conversationId":"…"}。',
+        options: () => activeTeam.members.map(member => ({
+          memberId: member.id,
+          name: member.name,
+          conversations: visibleAgentConversations(activeTeam, member).map(conversation => ({
+            conversationId: conversation.id,
+            name: conversation.name,
+            kind: conversation.kind,
+          })),
+        })),
+        perform: async input => {
+          const record = fleetActionRecord(input)
+          const memberId = fleetActionId(record, 'memberId')
+          const conversationId = fleetActionId(record, 'conversationId')
+          const member = activeTeam.members.find(candidate => candidate.id === memberId)
+          if (member === undefined) throw new Error(`Unknown Fleet member ${JSON.stringify(memberId)}`)
+          const conversation = visibleAgentConversations(activeTeam, member).find(candidate => candidate.id === conversationId)
+          if (conversation === undefined) throw new Error(`Conversation ${JSON.stringify(conversationId)} is not visible to ${JSON.stringify(memberId)}`)
+          setItems(current => ({
+            ...current,
+            [`${activeTeam.teamId}:agent`]: agentViewItem(memberId, conversationId),
+          }))
+          setActiveTool('agent')
+          setNavigationOpen(false)
+          await waitForFleetPaint()
+          return {
+            perspective: joyrideViewFeedback(activeTeam, 'agent', agentViewItem(memberId, conversationId)),
+            conversation: joyrideConversationFeedback(activeTeam, conversationId, true),
+          }
+        },
+      })
+      register({
+        id: 'fleet.resource.select',
+        label: '打开 Fleet 团队文件',
+        scope: 'fleet',
+        description: '只允许打开当前团队已经注册的文件、计划或清单。输入资源 ID 或 {"resourceId":"…"}。',
+        options: () => activeTeam.resources.map(resource => ({
+          resourceId: resource.id,
+          name: resource.name,
+          kind: resource.kind,
+        })),
+        perform: input => {
+          const resourceId = fleetActionId(input, 'resourceId')
+          const resource = activeTeam.resources.find(candidate => candidate.id === resourceId)
+          if (resource === undefined) throw new Error(`Unknown Fleet resource ${JSON.stringify(resourceId)}`)
+          setItems(current => ({ ...current, [`${activeTeam.teamId}:resources`]: resourceId }))
+          setActiveTool('resources')
+          setNavigationOpen(false)
+          return joyrideResourceFeedback(activeTeam, resourceId)
+        },
+      })
+      register({
+        id: 'fleet.workspace.select',
+        label: '打开 Fleet 工作区信息',
+        scope: 'fleet',
+        description: '只允许选择当前团队已经挂载的工作区。输入工作区 ID 或 {"workspaceId":"…"}。',
+        options: () => (activeTeam.workspaces ?? []).map(workspace => ({
+          workspaceId: workspace.id,
+          name: workspace.name,
+          access: workspace.access,
+        })),
+        perform: input => {
+          const workspaceId = fleetActionId(input, 'workspaceId')
+          const workspace = activeTeam.workspaces?.find(candidate => candidate.id === workspaceId)
+          if (workspace === undefined) throw new Error(`Unknown Fleet workspace ${JSON.stringify(workspaceId)}`)
+          setItems(current => ({ ...current, [`${activeTeam.teamId}:resources`]: workspaceId }))
+          setActiveTool('resources')
+          setNavigationOpen(false)
+          return joyrideResourceFeedback(activeTeam, workspaceId)
+        },
+      })
+      register({
+        id: 'fleet.workspace.open',
+        label: '在 DSH 中浏览 Fleet 工作区',
+        scope: 'fleet',
+        description: '只允许打开当前团队已经挂载的工作区根目录。输入工作区 ID 或 {"workspaceId":"…"}。',
+        options: () => (activeTeam.workspaces ?? []).map(workspace => ({
+          workspaceId: workspace.id,
+          name: workspace.name,
+          access: workspace.access,
+        })),
+        perform: async input => {
+          const workspaceId = fleetActionId(input, 'workspaceId')
+          const workspace = activeTeam.workspaces?.find(candidate => candidate.id === workspaceId)
+          if (workspace === undefined) throw new Error(`Unknown Fleet workspace ${JSON.stringify(workspaceId)}`)
+          await nativeContext.openPath(workspace.path)
+          return { workspaceId, name: workspace.name, path: workspace.path }
+        },
+      })
+      register({
+        id: 'fleet.activity.select',
+        label: '筛选 Fleet 团队动态',
+        scope: 'fleet',
+        description: '只允许选择 all、message、resource、decision 四种现有动态视图。输入筛选名或 {"kind":"…"}。',
+        options: () => ['all', 'message', 'resource', 'decision'],
+        perform: input => {
+          const kind = typeof input === 'string' ? input : fleetActionId(input, 'kind')
+          if (!['all', 'message', 'resource', 'decision'].includes(kind)) throw new Error(`Unknown Fleet activity filter ${JSON.stringify(kind)}`)
+          setItems(current => ({ ...current, [`${activeTeam.teamId}:activity`]: kind }))
+          setActiveTool('activity')
+          setNavigationOpen(false)
+          return joyrideViewFeedback(activeTeam, 'activity', kind)
+        },
+      })
+    }
+    return () => { for (const unregister of dispose) unregister() }
+  }, [activeItem, activeTeam, activeTool, items, joyride, nativeContext])
+
   const rail = jsxs('nav', {
     className: 'dsh-fleet-panel-rail',
     'aria-label': 'Fleet 工具',
@@ -3889,6 +4419,7 @@ export function FleetTeamPanel({
         className: 'dsh-fleet-panel-rail-brand',
         'aria-label': '团队首页',
         'aria-current': visibleTool === 'home' ? 'page' : undefined,
+        'data-joyride-action': FLEET_VIEW_ACTIONS.home,
         title: '团队首页',
         onClick: showTeamDirectory,
         children: jsx('span', { className: 'dsh-fleet-panel-harmony-icon', 'aria-hidden': 'true' }),
@@ -4090,6 +4621,7 @@ export function FleetPanelToolButton({ owner, tool, label, children }: {
     disabled: owner.disabled === true,
     'aria-label': label,
     'aria-current': active ? 'page' : undefined,
+    'data-joyride-action': FLEET_VIEW_ACTIONS[tool as keyof typeof FLEET_VIEW_ACTIONS],
     title: label,
     onClick: () => { owner.selectTool(tool) },
     children,
@@ -5866,6 +6398,7 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
           className: 'dsh-fleet-panel-chat-column',
           role: 'log',
           'aria-live': 'polite',
+          'data-fleet-conversation-id': conversation.id,
           children: messages.length === 0
             ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '这里还没有消息' })
             : messages.map(message => {
@@ -6608,6 +7141,7 @@ function AgentMain(owner: FleetPanelPaneOwner): ReactElement {
           className: 'dsh-fleet-panel-agent-chat-column',
           role: 'log',
           'aria-live': 'polite',
+          'data-fleet-conversation-id': conversation.id,
           children: messages.length === 0
             ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '这里还没有消息' })
             : messages.map(message => {
@@ -7521,6 +8055,12 @@ export const inject = ['slots', 'sessions', 'workspaces', 'remote'] as const
 
 export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise<void>> {
   const disposeConfigurationModules = ctx.provide?.('fleetConfigurationModules', fleetConfigurationModules)
+  ctx.inject<{ readonly joyride: FleetJoyrideService }>(['joyride'], joyrideCtx => {
+    configureFleetJoyride(joyrideCtx.joyride)
+    return () => {
+      if (fleetJoyrideService === joyrideCtx.joyride) configureFleetJoyride(undefined)
+    }
+  })
   const modelDirectoryResolver = ctx.get?.('modelDirectories') as FleetModelDirectoryResolver | undefined
   fleetModelDirectoryResolver = modelDirectoryResolver
   configureFleetActivationSessions(

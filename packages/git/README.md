@@ -10,7 +10,7 @@ The single `fleet_git` tool exposes a small collaboration loop:
 - `handoff` prepares a bounded commit/file/test/notes payload which the Agent may send through Fleet messaging.
 - `scope`, `check`, and `create_worktree` retain the existing terminal-operation and worktree services.
 
-When the DSH render-engine diff services are installed, file diffs use their syntax-aware renderer. The view falls back to bounded plain-text patches when those services are absent.
+When the DSH render-engine diff services are installed, file diffs detect them at render time and use their syntax-aware renderer regardless of plugin load order. The view falls back to bounded plain-text patches when those services are absent or reject a patch.
 
 The package registers `git.inspect`, `git.scope-check`, `git.worktree-create`, and `git.worktree-manage` plus the `git-repository` resource kind with Fleet. Its own safe defaults keep it usable without Permissions or Access. Those plugins may narrow the action and concrete repository decisions, while the DSH sandbox remains mandatory.
 

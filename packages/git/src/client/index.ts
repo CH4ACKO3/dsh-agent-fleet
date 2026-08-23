@@ -68,15 +68,91 @@ interface FleetGitClientContext {
   get?(name: string): unknown
 }
 
-interface FleetDiffEngine {
+type JoyrideValue = null | boolean | number | string | readonly JoyrideValue[] | {
+  readonly [key: string]: JoyrideValue
+}
+
+interface JoyrideService {
+  register(action: {
+    readonly id: string
+    readonly label: string
+    readonly scope: 'fleet'
+    readonly description?: string
+    readonly options?: () => JoyrideValue
+    readonly target?: () => HTMLElement | null
+    readonly perform?: (input: JoyrideValue) => JoyrideValue | Promise<JoyrideValue>
+  }): () => void
+}
+
+let joyrideService: JoyrideService | undefined
+const joyrideListeners = new Set<() => void>()
+
+function configureJoyride(service: JoyrideService | undefined): void {
+  joyrideService = service
+  for (const listener of joyrideListeners) listener()
+}
+
+function useJoyride(): JoyrideService | undefined {
+  return useSyncExternalStore(
+    listener => {
+      joyrideListeners.add(listener)
+      return () => { joyrideListeners.delete(listener) }
+    },
+    () => joyrideService,
+    () => joyrideService,
+  )
+}
+
+function joyrideRecord(input: JoyrideValue): Readonly<Record<string, JoyrideValue>> {
+  if (input !== null && !Array.isArray(input) && typeof input === 'object') {
+    return input as Readonly<Record<string, JoyrideValue>>
+  }
+  throw new Error('Fleet Git action requires an object input')
+}
+
+function joyrideString(record: Readonly<Record<string, JoyrideValue>>, field: string): string {
+  const value = record[field]
+  if (typeof value === 'string' && value !== '') return value
+  throw new Error(`Fleet Git action requires a non-empty ${field}`)
+}
+
+function gitScrollTarget(area: 'sidebar' | 'main'): HTMLElement | null {
+  const panel = document.querySelector<HTMLElement>('[data-fleet-team-panel]')
+  if (panel === null) return null
+  return area === 'sidebar'
+    ? panel.querySelector<HTMLElement>('.dsh-fleet-git-sidebar-scroll')
+    : panel.querySelector<HTMLElement>('.dsh-fleet-git-graph-scroll,.dsh-fleet-git-diff-scroll')
+}
+
+function scrollGit(input: JoyrideValue): JoyrideValue {
+  const record = joyrideRecord(input)
+  const area = record.area
+  const direction = record.direction
+  if (area !== 'sidebar' && area !== 'main') throw new Error('Fleet Git scroll area must be sidebar or main')
+  if (typeof direction !== 'string' || !['up', 'down', 'left', 'right', 'top', 'bottom'].includes(direction)) {
+    throw new Error('Fleet Git scroll direction must be up, down, left, right, top, or bottom')
+  }
+  const target = gitScrollTarget(area)
+  if (target === null) throw new Error(`Fleet Git ${area} is not currently scrollable`)
+  if (direction === 'top') target.scrollTo({ top: 0, behavior: 'smooth' })
+  else if (direction === 'bottom') target.scrollTo({ top: target.scrollHeight, behavior: 'smooth' })
+  else target.scrollBy({
+    top: direction === 'up' ? -target.clientHeight * 0.8 : direction === 'down' ? target.clientHeight * 0.8 : 0,
+    left: direction === 'left' ? -target.clientWidth * 0.8 : direction === 'right' ? target.clientWidth * 0.8 : 0,
+    behavior: 'smooth',
+  })
+  return { area, direction }
+}
+
+export interface FleetDiffEngine {
   diff(input: { readonly kind: 'patch'; readonly patch: string }): unknown
 }
 
-interface FleetDiffRenderer {
+export interface FleetDiffRenderer {
   render(document: unknown): { readonly html: string }
 }
 
-interface FleetDiffServices {
+export interface FleetDiffServices {
   readonly diffEngine: FleetDiffEngine
   readonly diffRenderer: FleetDiffRenderer
 }
@@ -101,14 +177,19 @@ const stateByRoot = new Map<string, GitViewState>()
 const listenersByRoot = new Map<string, Set<() => void>>()
 const refreshes = new Map<string, Promise<void>>()
 let webClient: FleetGitWebClient | undefined
-let diffServices: FleetDiffServices | undefined
+let diffContext: FleetGitClientContext | undefined
 let diffServicesRevision = 0
 const diffServiceListeners = new Set<() => void>()
 
-function configureDiffServices(services: FleetDiffServices | undefined): void {
-  diffServices = services
+function diffServicesChanged(): void {
   diffServicesRevision += 1
   for (const listener of diffServiceListeners) listener()
+}
+
+function resolveDiffServices(): FleetDiffServices | undefined {
+  const diffEngine = diffContext?.get?.('diffEngine') as FleetDiffEngine | undefined
+  const diffRenderer = diffContext?.get?.('diffRenderer') as FleetDiffRenderer | undefined
+  return diffEngine === undefined || diffRenderer === undefined ? undefined : { diffEngine, diffRenderer }
 }
 
 function useDiffServices(): FleetDiffServices | undefined {
@@ -120,7 +201,7 @@ function useDiffServices(): FleetDiffServices | undefined {
     () => diffServicesRevision,
     () => diffServicesRevision,
   )
-  return diffServices
+  return resolveDiffServices()
 }
 
 function publish(root: string, state: GitViewState): void {
@@ -292,13 +373,27 @@ function Icon({ name, size = 18 }: { readonly name: 'git' | 'refresh' | 'chevron
 }
 
 function GitTool(owner: FleetToolOwner): ReactElement {
+  const joyride = useJoyride()
   const active = owner.activeTool === TOOL_ID
+  useEffect(() => joyride?.register({
+    id: 'fleet.view.git',
+    label: '打开 Fleet Git 视图',
+    scope: 'fleet',
+    description: '只切换到当前团队的 Git 子插件视图。',
+    target: () => document.querySelector<HTMLElement>('[data-joyride-action="fleet.view.git"]'),
+    perform: () => {
+      if (owner.disabled === true) throw new Error('No Fleet team is selected')
+      owner.selectTool(TOOL_ID)
+      return { view: TOOL_ID }
+    },
+  }), [joyride, owner.disabled, owner.selectTool])
   return jsx('button', {
     type: 'button',
     className: 'dsh-fleet-panel-tool',
     disabled: owner.disabled === true,
     'aria-label': '源代码管理',
     'aria-current': active ? 'page' : undefined,
+    'data-joyride-action': 'fleet.view.git',
     title: '源代码管理',
     onClick: () => { owner.selectTool(TOOL_ID) },
     children: jsx(Icon, { name: 'git' }),
@@ -624,16 +719,21 @@ function GraphView({ snapshot }: { readonly snapshot: FleetGitSnapshot }): React
   })
 }
 
+export function renderFleetGitDiff(text: string, services: FleetDiffServices | undefined): string | undefined {
+  if (services === undefined || text.length === 0) return undefined
+  try {
+    return services.diffRenderer.render(services.diffEngine.diff({ kind: 'patch', patch: text })).html
+  } catch {
+    return undefined
+  }
+}
+
 function DiffContent({ text }: { readonly text: string }): ReactElement {
   const services = useDiffServices()
-  const rendered = useMemo(() => {
-    if (services === undefined || text.length === 0) return undefined
-    try {
-      return services.diffRenderer.render(services.diffEngine.diff({ kind: 'patch', patch: text })).html
-    } catch {
-      return undefined
-    }
-  }, [services, text])
+  const rendered = useMemo(
+    () => renderFleetGitDiff(text, services),
+    [services?.diffEngine, services?.diffRenderer, text],
+  )
   return rendered === undefined
     ? jsx('pre', { className: 'dsh-fleet-git-diff', children: text })
     : jsx('div', { className: 'dsh-fleet-git-rendered-diff', dangerouslySetInnerHTML: { __html: rendered } })
@@ -674,10 +774,74 @@ function DiffView({ root, state }: { readonly root: string; readonly state: GitV
   })
 }
 
+function useGitJoyride(root: string | undefined, state: GitViewState): void {
+  const joyride = useJoyride()
+  useEffect(() => {
+    if (joyride === undefined || root === undefined) return
+    const dispose = [
+      joyride.register({
+        id: 'fleet.git.file.select',
+        label: '打开 Fleet Git 变更文件',
+        scope: 'fleet',
+        description: '只允许打开当前仓库状态中已有的变更文件。输入 {"path":"…","staged":true|false}。',
+        options: () => state.snapshot?.status.changes.flatMap(change => [
+          ...(change.index !== ' ' && change.index !== '?' ? [{ path: change.path, staged: true }] : []),
+          ...(change.worktree !== ' ' || change.index === '?' ? [{ path: change.path, staged: false }] : []),
+        ]) ?? [],
+        perform: async input => {
+          const record = joyrideRecord(input)
+          const path = joyrideString(record, 'path')
+          const staged = record.staged
+          if (typeof staged !== 'boolean') throw new Error('Fleet Git action requires staged to be true or false')
+          const change = state.snapshot?.status.changes.find(candidate => candidate.path === path)
+          const available = staged
+            ? change !== undefined && change.index !== ' ' && change.index !== '?'
+            : change !== undefined && (change.worktree !== ' ' || change.index === '?')
+          if (!available) throw new Error(`Git change ${JSON.stringify(path)} is not available in the requested section`)
+          await openDiff(root, { path, staged })
+          return { path, staged }
+        },
+      }),
+      joyride.register({
+        id: 'fleet.git.graph.show',
+        label: '返回 Fleet Git 图谱',
+        scope: 'fleet',
+        description: '关闭当前 Diff，返回当前仓库的提交图谱。',
+        target: () => document.querySelector<HTMLElement>('.dsh-fleet-git-main'),
+        perform: () => {
+          closeDiff(root)
+          return { view: 'graph' }
+        },
+      }),
+      joyride.register({
+        id: 'fleet.git.refresh',
+        label: '刷新 Fleet Git',
+        scope: 'fleet',
+        description: '只刷新当前团队已挂载仓库的只读状态与图谱。',
+        perform: async () => {
+          await refresh(root)
+          return { root }
+        },
+      }),
+      joyride.register({
+        id: 'fleet.git.scroll',
+        label: '滚动 Fleet Git 当前视图',
+        scope: 'fleet',
+        description: '只滚动 Git 的 sidebar 或 main。direction 可为 up、down、left、right、top、bottom。',
+        options: () => ({ areas: ['sidebar', 'main'], directions: ['up', 'down', 'left', 'right', 'top', 'bottom'] }),
+        target: () => gitScrollTarget('main'),
+        perform: scrollGit,
+      }),
+    ]
+    return () => { for (const unregister of dispose) unregister() }
+  }, [joyride, root, state.snapshot])
+}
+
 function GitMain(owner: FleetPaneOwner): ReactElement {
   const root = repositoryRoot(owner)
   const state = useGitState(root)
   useGitRefresh(root)
+  useGitJoyride(root, state)
   if (root === undefined) return jsx('div', { className: 'dsh-fleet-git-main-empty', children: '挂载 Git 工作区后，这里会显示提交图谱。' })
   if (state.selection !== undefined) return jsx(DiffView, { root, state })
   return jsxs('div', {
@@ -792,12 +956,16 @@ export const inject = ['slots', 'remote'] as const
 
 export async function apply(ctx: FleetGitClientContext): Promise<() => Promise<void>> {
   installStyles()
-  ctx.inject?.<FleetDiffServices>(['diffEngine', 'diffRenderer'], rendererCtx => {
-    const services = { diffEngine: rendererCtx.diffEngine, diffRenderer: rendererCtx.diffRenderer }
-    configureDiffServices(services)
+  diffContext = ctx
+  ctx.inject?.<{ readonly joyride: JoyrideService }>(['joyride'], joyrideCtx => {
+    configureJoyride(joyrideCtx.joyride)
     return () => {
-      if (diffServices === services) configureDiffServices(undefined)
+      if (joyrideService === joyrideCtx.joyride) configureJoyride(undefined)
     }
+  })
+  ctx.inject?.<FleetDiffServices>(['diffEngine', 'diffRenderer'], () => {
+    diffServicesChanged()
+    return diffServicesChanged
   })
   const gateway = ctx.remote ?? ctx.get?.('remote') as FleetGitClientContext['remote']
   if (gateway === undefined) throw new Error('DSH Remote Gateway is unavailable')
@@ -812,6 +980,10 @@ export async function apply(ctx: FleetGitClientContext): Promise<() => Promise<v
   ctx.slots.inject('fleet.panel.sidebar', () => ctx.slots.register({ name: 'fleet.panel.sidebar', key: TOOL_ID }, GitSidebar))
   ctx.slots.inject('fleet.panel.main', () => ctx.slots.register({ name: 'fleet.panel.main', key: TOOL_ID }, GitMain))
   return async () => {
+    if (diffContext === ctx) {
+      diffContext = undefined
+      diffServicesChanged()
+    }
     if (webClient === mounted) webClient = undefined
     await disposeRemote()
   }
