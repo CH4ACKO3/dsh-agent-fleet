@@ -1485,8 +1485,8 @@ export const FULL_TEAM_TEMPLATES = [
   },
   {
     "id": "research-full",
-    "nameZh": "完整科研团队",
-    "nameEn": "Complete research Team",
+    "nameZh": "数据科学团队",
+    "nameEn": "Data science Team",
     "configuration": {
       "en": {
         "core": {

@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import { FULL_TEAM_TEMPLATES } from '../packages/ui/src/team-templates.generated.js'
 describe('complete Team template locales', () => {
+  it('uses the user-facing data science name for the research template', () => {
+    const template = FULL_TEAM_TEMPLATES.find(candidate => candidate.id === 'research-full')
+    expect(template?.nameZh).toBe('数据科学团队')
+    expect(template?.nameEn).toBe('Data science Team')
+  })
+
   it('contains syntactically valid static actions without requiring the permissions plugin', () => {
     for (const template of FULL_TEAM_TEMPLATES) {
       for (const configuration of [template.configuration.en, template.configuration.zh]) {

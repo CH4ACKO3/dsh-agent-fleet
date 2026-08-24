@@ -169,7 +169,7 @@ const specifications = [
   { id: 'coding-small', nameZh: '小型开发团队', nameEn: 'Small development Team', file: 'coding-small.json' },
   { id: 'coding-medium', nameZh: '中型开发团队', nameEn: 'Medium development Team', file: 'coding-medium.json' },
   { id: 'coding-large', nameZh: '大型开发团队', nameEn: 'Large development Team', file: 'coding-large.json' },
-  { id: 'research-full', nameZh: '完整科研团队', nameEn: 'Complete research Team', file: 'research.json', configure: configuredResearch },
+  { id: 'research-full', nameZh: '数据科学团队', nameEn: 'Data science Team', file: 'research.json', configure: configuredResearch },
   { id: 'research-livestream', nameZh: '直播科研团队', nameEn: 'Livestream research Team', file: 'research.json', configure: configuredLivestreamResearch },
 ]
 
