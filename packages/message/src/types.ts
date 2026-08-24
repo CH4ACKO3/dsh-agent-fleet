@@ -31,7 +31,7 @@ export type FleetMessagePermission = 'channel.manage' | 'meeting.manage' | 'vote
 
 export type FleetTarget = `@${string}` | `#${string}` | `meeting:${string}`
 export type FleetDelivery = 'quiet' | 'wakeup' | 'interrupt'
-export type FleetSystemPromptKind =
+export type FleetSystemNotificationKind =
   | 'message_notice'
   | 'work_start'
   | 'work_resume'
@@ -84,15 +84,15 @@ export interface SendMessageResult {
   readonly woken: number
 }
 
-export interface FleetSystemPromptInput {
-  readonly kind: FleetSystemPromptKind
+export interface FleetSystemNotificationInput {
+  readonly kind: FleetSystemNotificationKind
   readonly text: string
   readonly delivery: FleetDelivery
   readonly coalesceKey?: string
   readonly relatedMessageId?: string
 }
 
-export interface FleetSystemPromptResult {
+export interface FleetSystemNotificationResult {
   readonly contextMessageId: string
   readonly disposition: 'injected' | 'followed-up' | 'interrupted' | 'replaced'
 }
@@ -260,11 +260,11 @@ export interface CastVoteInput {
 export type FleetCoordinationEvent =
   | { readonly type: 'message'; readonly message: FleetMessage }
   | {
-      readonly type: 'system_prompt'
-      readonly action: FleetSystemPromptResult['disposition']
+      readonly type: 'system_notification'
+      readonly action: FleetSystemNotificationResult['disposition']
       readonly agentId: string
       readonly contextMessageId: string
-      readonly prompt: FleetSystemPromptInput
+      readonly notification: FleetSystemNotificationInput
     }
   | { readonly type: 'channel'; readonly action: 'created' | 'updated' | 'archived'; readonly channel: FleetChannel }
   | { readonly type: 'meeting'; readonly action: 'opened' | 'updated' | 'joined' | 'left' | 'closed'; readonly meeting: FleetMeeting }

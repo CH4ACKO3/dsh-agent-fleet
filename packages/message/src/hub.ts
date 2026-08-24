@@ -18,8 +18,8 @@ import type {
   FleetMeeting,
   FleetMessagePermission,
   FleetTarget,
-  FleetSystemPromptInput,
-  FleetSystemPromptResult,
+  FleetSystemNotificationInput,
+  FleetSystemNotificationResult,
   FleetVote,
   InitializeChannelInput,
   MessageAgent,
@@ -44,7 +44,7 @@ interface Waiter {
   fail(error: unknown): void
 }
 
-interface PendingSystemPrompt {
+interface PendingSystemNotification {
   readonly message: UserMessage
   readonly queue: 'nextStep' | 'nextTurn'
 }
@@ -575,21 +575,26 @@ export class MessageHub {
     return snapshot([...(this.pendingWakeupsByAgent.get(agentId)?.values() ?? [])])
   }
 
-  sendSystemPrompt(agentId: string, prompt: FleetSystemPromptInput): FleetSystemPromptResult {
+  sendSystemNotification(
+    agentId: string,
+    notification: FleetSystemNotificationInput,
+  ): FleetSystemNotificationResult {
     this.assertOpen()
     const target = this.requireAgent(agentId)
-    const text = prompt.text.trim()
-    if (text.length === 0) throw new Error('Fleet system prompt cannot be empty')
+    const text = notification.text.trim()
+    if (text.length === 0) throw new Error('Fleet system notification cannot be empty')
     if (text.length > MAX_MESSAGE_LENGTH) {
-      throw new Error(`Fleet system prompt cannot exceed ${MAX_MESSAGE_LENGTH} characters`)
+      throw new Error(`Fleet system notification cannot exceed ${MAX_MESSAGE_LENGTH} characters`)
     }
-    const coalesceKey = prompt.coalesceKey?.trim()
-    if (prompt.coalesceKey !== undefined && coalesceKey?.length === 0) {
-      throw new Error('Fleet system prompt coalesceKey cannot be empty')
+    const coalesceKey = notification.coalesceKey?.trim()
+    if (notification.coalesceKey !== undefined && coalesceKey?.length === 0) {
+      throw new Error('Fleet system notification coalesceKey cannot be empty')
     }
-    if (prompt.relatedMessageId !== undefined) this.requireVisibleMessage(agentId, prompt.relatedMessageId)
-    const normalized: FleetSystemPromptInput = {
-      ...prompt,
+    if (notification.relatedMessageId !== undefined) {
+      this.requireVisibleMessage(agentId, notification.relatedMessageId)
+    }
+    const normalized: FleetSystemNotificationInput = {
+      ...notification,
       text,
       ...(coalesceKey === undefined ? {} : { coalesceKey }),
     }
@@ -601,16 +606,18 @@ export class MessageHub {
             kind: 'plugin',
             plugin: 'dsh-agent-fleet',
             form: 'snapshot',
-            sections: [{ name: `system:${coalesceKey}`, text }],
+            sections: [{ name: `notification:${coalesceKey}`, text }],
           },
     })
-    const pending = coalesceKey === undefined ? undefined : this.findPendingSystemPrompt(target, coalesceKey)
-    if (pending !== undefined && prompt.delivery !== 'interrupt'
-      && (prompt.delivery === 'quiet' || pending.queue === 'nextTurn')) {
+    const pending = coalesceKey === undefined
+      ? undefined
+      : this.findPendingSystemNotification(target, coalesceKey)
+    if (pending !== undefined && notification.delivery !== 'interrupt'
+      && (notification.delivery === 'quiet' || pending.queue === 'nextTurn')) {
       const replacement = { ...created, id: pending.message.id }
       if (typeof target.inbox?.replace === 'function'
         && target.inbox.replace(pending.message.id, replacement)) {
-        return this.recordSystemPrompt(target, replacement, normalized, 'replaced')
+        return this.recordSystemNotification(target, replacement, normalized, 'replaced')
       }
     }
     let input = created
@@ -618,15 +625,15 @@ export class MessageHub {
       && target.inbox.remove(pending.message.id)) {
       input = { ...created, id: pending.message.id }
     }
-    const disposition = this.dispatchContext(target, input, prompt.delivery)
-    return this.recordSystemPrompt(target, input, normalized, disposition)
+    const disposition = this.dispatchContext(target, input, notification.delivery)
+    return this.recordSystemNotification(target, input, normalized, disposition)
   }
 
   followupUnread(target: MessageAgent): FleetMessage | undefined {
     const unread = this.inbox(target, { unreadOnly: true, limit: 1 }).at(-1)?.message
     if (unread === undefined) return undefined
     const sender = `@${unread.fromName ?? unread.from}`
-    this.sendSystemPrompt(target.id, {
+    this.sendSystemNotification(target.id, {
       kind: 'message_notice',
       text: `[Fleet ${unread.conversation}] New message ${unread.id} from ${sender}. Call fleet_messages to read it.`,
       delivery: 'wakeup',
@@ -676,7 +683,7 @@ export class MessageHub {
       if (message.from !== sender.id && this.markAcknowledged(sender.id, message.id)) acknowledged = true
     }
     if (input.conversation.startsWith('#') && !hasMore) {
-      this.removePendingSystemPrompt(sender, `unread:${input.conversation}`)
+      this.removePendingSystemNotification(sender, `unread:${input.conversation}`)
     }
     if (acknowledged) this.changed([sender.id])
     return {
@@ -1483,7 +1490,7 @@ export class MessageHub {
     target: MessageAgent,
     input: UserMessage,
     delivery: FleetDelivery,
-  ): FleetSystemPromptResult['disposition'] {
+  ): FleetSystemNotificationResult['disposition'] {
     if (delivery === 'interrupt') {
       target.cancel({ kind: 'user' }, { keepInbox: true })
       target.steer(input)
@@ -1497,26 +1504,26 @@ export class MessageHub {
     return 'injected'
   }
 
-  private recordSystemPrompt(
+  private recordSystemNotification(
     target: MessageAgent,
     input: UserMessage,
-    prompt: FleetSystemPromptInput,
-    disposition: FleetSystemPromptResult['disposition'],
-  ): FleetSystemPromptResult {
+    notification: FleetSystemNotificationInput,
+    disposition: FleetSystemNotificationResult['disposition'],
+  ): FleetSystemNotificationResult {
     this.emit({
-      type: 'system_prompt',
+      type: 'system_notification',
       action: disposition,
       agentId: target.id,
       contextMessageId: String(input.id),
-      prompt,
+      notification,
     })
-    if (prompt.relatedMessageId !== undefined) {
-      this.rememberDelivery(target.id, String(input.id), prompt.relatedMessageId)
+    if (notification.relatedMessageId !== undefined) {
+      this.rememberDelivery(target.id, String(input.id), notification.relatedMessageId)
       this.emit({
         type: 'inbox',
         action: 'delivered',
         agentId: target.id,
-        messageId: prompt.relatedMessageId,
+        messageId: notification.relatedMessageId,
         contextMessageId: input.id,
       })
     }
@@ -1529,10 +1536,13 @@ export class MessageHub {
       : `unread-message:${message.id}`
   }
 
-  private findPendingSystemPrompt(target: MessageAgent, coalesceKey: string): PendingSystemPrompt | undefined {
+  private findPendingSystemNotification(
+    target: MessageAgent,
+    coalesceKey: string,
+  ): PendingSystemNotification | undefined {
     const inbox = target.inbox
     if (inbox === undefined) return undefined
-    const sectionName = `system:${coalesceKey}`
+    const sectionName = `notification:${coalesceKey}`
     const matches = (message: UserMessage): boolean => {
       const source = message.source
       return source.kind === 'plugin'
@@ -1546,8 +1556,8 @@ export class MessageHub {
     return nextStep === undefined ? undefined : { message: nextStep, queue: 'nextStep' }
   }
 
-  private removePendingSystemPrompt(target: MessageAgent, coalesceKey: string): void {
-    const pending = this.findPendingSystemPrompt(target, coalesceKey)
+  private removePendingSystemNotification(target: MessageAgent, coalesceKey: string): void {
+    const pending = this.findPendingSystemNotification(target, coalesceKey)
     if (pending !== undefined && typeof target.inbox?.remove === 'function') {
       target.inbox.remove(pending.message.id)
     }
@@ -1556,7 +1566,7 @@ export class MessageHub {
   private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
     const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
     const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.`
-    this.sendSystemPrompt(target.id, {
+    this.sendSystemNotification(target.id, {
       kind: 'message_notice',
       text,
       delivery: 'quiet',

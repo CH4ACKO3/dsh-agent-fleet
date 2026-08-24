@@ -13,7 +13,7 @@ import type {
   AgentDirectory,
   FleetCoordinationEvent,
   FleetMessagePermission,
-  FleetSystemPromptKind,
+  FleetSystemNotificationKind,
   MessageAgent,
   SendMessageInput,
   SendMessageResult,
@@ -337,7 +337,7 @@ export class FleetCollaborationService {
     const notifyMembers = (
       members: readonly string[],
       text: string,
-      kind: FleetSystemPromptKind,
+      kind: FleetSystemNotificationKind,
       coalesceKey: string,
       delivery: 'quiet' | 'wakeup' = 'quiet',
     ): string[] => {
@@ -346,7 +346,7 @@ export class FleetCollaborationService {
         const agentId = memberIdsByName.get(member)
         if (agentId === undefined || agentDirectory.get(agentId) === undefined) continue
         try {
-          messages.sendSystemPrompt(agentId, { kind, text, delivery, coalesceKey })
+          messages.sendSystemNotification(agentId, { kind, text, delivery, coalesceKey })
           delivered.push(member)
         } catch {}
       }

@@ -1532,7 +1532,7 @@ export class FleetRunService {
       .join('\n')
     const messages = this.requireRuntime(record.id).messages
     for (const member of available) {
-      messages.sendSystemPrompt(member.sessionId, {
+      messages.sendSystemNotification(member.sessionId, {
         kind: 'work_start',
         text: [
           `[Fleet work ${work.id}]`,
@@ -1767,7 +1767,7 @@ export class FleetRunService {
           }).inbox
           if (inbox !== undefined && inbox.nextTurn.length > 0) continue
           if (inbox !== undefined && inbox.nextStep.length > 0) {
-            runtime.messages.sendSystemPrompt(member.sessionId, {
+            runtime.messages.sendSystemNotification(member.sessionId, {
               kind: 'work_resume',
               text: `[Fleet work ${record.work.id} resumed.] Continue the pending Fleet work already in your inbox and re-establish peer coordination.`,
               delivery: 'wakeup',
@@ -1775,7 +1775,7 @@ export class FleetRunService {
             })
             continue
           }
-          runtime.messages.sendSystemPrompt(member.sessionId, {
+          runtime.messages.sendSystemNotification(member.sessionId, {
             kind: 'work_resume',
             text: [
               `[Fleet work ${record.work.id} resumed after a process restart.]`,
@@ -2395,7 +2395,7 @@ export class FleetRunService {
       this.appendEvent(record.id, 'member_attached', member)
       if (record.status === 'running' && record.work?.status === 'running') {
         const work = readFileSync(record.work.taskPath, 'utf8').trim()
-        runtime.messages.sendSystemPrompt(agent.id, {
+        runtime.messages.sendSystemNotification(agent.id, {
           kind: 'member_joined',
           text: `[Fleet member joined active work ${record.work.id}.]\n\n${work}`,
           delivery: 'wakeup',
@@ -3280,7 +3280,7 @@ export class FleetRunService {
     )) {
       const agent = this.ctx.agents.get(SessionId(member.sessionId))
       if (agent?.status !== 'idle') continue
-      runtime.messages.sendSystemPrompt(member.sessionId, {
+      runtime.messages.sendSystemNotification(member.sessionId, {
         kind: 'team_quiescent',
         text: [
           `[Fleet work ${record.work.id} continuation]`,
@@ -3371,7 +3371,7 @@ export class FleetRunService {
       return
     }
     if (agent.status !== 'idle') return
-    this.requireRuntime(record.id).messages.sendSystemPrompt(sessionId, {
+    this.requireRuntime(record.id).messages.sendSystemNotification(sessionId, {
       kind: 'network_recovery',
       text: [
         `[Fleet work ${record.work.id} network recovery]`,
@@ -4001,7 +4001,7 @@ export class FleetRunService {
         this.participants(record).some(member => member.name === view.id && member.sessionId === sessionId),
       )
     }
-    if (coordination.type === 'system_prompt') {
+    if (coordination.type === 'system_notification') {
       return this.participants(record).some(member => member.name === view.id && member.sessionId === coordination.agentId)
     }
     if (coordination.type === 'inbox') {

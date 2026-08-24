@@ -403,12 +403,12 @@ describe('MessageHub', () => {
     expect(hub.pendingWakeups(reviewer.id)).toEqual([])
   })
 
-  it('delivers, promotes, coalesces, and interrupts system prompts without creating Fleet messages', () => {
+  it('delivers, promotes, coalesces, and interrupts system notifications without creating Fleet messages', () => {
     const { hub, reviewer } = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []
     hub.onEvent(event => { events.push(event) })
 
-    const quiet = hub.sendSystemPrompt(reviewer.id, {
+    const quiet = hub.sendSystemNotification(reviewer.id, {
       kind: 'task_notice',
       text: 'Task state changed.',
       delivery: 'quiet',
@@ -418,7 +418,7 @@ describe('MessageHub', () => {
     expect(reviewer.inbox.nextStep).toHaveLength(1)
     expect(reviewer.inbox.nextTurn).toHaveLength(0)
 
-    const promoted = hub.sendSystemPrompt(reviewer.id, {
+    const promoted = hub.sendSystemNotification(reviewer.id, {
       kind: 'task_notice',
       text: 'Task is now due.',
       delivery: 'wakeup',
@@ -429,7 +429,7 @@ describe('MessageHub', () => {
     expect(reviewer.inbox.nextTurn).toHaveLength(1)
     expect(reviewer.followedUp.at(-1)).toBe('Task is now due.')
 
-    const replaced = hub.sendSystemPrompt(reviewer.id, {
+    const replaced = hub.sendSystemNotification(reviewer.id, {
       kind: 'task_notice',
       text: 'Task due reminder updated.',
       delivery: 'quiet',
@@ -440,7 +440,7 @@ describe('MessageHub', () => {
       expect.objectContaining({ type: 'text', text: 'Task due reminder updated.' }),
     ])
 
-    expect(hub.sendSystemPrompt(reviewer.id, {
+    expect(hub.sendSystemNotification(reviewer.id, {
       kind: 'network_recovery',
       text: 'Retry only after checking external side effects.',
       delivery: 'interrupt',
@@ -451,7 +451,7 @@ describe('MessageHub', () => {
     expect(reviewer.steered.at(-1)).toContain('external side effects')
     expect(hub.search(reviewer)).toEqual([])
     expect(hub.inbox(reviewer)).toEqual([])
-    expect(events.filter(event => event.type === 'system_prompt').map(event => event.action))
+    expect(events.filter(event => event.type === 'system_notification').map(event => event.action))
       .toEqual(['injected', 'followed-up', 'replaced', 'interrupted'])
   })
 
