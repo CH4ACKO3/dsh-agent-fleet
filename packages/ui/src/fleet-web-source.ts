@@ -283,6 +283,7 @@ function formatBytes(size: number | undefined): string | undefined {
 function activityKind(type: string): FleetPanelActivity['kind'] | undefined {
   if (type === 'coordination.message') return 'message'
   if (type.startsWith('resource.') || type.startsWith('workspace.')) return 'resource'
+  if (type.startsWith('memory.')) return 'memory'
   if (type === 'coordination.vote' || type.startsWith('work_') || type === 'team_status'
     || type.startsWith('task.') || type.startsWith('schedule.') || type.startsWith('calendar.')) return 'decision'
   if (type.startsWith('member_') || type.startsWith('assistant_')) return 'member'
@@ -534,6 +535,19 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
     if (event.type === 'workspace.assigned') return `更新了 ${member ?? '团队成员'} 的工作区挂载`
     if (event.type === 'workspace.detached') return `移除了工作区 ${string(workspace?.name) ?? string(data?.workspaceId) ?? ''}`.trim()
     return `挂载了工作区 ${string(workspace?.name) ?? string(workspace?.path) ?? ''}`.trim()
+  }
+  if (event.type === 'memory.stored') {
+    const conversation = string(data?.conversation)
+    const location = conversation === undefined ? '团队历史' : `${conversation} 的历史`
+    const providers = Array.isArray(data?.providers) ? data.providers.length : 0
+    return `${location}已送入记忆处理${providers > 0 ? `（${String(providers)} 个处理器）` : ''}`
+  }
+  if (event.type === 'memory.recalled') {
+    const member = string(data?.member) ?? '团队成员'
+    const conversation = string(data?.conversation)
+    const location = conversation === undefined ? '团队记忆' : `${conversation} 的记忆`
+    const query = string(data?.query)?.trim()
+    return `${member} 查询了${location}${query === undefined || query === '' ? '' : `：“${query}”`}`
   }
   if (event.type.startsWith('task.')) {
     const task = nestedRecord(event.data, 'task')

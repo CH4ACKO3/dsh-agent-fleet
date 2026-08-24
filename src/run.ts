@@ -378,6 +378,7 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
 function isProjectionActivity(event: StoredFleetEvent): boolean {
   return event.type.startsWith('resource.')
     || event.type.startsWith('workspace.')
+    || event.type.startsWith('memory.')
     || event.type.startsWith('task.')
     || event.type.startsWith('schedule.')
     || event.type.startsWith('calendar.')
@@ -3518,7 +3519,8 @@ export class FleetRunService {
     runId: string,
     type:
       | `resource.document_${'created' | 'updated' | 'commented' | 'resolved' | 'reverted'}`
-      | `workspace.${'attached' | 'detached' | 'assigned'}`,
+      | `workspace.${'attached' | 'detached' | 'assigned'}`
+      | `memory.${'stored' | 'recalled'}`,
     data: unknown,
   ): void {
     this.appendEvent(runId, type, data)

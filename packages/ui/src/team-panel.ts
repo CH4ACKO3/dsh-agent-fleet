@@ -419,6 +419,14 @@ const panelStyles = `
   display: block;
 }
 
+.dsh-fleet-panel-harmony-icon-probe {
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
 .dsh-fleet-panel-rail-tools {
   width: 100%;
   min-height: 0;
@@ -2885,9 +2893,14 @@ button.dsh-fleet-panel-team-title:focus-visible {
   background: var(--dsw-alias-state-warning-primary, #c38b36);
 }
 
+.dsh-fleet-panel-activity-dot[data-kind="memory"] {
+  background: #8b6bbd;
+}
+
 .dsh-fleet-panel-activity-copy {
   font-size: 13px;
   line-height: 19px;
+  overflow-wrap: anywhere;
 }
 
 .dsh-fleet-panel-activity-time {
@@ -3271,7 +3284,7 @@ export interface FleetPanelWorkspace {
 
 export interface FleetPanelActivity {
   readonly id: string
-  readonly kind: 'message' | 'resource' | 'decision' | 'member'
+  readonly kind: 'message' | 'resource' | 'decision' | 'member' | 'memory'
   readonly text: string
   readonly createdAt: string
 }
@@ -3904,6 +3917,24 @@ function PanelIcon({ name, size = 18 }: { readonly name: PanelIconName; readonly
   return jsx('svg', {
     ...common,
     children: jsx('path', { d: 'M7.2 3.5 5.4 16.5m7.4-13-1.8 13M3.5 7.4h13M2.8 12.6h13' }),
+  })
+}
+
+function HarmonyBrandIcon(): ReactElement {
+  const [available, setAvailable] = useState(false)
+  return jsxs(Fragment, {
+    children: [
+      available
+        ? jsx('span', { className: 'dsh-fleet-panel-harmony-icon', 'aria-hidden': 'true' })
+        : jsx(PanelIcon, { name: 'team', size: 21 }),
+      jsx('img', {
+        className: 'dsh-fleet-panel-harmony-icon-probe',
+        src: '/dsh-harmony/assets/harmony-icon-mono.png?fleet-brand-probe=1',
+        alt: '',
+        'aria-hidden': 'true',
+        onLoad: () => { setAvailable(true) },
+      }),
+    ],
   })
 }
 
@@ -4651,7 +4682,7 @@ export function resolveFleetPanelItem(
       || team.workspaces?.some(item => item.id === requested) === true
     ? requested
     : initialItem(team, tool)
-  if (tool === 'activity') return ['all', 'message', 'resource', 'decision'].includes(requested)
+  if (tool === 'activity') return ['all', 'message', 'resource', 'decision', 'memory'].includes(requested)
     ? requested
     : 'all'
   if (tool === 'agent') {
@@ -5105,11 +5136,11 @@ export function FleetTeamPanel({
         id: 'fleet.activity.select',
         label: '筛选 Fleet 团队动态',
         scope: 'fleet',
-        description: '只允许选择 all、message、resource、decision 四种现有动态视图。输入筛选名或 {"kind":"…"}。',
-        options: () => ['all', 'message', 'resource', 'decision'],
+        description: '只允许选择 all、message、resource、decision、memory 五种现有动态视图。输入筛选名或 {"kind":"…"}。',
+        options: () => ['all', 'message', 'resource', 'decision', 'memory'],
         perform: input => {
           const kind = typeof input === 'string' ? input : fleetActionId(input, 'kind')
-          if (!['all', 'message', 'resource', 'decision'].includes(kind)) throw new Error(`Unknown Fleet activity filter ${JSON.stringify(kind)}`)
+          if (!['all', 'message', 'resource', 'decision', 'memory'].includes(kind)) throw new Error(`Unknown Fleet activity filter ${JSON.stringify(kind)}`)
           setItems(current => ({ ...current, [`${activeTeam.teamId}:activity`]: kind }))
           setActiveTool('activity')
           setNavigationOpen(false)
@@ -5132,7 +5163,7 @@ export function FleetTeamPanel({
         'data-joyride-action': FLEET_VIEW_ACTIONS.home,
         title: '团队首页',
         onClick: showTeamDirectory,
-        children: jsx('span', { className: 'dsh-fleet-panel-harmony-icon', 'aria-hidden': 'true' }),
+        children: jsx(HarmonyBrandIcon, {}),
       }),
       jsx('div', {
         className: 'dsh-fleet-panel-rail-tools',
@@ -6781,10 +6812,11 @@ function ResourcesSidebar(owner: FleetPanelPaneOwner): ReactElement {
 function ActivitySidebar(owner: FleetPanelPaneOwner): ReactElement {
   const [query, setQuery] = useState('')
   const filters = [
-    ['all', '全部动态', '消息、资源和决策'],
+    ['all', '全部动态', '消息、资源、决策和记忆'],
     ['message', '消息', '频道与私聊'],
     ['resource', '资源', '共享文件与引用'],
     ['decision', '决策', '投票与共识'],
+    ['memory', '记忆', '历史写入与召回'],
   ] as const
   return jsx(PaneSidebar, {
     owner,

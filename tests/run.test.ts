@@ -1887,6 +1887,16 @@ describe('FleetRunService', () => {
       workspaces: [{ name: 'source', path: join(root, 'src'), access: 'write' }],
       actor: 'lead',
     })
+    service.recordDataEvent(run.id, 'memory.stored', {
+      sourceSequence: 1,
+      eventType: 'work_started',
+      providers: ['patchouli-test'],
+    })
+    service.recordDataEvent(run.id, 'memory.recalled', {
+      member: 'lead',
+      query: 'Why did we choose this plan?',
+      providers: ['patchouli-test'],
+    })
     const internal = service as unknown as { storedEvents: (record: unknown) => unknown[] }
     const storedEvents = internal.storedEvents.bind(service)
     let journalReads = 0
@@ -1936,6 +1946,8 @@ describe('FleetRunService', () => {
     expect(projectedEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'resource.document_updated' }),
       expect.objectContaining({ type: 'workspace.assigned' }),
+      expect.objectContaining({ type: 'memory.stored' }),
+      expect.objectContaining({ type: 'memory.recalled' }),
     ]))
     expect(projectedEvents.some(event => event.type.startsWith('session.'))).toBe(false)
     expect(readFileSync(join(root, '.fleet-registry', run.id, 'events.jsonl'), 'utf8')).not.toContain('"type":"session.')
