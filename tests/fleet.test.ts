@@ -3,9 +3,11 @@ import { FleetCore } from '@dsh-agent-fleet/core'
 import type { AgentRuntime, RuntimeAgent } from '@dsh-agent-fleet/core'
 import { MessageHub } from '@dsh-agent-fleet/message'
 import type { MessageAgent } from '@dsh-agent-fleet/message'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { apply } from '../src/index.js'
+
+afterEach(() => { vi.useRealTimers() })
 
 class FakeAgent implements RuntimeAgent, MessageAgent {
   readonly status = 'idle' as const
@@ -57,6 +59,7 @@ describe('dsh-agent-fleet', () => {
   })
 
   it('coalesces Fleet changes and wakes newly connected browser peers', async () => {
+    vi.useFakeTimers()
     const injections: Array<{
       dependencies: readonly string[]
       callback: (ctx: unknown) => unknown
@@ -103,7 +106,7 @@ describe('dsh-agent-fleet', () => {
 
     changeListener?.()
     changeListener?.()
-    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(500)
     expect(invalidate).toHaveBeenCalledTimes(1)
 
     peerListener?.({ type: 'added', peer: browser })
