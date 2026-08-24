@@ -4,6 +4,7 @@ lib/
 dist/
 coverage/
 .fleet/
+docs/local/
 *.log
 .env
 .env.*
