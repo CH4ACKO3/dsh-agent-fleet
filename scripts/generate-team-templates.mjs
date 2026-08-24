@@ -61,7 +61,7 @@ Do not analyze results as the Team's authority, choose hypotheses, recommend exp
       provider: '', model: '',
       toolGroups: ['messages', 'status', 'resources', 'documents', 'tasks', 'calendar', 'schedule'],
       permissions: [],
-      contacts: { members: ['team-assistant'], channels: ['main'] },
+      contacts: { members: '*', channels: ['main'] },
     },
     teamAssistant: {
       id: 'team-assistant', name: '', color: '', role: 'Research Team assistant',
@@ -104,7 +104,7 @@ Do not interpret, compare, critique, or synthesize research results. Do not prop
       provider: '', model: '',
       toolGroups: ['messages', 'status', 'resources', 'documents', 'tasks', 'calendar', 'schedule'],
       permissions: [],
-      contacts: { members: ['team-assistant'], channels: ['main'] },
+      contacts: { members: '*', channels: ['main'] },
     },
     teamAssistant: {
       id: 'team-assistant', name: '', color: '', role: '科研团队助理',

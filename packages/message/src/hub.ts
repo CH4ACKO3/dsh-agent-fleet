@@ -1259,7 +1259,7 @@ export class MessageHub {
     this.clearPendingWakeups(sender.id, input.to)
     const message = this.appendMessage(sender.id, input, text, resources, [], input.kind ?? 'text')
     const wake = input.delivery !== 'quiet'
-    this.addPendingWakeup(target.id, message)
+    if (wake) this.addPendingWakeup(target.id, message)
     this.deliver(target, message, wake)
     this.changed([sender.id, target.id])
     return { messageId: message.id, recipients: 1, woken: wake ? 1 : 0 }
@@ -1320,7 +1320,7 @@ export class MessageHub {
     const message = this.appendMessage(sender.id, input, text, resources, [], input.kind ?? 'text')
     const wake = input.delivery !== 'quiet'
     for (const participant of meeting.participants) {
-      if (participant !== sender.id) this.addPendingWakeup(participant, message)
+      if (wake && participant !== sender.id) this.addPendingWakeup(participant, message)
     }
     const recipients = this.deliverMeeting(meeting, sender.id, message, wake)
     this.changed(meeting.participants)
@@ -1587,7 +1587,7 @@ export class MessageHub {
         continue
       }
       if (message.conversation.startsWith('@')) {
-        this.addPendingWakeup(agentTarget(message.conversation), message)
+        if (message.delivery !== 'quiet') this.addPendingWakeup(agentTarget(message.conversation), message)
       } else if (message.conversation.startsWith('#')) {
         if (message.delivery !== 'quiet') {
           for (const mention of message.mentions) this.addPendingWakeup(mention, message)
@@ -1595,8 +1595,10 @@ export class MessageHub {
       } else {
         const meeting = this.meetings.get(meetingId(message.conversation))
         if (meeting === undefined) continue
-        for (const participant of meeting.participants) {
-          if (participant !== message.from) this.addPendingWakeup(participant, message)
+        if (message.delivery !== 'quiet') {
+          for (const participant of meeting.participants) {
+            if (participant !== message.from) this.addPendingWakeup(participant, message)
+          }
         }
       }
     }

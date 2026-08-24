@@ -67,7 +67,7 @@ describe('complete Team template locales', () => {
       expect(configuration.core.assistant).toMatchObject({
         id: 'livestream-vtuber',
         permissions: [],
-        contacts: { members: ['team-assistant'], channels: ['main'] },
+        contacts: { members: '*', channels: ['main'] },
       })
       const assistant = configuration.core.members.find(member => member.id === 'team-assistant')
       expect(assistant).toMatchObject({

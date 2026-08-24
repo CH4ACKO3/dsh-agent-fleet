@@ -1897,9 +1897,7 @@ export const FULL_TEAM_TEMPLATES = [
             ],
             "permissions": [],
             "contacts": {
-              "members": [
-                "team-assistant"
-              ],
+              "members": "*",
               "channels": [
                 "main"
               ]
@@ -2114,9 +2112,7 @@ export const FULL_TEAM_TEMPLATES = [
             ],
             "permissions": [],
             "contacts": {
-              "members": [
-                "team-assistant"
-              ],
+              "members": "*",
               "channels": [
                 "main"
               ]
