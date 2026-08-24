@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentOptions, AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   appendDelegatedPolicyOverrides,
@@ -15,7 +16,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
 import { FleetCore } from './core.js'
-import type { RuntimeAgent, RuntimeAgentHandle } from './types.js'
+import type { RuntimeAgent, RuntimeAgentHandle, RuntimeRequestConfig } from './types.js'
 
 export * from './core.js'
 export * from './activation.js'
@@ -98,6 +99,51 @@ function sessionArchive(ctx: Context): SessionArchiveBridge | undefined {
   return ctx.get('sessionArchive', false) as SessionArchiveBridge | undefined
 }
 
+interface RuntimeRequestConfigRef extends ModelSelectionRef {
+  current: RuntimeRequestConfig | undefined
+  assembled: RuntimeRequestConfig | undefined
+}
+
+const requestConfigByHandle = new WeakMap<RuntimeAgentHandle, RuntimeRequestConfigRef>()
+
+function installRuntimeRequestConfig(ctx: Context, ref: RuntimeRequestConfigRef): void {
+  installModelSelection(ctx, ref)
+  ctx.on('agent/request', async (_payload, next) => {
+    const resolved = await next()
+    const selected = ref.assembled
+    if (selected === undefined) return resolved
+    const { maxTokens: _inheritedMaxTokens, ...base } = resolved
+    return {
+      ...base,
+      ...(selected.maxTokens === undefined ? {} : { maxTokens: selected.maxTokens }),
+    }
+  })
+}
+
+function initializeRuntimeRequestConfig(
+  agent: Agent,
+  ref: RuntimeRequestConfigRef,
+  reasoningEffort?: RuntimeRequestConfig['reasoningEffort'],
+): void {
+  if (agent.options.provider === undefined || agent.options.model === undefined) return
+  ref.current = {
+    provider: agent.options.provider,
+    model: agent.options.model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(agent.options.maxTokens === undefined ? {} : { maxTokens: agent.options.maxTokens }),
+  }
+}
+
+function configurableHandle(handle: AgentHandle, ref: RuntimeRequestConfigRef): RuntimeAgentHandle {
+  const configured: RuntimeAgentHandle = {
+    agent: handle.agent,
+    configure: config => { ref.current = config === undefined ? undefined : structuredClone(config) },
+    dispose: () => handle.dispose(),
+  }
+  requestConfigByHandle.set(configured, ref)
+  return configured
+}
+
 export function apply(ctx: Context): void {
   const core = new FleetCore({
     get(id): RuntimeAgent | undefined {
@@ -118,6 +164,7 @@ export function apply(ctx: Context): void {
         ...(agentModel === undefined ? {} : { agentModel }),
         ...(input.persona === undefined ? {} : { persona: input.persona }),
       })
+      const requestConfig: RuntimeRequestConfigRef = { current: undefined, assembled: undefined }
       const handle: AgentHandle = await ctx.agents.create({
         sessionId: SessionId(input.id),
         seed: seedDescriptorTurn(SessionId(input.id), undefined, descriptor),
@@ -132,6 +179,8 @@ export function apply(ctx: Context): void {
         }, childDepth),
         async setup(childCtx) {
           if (childCtx.agent === undefined) throw new Error('Fleet child Agent setup requires ctx.agent')
+          initializeRuntimeRequestConfig(childCtx.agent, requestConfig, input.reasoningEffort)
+          installRuntimeRequestConfig(childCtx, requestConfig)
           appendDelegatedPolicyOverrides(childCtx.agent.session, delegatedPolicies)
           applyChildComposition(childCtx, nativeOwner, {
             ...(input.persona === undefined ? {} : { persona: input.persona }),
@@ -143,7 +192,7 @@ export function apply(ctx: Context): void {
       const archive = archiveId === undefined ? undefined : sessionArchive(ctx)
       try {
         if (archive !== undefined && archiveId !== undefined) await archive.attach(archiveId, String(handle.agent.id))
-        return handle
+        return configurableHandle(handle, requestConfig)
       } catch (error) {
         await handle.dispose()
         throw error
@@ -162,6 +211,7 @@ export function apply(ctx: Context): void {
         ...(agentModel === undefined ? {} : { agentModel }),
         ...(input.persona === undefined ? {} : { persona: input.persona }),
       })
+      const requestConfig: RuntimeRequestConfigRef = { current: undefined, assembled: undefined }
       const agentOptions: AgentOptions = {
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.model === undefined ? {} : { model: input.model }),
@@ -169,6 +219,8 @@ export function apply(ctx: Context): void {
       }
       const setup: AgentSetup = async (childCtx) => {
         if (childCtx.agent === undefined) throw new Error('Fleet child Agent setup requires ctx.agent')
+        initializeRuntimeRequestConfig(childCtx.agent, requestConfig, input.reasoningEffort)
+        installRuntimeRequestConfig(childCtx, requestConfig)
         if (!childCtx.agent.session.events.some(event => event.type === 'subagent/descriptor')) {
           childCtx.agent.session.append('subagent/descriptor', descriptor)
         }
@@ -194,7 +246,7 @@ export function apply(ctx: Context): void {
         if (archive !== undefined && archiveId !== undefined && timeline === undefined) {
           await archive.attach(archiveId, String(handle.agent.id))
         }
-        return handle
+        return configurableHandle(handle, requestConfig)
       } catch (error) {
         await handle.dispose()
         throw error
@@ -203,10 +255,18 @@ export function apply(ctx: Context): void {
     async rotate(handle, input): Promise<RuntimeAgentHandle | undefined> {
       const archive = sessionArchive(ctx)
       if (archive === undefined) return undefined
+      const previous = requestConfigByHandle.get(handle)
+      const requestConfig: RuntimeRequestConfigRef = {
+        current: previous?.current === undefined ? undefined : structuredClone(previous.current),
+        assembled: undefined,
+      }
       const rotated = await archive.rotateIfNeeded(input.archiveId, handle as AgentHandle, {
-        ...(input.setup === undefined ? {} : { setup: input.setup }),
+        setup: async childCtx => {
+          installRuntimeRequestConfig(childCtx, requestConfig)
+          await input.setup?.(childCtx)
+        },
       })
-      return rotated?.handle
+      return rotated === undefined ? undefined : configurableHandle(rotated.handle, requestConfig)
     },
   })
   ctx.provide('fleetCore', core)

@@ -31,6 +31,17 @@ export type FleetMessagePermission = 'channel.manage' | 'meeting.manage' | 'vote
 
 export type FleetTarget = `@${string}` | `#${string}` | `meeting:${string}`
 export type FleetDelivery = 'quiet' | 'wakeup' | 'interrupt'
+export type FleetSystemNotificationKind =
+  | 'message_notice'
+  | 'work_start'
+  | 'work_resume'
+  | 'member_joined'
+  | 'team_wake'
+  | 'team_quiescent'
+  | 'network_recovery'
+  | 'task_notice'
+  | 'schedule_notice'
+  | 'calendar_notice'
 export type FleetMessageKind =
   | 'text'
   | 'meeting_opened'
@@ -38,6 +49,7 @@ export type FleetMessageKind =
   | 'vote_opened'
   | 'vote_cast'
   | 'vote_closed'
+  /** Legacy persisted kinds from before productivity updates became system notifications. */
   | 'task_notification'
   | 'calendar_notification'
 
@@ -73,14 +85,40 @@ export interface SendMessageResult {
   readonly woken: number
 }
 
+export interface FleetSystemNotificationInput {
+  readonly kind: FleetSystemNotificationKind
+  readonly text: string
+  readonly delivery: FleetDelivery
+  readonly coalesceKey?: string
+  readonly relatedMessageId?: string
+}
+
+export interface FleetSystemNotificationResult {
+  readonly contextMessageId: string
+  readonly disposition: 'injected' | 'followed-up' | 'interrupted' | 'replaced'
+}
+
 export interface ReadMessagesInput {
   readonly conversation: FleetTarget
   readonly after?: string
   readonly limit?: number
+  readonly maxChars?: number
+  readonly unreadOnly?: boolean
+}
+
+export interface FleetMessageReadRange {
+  readonly start: number
+  readonly end: number
+  readonly total: number
+}
+
+export interface FleetReadMessage extends FleetMessage {
+  /** Exact text range returned by this read operation. */
+  readonly readRange: FleetMessageReadRange
 }
 
 export interface ReadMessagesResult {
-  readonly messages: FleetMessage[]
+  readonly messages: FleetReadMessage[]
   readonly hasMore: boolean
   readonly revision: number
 }
@@ -92,6 +130,7 @@ export interface FleetMessageTextChunk {
   readonly totalLength: number
   readonly hasMore: boolean
   readonly nextOffset?: number
+  readonly readThrough: number
 }
 
 export interface SearchMessagesInput {
@@ -235,6 +274,13 @@ export interface CastVoteInput {
 
 export type FleetCoordinationEvent =
   | { readonly type: 'message'; readonly message: FleetMessage }
+  | {
+      readonly type: 'system_notification'
+      readonly action: FleetSystemNotificationResult['disposition']
+      readonly agentId: string
+      readonly contextMessageId: string
+      readonly notification: FleetSystemNotificationInput
+    }
   | { readonly type: 'channel'; readonly action: 'created' | 'updated' | 'archived'; readonly channel: FleetChannel }
   | { readonly type: 'meeting'; readonly action: 'opened' | 'updated' | 'joined' | 'left' | 'closed'; readonly meeting: FleetMeeting }
   | { readonly type: 'vote'; readonly action: 'opened' | 'updated' | 'cast' | 'closed'; readonly vote: FleetVote }
@@ -248,4 +294,13 @@ export type FleetCoordinationEvent =
       /** Native DSH UserMessage id injected into this Agent's context. */
       readonly contextMessageId: string
     }
+  | {
+      readonly type: 'inbox'
+      readonly action: 'read'
+      readonly agentId: string
+      readonly messageId: string
+      /** Cumulative contiguous character offset returned by fleet_messages read/text. */
+      readonly through: number
+    }
+  /** Legacy persisted terminal receipt. New writes use the cumulative read action. */
   | { readonly type: 'inbox'; readonly action: 'acknowledged'; readonly agentId: string; readonly messageId: string }

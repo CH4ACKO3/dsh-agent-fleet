@@ -12,7 +12,17 @@ export type FleetConfigurationValue =
 
 export interface FleetConfigurationModule {
   readonly id: string
+  readonly setup?: {
+    readonly description: string
+    readonly defaultValue: FleetConfigurationValue
+  }
   parse(value: unknown): unknown
+}
+
+export interface FleetConfigurationGuideModule {
+  readonly id: string
+  readonly description: string
+  readonly defaultValue: FleetConfigurationValue
 }
 
 export interface FleetMessageConfiguration {
@@ -127,9 +137,40 @@ export class FleetConfigurationRegistry {
   private readonly modules = new Map<string, FleetConfigurationModule>()
 
   constructor() {
-    this.register({ id: FLEET_MESSAGE_MODULE, parse: parseFleetMessageConfiguration })
-    this.register({ id: FLEET_RESOURCES_MODULE, parse: parseFleetResourcesConfiguration })
-    this.register({ id: FLEET_UI_MODULE, parse: parseFleetUiConfiguration })
+    this.register({
+      id: FLEET_MESSAGE_MODULE,
+      setup: {
+        description: 'The default Channel and the Team\'s long-lived communication rules and collaboration method.',
+        defaultValue: {
+          defaultChannel: { id: 'main', name: 'Main' },
+          rules: '',
+          collaborationMethod: '',
+        },
+      },
+      parse: parseFleetMessageConfiguration,
+    })
+    this.register({
+      id: FLEET_RESOURCES_MODULE,
+      setup: {
+        description: 'Shared-resource policy and references to local files or directories available to the Team.',
+        defaultValue: { policy: '', items: [] },
+      },
+      parse: parseFleetResourcesConfiguration,
+    })
+    this.register({
+      id: FLEET_UI_MODULE,
+      setup: {
+        description: 'User-facing update density, notification timing, content preferences, and editor-owned settings.',
+        defaultValue: {
+          userAccess: {
+            updateDensity: 'concise',
+            notificationPolicy: 'decisions',
+            contentPreference: '',
+          },
+        },
+      },
+      parse: parseFleetUiConfiguration,
+    })
   }
 
   register(module: FleetConfigurationModule): () => void {
@@ -140,6 +181,14 @@ export class FleetConfigurationRegistry {
     return () => {
       if (this.modules.get(id) === module) this.modules.delete(id)
     }
+  }
+
+  guideModules(): FleetConfigurationGuideModule[] {
+    return [...this.modules.values()].flatMap(module => module.setup === undefined ? [] : [{
+      id: module.id,
+      description: module.setup.description,
+      defaultValue: structuredClone(module.setup.defaultValue),
+    }])
   }
 
   parse(value: unknown): Record<string, FleetConfigurationValue> {

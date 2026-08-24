@@ -47,11 +47,13 @@ import {
 import {
   getFleetModelDirectory,
   getFleetTeamDirectorySnapshot,
+  sendFleetAssistantMailboxMessage,
   subscribeFleetTeamDirectory,
   type FleetModelDirectory,
   type FleetModelDirectoryState,
   type FleetPanelTeamSummary,
 } from './team-panel.js'
+import { useFleetMetaAssistantSession } from './meta-assistant.js'
 import { uploadFleetSetupFile } from './web-client.js'
 
 const STYLE_ID = 'dsh-agent-fleet-team-entry'
@@ -118,6 +120,40 @@ body:has(.dsh-fleet-meta-composer-marker) [class*="_heroWorkspaceRow"] {
   flex: none;
 }
 
+button[data-dsh-fleet-workspace-required="true"] {
+  animation: dsh-fleet-workspace-required 760ms cubic-bezier(.16, 1, .3, 1);
+}
+
+.dsh-fleet-workspace-warning {
+  z-index: 1200;
+  max-width: min(240px, calc(100vw - 24px));
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-menu);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  box-shadow: var(--dsw-shadow-lv2);
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  position: fixed;
+  transform: translateX(-50%);
+  animation: dsh-fleet-workspace-warning-in 160ms cubic-bezier(.16, 1, .3, 1) both;
+}
+
+.dsh-fleet-workspace-warning::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  background: var(--dsw-specific-menu);
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  border-left: 1px solid var(--dsw-alias-border-l2);
+  position: absolute;
+  top: -5px;
+  left: calc(50% - 4px);
+  transform: rotate(45deg);
+}
+
 .dsh-fleet-team-label {
   min-width: 0;
   text-overflow: ellipsis;
@@ -177,8 +213,32 @@ body:has(.dsh-fleet-meta-composer-marker) [class*="_heroWorkspaceRow"] {
   }
 }
 
+@keyframes dsh-fleet-workspace-required {
+  0%, 100% {
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+
+  28%, 72% {
+    box-shadow: inset 0 0 0 1px var(--dsw-alias-state-business-primary);
+  }
+}
+
+@keyframes dsh-fleet-workspace-warning-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .dsh-fleet-team-active {
+  .dsh-fleet-team-active,
+  .dsh-fleet-workspace-warning,
+  button[data-dsh-fleet-workspace-required="true"] {
     animation: none;
   }
 }
@@ -508,13 +568,30 @@ body:has(.dsh-fleet-meta-composer-marker) [class*="_heroWorkspaceRow"] {
   display: block;
 }
 
+.dsh-fleet-quick-option-heading {
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  display: flex;
+}
+
 .dsh-fleet-quick-option-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
   font-weight: 500;
   line-height: 20px;
+}
+
+.dsh-fleet-quick-option-origin {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 16px;
 }
 
 .dsh-fleet-quick-remove {
@@ -571,19 +648,34 @@ body:has(.dsh-fleet-meta-composer-marker) [class*="_heroWorkspaceRow"] {
   overflow-y: auto;
 }
 
-.dsh-fleet-quick-source {
-  color: var(--dsw-alias-label-tertiary);
-  margin: 0 0 2px;
-  font-size: 11px;
-  line-height: 18px;
+.dsh-fleet-quick-detail-heading {
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  display: flex;
 }
 
 .dsh-fleet-quick-detail-title {
+  min-width: 0;
   color: var(--dsw-alias-label-primary);
   margin: 0;
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
+}
+
+.dsh-fleet-quick-source {
+  max-width: 45%;
+  flex: none;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  margin: 0;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dsh-fleet-quick-description {
@@ -2099,39 +2191,71 @@ interface MemberPreset {
   readonly prompt: string
   readonly provider: string
   readonly model: string
+  readonly toolGroups?: unknown
+  readonly permissions?: unknown
+  readonly contacts?: unknown
   readonly groupId: string
 }
 
-const MEMBER_PRESETS: readonly MemberPreset[] = [
-  {
-    id: 'product-lead',
-    displayName: 'Avery',
-    role: ['产品负责人', 'Product lead'],
-    responsibilities: ['负责长期方向、需求澄清与跨成员决策协调。', 'Own lasting direction, requirement clarity, and cross-member decisions.'],
-    prompt: '', provider: '', model: '', groupId: 'default',
-  },
-  {
-    id: 'engineer',
-    displayName: 'Morgan',
-    role: ['开发工程师', 'Implementation engineer'],
-    responsibilities: ['负责实现、集成与交付可验证的工程结果。', 'Implement, integrate, and deliver verifiable engineering results.'],
-    prompt: '', provider: '', model: '', groupId: 'default',
-  },
-  {
-    id: 'reviewer',
-    displayName: 'Riley',
-    role: ['独立审查员', 'Independent reviewer'],
-    responsibilities: ['独立检查方案、代码和证据，及时指出风险与遗漏。', 'Independently inspect plans, code, and evidence for risks and omissions.'],
-    prompt: '', provider: '', model: '', groupId: 'default',
-  },
-  {
-    id: 'researcher',
-    displayName: 'Quinn',
-    role: ['研究员', 'Researcher'],
-    responsibilities: ['负责资料检索、事实核验与形成可引用的分析结论。', 'Research sources, verify facts, and produce citable analysis.'],
-    prompt: '', provider: '', model: '', groupId: 'default',
-  },
+const MEMBER_PRESET_ALL_GROUP = 'all'
+const MEMBER_PRESET_DEVELOPMENT_GROUP = 'development'
+const MEMBER_PRESET_RESEARCH_GROUP = 'research'
+
+const BUILT_IN_MEMBER_PRESET_GROUPS: readonly MemberPresetGroup[] = [
+  { id: MEMBER_PRESET_DEVELOPMENT_GROUP, name: ['开发', 'Development'] },
+  { id: MEMBER_PRESET_RESEARCH_GROUP, name: ['科研', 'Research'] },
 ]
+
+const TEMPLATE_MEMBER_NAMES = [
+  'Avery', 'Morgan', 'Riley', 'Quinn', 'Jordan', 'Casey', 'Taylor', 'Cameron',
+  'Reese', 'Parker', 'Rowan', 'Ellis', 'Sage', 'Robin', 'Finley', 'Hayden',
+] as const
+
+interface TeamTemplateMemberPresetSource {
+  readonly id: string
+  readonly role: string
+  readonly responsibilities: string
+  readonly prompt: string
+  readonly provider: string
+  readonly model: string
+  readonly toolGroups?: unknown
+  readonly permissions?: unknown
+  readonly contacts?: unknown
+}
+
+function memberPresetsFromTeamTemplates(): readonly MemberPreset[] {
+  const presets = new Map<string, MemberPreset>()
+  for (const template of FULL_TEAM_TEMPLATES) {
+    const configuration = template.configuration as unknown as {
+      readonly en: { readonly core: { readonly members: readonly TeamTemplateMemberPresetSource[] } }
+      readonly zh: { readonly core: { readonly members: readonly TeamTemplateMemberPresetSource[] } }
+    }
+    const chineseMembers = new Map(configuration.zh.core.members.map(member => [member.id, member]))
+    for (const member of configuration.en.core.members) {
+      if (presets.has(member.id)) continue
+      const chineseMember = chineseMembers.get(member.id)
+      if (chineseMember === undefined) continue
+      presets.set(member.id, {
+        id: member.id,
+        displayName: TEMPLATE_MEMBER_NAMES[presets.size] ?? `Agent ${presets.size + 1}`,
+        role: [chineseMember.role, member.role],
+        responsibilities: [chineseMember.responsibilities, member.responsibilities],
+        prompt: member.prompt,
+        provider: member.provider,
+        model: member.model,
+        ...(member.toolGroups === undefined ? {} : { toolGroups: structuredClone(member.toolGroups) }),
+        ...(member.permissions === undefined ? {} : { permissions: structuredClone(member.permissions) }),
+        ...(member.contacts === undefined ? {} : { contacts: structuredClone(member.contacts) }),
+        groupId: template.id === 'research-full'
+          ? MEMBER_PRESET_RESEARCH_GROUP
+          : MEMBER_PRESET_DEVELOPMENT_GROUP,
+      })
+    }
+  }
+  return [...presets.values()]
+}
+
+const MEMBER_PRESETS = memberPresetsFromTeamTemplates()
 
 interface MemberPresetGroup {
   readonly id: string
@@ -2176,9 +2300,42 @@ const PRESET_LIBRARY_KEY = 'dsh-agent-fleet.preset-library.v1'
 
 function defaultPresetLibrary(): PresetLibrary {
   return {
-    groups: [{ id: 'default', name: ['默认', 'Default'] }],
+    groups: BUILT_IN_MEMBER_PRESET_GROUPS,
     members: MEMBER_PRESETS,
     fields: FIELD_CONTENT_PRESETS,
+  }
+}
+
+function normalizedPresetLibrary(library: PresetLibrary): PresetLibrary {
+  const builtInIds = new Set(MEMBER_PRESETS.map(preset => preset.id))
+  const legacyIds: Readonly<Record<string, string>> = {
+    engineer: 'core-engineer',
+    reviewer: 'quality-engineer',
+    researcher: 'literature-researcher',
+  }
+  const existing = new Map(library.members.map(preset => [legacyIds[preset.id] ?? preset.id, preset]))
+  const customGroups = library.groups.filter(group => (
+    group.id !== 'default'
+    && !BUILT_IN_MEMBER_PRESET_GROUPS.some(candidate => candidate.id === group.id)
+  ))
+  const groups = [...BUILT_IN_MEMBER_PRESET_GROUPS, ...customGroups]
+  const groupIds = new Set(groups.map(group => group.id))
+  return {
+    groups,
+    members: [
+      ...MEMBER_PRESETS.map(preset => {
+        const stored = existing.get(preset.id)
+        return stored === undefined ? preset : { ...preset, displayName: stored.displayName }
+      }),
+      ...library.members.filter(preset => (
+        !builtInIds.has(preset.id)
+        && legacyIds[preset.id] === undefined
+      )).map(preset => ({
+        ...preset,
+        groupId: groupIds.has(preset.groupId) ? preset.groupId : MEMBER_PRESET_DEVELOPMENT_GROUP,
+      })),
+    ],
+    fields: library.fields,
   }
 }
 
@@ -2196,7 +2353,7 @@ function readPresetLibrary(): PresetLibrary {
       || !Array.isArray(fields.collaboration)
       || !Array.isArray(fields.content)
       || !Array.isArray(fields.resources)) return defaultPresetLibrary()
-    return library as PresetLibrary
+    return normalizedPresetLibrary(library as PresetLibrary)
   } catch {
     return defaultPresetLibrary()
   }
@@ -2622,6 +2779,7 @@ function readStoredTeamPresets(): readonly StoredTeamPreset[] {
 interface QuickTeamTemplate {
   readonly id: string
   readonly storedId?: string
+  readonly builtIn?: boolean
   readonly name: string
   readonly source: string
   readonly summary: string
@@ -2683,6 +2841,7 @@ function quickTeamTemplates(chinese: boolean): readonly QuickTeamTemplate[] {
       : template.configuration.en)
     return {
       id: template.id,
+      builtIn: true,
       name: text(template.nameZh, template.nameEn),
       source: text('内置完整模板', 'Complete built-in'),
       summary: text(
@@ -2696,6 +2855,7 @@ function quickTeamTemplates(chinese: boolean): readonly QuickTeamTemplate[] {
   const builtIn: readonly QuickTeamTemplate[] = [
     {
       id: 'blank',
+      builtIn: true,
       name: text('空白团队', 'Blank Team'),
       source: text('内置模板', 'Built-in'),
       summary: text('一名助理 · 稍后组建', '1 assistant · assemble later'),
@@ -3386,7 +3546,7 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
   const [newFieldPresetName, setNewFieldPresetName] = useState<readonly [string, string]>(['', ''])
   const [newFieldPresetDetail, setNewFieldPresetDetail] = useState<readonly [string, string]>(['', ''])
   const [presetLibrary, setPresetLibrary] = useState(readPresetLibrary)
-  const [activePresetGroup, setActivePresetGroup] = useState('default')
+  const [activePresetGroup, setActivePresetGroup] = useState(MEMBER_PRESET_ALL_GROUP)
   const [groupMenuOpen, setGroupMenuOpen] = useState(false)
   const [groupMenuPosition, setGroupMenuPosition] = useState<FloatingMenuPosition | null>(null)
   const [creatingGroup, setCreatingGroup] = useState(false)
@@ -3506,6 +3666,9 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
       prompt: preset.prompt,
       provider: preset.provider,
       model: preset.model,
+      ...(preset.toolGroups === undefined ? {} : { toolGroups: structuredClone(preset.toolGroups) }),
+      ...(preset.permissions === undefined ? {} : { permissions: structuredClone(preset.permissions) }),
+      ...(preset.contacts === undefined ? {} : { contacts: structuredClone(preset.contacts) }),
       sourcePresetId: preset.id,
     })
   }
@@ -3611,15 +3774,13 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
         && typeof member.provider === 'string'
         && typeof member.model === 'string'
         && typeof member.groupId === 'string')) throw new Error('invalid')
-      const groups = imported.groups.some(group => group.id === 'default')
-        ? imported.groups
-        : [{ id: 'default', name: ['默认', 'Default'] as const }, ...imported.groups]
-      const groupIds = new Set(groups.map(group => group.id))
-      const members = imported.members.map(member => groupIds.has(member.groupId)
-        ? member
-        : { ...member, groupId: 'default' })
-      updatePresetLibrary(current => ({ ...current, groups, members }))
-      setActivePresetGroup(groups[0]?.id ?? 'default')
+      const normalized = normalizedPresetLibrary({
+        groups: imported.groups,
+        members: imported.members,
+        fields: presetLibrary.fields,
+      })
+      updatePresetLibrary(current => ({ ...current, groups: normalized.groups, members: normalized.members }))
+      setActivePresetGroup(MEMBER_PRESET_ALL_GROUP)
       setPresetError(null)
     } catch {
       setPresetError(text('无法导入：文件不是有效的成员预设库。', 'Could not import: this is not a valid member preset library.'))
@@ -3997,8 +4158,12 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
   const visibleMembers = draft.members.filter(member =>
     dragSource?.kind !== 'member' || member.key !== dragSource.key,
   )
+  const activePresetGroupName = activePresetGroup === MEMBER_PRESET_ALL_GROUP
+    ? text('全部', 'All')
+    : presetLibrary.groups.find(group => group.id === activePresetGroup)?.name[chinese ? 0 : 1]
+      ?? text('全部', 'All')
   const visibleMemberPresets = presetLibrary.members.filter(preset =>
-    preset.groupId === activePresetGroup
+    (activePresetGroup === MEMBER_PRESET_ALL_GROUP || preset.groupId === activePresetGroup)
       && (dragSource?.kind !== 'preset' || preset.id !== dragSource.id),
   )
   const memberCards: ReactNode[] = []
@@ -4422,12 +4587,25 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
                                   setGroupMenuPosition(floatingMenuPosition(event.currentTarget.getBoundingClientRect(), 240, 220))
                                   setGroupMenuOpen(true)
                                 },
-                                children: text('分组', 'Groups'),
+                                children: text(`分组：${activePresetGroupName}`, `Group: ${activePresetGroupName}`),
                               }),
                               groupMenuOpen && groupMenuPosition !== null && jsx('div', {
                                 className: 'dsh-fleet-config-group-menu',
                                 style: groupMenuPosition,
                                 children: [
+                                  jsx('div', {
+                                    className: 'dsh-fleet-config-group-row',
+                                    children: jsx('button', {
+                                      type: 'button',
+                                      className: 'dsh-fleet-config-group-option',
+                                      'aria-pressed': activePresetGroup === MEMBER_PRESET_ALL_GROUP,
+                                      onClick: () => {
+                                        setActivePresetGroup(MEMBER_PRESET_ALL_GROUP)
+                                        setGroupMenuOpen(false)
+                                      },
+                                      children: text('全部', 'All'),
+                                    }),
+                                  }),
                                   ...presetLibrary.groups.map(group => jsxs('div', {
                                     className: 'dsh-fleet-config-group-row',
                                     children: [
@@ -4441,7 +4619,7 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
                                         },
                                         children: text(...group.name),
                                       }),
-                                      group.id !== 'default' && jsx('button', {
+                                      !BUILT_IN_MEMBER_PRESET_GROUPS.some(candidate => candidate.id === group.id) && jsx('button', {
                                         type: 'button',
                                         className: 'dsh-fleet-config-group-remove',
                                         'aria-label': text(`删除分组 ${group.name[0]}`, `Delete group ${group.name[1]}`),
@@ -4726,7 +4904,12 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
             prompt: saved.prompt,
             provider: saved.provider,
             model: saved.model,
-            groupId: activePresetGroup,
+            ...(saved.toolGroups === undefined ? {} : { toolGroups: structuredClone(saved.toolGroups) }),
+            ...(saved.permissions === undefined ? {} : { permissions: structuredClone(saved.permissions) }),
+            ...(saved.contacts === undefined ? {} : { contacts: structuredClone(saved.contacts) }),
+            groupId: activePresetGroup === MEMBER_PRESET_ALL_GROUP
+              ? MEMBER_PRESET_DEVELOPMENT_GROUP
+              : activePresetGroup,
           }
           updatePresetLibrary(current => ({ ...current, members: [...current.members, preset] }))
           setEditingMemberPreset(null)
@@ -4750,8 +4933,8 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
           : text('删除预设', 'Delete preset'),
         copy: pendingLibraryRemoval.kind === 'group'
           ? text(
-            `确定删除“${pendingLibraryRemoval.name}”分组吗？其中的预设成员会移到默认分组。`,
-            `Delete the “${pendingLibraryRemoval.name}” group? Its preset members will move to Default.`,
+            `确定删除“${pendingLibraryRemoval.name}”分组吗？其中的预设成员会移到开发分组。`,
+            `Delete the “${pendingLibraryRemoval.name}” group? Its preset members will move to Development.`,
           )
           : text(
             `确定删除“${pendingLibraryRemoval.name}”预设吗？已经引用它的字段也会移除该预设。`,
@@ -4765,10 +4948,10 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
               ...current,
               groups: current.groups.filter(group => group.id !== groupId),
               members: current.members.map(preset => preset.groupId === groupId
-                ? { ...preset, groupId: 'default' }
+                ? { ...preset, groupId: MEMBER_PRESET_DEVELOPMENT_GROUP }
                 : preset),
             }))
-            if (activePresetGroup === groupId) setActivePresetGroup('default')
+            if (activePresetGroup === groupId) setActivePresetGroup(MEMBER_PRESET_ALL_GROUP)
           } else {
             const { target, id } = pendingLibraryRemoval
             updatePresetLibrary(current => ({
@@ -5081,7 +5264,16 @@ function FleetQuickTeamDialog({ initial, sessionId, onCancel, onDetailed, onUse 
                           'aria-selected': template.id === selected.id,
                           onClick: () => setSelectedId(template.id),
                           children: [
-                            jsx('span', { className: 'dsh-fleet-quick-option-name', children: template.name }),
+                            jsxs('span', {
+                              className: 'dsh-fleet-quick-option-heading',
+                              children: [
+                                jsx('span', { className: 'dsh-fleet-quick-option-name', children: template.name }),
+                                template.builtIn === true && jsx('span', {
+                                  className: 'dsh-fleet-quick-option-origin',
+                                  children: text('内置', 'Built-in'),
+                                }),
+                              ],
+                            }),
                             jsx('span', { className: 'dsh-fleet-quick-option-summary', children: template.summary }),
                           ],
                         }),
@@ -5112,29 +5304,18 @@ function FleetQuickTeamDialog({ initial, sessionId, onCancel, onDetailed, onUse 
               jsxs('article', {
                 className: 'dsh-fleet-quick-detail',
                 children: [
-                  jsx('p', { className: 'dsh-fleet-quick-source', children: selected.source }),
-                  jsx('h3', { className: 'dsh-fleet-quick-detail-title', children: selected.name }),
+                  jsxs('div', {
+                    className: 'dsh-fleet-quick-detail-heading',
+                    children: [
+                      jsx('h3', { className: 'dsh-fleet-quick-detail-title', children: selected.name }),
+                      jsx('span', { className: 'dsh-fleet-quick-source', children: selected.source }),
+                    ],
+                  }),
                   jsx('button', {
                     type: 'button',
                     className: 'dsh-fleet-quick-description',
                     onClick: () => onDetailed(configuration, 'basics', selected.id),
                     children: configuration.positioning.trim() || selected.description,
-                  }),
-                  jsxs('section', {
-                    className: 'dsh-fleet-quick-detail-section',
-                    children: [
-                      jsx('h4', {
-                        className: 'dsh-fleet-quick-detail-label',
-                        children: text('协作方式', 'Collaboration method'),
-                      }),
-                      jsx('button', {
-                        type: 'button',
-                        className: 'dsh-fleet-quick-detail-action dsh-fleet-quick-collaboration',
-                        onClick: () => onDetailed(configuration, 'basics', selected.id),
-                        children: configuration.collaborationMethod.trim()
-                          || text('启动后再与团队助理一起确定', 'Decide later with the Team assistant'),
-                      }),
-                    ],
                   }),
                   jsxs('section', {
                     className: 'dsh-fleet-quick-detail-section',
@@ -5188,6 +5369,22 @@ function FleetQuickTeamDialog({ initial, sessionId, onCancel, onDetailed, onUse 
                         className: 'dsh-fleet-quick-detail-action dsh-fleet-quick-preferences',
                         onClick: () => onDetailed(configuration, 'user', selected.id),
                         children: [jsx('span', { children: density }), jsx('span', { children: notification })],
+                      }),
+                    ],
+                  }),
+                  jsxs('section', {
+                    className: 'dsh-fleet-quick-detail-section',
+                    children: [
+                      jsx('h4', {
+                        className: 'dsh-fleet-quick-detail-label',
+                        children: text('协作方式', 'Collaboration method'),
+                      }),
+                      jsx('button', {
+                        type: 'button',
+                        className: 'dsh-fleet-quick-detail-action dsh-fleet-quick-collaboration',
+                        onClick: () => onDetailed(configuration, 'basics', selected.id),
+                        children: configuration.collaborationMethod.trim()
+                          || text('启动后再与团队助理一起确定', 'Decide later with the Team assistant'),
                       }),
                     ],
                   }),
@@ -5337,9 +5534,12 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   const [configuration, setConfiguration] = useState<FleetConfigurationDraft>(emptyConfiguration)
   const [menuPosition, setMenuPosition] = useState<MenuPosition>({ left: 0, top: 0 })
   const [connectionPosition, setConnectionPosition] = useState<MenuPosition>({ left: 0, top: 0 })
+  const [workspaceWarningPosition, setWorkspaceWarningPosition] = useState<MenuPosition | null>(null)
   const root = useRef<HTMLDivElement>(null)
   const anchor = useRef<HTMLButtonElement>(null)
   const connectionAnchor = useRef<HTMLButtonElement>(null)
+  const workspaceWarningTarget = useRef<HTMLButtonElement | null>(null)
+  const workspaceWarningTimer = useRef<number | null>(null)
   const menuId = useId()
   const connectionMenuId = useId()
   const directory = useSyncExternalStore(
@@ -5378,6 +5578,22 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
       ? directory.teams.find(team => team.teamId === request.teamId) ?? null
       : null)
   }, [activation, directory.teams, sessionId])
+
+  useEffect(() => () => {
+    if (workspaceWarningTimer.current !== null) window.clearTimeout(workspaceWarningTimer.current)
+    workspaceWarningTarget.current?.removeAttribute('data-dsh-fleet-workspace-required')
+  }, [])
+
+  useEffect(() => {
+    if (sessionId === undefined) return
+    setWorkspaceWarningPosition(null)
+    workspaceWarningTarget.current?.removeAttribute('data-dsh-fleet-workspace-required')
+    workspaceWarningTarget.current = null
+    if (workspaceWarningTimer.current !== null) {
+      window.clearTimeout(workspaceWarningTimer.current)
+      workspaceWarningTimer.current = null
+    }
+  }, [sessionId])
 
   useLayoutEffect(() => {
     if (mode === null) return
@@ -5432,6 +5648,34 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   }, [connectionOpen, open])
 
   const toggleMenu = (): void => {
+    if (sessionId === undefined) {
+      const workspaceButton = anchor.current
+        ?.closest('[class*="_heroWorkspaceRow"]')
+        ?.querySelector<HTMLButtonElement>('button')
+      const warningAnchor = workspaceButton ?? anchor.current
+      if (workspaceButton !== null && workspaceButton !== undefined) {
+        workspaceWarningTarget.current?.removeAttribute('data-dsh-fleet-workspace-required')
+        workspaceButton.removeAttribute('data-dsh-fleet-workspace-required')
+        void workspaceButton.offsetWidth
+        workspaceButton.setAttribute('data-dsh-fleet-workspace-required', 'true')
+        workspaceWarningTarget.current = workspaceButton
+      }
+      if (warningAnchor !== null && warningAnchor !== undefined) {
+        const rect = warningAnchor.getBoundingClientRect()
+        setWorkspaceWarningPosition({
+          left: Math.max(116, Math.min(rect.left + rect.width / 2, window.innerWidth - 116)),
+          top: rect.bottom + 7,
+        })
+      }
+      if (workspaceWarningTimer.current !== null) window.clearTimeout(workspaceWarningTimer.current)
+      workspaceWarningTimer.current = window.setTimeout(() => {
+        setWorkspaceWarningPosition(null)
+        workspaceWarningTarget.current?.removeAttribute('data-dsh-fleet-workspace-required')
+        workspaceWarningTarget.current = null
+        workspaceWarningTimer.current = null
+      }, 1800)
+      return
+    }
     if (!open) {
       const rect = anchor.current?.getBoundingClientRect()
       if (rect !== undefined) {
@@ -5520,6 +5764,13 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
     className: 'dsh-fleet-team-root',
     children: [
       trigger,
+      workspaceWarningPosition !== null && jsx('div', {
+        className: 'dsh-fleet-workspace-warning',
+        role: 'status',
+        'aria-live': 'polite',
+        style: workspaceWarningPosition,
+        children: chinese ? '请先选择工作区' : 'Choose a workspace first',
+      }),
       open && jsxs('div', {
         id: menuId,
         className: 'dsh-fleet-team-menu',
@@ -5791,6 +6042,7 @@ export function withFleetComposerActivation(
       getCurrentFleetSessionId,
     )
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : currentSessionId
+    const fleetAssistant = useFleetMetaAssistantSession(sessionId)
     const activation = useSyncExternalStore(
       subscribeFleetActivation,
       () => getFleetActivationSnapshot(sessionId),
@@ -5799,6 +6051,22 @@ export function withFleetComposerActivation(
     const meta = activation?.request.mode === 'meta'
     const inputActions = props.inputActions as NativeInputActions | undefined
     const keyboard = props.keyboard as NativeComposerKeyboard | undefined
+    const latestDraft = useRef(input?.draft ?? '')
+    latestDraft.current = input?.draft ?? ''
+    const mailboxSending = useRef(false)
+
+    const submitMailbox = (draft: string, setDraft: (text: string) => void): void => {
+      const text = draft.trim()
+      if (sessionId === undefined || text.length === 0 || mailboxSending.current) return
+      mailboxSending.current = true
+      latestDraft.current = ''
+      setDraft('')
+      void sendFleetAssistantMailboxMessage(sessionId, text).catch(() => {
+        if (latestDraft.current.length === 0) setDraft(draft)
+      }).finally(() => {
+        mailboxSending.current = false
+      })
+    }
 
     useEffect(() => {
       if (input?.phase !== 'plain' || inputActions === undefined) return
@@ -5809,20 +6077,24 @@ export function withFleetComposerActivation(
 
     const decoratedActions = inputActions === undefined
       ? undefined
-      : withSubmitOverride(inputActions, () => submitWithFleetActivation(
-            sessionId,
-            input?.draft ?? '',
-            text => inputActions.setDraft(text),
-            () => inputActions.submit(),
-          ))
+      : withSubmitOverride(inputActions, () => fleetAssistant
+        ? submitMailbox(input?.draft ?? '', text => inputActions.setDraft(text))
+        : submitWithFleetActivation(
+          sessionId,
+          input?.draft ?? '',
+          text => inputActions.setDraft(text),
+          () => inputActions.submit(),
+        ))
     const decoratedKeyboard = keyboard === undefined
       ? undefined
-      : withSubmitOverride(keyboard, (mode?: unknown) => submitWithFleetActivation(
-            sessionId,
-            keyboard.snapshot.draft,
-            text => keyboard.setDraft(text),
-            () => keyboard.submit(mode),
-          ))
+      : withSubmitOverride(keyboard, (mode?: unknown) => fleetAssistant
+        ? submitMailbox(keyboard.snapshot.draft, text => keyboard.setDraft(text))
+        : submitWithFleetActivation(
+          sessionId,
+          keyboard.snapshot.draft,
+          text => keyboard.setDraft(text),
+          () => keyboard.submit(mode),
+        ))
 
     return jsxs(Fragment, {
       children: [
@@ -5839,6 +6111,11 @@ export function withFleetComposerActivation(
             placeholder: isChineseLocale()
               ? '询问 Agent Fleet 关于团队插件的问题'
               : 'Ask Agent Fleet about the Team plugin',
+          } : fleetAssistant ? {
+            disabled: false,
+            placeholder: isChineseLocale()
+              ? '发送私聊消息给团队助理'
+              : 'Send a private message to the Team assistant',
           } : {}),
           inputActions: decoratedActions,
           keyboard: decoratedKeyboard,

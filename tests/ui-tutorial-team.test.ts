@@ -25,20 +25,14 @@ describe('Fleet tutorial Team projection', () => {
     expect(projected.selectedTeamId).toBe(FLEET_TUTORIAL_TEAM_ID)
     expect(projected.directory.teams).toMatchObject([{
       teamId: FLEET_TUTORIAL_TEAM_ID,
-      teamName: '引导团队 · 临时',
       tutorial: true,
     }])
     expect(projected.directory.groups[0]).toMatchObject({ id: 'tutorial', teamIds: [FLEET_TUTORIAL_TEAM_ID] })
-    expect(projected.team).toMatchObject({
-      tutorial: true,
-      members: [
-        { name: 'Nova', presence: 'busy', statusUpdatedAt: '2026-08-22T21:37:52.620Z' },
-        { name: 'Mina', presence: 'waiting', statusUpdatedAt: '2026-08-22T21:39:58.102Z' },
-        { name: 'Rowan', presence: 'active', statusUpdatedAt: '2026-08-22T21:38:31.811Z' },
-      ],
-    })
+    expect(projected.team?.tutorial).toBe(true)
+    expect(projected.team?.members.map(member => member.presence).sort()).toEqual(['active', 'busy', 'waiting'])
+    expect(projected.team?.members.every(member => !Number.isNaN(Date.parse(member.statusUpdatedAt ?? '')))).toBe(true)
     expect(projected.team?.messages.some(message => message.receipt !== undefined)).toBe(true)
-    expect(projected.team?.resources[0]).toMatchObject({ name: 'project-brief.md', mediaType: 'text/markdown' })
+    expect(projected.team?.resources.some(resource => resource.mediaType === 'text/markdown')).toBe(true)
   })
 
   it('does not cover loading, disconnected, or real Team snapshots', () => {

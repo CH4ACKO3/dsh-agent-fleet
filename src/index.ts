@@ -44,20 +44,19 @@ interface FleetWebBindingContext extends Context {
 async function installFleetWebNotifications(ctx: FleetWebBindingContext, runs: FleetRunService): Promise<() => Promise<void>> {
   const disposeRemote = await ctx.remote.$mount(FLEET_WEB_PEER_REMOTE)
   let active = true
-  let scheduled = false
+  let scheduled: ReturnType<typeof setTimeout> | undefined
   const notifyPeer = (peer: ReturnType<HostConnectionPeers['list']>[number]): void => {
     if (!active || peer.kind !== 'browser') return
     const client = (ctx.remote.for(peer) as unknown as { fleetWebPeer: FleetWebPeerClient }).fleetWebPeer
     void client.invalidate().catch(() => undefined)
   }
   const notifyAll = (): void => {
-    if (!active || scheduled) return
-    scheduled = true
-    queueMicrotask(() => {
-      scheduled = false
+    if (!active || scheduled !== undefined) return
+    scheduled = setTimeout(() => {
+      scheduled = undefined
       if (!active) return
       for (const peer of ctx.connection.peers.list()) notifyPeer(peer)
-    })
+    }, 500)
   }
   const unsubscribeChanges = runs.subscribeChanges(notifyAll)
   const unsubscribePeers = ctx.connection.peers.subscribe(change => {
@@ -65,6 +64,7 @@ async function installFleetWebNotifications(ctx: FleetWebBindingContext, runs: F
   })
   return async () => {
     active = false
+    if (scheduled !== undefined) clearTimeout(scheduled)
     unsubscribePeers()
     unsubscribeChanges()
     await disposeRemote()
@@ -73,7 +73,7 @@ async function installFleetWebNotifications(ctx: FleetWebBindingContext, runs: F
 
 export function apply(ctx: Context): void {
   ctx.plugin(Core)
-  ctx.inject(['fleetCore', 'agents', 'sessions', 'tools', 'fs'], (scope) => {
+  ctx.inject(['fleetCore', 'agents', 'sessions', 'tools', 'fs', 'llm'], (scope) => {
     const archives = new FleetArchiveRegistry()
     const authorization = new FleetAuthorizationService()
     const configuration = new FleetConfigurationRegistry()

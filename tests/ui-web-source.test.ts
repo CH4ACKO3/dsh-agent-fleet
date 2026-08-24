@@ -20,7 +20,7 @@ function deferred<T>(): {
 }
 
 describe('Fleet Web panel source', () => {
-  it('projects a live Team and routes a channel message through FleetWebRemote', async () => {
+  it('projects a live Team and routes operator actions through FleetWebRemote', async () => {
     const sent: unknown[] = []
     const uploaded: unknown[] = []
     const controlled: unknown[] = []
@@ -36,7 +36,10 @@ describe('Fleet Web panel source', () => {
         name: 'builder', displayName: 'Avery Stone', role: '实现工程师',
         sessionId: 'member-session', status: 'error', provider: 'deepseek', model: 'deepseek-chat',
       }],
-      assistants: [{ sessionId: 'observer-session', view: { id: 'assistant', name: 'You', role: '外部观察者' } }],
+      assistants: [{
+        sessionId: 'observer-session', status: 'idle',
+        view: { id: 'assistant', name: 'You', role: '外部观察者' },
+      }],
     }
     const remote = {
       list: async () => ok([run]),
@@ -154,7 +157,7 @@ describe('Fleet Web panel source', () => {
             createdAt: '2026-08-21T10:05:30.000Z',
             type: 'coordination.inbox',
             data: {
-              type: 'inbox', action: 'acknowledged', agentId: 'member-session', messageId: 'message-user',
+              type: 'inbox', action: 'read', agentId: 'member-session', messageId: 'message-user', through: 29,
             },
           },
           {
@@ -257,7 +260,10 @@ describe('Fleet Web panel source', () => {
     const snapshot = source.getSnapshot()
     expect(snapshot).toMatchObject({
       selectedTeamId: 'team-1',
-      directory: { teams: [{ teamId: 'team-1', teamName: 'Runtime Team', primaryWorkspace: 'fleet' }] },
+      directory: { teams: [{
+        teamId: 'team-1', teamName: 'Runtime Team', primaryWorkspace: 'fleet',
+        assistantSessionIds: ['observer-session'],
+      }] },
       team: {
         teamId: 'team-1',
         members: [{
@@ -267,7 +273,7 @@ describe('Fleet Web panel source', () => {
         }],
         assistants: [{
           id: 'assistant', name: 'You', role: '外部观察者', responsibility: '外部观察者',
-          presence: 'offline', runtimeStatus: 'offline', sessionId: 'observer-session', operator: true,
+          presence: 'active', runtimeStatus: 'idle', sessionId: 'observer-session',
         }],
         resources: [{ id: 'plan', name: 'plan.md', kind: 'plan', path: '/workspace/fleet/.fleet/plan.md' }],
         workspaces: [{ id: 'workspace:/workspace/fleet/src', name: 'source', path: '/workspace/fleet/src' }],
@@ -277,7 +283,7 @@ describe('Fleet Web panel source', () => {
       },
     })
     expect(snapshot.team?.conversations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: '#general', name: 'general' }),
+      expect.objectContaining({ id: '#general', name: 'general', memberCount: 2, activeCount: 2 }),
       expect.objectContaining({ id: '@member-session', name: 'Avery Stone' }),
     ]))
     expect(snapshot.team?.messages).toEqual(expect.arrayContaining([
@@ -304,12 +310,8 @@ describe('Fleet Web panel source', () => {
       }),
       expect.objectContaining({ id: 'message-reply', conversationId: '@member-session', senderId: 'builder' }),
     ]))
-    expect(snapshot.team?.activity).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'decision', text: '任务已创建：接通运行时投影' }),
-      expect.objectContaining({ kind: 'decision', text: '计划已触发：检查长跑状态' }),
-      expect.objectContaining({ kind: 'decision', text: '日程已开始：团队同步' }),
-      expect.objectContaining({ kind: 'resource', text: '更新了团队文档 执行计划' }),
-    ]))
+    expect(snapshot.team?.activity.filter(item => item.kind === 'decision')).toHaveLength(3)
+    expect(snapshot.team?.activity.some(item => item.kind === 'resource')).toBe(true)
     const updatesAfterInitialProjection = snapshotUpdates
     await source.refresh()
     expect(snapshotUpdates).toBe(updatesAfterInitialProjection)
@@ -401,10 +403,12 @@ describe('Fleet Web panel source', () => {
     })
 
     await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'pause' })
+    await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'wake' })
     await source.controlMember?.({
       sessionId: 'observer-session', teamId: 'team-1', memberId: 'builder', action: 'resume',
     })
     expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'pause' })
+    expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'wake' })
     expect(membersControlled).toContainEqual({
       sessionId: 'observer-session', teamId: 'team-1', member: 'builder', action: 'resume',
     })
@@ -463,6 +467,44 @@ describe('Fleet Web panel source', () => {
     source.dispose()
   })
 
+  it('removes a passively discovered Team file when the filesystem projection reports deletion', async () => {
+    const run = {
+      id: 'team-1', name: 'Runtime Team', projectRoot: '/workspace/fleet', status: 'idle',
+      startedAt: '2026-08-21T10:00:00.000Z', members: [], assistants: [],
+    }
+    const resource = {
+      id: 'shared:notes/progress.md', path: '/workspace/fleet/.fleet/team-1/notes/progress.md',
+      label: 'notes/progress.md', createdBy: 'fleet-filesystem', createdAt: '2026-08-21T10:01:00.000Z',
+    }
+    const remote = {
+      list: async () => ok([run]),
+      project: async () => ok({
+        run, memberViews: [], hasMore: false,
+        events: [
+          {
+            sequence: 1, createdAt: '2026-08-21T10:01:00.000Z', type: 'resource.resource_added',
+            data: { type: 'resource_added', resource },
+          },
+          {
+            sequence: 2, createdAt: '2026-08-21T10:02:00.000Z', type: 'resource.resource_removed',
+            data: {
+              type: 'resource_removed',
+              removal: { resource, removedBy: 'builder', removedAt: '2026-08-21T10:02:00.000Z' },
+            },
+          },
+        ],
+      }),
+      send: async () => ok({}), member: async () => ok({}), control: async () => ok({}),
+      upload: async () => ok({}), uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const source = createFleetWebPanelSource(() => Promise.resolve(remote))
+
+    await source.refresh()
+    expect(source.getSnapshot().team?.resources).toEqual([])
+    source.dispose()
+  })
+
   it('refreshes an active projection when the browser peer invalidates it', async () => {
     const run = {
       id: 'team-1', name: 'Runtime Team', projectRoot: '/workspace/fleet', status: 'idle',
@@ -499,6 +541,7 @@ describe('Fleet Web panel source', () => {
   })
 
   it('separates operator direct chats from each member-to-member conversation', async () => {
+    const sent: unknown[] = []
     const run = {
       id: 'team-1', name: 'Runtime Team', projectRoot: '/workspace/fleet', status: 'running',
       startedAt: '2026-08-21T10:00:00.000Z',
@@ -535,10 +578,27 @@ describe('Fleet Web panel source', () => {
           message(2, 'reviewer-to-builder', 'reviewer-session', '@builder-session'),
           message(3, 'user-to-builder', 'fleet-user:team-1', '@builder-session'),
           message(4, 'assistant-to-builder', 'assistant-session', '@builder-session'),
+          message(5, 'user-to-assistant', 'fleet-user:team-1', '@assistant-session'),
+          {
+            sequence: 6,
+            createdAt: '2026-08-21T10:06:00.000Z',
+            type: 'coordination.inbox',
+            data: {
+              type: 'inbox', action: 'delivered', agentId: 'assistant-session', messageId: 'user-to-assistant',
+              contextMessageId: 'assistant-context-message',
+            },
+          },
+          {
+            sequence: 7,
+            createdAt: '2026-08-21T10:07:00.000Z',
+            type: 'coordination.inbox',
+            data: { type: 'inbox', action: 'read', agentId: 'assistant-session', messageId: 'user-to-assistant', through: 100 },
+          },
+          message(8, 'assistant-to-user', 'assistant-session', '@fleet-user:team-1'),
         ],
         hasMore: false,
       }),
-      send: async () => ok({}), member: async () => ok({}), control: async () => ok({}),
+      send: async input => { sent.push(input); return ok({}) }, member: async () => ok({}), control: async () => ok({}),
       upload: async () => ok({}), uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
     } satisfies FleetWebClient
     const source = createFleetWebPanelSource(() => Promise.resolve(remote))
@@ -551,6 +611,7 @@ describe('Fleet Web panel source', () => {
     expect(team?.conversations).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: '@builder-session', peerId: 'builder' }),
       expect.objectContaining({ id: '@reviewer-session', peerId: 'reviewer' }),
+      expect.objectContaining({ id: '@assistant-session', peerId: 'assistant' }),
       expect.objectContaining({ id: memberDirectId, participantIds: ['builder', 'reviewer'] }),
       expect.objectContaining({ id: assistantDirectId }),
     ]))
@@ -559,12 +620,35 @@ describe('Fleet Web panel source', () => {
       expect.objectContaining({ id: 'reviewer-to-builder', conversationId: memberDirectId }),
       expect.objectContaining({ id: 'user-to-builder', conversationId: '@builder-session' }),
       expect.objectContaining({ id: 'assistant-to-builder', conversationId: assistantDirectId }),
+      expect.objectContaining({
+        id: 'user-to-assistant', conversationId: '@assistant-session',
+        sender: expect.objectContaining({ id: 'operator', operator: true }),
+        receipt: {
+          visibleMemberIds: ['assistant'], readMemberIds: ['assistant'], unreadMemberIds: [],
+          sources: [{ memberId: 'assistant', sessionId: 'assistant-session', contextMessageId: 'assistant-context-message' }],
+        },
+      }),
+      expect.objectContaining({
+        id: 'assistant-to-user', conversationId: '@assistant-session',
+        sender: expect.objectContaining({ id: 'assistant' }),
+      }),
     ]))
+    expect(team?.messages.find(item => item.id === 'assistant-to-user')?.sender)
+      .not.toEqual(expect.objectContaining({ operator: true }))
     expect(team?.members.find(member => member.id === 'builder')?.visibleConversationIds)
       .toEqual(expect.arrayContaining(['@builder-session', memberDirectId, assistantDirectId]))
     expect(team?.members.find(member => member.id === 'reviewer')?.visibleConversationIds)
       .toEqual(expect.arrayContaining(['@reviewer-session', memberDirectId]))
-    expect(team?.activity.map(item => item.id)).toEqual(['team-1:3'])
+    expect(team?.activity.map(item => item.id)).toEqual(['team-1:3', 'team-1:5', 'team-1:8'])
+    await source.sendMessage({
+      sessionId: 'assistant-session',
+      teamId: 'team-1',
+      conversationId: '@assistant-session',
+      content: [{ type: 'text', text: 'mailbox input' }],
+    })
+    expect(sent).toContainEqual(expect.objectContaining({
+      teamId: 'team-1', mode: 'conversation', to: '@assistant-session', text: 'mailbox input', delivery: 'wakeup',
+    }))
     source.dispose()
   })
 

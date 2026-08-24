@@ -41,6 +41,8 @@ describe('Fleet productivity authorization', () => {
       tools: {
         register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} },
         restrict: () => () => {},
+        guard: () => () => {},
+        get: () => undefined,
       },
     } as unknown as Context, member.id)
     const tool = registered.find(candidate => candidate.name === 'fleet_task')

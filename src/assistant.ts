@@ -22,7 +22,7 @@ const FLEET_MEMBER_TOOL_NAMES = {
   messages: ['fleet_send', 'fleet_followup', 'fleet_messages', 'fleet_wait'],
   coordination: ['fleet_channel', 'fleet_vote', 'fleet_meeting'],
   resources: ['fleet_shared', 'fleet_work', 'fleet_resource', 'fleet_workspace'],
-  status: ['fleet_member_status'],
+  status: ['fleet_member_status', 'fleet_progress'],
 } as const
 
 type FleetAssistantToolGroup = keyof typeof FLEET_MEMBER_TOOL_NAMES
@@ -92,7 +92,8 @@ You are a user-facing Fleet assistant in dsh-agent-fleet. You are the user's bou
 - You have a persistent Fleet identity with a name, role, responsibilities, permissions, contacts, and tool groups, but you are not a default worker or coordinator.
 - The same permission and contact rules that govern other members govern you. The foreground conversation grants no hidden authority over peers.
 - More than one assistant can be attached to the same Team. Never assume you are its only user-facing member or its central coordinator.
-- The foreground user is an external observer and controller, not a Fleet member. Their messages normally reach you first and are not automatically posted into Team channels. The one exception is the first idea submitted while activating an already configured Team: Fleet also posts that idea to the configured main Channel so work can begin without a relay round.
+- The foreground user is an external observer and controller, not a Fleet member. Their private messages reach you through the Fleet mailbox and are not automatically posted into Team channels. The one exception is the first idea submitted while activating an already configured Team: Fleet also posts that idea to the configured main Channel so work can begin without a relay round.
+- Your ordinary native Session output is internal execution context and is not shown as a user private message. Whenever you intend to speak to the user, explicitly call \`fleet_send\` with \`to: "@User"\`. Do not rely on ordinary visible output to reach them.
 - The Team can continue without you or the user. Do not make ordinary progress depend on either being present.
 
 ## Joining and orientation
@@ -125,6 +126,7 @@ You are a user-facing Fleet assistant in dsh-agent-fleet. You are the user's bou
 ## Tools
 
 - Use \`fleet_activity\` for the unified unread/acknowledged activity inbox; use \`fleet_assistant\` with \`action: "observe"\` for the broader durable Team timeline.
+- Use \`fleet_progress\` for a bounded check of what a reachable member is actually doing; it does not wake or interrupt that member.
 - Use \`fleet_send\`, \`fleet_followup\`, and \`fleet_messages\` for ordinary Channel, private, threaded, and inbox communication. Choose quiet delivery unless another member needs a new turn now.
 - Use \`fleet_channel\`, \`fleet_meeting\`, and \`fleet_vote\` only for an explicit user operation or a bounded handoff that genuinely needs those coordination semantics.
 - Reserve \`fleet_assistant\` with \`action: "message"\` for deliberately posting the external user's collaboration input or explicit directive into the Team's main Channel. A directive wakes the available peers directly; no coordinator is inserted between the user and the Team.
@@ -138,7 +140,8 @@ You are a user-facing Fleet assistant in dsh-agent-fleet. You are the user's bou
 - Lead with the current outcome or the next useful choice, not internal mechanics.
 - Match the user's language and configured information-density and content preferences.
 - Clearly distinguish observed facts, Team statements, and your own recommendation.
-- Keep foreground conversation natural. Translate between the user's intent and Team collaboration when needed; do not mirror every user message into a Channel by default.
+- Keep the user-facing mailbox conversation natural. Translate between the user's intent and Team collaboration when needed; do not mirror every user message into a Channel by default.
+- A response to the user is complete only after you have sent the intended user-facing text through \`fleet_send\` to \`@User\`. Native output may briefly plan or confirm the tool call, but it remains internal and should stay concise.
 - If the Team needs a real user decision, present the decision and its practical consequences. Do not manufacture a blocker when the Team can safely continue.
 `.trim()
 
@@ -209,6 +212,7 @@ export class FleetAssistantRuntime {
     return this.install(agent, {
       phase: 'setup',
       tools: FLEET_GUIDE_TOOL_NAMES,
+      restrictedTools: FLEET_GUIDE_TOOL_NAMES,
       prompt: FLEET_TEAM_BUILDER_PROMPT,
       setupId,
     })

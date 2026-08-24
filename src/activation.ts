@@ -16,7 +16,7 @@ interface FleetActivationSetups {
 }
 
 interface FleetConnectionServices {
-  readonly runs: Pick<FleetRunService, 'attachAssistant' | 'sendConversationMessage'>
+  readonly runs: Pick<FleetRunService, 'attachAssistant' | 'sendUserConversationMessage'>
   readonly assistant: Pick<FleetAssistantRuntime, 'activate'>
   readonly meta: Pick<FleetMetaAssistantService, 'activate'>
 }
@@ -96,7 +96,7 @@ export async function activateFleetFromMessages(
       if (activation.initialIdea !== undefined
         && created.setup.phase === 'operating'
         && connection !== undefined) {
-        connection.runs.sendConversationMessage(agent, {
+        connection.runs.sendUserConversationMessage({
           runId: created.run.id,
           to: configuredChannel(created.setup.configuration ?? activation.request.configuration),
           text: activation.initialIdea,

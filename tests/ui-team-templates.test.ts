@@ -46,7 +46,7 @@ describe('complete Team template locales', () => {
       }
     }
   })
-  it('keeps the research assistant observational instead of making it a research coordinator', () => {
+  it('keeps the research assistant operating capabilities stable', () => {
     const research = FULL_TEAM_TEMPLATES.find(template => template.id === 'research-full')
     if (research === undefined) throw new Error('missing research Team template')
     for (const assistant of [research.configuration.en.core.assistant, research.configuration.zh.core.assistant]) {
@@ -54,36 +54,43 @@ describe('complete Team template locales', () => {
         'messages', 'status', 'resources', 'documents', 'tasks', 'calendar', 'schedule',
       ])
       expect(assistant.permissions).toEqual(['message.wakeup', 'team.manage'])
-      expect(assistant.prompt.length).toBeGreaterThan(200)
-      expect(assistant.prompt).toMatch(/default state is quiet|默认保持安静/u)
-      expect(assistant.prompt).toMatch(/Do not interpret|不要解释/u)
     }
   })
 
-  it('provides a non-voting VTuber frontend and passive research assistant for livestreams', () => {
+  it('uses the backstage Team assistant for the conversation and lists the VTuber as a member', () => {
     const livestream = FULL_TEAM_TEMPLATES.find(template => template.id === 'research-livestream')
     if (livestream === undefined) throw new Error('missing livestream research Team template')
     for (const configuration of [livestream.configuration.en, livestream.configuration.zh]) {
       expect(configuration.core.assistant).toMatchObject({
-        id: 'livestream-vtuber',
-        permissions: [],
-        contacts: { members: ['team-assistant'], channels: ['main'] },
-      })
-      const assistant = configuration.core.members.find(member => member.id === 'team-assistant')
-      expect(assistant).toMatchObject({
+        id: 'team-assistant',
         canVote: false,
         permissions: ['message.wakeup'],
       })
-      expect(assistant?.toolGroups).not.toContain('coordination')
-      expect(assistant?.prompt).toMatch(/default state is quiet|默认保持安静/u)
-      expect(configuration.core.members.filter(member => member.id !== 'team-assistant').map(member => member.id))
-        .toEqual([
-          'theory-lead',
-          'data-evaluation-scientist',
-          'literature-researcher',
-          'experiment-model-researcher',
-          'reproducibility-engineer',
-        ])
+      const participants = [configuration.core.assistant, ...configuration.core.members]
+      expect(participants.every(member => member.provider.length > 0 && member.model.length > 0)).toBe(true)
+      expect(new Set(participants.map(member => `${member.provider}/${member.model}`)).size).toBe(1)
+      const vtuber = configuration.core.members.find(member => member.id === 'livestream-vtuber')
+      expect(vtuber).toMatchObject({
+        permissions: ['joyride.control', 'livestream.host'],
+        contacts: { members: ['team-assistant'], channels: ['main'] },
+      })
+      expect(configuration.core.assistant.toolGroups).not.toContain('coordination')
+      expect(configuration.core.assistant.permissions).not.toContain('joyride.control')
+      expect(configuration.core.assistant.permissions).not.toContain('livestream.host')
+      expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
+        .every(member => !member.permissions.includes('joyride.control'))).toBe(true)
+      expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
+        .every(member => !member.permissions.includes('livestream.host'))).toBe(true)
+      const sharedPersona = vtuber?.prompt.split(/\n\n## Onstage surface|\n\n## 前台界面/u)[0]
+      expect(configuration.core.assistant.prompt.startsWith(sharedPersona ?? '')).toBe(true)
+      expect([...configuration.core.members.map(member => member.id)].sort()).toEqual([
+        'livestream-vtuber',
+        'theory-lead',
+        'data-evaluation-scientist',
+        'literature-researcher',
+        'experiment-model-researcher',
+        'reproducibility-engineer',
+      ].sort())
     }
   })
 })

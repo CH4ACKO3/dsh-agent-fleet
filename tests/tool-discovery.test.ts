@@ -27,5 +27,15 @@ describe('Fleet tool discovery', () => {
       })
     expect(searchFleetTools('resource', allowed, new Set(), new Set(['resource.write']))
       .find(match => match.name === 'fleet_resource')?.actions).toEqual(['list', 'get', 'add'])
+    expect(searchFleetTools('shared file', allowed, new Set())
+      .find(match => match.name === 'fleet_shared')).toMatchObject({
+        actions: ['list', 'read'],
+        restrictedActions: [
+          { action: 'write', permissions: ['resource.write'] },
+          { action: 'delete', permissions: ['resource.write'] },
+        ],
+      })
+    expect(searchFleetTools('shared file', allowed, new Set(), new Set(['resource.write']))
+      .find(match => match.name === 'fleet_shared')?.actions).toEqual(['list', 'read', 'write', 'delete'])
   })
 })

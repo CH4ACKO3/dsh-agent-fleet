@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import type {
   AgentRuntime,
@@ -9,6 +8,7 @@ import type {
   ResumeFleetAgentInput,
   RuntimeAgent,
   RuntimeAgentHandle,
+  RuntimeRequestConfig,
   UpdateFleetAgentInput,
 } from './types.js'
 import {
@@ -203,6 +203,7 @@ export class FleetCore {
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
         ...(input.persona === undefined ? {} : { persona: input.persona }),
         ...(input.setup === undefined ? {} : { setup: input.setup }),
@@ -257,6 +258,7 @@ export class FleetCore {
         label: displayName,
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
         ...(input.persona === undefined ? {} : { persona: input.persona }),
         ...(input.setup === undefined ? {} : { setup: input.setup }),
@@ -311,14 +313,6 @@ export class FleetCore {
     return this.stopManaged(member.name)
   }
 
-  inject(name: string, message: UserMessage): void {
-    this.requireLive(this.requireMember(memberName(name)).id).inject(message)
-  }
-
-  followup(name: string, message: UserMessage): void {
-    this.requireLive(this.requireMember(memberName(name)).id).followup(message)
-  }
-
   whenIdle(name: string): Promise<void> {
     return this.requireLive(this.requireMember(memberName(name)).id).whenIdle()
   }
@@ -333,6 +327,16 @@ export class FleetCore {
   clearManagedInbox(name: string): void {
     const member = this.requireMember(memberName(name))
     this.requireLive(member.id).inbox?.clear()
+  }
+
+  configureManaged(name: string, config: RuntimeRequestConfig | undefined): void {
+    const member = this.requireMember(memberName(name))
+    const managed = this.handles.get(member.name)
+    if (managed === undefined) throw new Error(`Fleet Agent ${member.name} is not managed by Core`)
+    if (managed.handle.configure === undefined) {
+      throw new Error(`Fleet Agent ${member.name} does not support live request configuration`)
+    }
+    managed.handle.configure(config)
   }
 
   async rotateManaged(name: string): Promise<FleetAgent | undefined> {

@@ -1,3 +1,6 @@
+import { unlinkSync } from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -13,6 +16,7 @@ import type {
   AgentDirectory,
   FleetCoordinationEvent,
   FleetMessagePermission,
+  FleetSystemNotificationKind,
   MessageAgent,
   SendMessageInput,
   SendMessageResult,
@@ -24,6 +28,12 @@ import {
   fleetMemberCanContact,
 } from './member-view.js'
 import type { FleetMemberView } from './member-view.js'
+
+const SPECIAL_TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
+  'joyride.control': ['joyride_catalog', 'joyride_act', 'joyride_control'],
+  'livestream.host': ['live_stream', 'live_stage'],
+}
+
 import type { FleetMemberToolGroup } from './member-view.js'
 import { installFleetToolDiscovery } from './tool-discovery.js'
 import type { FleetAuthorizationChange, FleetAuthorizationService } from './authorization.js'
@@ -60,7 +70,7 @@ export interface FleetCollaborationTeam {
   attachMember(agentId: string, view: FleetMemberView): void
   rebindMember(previousAgentId: string, agentId: string, view: FleetMemberView): void
   detachMember(agentId: string): void
-  updateMemberView(view: FleetMemberView): void
+  updateMemberView(view: FleetMemberView, refreshTools?: boolean): void
   removeMemberView(member: string): void
   retireMember(input: {
     readonly agentId: string
@@ -336,7 +346,8 @@ export class FleetCollaborationService {
     const notifyMembers = (
       members: readonly string[],
       text: string,
-      kind: 'task_notification' | 'calendar_notification',
+      kind: FleetSystemNotificationKind,
+      coalesceKey: string,
       delivery: 'quiet' | 'wakeup' = 'quiet',
     ): string[] => {
       const delivered: string[] = []
@@ -344,7 +355,7 @@ export class FleetCollaborationService {
         const agentId = memberIdsByName.get(member)
         if (agentId === undefined || agentDirectory.get(agentId) === undefined) continue
         try {
-          messages.send(productivity, { to: `@${agentId}`, text, delivery, kind })
+          messages.sendSystemNotification(agentId, { kind, text, delivery, coalesceKey })
           delivered.push(member)
         } catch {}
       }
@@ -354,14 +365,16 @@ export class FleetCollaborationService {
       notifyMembers(
         recipients,
         `[Fleet task due] ${task.title} (${task.id})`,
-        'task_notification',
+        'task_notice',
+        `task:${task.id}`,
         'wakeup',
       ))
     const scheduler = new FleetScheduler(memberDirectory, agentId => canManage(agentId, 'schedule'), (task, recipients) =>
       notifyMembers(
         recipients,
         `[Fleet schedule due] ${task.title}\n${task.instructions}`.trim(),
-        'task_notification',
+        'schedule_notice',
+        `schedule:${task.id}`,
         'wakeup',
       ))
     const calendar = new FleetCalendar(memberDirectory, event => {
@@ -404,7 +417,8 @@ export class FleetCollaborationService {
           notifyMembers(
             recipients,
             `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`,
-            'task_notification',
+            'task_notice',
+            `task:${event.task.id}`,
             event.action === 'created' || event.action === 'completed' ? 'wakeup' : 'quiet',
           )
         }
@@ -415,14 +429,20 @@ export class FleetCollaborationService {
           notifyMembers(
             event.task.assignees.filter(member => member !== event.actor),
             `[Fleet schedule ${event.action}] ${event.task.title} (${event.task.id})`,
-            'task_notification',
+            'schedule_notice',
+            `schedule:${event.task.id}`,
           )
         }
       }),
       calendar.onEvent(event => {
         input.onCalendar?.(event, calendar.state())
         const recipients = [event.event.organizer, ...event.event.attendees].filter(member => member !== event.actor)
-        notifyMembers(recipients, `[Fleet calendar ${event.action}] ${event.event.title} (${event.event.id})`, 'calendar_notification')
+        notifyMembers(
+          recipients,
+          `[Fleet calendar ${event.action}] ${event.event.title} (${event.event.id})`,
+          'calendar_notice',
+          `calendar:${event.event.id}`,
+        )
       }),
     ]
     interface ToolBinding {
@@ -497,6 +517,15 @@ export class FleetCollaborationService {
                 : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
             ),
             resourceWrite: permissions.has('resource.write'),
+            deleteShared: path => {
+              const root = resolve(input.projectRoot, input.sharedDirectory)
+              const target = resolve(root, path)
+              const nested = relative(root, target)
+              if (nested === '' || nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) {
+                throw new Error('Fleet shared delete path must stay inside the Team shared directory')
+              }
+              unlinkSync(target)
+            },
           })
         }
       }
@@ -525,6 +554,19 @@ export class FleetCollaborationService {
             authorization: effective,
           }))
         }
+        const deniedSpecialTools = Object.entries(SPECIAL_TOOL_PERMISSIONS)
+          .filter(([permission]) => !permissions.has(permission))
+          .flatMap(([, names]) => names)
+        const installedDeniedTools = deniedSpecialTools.filter(name => ctx.tools.get(name) !== undefined)
+        if (installedDeniedTools.length > 0) {
+          add(ctx.tools.restrict({ deny: installedDeniedTools }))
+        }
+        if (deniedSpecialTools.length > 0) {
+          const denied = new Set(deniedSpecialTools)
+          add(ctx.tools.guard(execution => denied.has(execution.name)
+            ? `Fleet member @${view.id} is not permitted to use ${execution.name}`
+            : undefined))
+        }
         if (!exposeHostFleetTools) {
           add(ctx.tools.restrict({
             deny: [
@@ -534,6 +576,7 @@ export class FleetCollaborationService {
               'fleet_assistant',
               'fleet_trace',
               'fleet_setup',
+              ...(permissions.has('member-status.read') ? [] : ['fleet_progress']),
               ...(permissions.has('team.manage') || effective.op ? [] : ['fleet_member']),
             ],
           }))
@@ -586,10 +629,12 @@ export class FleetCollaborationService {
         memberNamesById.delete(agentId)
         if (memberIdsByName.get(name) === agentId) memberIdsByName.delete(name)
       },
-      updateMemberView: (view) => {
+      updateMemberView: (view, refreshTools = true) => {
         memberViews.set(view.id, structuredClone(view))
         defaultVoterNames.add(view.id)
-        for (const binding of [...toolBindings]) if (binding.member === view.id) refreshBinding(binding)
+        if (refreshTools) {
+          for (const binding of [...toolBindings]) if (binding.member === view.id) refreshBinding(binding)
+        }
       },
       retireMember: ({ agentId, member, successorAgentId, successor }) => {
         messages.retireAgent(agentId, successorAgentId)

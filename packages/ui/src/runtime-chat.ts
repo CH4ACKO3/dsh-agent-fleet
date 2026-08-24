@@ -366,10 +366,11 @@ const runtimeChatStyles = `
 }
 
 .dsh-fleet-message-receipt-member-seat {
-  align-items: center;
+  align-items: flex-start;
   gap: 4px;
   padding-inline-end: 4px;
   display: flex;
+  position: relative;
 }
 
 .dsh-fleet-message-receipt-member {
@@ -405,6 +406,11 @@ const runtimeChatStyles = `
   line-height: 17px;
 }
 
+.dsh-fleet-message-receipt-member-seat:has(.dsh-fleet-message-receipt-source)
+  .dsh-fleet-message-receipt-member-name {
+  padding-inline-end: 58px;
+}
+
 .dsh-fleet-message-receipt-member-role,
 .dsh-fleet-message-receipt-empty {
   color: var(--dsw-alias-label-secondary);
@@ -422,11 +428,15 @@ const runtimeChatStyles = `
   background: transparent;
   border: 0;
   border-radius: 5px;
-  flex: none;
-  margin-left: auto;
-  padding: 4px 5px;
-  font: var(--dsw-font-xxs-12, inherit);
+  z-index: 1;
+  padding: 0 5px;
+  font: var(--dsw-font-xs-13, inherit);
+  font-size: 12px;
+  line-height: 17px;
   white-space: nowrap;
+  position: absolute;
+  inset-block-start: 4px;
+  inset-inline-end: 4px;
 }
 
 .dsh-fleet-message-receipt-source:hover {

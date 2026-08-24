@@ -11,6 +11,10 @@ import {
   fleetLocaleDictionaries,
   isChineseLocale,
 } from './locale.js'
+import {
+  getFleetPanelNavigationRequest,
+  subscribeFleetPanelNavigation,
+} from './panel-navigation.js'
 
 const STYLE_ID = 'dsh-agent-fleet-meta-assistant'
 const SESSION_KEY = 'dsh-agent-fleet:meta-session:v1'
@@ -473,6 +477,34 @@ type NativeUseStore = <Selection>(
   selector: (snapshot: { readonly view?: string }) => Selection,
 ) => Selection
 
+interface FleetAssistantTeamSource {
+  getSnapshot(): {
+    readonly directory: {
+      readonly teams: readonly {
+        readonly status: string
+        readonly assistantSessionIds?: readonly string[]
+      }[]
+    }
+  }
+  subscribe(listener: () => void): () => void
+}
+
+let assistantTeamSource: FleetAssistantTeamSource | undefined
+
+export function configureFleetMetaAssistantTeams(source: FleetAssistantTeamSource | undefined): void {
+  assistantTeamSource = source
+}
+
+export function useFleetMetaAssistantSession(sessionId: string | undefined): boolean {
+  return useSyncExternalStore(
+    listener => assistantTeamSource?.subscribe(listener) ?? (() => {}),
+    () => sessionId !== undefined && assistantTeamSource?.getSnapshot().directory.teams.some(
+      team => team.status !== 'closed' && team.assistantSessionIds?.includes(sessionId) === true,
+    ) === true,
+    () => false,
+  )
+}
+
 let cachedSessionSource: NativeSessionSnapshot | undefined
 let cachedEstablishedSession: NativeSessionSnapshot | undefined
 
@@ -532,11 +564,30 @@ export function withFleetGlobalConversationView(
     const meta = state.sessionId !== undefined && state.currentSessionId === state.sessionId
     const useStore = props.useStore as NativeUseStore
     const fleetSelected = useStore(source => source.view) === 'fleet'
+    const sessionId = typeof props.sessionId === 'string' ? props.sessionId : undefined
+    const panelNavigation = useSyncExternalStore(
+      subscribeFleetPanelNavigation,
+      getFleetPanelNavigationRequest,
+      getFleetPanelNavigationRequest,
+    )
+    const fleetAssistant = useFleetMetaAssistantSession(sessionId)
+    const wasFleetAssistant = useRef(false)
+    const actions = props.actions as { readonly setView?: (view: string) => void } | undefined
     const useSession = props.useSession as NativeUseSession
     const decoratedUseSession: NativeUseSession = (selector, equality) => useSession(
       source => selector(meta || fleetSelected ? establishedMetaSession(source) : source),
       equality,
     )
+
+    useEffect(() => {
+      if (fleetAssistant && !wasFleetAssistant.current) actions?.setView?.('chat')
+      wasFleetAssistant.current = fleetAssistant
+    }, [actions, fleetAssistant])
+
+    useEffect(() => {
+      if (panelNavigation?.sessionId === sessionId) actions?.setView?.('fleet')
+    }, [actions, panelNavigation, sessionId])
+
     return jsx(ConversationSession, { ...props, useSession: decoratedUseSession })
   }
 

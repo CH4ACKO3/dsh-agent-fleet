@@ -67,6 +67,14 @@ export interface FleetSetupCreation {
   readonly run: FleetRunRecord
 }
 
+export interface FleetSetupConfigurationGuide {
+  readonly configurationTemplate: string
+  readonly modules: readonly {
+    readonly id: string
+    readonly description: string
+  }[]
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -111,6 +119,17 @@ function optionalBooleanField(
   return { [key]: value }
 }
 
+function optionalPositiveIntegerField(
+  source: Record<string, unknown>,
+  key: string,
+  label: string,
+): Record<string, number> {
+  const value = source[key]
+  if (value === undefined) return {}
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) throw new Error(`${label} must be a positive integer`)
+  return { [key]: Number(value) }
+}
+
 function normalizeMember(
   value: unknown,
   index: number,
@@ -131,6 +150,8 @@ function normalizeMember(
     prompt: optionalText(member.prompt, `members[${index}].prompt`),
     ...optionalStringField(member, 'provider', `members[${index}].provider`),
     ...optionalStringField(member, 'model', `members[${index}].model`),
+    ...optionalStringField(member, 'reasoningEffort', `members[${index}].reasoningEffort`),
+    ...optionalPositiveIntegerField(member, 'maxTokens', `members[${index}].maxTokens`),
     ...optionalBooleanField(member, 'canVote', `members[${index}].canVote`),
     ...(member.toolGroups === undefined ? {} : { toolGroups: structuredClone(member.toolGroups) }),
     ...(member.permissions === undefined ? {} : { permissions: structuredClone(member.permissions) }),
@@ -202,6 +223,23 @@ export function normalizeFleetSetupConfiguration(
       members: normalizedMembers,
     },
     modules,
+  }
+}
+
+function preserveExistingModules(
+  existing: Record<string, unknown> | undefined,
+  next: unknown,
+): Record<string, unknown> {
+  const draft = object(next, 'Fleet setup configuration')
+  if (existing === undefined) return draft
+  const existingModules = object(existing.modules, 'modules')
+  const draftModules = object(draft.modules, 'modules')
+  return {
+    ...draft,
+    modules: {
+      ...structuredClone(existingModules),
+      ...draftModules,
+    },
   }
 }
 
@@ -299,12 +337,26 @@ export class FleetSetupService {
     const record: FleetSetupRecord = {
       ...currentWithoutError,
       phase: 'setup',
-      configuration: normalizeFleetSetupConfiguration(input.configuration, this.configuration),
+      configuration: normalizeFleetSetupConfiguration(
+        preserveExistingModules(current.configuration, input.configuration),
+        this.configuration,
+      ),
       updatedAt: new Date().toISOString(),
     }
     this.write(record)
     this.assistant.activateGuide(agent, record.setupId)
     return recordSnapshot(record)
+  }
+
+  configurationGuide(): FleetSetupConfigurationGuide {
+    const modules = this.configuration.guideModules()
+    return {
+      configurationTemplate: JSON.stringify({
+        core: { name: '', positioning: '', members: [] },
+        modules: Object.fromEntries(modules.map(module => [module.id, module.defaultValue])),
+      }),
+      modules: modules.map(module => ({ id: module.id, description: module.description })),
+    }
   }
 
   create(agent: Agent): Promise<FleetSetupCreation> {
@@ -519,6 +571,18 @@ const SETUP_RESULT_SCHEMA = {
       },
     },
     requiredFields: { type: 'array', items: { type: 'string' } },
+    configurationTemplate: { type: 'string' },
+    configurationModules: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true },
+          description: { type: 'string', required: true },
+        },
+      },
+    },
   },
 } as const
 
@@ -565,20 +629,26 @@ export function installSetupTool(ctx: Context, service: FleetSetupService): void
         const setup = service.begin(agent, {
           ...(args.initial_idea === undefined ? {} : { initialIdea: args.initial_idea }),
         })
+        const guide = service.configurationGuide()
         return {
           action: 'begin' as const,
           setup: outputSetup(setup),
           workspaceEntries: service.workspaceEntries(agent),
           requiredFields: ['core.name', 'modules.dsh-agent-fleet/message.defaultChannel.id', 'modules.dsh-agent-fleet/message.defaultChannel.name'],
+          configurationTemplate: guide.configurationTemplate,
+          configurationModules: [...guide.modules],
         }
       }
       if (args.action === 'inspect') {
         const setup = service.inspect(agent)
+        const guide = service.configurationGuide()
         return {
           action: 'inspect' as const,
           setup: outputSetup(setup),
           workspaceEntries: service.workspaceEntries(agent),
           requiredFields: ['core.name', 'modules.dsh-agent-fleet/message.defaultChannel.id', 'modules.dsh-agent-fleet/message.defaultChannel.name'],
+          configurationTemplate: guide.configurationTemplate,
+          configurationModules: [...guide.modules],
         }
       }
       if (args.action === 'stage') {

@@ -4,6 +4,7 @@ import {
   FLEET_MEMBER_PERMISSIONS,
   FLEET_MEMBER_TOOL_GROUP_ACTIONS,
   FLEET_MEMBER_TOOL_GROUPS,
+  FLEET_OPT_IN_PERMISSIONS,
 } from './member-view.js'
 import type { FleetMemberView } from './member-view.js'
 
@@ -106,6 +107,7 @@ export class FleetAuthorizationService {
   private readonly listeners = new Set<(change: FleetAuthorizationChange) => void>()
   private readonly builtinActions = new Set<string>([
     ...FLEET_MEMBER_PERMISSIONS,
+    ...FLEET_OPT_IN_PERMISSIONS,
     ...Object.values(FLEET_MEMBER_TOOL_GROUP_ACTIONS).flat(),
   ])
   private readonly resourceKinds = new Map<string, FleetAuthorizationResourceKind>(

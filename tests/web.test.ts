@@ -161,6 +161,35 @@ describe('FleetWebRemote', () => {
     })
   })
 
+  it('routes lightweight member request configuration without a structural update', async () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const configured = {
+      member: { name: 'lead', sessionId: 'lead-session', status: 'running' },
+      request: { provider: 'provider-new', model: 'model-new' },
+      effectiveFrom: 'next-model-step' as const,
+    }
+    const runs = {
+      requireAssistantConnection: vi.fn(() => ({ view: { id: 'assistant' } })),
+      configureMember: vi.fn(() => Promise.resolve(configured)),
+    } as unknown as FleetRunService
+    const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
+
+    await expect(remote.member({
+      sessionId: 'ui-session',
+      teamId: 'team-one',
+      action: 'configure',
+      member: 'lead',
+      request: { provider: 'provider-new', model: 'model-new', maxTokens: null },
+    }, new AbortController().signal)).resolves.toEqual(configured)
+    expect(runs.configureMember).toHaveBeenCalledWith(caller, {
+      runId: 'team-one',
+      member: 'lead',
+      request: { provider: 'provider-new', model: 'model-new', maxTokens: null },
+    })
+  })
+
   it('resolves an Agent only for assistant relay messages', () => {
     const caller = { id: 'ui-session' } as Agent
     const ctx = new Context()
@@ -184,6 +213,24 @@ describe('FleetWebRemote', () => {
       kind: 'collaboration',
       text: 'Ask the attached assistant to relay this.',
     })
+  })
+
+  it('routes an explicit Team wake through the existing control endpoint', () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const runs = {
+      status: vi.fn(() => ({ id: 'team-one', status: 'running', runtimeState: 'active' })),
+      requireAssistantConnection: vi.fn(),
+      wakeTeam: vi.fn(() => ({ id: 'team-one', status: 'running' })),
+    } as unknown as FleetRunService
+    const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
+
+    expect(remote.control({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'wake',
+    }, new AbortController().signal)).toEqual({ id: 'team-one', status: 'running' })
+    expect(runs.requireAssistantConnection).toHaveBeenCalledWith(caller, 'team-one', false)
+    expect(runs.wakeTeam).toHaveBeenCalledWith(caller, 'team-one')
   })
 
   it('streams complete Team archives in bounded Web chunks', async () => {

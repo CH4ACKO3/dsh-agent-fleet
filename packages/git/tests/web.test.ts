@@ -10,7 +10,7 @@ import type { FleetRunService } from 'dsh-agent-fleet'
 import { FleetAccessService, FleetGroupService } from 'dsh-agent-fleet'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
-import { FLEET_GIT_PERMISSIONS, FleetGitAttributionStore, FleetGitWebRemote, apply } from '../src/index.js'
+import { FleetGitAttributionStore, FleetGitWebRemote, apply } from '../src/index.js'
 
 const roots: string[] = []
 
@@ -29,13 +29,6 @@ function repository(): string {
 }
 
 describe('FleetGitWebRemote', () => {
-  it('publishes the Git capability namespace used by dynamic permission groups', () => {
-    expect(FLEET_GIT_PERMISSIONS.map(permission => permission.id)).toEqual([
-      'inspect', 'scope-check', 'history-rewrite', 'publish', 'repository-manage',
-      'worktree-create', 'worktree-manage',
-    ])
-  })
-
   it('registers Fleet actions, resource defaults, and member tools', async () => {
     const ctx = new Context()
     const access = new FleetAuthorizationService()

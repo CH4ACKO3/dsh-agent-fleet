@@ -12,11 +12,8 @@ describe('hover hint seen markers', () => {
     markHintSeen(marker)
 
     expect(hasSeenHint(marker)).toBe(true)
+    expect(hasSeenHint(undefined)).toBe(false)
     expect(notifications).toBe(1)
     unsubscribe()
-  })
-
-  it('does not track hints without a marker', () => {
-    expect(hasSeenHint(undefined)).toBe(false)
   })
 })

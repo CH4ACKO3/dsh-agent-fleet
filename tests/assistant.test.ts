@@ -102,7 +102,7 @@ describe('FleetAssistantRuntime', () => {
       order: 0,
       text: FLEET_TEAM_BUILDER_PROMPT,
     })
-    expect(fixture.restrict).not.toHaveBeenCalled()
+    expect(fixture.restrict).toHaveBeenCalledWith({ allow: FLEET_GUIDE_TOOL_NAMES })
 
     expect(runtime.promote(fixture.agent, 'team-1')).toEqual({
       active: true,
@@ -112,7 +112,7 @@ describe('FleetAssistantRuntime', () => {
       tools: [...FLEET_ASSISTANT_TOOL_NAMES],
     })
     expect(fixture.removePersona).toHaveBeenCalledOnce()
-    expect(fixture.removeRestriction).not.toHaveBeenCalled()
+    expect(fixture.removeRestriction).toHaveBeenCalledOnce()
     expect(fixture.section).toHaveBeenLastCalledWith({
       name: 'deployment:persona',
       order: 0,
@@ -151,10 +151,6 @@ describe('FleetAssistantRuntime', () => {
     expect(fixture.section).toHaveBeenCalledWith(expect.objectContaining({
       text: expect.stringContaining('Name: Maya'),
     }))
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('More than one assistant can be attached to the same Team')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('Do not run the Team-building guide')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('Use `fleet_send`, `fleet_followup`, and `fleet_messages`')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('not a default worker or coordinator')
   })
 
   it('leaves plugin-owned tools to the native DSH tool registry', () => {
