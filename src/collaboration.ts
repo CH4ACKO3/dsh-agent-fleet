@@ -28,6 +28,12 @@ import {
   fleetMemberCanContact,
 } from './member-view.js'
 import type { FleetMemberView } from './member-view.js'
+
+const SPECIAL_TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
+  'joyride.control': ['joyride_catalog', 'joyride_act', 'joyride_control'],
+  'livestream.host': ['live_stream', 'live_stage'],
+}
+
 import type { FleetMemberToolGroup } from './member-view.js'
 import { installFleetToolDiscovery } from './tool-discovery.js'
 import type { FleetAuthorizationChange, FleetAuthorizationService } from './authorization.js'
@@ -547,6 +553,19 @@ export class FleetCollaborationService {
             hasMember: candidate => memberViews.has(candidate),
             authorization: effective,
           }))
+        }
+        const deniedSpecialTools = Object.entries(SPECIAL_TOOL_PERMISSIONS)
+          .filter(([permission]) => !permissions.has(permission))
+          .flatMap(([, names]) => names)
+        const installedDeniedTools = deniedSpecialTools.filter(name => ctx.tools.get(name) !== undefined)
+        if (installedDeniedTools.length > 0) {
+          add(ctx.tools.restrict({ deny: installedDeniedTools }))
+        }
+        if (deniedSpecialTools.length > 0) {
+          const denied = new Set(deniedSpecialTools)
+          add(ctx.tools.guard(execution => denied.has(execution.name)
+            ? `Fleet member @${view.id} is not permitted to use ${execution.name}`
+            : undefined))
         }
         if (!exposeHostFleetTools) {
           add(ctx.tools.restrict({

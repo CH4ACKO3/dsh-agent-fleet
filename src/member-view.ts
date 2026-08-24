@@ -22,6 +22,12 @@ export const FLEET_MEMBER_PERMISSIONS = [
   'team.manage',
 ] as const
 
+/** Sensitive optional-plugin capabilities that are never granted by omission. */
+export const FLEET_OPT_IN_PERMISSIONS = [
+  'joyride.control',
+  'livestream.host',
+] as const
+
 /** Registered action id. Feature plugins own their namespaced actions. */
 export type FleetMemberPermission = string
 

@@ -60,24 +60,50 @@ describe('complete Team template locales', () => {
     }
   })
 
-  it('provides a non-voting VTuber frontend and passive research assistant for livestreams', () => {
+  it('uses the backstage Team assistant for the conversation and lists the VTuber as a member', () => {
     const livestream = FULL_TEAM_TEMPLATES.find(template => template.id === 'research-livestream')
     if (livestream === undefined) throw new Error('missing livestream research Team template')
     for (const configuration of [livestream.configuration.en, livestream.configuration.zh]) {
       expect(configuration.core.assistant).toMatchObject({
-        id: 'livestream-vtuber',
-        permissions: [],
-        contacts: { members: '*', channels: ['main'] },
-      })
-      const assistant = configuration.core.members.find(member => member.id === 'team-assistant')
-      expect(assistant).toMatchObject({
+        id: 'team-assistant',
+        provider: 'openai-codex',
+        model: 'gpt-5.6-luna',
         canVote: false,
         permissions: ['message.wakeup'],
       })
-      expect(assistant?.toolGroups).not.toContain('coordination')
-      expect(assistant?.prompt).toMatch(/default state is quiet|默认保持安静/u)
-      expect(configuration.core.members.filter(member => member.id !== 'team-assistant').map(member => member.id))
+      expect(configuration.core.members.every(member =>
+        member.provider === 'openai-codex' && member.model === 'gpt-5.6-luna',
+      )).toBe(true)
+      const vtuber = configuration.core.members.find(member => member.id === 'livestream-vtuber')
+      expect(vtuber).toMatchObject({
+        permissions: ['joyride.control', 'livestream.host'],
+        contacts: { members: ['team-assistant'], channels: ['main'] },
+      })
+      expect(configuration.core.assistant.toolGroups).not.toContain('coordination')
+      expect(configuration.core.assistant.permissions).not.toContain('joyride.control')
+      expect(configuration.core.assistant.permissions).not.toContain('livestream.host')
+      expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
+        .every(member => !member.permissions.includes('joyride.control'))).toBe(true)
+      expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
+        .every(member => !member.permissions.includes('livestream.host'))).toBe(true)
+      expect(vtuber?.prompt).toMatch(/Shared persona: D chan|共享人格：小D/u)
+      expect(vtuber?.prompt).toMatch(/Roleplay and audience interaction are your primary work|角色扮演和观众互动是你的主要工作/u)
+      expect(vtuber?.prompt).toMatch(/Treat the research Team as something you observe|以观察者态度看待科研团队/u)
+      expect(vtuber?.prompt).toMatch(/curious outsiders who do not know the current research problem|外行业余观众/u)
+      expect(vtuber?.prompt).toMatch(/only when a viewer clearly asks a technical question|只有观众明确提出技术问题时/u)
+      expect(vtuber?.prompt).toMatch(/completely invisible to the audience|对观众完全不可见/u)
+      expect(vtuber?.prompt).toMatch(/action set to speak|action 设为 speak/u)
+      expect(vtuber?.prompt).toMatch(/action mood to choose calm, happy, or disgusted|mood 动作，在 calm、happy、disgusted 中选择/u)
+      expect(vtuber?.prompt).toMatch(/no Markdown, HTML, links, code, emoji, decorative symbols, or list formatting|不能包含 Markdown、HTML、链接、代码、emoji、装饰符号或列表格式/u)
+      expect(configuration.core.assistant.prompt).toMatch(/Shared persona: D chan|共享人格：小D/u)
+      const sharedPersona = vtuber?.prompt.split(/\n\n## Onstage surface|\n\n## 前台界面/u)[0]
+      expect(configuration.core.assistant.prompt.startsWith(sharedPersona ?? '')).toBe(true)
+      expect(configuration.core.assistant.prompt).toMatch(/Team progress must not depend on you|团队进展不得依赖你/u)
+      expect(configuration.core.assistant.prompt).toMatch(/Compare plans, messages, code, logs, metrics, and reports|对照计划、消息、代码、日志、指标与报告/u)
+      expect(configuration.core.assistant.prompt).toMatch(/Do not proactively manufacture or feed livestream material|不要主动制造或向 VTuber 投喂直播素材/u)
+      expect(configuration.core.members.map(member => member.id))
         .toEqual([
+          'livestream-vtuber',
           'theory-lead',
           'data-evaluation-scientist',
           'literature-researcher',

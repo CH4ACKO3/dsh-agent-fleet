@@ -929,15 +929,23 @@ describe('FleetRunService', () => {
     })
     const register = vi.fn(() => () => {})
     const restrict = vi.fn(() => () => {})
+    const guard = vi.fn(() => () => {})
+    const get = vi.fn((name: string) => name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
     await runtime.creates[0]?.setup?.({
       inject: (_deps: readonly string[], callback: (scope: Context) => void) => {
-        callback({ tools: { register, restrict } } as unknown as Context)
+        callback({ tools: { register, restrict, guard, get } } as unknown as Context)
         return Promise.resolve()
       },
     } as unknown as Context)
     expect(restrict).toHaveBeenCalledWith({
       deny: ['fleet_agent', 'fleet_run', 'fleet_archive', 'fleet_assistant', 'fleet_trace', 'fleet_setup', 'fleet_progress', 'fleet_member'],
     })
+    expect(restrict).toHaveBeenCalledWith({
+      deny: ['joyride_catalog', 'joyride_act', 'joyride_control', 'live_stream', 'live_stage'],
+    })
+    const specialToolGuard = guard.mock.calls[0]?.[0] as ((execution: { readonly name: string }) => string | undefined)
+    expect(specialToolGuard({ name: 'joyride_act' })).toContain('not permitted')
+    expect(specialToolGuard({ name: 'fleet_send' })).toBeUndefined()
     expect(register.mock.calls.map(call => (call[0] as { name: string }).name)).toEqual([
       'fleet_send',
       'fleet_followup',
