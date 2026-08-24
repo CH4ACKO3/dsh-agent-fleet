@@ -28,7 +28,7 @@ const SHARED_ENTRY_SCHEMA = {
 
 const SHARED_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
-    action: { type: 'string', required: true, enum: ['list', 'read', 'write'] },
+    action: { type: 'string', required: true, enum: ['list', 'read', 'write', 'delete'] },
     path: { type: 'string', required: true }, exists: { type: 'boolean', required: true },
     content: { type: 'string' }, entries: { type: 'array', items: SHARED_ENTRY_SCHEMA },
   },
@@ -91,6 +91,7 @@ export interface FleetResourceToolOptions {
   readonly canRead?: (agentId: string, kind: 'shared' | 'resource' | 'work', id?: string) => boolean
   readonly canWrite?: (agentId: string, kind: 'shared' | 'resource' | 'work', id?: string) => boolean
   readonly resourceWrite?: boolean
+  readonly deleteShared?: (relativePath: string) => void | Promise<void>
 }
 
 export function apply(ctx: Context): void {
@@ -124,9 +125,11 @@ export function installResourceTools(ctx: Context, resources: FleetResources, op
 
   register(defineTool({
     name: 'fleet_shared',
-    description: 'List, read, or replace real files inside this Team shared directory. Paths are relative to the shared directory.',
+    description: 'List, read, replace, or delete real files inside this Team shared directory. Paths are relative to the shared directory.',
     parameters: {
-      action: { type: 'string', required: true, enum: options.resourceWrite === false ? ['list', 'read'] as const : ['list', 'read', 'write'] as const },
+      action: { type: 'string', required: true, enum: options.resourceWrite === false || options.deleteShared === undefined
+        ? options.resourceWrite === false ? ['list', 'read'] as const : ['list', 'read', 'write'] as const
+        : ['list', 'read', 'write', 'delete'] as const },
       path: { type: 'string', description: 'Relative file or directory path. Defaults to the shared directory root.' },
       content: { type: 'string', description: 'Complete UTF-8 text content. Required for write.' },
     },
@@ -135,7 +138,7 @@ export function installResourceTools(ctx: Context, resources: FleetResources, op
       const agent = callingAgent(exec.agent, 'fleet_shared')
       const path = args.path?.trim() ?? ''
       const { target } = await sharedTarget(path, exec.signal)
-      requireAccess(agent, args.action === 'write', 'shared', target.displayPath)
+      requireAccess(agent, args.action === 'write' || args.action === 'delete', 'shared', target.displayPath)
       if (args.action === 'list') {
         const entries = await ctx.fs.listDir(target, exec.signal)
         return {
@@ -155,6 +158,17 @@ export function installResourceTools(ctx: Context, resources: FleetResources, op
         const content = await ctx.fs.readText(target, exec.signal)
         ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
         return { action: 'read' as const, path: target.displayPath, exists: true, content }
+      }
+      if (args.action === 'delete') {
+        if (path === '') throw new Error('fleet_shared delete requires a file path')
+        if (options.deleteShared === undefined) throw new Error('fleet_shared delete is unavailable')
+        const info = await ctx.fs.stat(target, exec.signal)
+        if (info === undefined) return { action: 'delete' as const, path: target.displayPath, exists: false }
+        if (info.type !== 'file') throw new Error(`Fleet shared path is not a regular file: ${target.displayPath}`)
+        await options.deleteShared(path)
+        resources.removeResource(String(agent.id), `shared:${path}`)
+        ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
+        return { action: 'delete' as const, path: target.displayPath, exists: false }
       }
       if (path === '') throw new Error('fleet_shared write requires a file path')
       if (args.content === undefined) throw new Error('fleet_shared write requires content')

@@ -337,8 +337,11 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
     const id = projectionEntityId(event.data, 'meeting')
     return id === undefined ? undefined : `meeting:${id}`
   }
-  if (event.type === 'resource.resource_added') {
-    const id = projectionEntityId(event.data, 'resource')
+  if (event.type === 'resource.resource_added' || event.type === 'resource.resource_removed') {
+    const data = event.type === 'resource.resource_removed' && typeof event.data === 'object' && event.data !== null
+      ? (event.data as { readonly removal?: unknown }).removal
+      : event.data
+    const id = projectionEntityId(data, 'resource')
     return id === undefined ? undefined : `resource:${id}`
   }
   if (event.type === 'workspace.assigned') {
@@ -885,6 +888,24 @@ function relocateArchiveEvents(
         },
       })]
     }
+    if (event.type === 'resource.resource_removed') {
+      const data = event.data as Extract<FleetResourceEvent, { type: 'resource_removed' }>
+      return [JSON.stringify({
+        ...event,
+        data: {
+          ...data,
+          removal: {
+            ...data.removal,
+            resource: {
+              ...data.removal.resource,
+              path: relocateArchivePath(
+                data.removal.resource.path, sourceRoot, targetRoot, sourceTeamId, targetTeamId,
+              ),
+            },
+          },
+        },
+      })]
+    }
     return [JSON.stringify(event)]
   }).join('\n') + '\n'
 }
@@ -922,6 +943,24 @@ function migrateLegacyRunEvents(source: string, legacyRun: string, runDirectory:
             path: pathInside(legacyRun, data.resource.path)
               ? resolve(sharedDirectory, relative(legacyRun, data.resource.path))
               : data.resource.path,
+          },
+        },
+      })]
+    }
+    if (event.type === 'resource.resource_removed') {
+      const data = event.data as Extract<FleetResourceEvent, { type: 'resource_removed' }>
+      return [JSON.stringify({
+        ...event,
+        data: {
+          ...data,
+          removal: {
+            ...data.removal,
+            resource: {
+              ...data.removal.resource,
+              path: pathInside(legacyRun, data.removal.resource.path)
+                ? resolve(sharedDirectory, relative(legacyRun, data.removal.resource.path))
+                : data.removal.resource.path,
+            },
           },
         },
       })]
@@ -1294,6 +1333,7 @@ const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
 const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_HISTORY_LIMIT = 500
+const SHARED_FILE_SCAN_INTERVAL_MS = 5_000
 
 function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kind'] | undefined {
   const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
@@ -1338,6 +1378,9 @@ export class FleetRunService {
   private readonly memberToolActivity = new Map<string, MemberToolActivity>()
   private readonly waitingSessionIds = new Set<string>()
   private readonly abnormalSessionIds = new Set<string>()
+  private readonly sharedFileVersions = new Map<string, Map<string, string>>()
+  private readonly sharedFileScanErrors = new Map<string, string>()
+  private readonly sharedFileScanTimer: ReturnType<typeof setInterval>
   private readonly changeListeners = new Set<() => void>()
   private readonly registryDirectory: string
   private readonly archives: FleetArchiveRegistry
@@ -1356,6 +1399,8 @@ export class FleetRunService {
     this.authorization = options.authorization
     this.configuration = options.configuration ?? new FleetConfigurationRegistry()
     this.loadPersistedTeams()
+    this.sharedFileScanTimer = setInterval(() => { this.scanSharedFiles() }, SHARED_FILE_SCAN_INTERVAL_MS)
+    this.sharedFileScanTimer.unref?.()
   }
 
   subscribeChanges(listener: () => void): () => void {
@@ -3360,28 +3405,42 @@ export class FleetRunService {
 
   recordResource(runId: string, event: FleetResourceEvent): void {
     if (!this.collaboration.has(runId)) return
+    const record = this.requireRecord(runId)
+    const actorName = (actorId: string): string => this.participants(record)
+      .find(participant => participant.sessionId === actorId)?.name ?? actorId
+    if (event.type === 'resource_added') {
+      this.appendEvent(runId, 'resource.resource_added', event)
+      return
+    }
+    if (event.type === 'resource_removed') {
+      this.appendEvent(runId, 'resource.resource_removed', {
+        ...event,
+        removal: { ...event.removal, removedBy: actorName(event.removal.removedBy) },
+      })
+      return
+    }
     if (event.type === 'resource_revised') {
-      const record = this.requireRecord(runId)
-      const beforeBytes = event.revision.before === null ? 0 : Buffer.byteLength(event.revision.before, 'utf8')
-      const afterBytes = Buffer.byteLength(event.revision.after, 'utf8')
+      const revision = { ...event.revision, updatedBy: actorName(event.revision.updatedBy) }
+      const beforeBytes = revision.before === null ? 0 : Buffer.byteLength(revision.before, 'utf8')
+      const afterBytes = Buffer.byteLength(revision.after, 'utf8')
       const size = beforeBytes + afterBytes
       const available = size <= RESOURCE_REVISION_MAX_BYTES
       if (available) {
         const directory = join(this.runDirectory(record), 'resource-revisions')
         mkdirSync(directory, { recursive: true })
-        const target = join(directory, `${event.revision.id}.json`)
+        const target = join(directory, `${revision.id}.json`)
         const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`
-        writeFileSync(temporary, JSON.stringify(event.revision), 'utf8')
+        writeFileSync(temporary, JSON.stringify(revision), 'utf8')
         renameSync(temporary, target)
       }
       appendFileSync(
         join(this.runDirectory(record), 'resource-history.jsonl'),
         `${JSON.stringify({
-          id: event.revision.id,
-          resourceId: event.revision.resourceId,
-          updatedBy: event.revision.updatedBy,
-          updatedAt: event.revision.updatedAt,
-          operation: event.revision.before === null ? 'created' : 'updated',
+          id: revision.id,
+          resourceId: revision.resourceId,
+          updatedBy: revision.updatedBy,
+          updatedAt: revision.updatedAt,
+          operation: revision.before === null ? 'created' : 'updated',
           available,
           size,
         })}\n`,
@@ -3390,10 +3449,10 @@ export class FleetRunService {
       this.appendEvent(runId, 'resource.resource_revised', {
         type: event.type,
         revision: {
-          id: event.revision.id,
-          resourceId: event.revision.resourceId,
-          updatedBy: event.revision.updatedBy,
-          updatedAt: event.revision.updatedAt,
+          id: revision.id,
+          resourceId: revision.resourceId,
+          updatedBy: revision.updatedBy,
+          updatedAt: revision.updatedAt,
           available,
           size,
         },
@@ -3779,12 +3838,42 @@ export class FleetRunService {
   ): Promise<FleetResourcePreview> {
     const record = this.requireRecord(runId)
     const events = this.storedEvents(record)
-    const resource = events.flatMap(event => {
-      if (event.type !== 'resource.resource_added') return []
-      const candidate = (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource
-      return candidate.id === resourceId ? [candidate] : []
-    }).at(-1)
+    const actorName = (actorId: string): string => {
+      const current = this.participants(record).find(participant => participant.sessionId === actorId)
+      if (current !== undefined) return current.name
+      for (const event of events) {
+        if (event.type === 'member_session_rotated') {
+          const data = event.data as { readonly member?: unknown; readonly previousSessionId?: unknown; readonly sessionId?: unknown }
+          if ((data.previousSessionId === actorId || data.sessionId === actorId) && typeof data.member === 'string') {
+            return data.member
+          }
+        }
+        if (event.type === 'assistant_rebound') {
+          const data = event.data as { readonly previousSessionId?: unknown; readonly sessionId?: unknown; readonly view?: { readonly id?: unknown } }
+          if ((data.previousSessionId === actorId || data.sessionId === actorId) && typeof data.view?.id === 'string') {
+            return data.view.id
+          }
+        }
+      }
+      return actorId
+    }
+    const resourceEvents: Array<{ readonly type: 'added' | 'removed'; readonly resource: FleetResource }> = []
+    for (const event of events) {
+      if (event.type === 'resource.resource_added') {
+        const candidate = (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource
+        if (candidate.id === resourceId) resourceEvents.push({ type: 'added', resource: candidate })
+      }
+      if (event.type === 'resource.resource_removed') {
+        const removal = (event.data as Extract<FleetResourceEvent, { type: 'resource_removed' }>).removal
+        if (removal.resource.id === resourceId) resourceEvents.push({ type: 'removed', resource: removal.resource })
+      }
+    }
+    const lastRemoval = resourceEvents.findLastIndex(event => event.type === 'removed')
+    const activeResourceEvents = resourceEvents.slice(lastRemoval + 1)
+    const latestResourceEvent = activeResourceEvents.at(-1)
+    const resource = latestResourceEvent?.type === 'added' ? latestResourceEvent.resource : undefined
     if (resource === undefined) throw new Error(`Unknown Fleet resource: ${resourceId}`)
+    const createdResource = activeResourceEvents.find(event => event.type === 'added')?.resource ?? resource
     const kind = resourcePreviewKind(resource)
     if (kind === undefined) throw new Error('This file type does not support inline preview')
 
@@ -3797,7 +3886,19 @@ export class FleetRunService {
     }
     const bytes = await this.ctx.fs.readBytes(target, signal, RESOURCE_PREVIEW_MAX_BYTES)
     const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-    const revisions = this.storedResourceRevisionSummaries(record).filter(revision => revision.resourceId === resourceId)
+    const revisions = this.storedResourceRevisionSummaries(record).filter(revision =>
+      revision.resourceId === resourceId && revision.updatedAt >= createdResource.createdAt)
+    const history = revisions.some(revision => revision.operation === 'created')
+      ? revisions
+      : [{
+          id: `resource-added:${resourceId}`,
+          resourceId,
+          updatedBy: actorName(createdResource.createdBy),
+          updatedAt: createdResource.createdAt,
+          operation: 'created' as const,
+          available: false,
+          size: createdResource.size ?? info.size ?? 0,
+        }, ...revisions]
     const selected = revisionId === undefined
       ? undefined
       : revisions.find(revision => revision.id === revisionId)
@@ -3810,19 +3911,19 @@ export class FleetRunService {
       body,
       ...(resource.mediaType === undefined ? {} : { mediaType: resource.mediaType }),
       ...(info.size === undefined ? {} : { size: info.size }),
-      history: revisions.slice(-RESOURCE_HISTORY_LIMIT).map((revision): FleetResourceRevisionSummary => ({
+      history: history.slice(-RESOURCE_HISTORY_LIMIT).map((revision): FleetResourceRevisionSummary => ({
         id: revision.id,
-        updatedBy: revision.updatedBy,
+        updatedBy: actorName(revision.updatedBy),
         updatedAt: revision.updatedAt,
         operation: revision.operation,
         available: revision.available,
         size: revision.size,
       })).reverse(),
-      historyTruncated: revisions.length > RESOURCE_HISTORY_LIMIT,
+      historyTruncated: history.length > RESOURCE_HISTORY_LIMIT,
       ...(selected === undefined || !selected.available ? {} : {
         revision: {
           id: selected.id,
-          updatedBy: selected.updatedBy,
+          updatedBy: actorName(selected.updatedBy),
           updatedAt: selected.updatedAt,
           operation: selected.operation,
           available: true,
@@ -4360,6 +4461,7 @@ export class FleetRunService {
   }
 
   close(): void {
+    clearInterval(this.sharedFileScanTimer)
     for (const waiter of [...this.waiters]) waiter.fail(new Error('Fleet Run service stopped'))
     for (const recovery of this.networkRecoveries.values()) {
       if (recovery.timer !== undefined) clearTimeout(recovery.timer)
@@ -4373,7 +4475,77 @@ export class FleetRunService {
     this.dormantRunIds.clear()
     this.teamProjectionEvents.clear()
     this.memberViewSnapshots.clear()
+    this.sharedFileVersions.clear()
+    this.sharedFileScanErrors.clear()
     this.changeListeners.clear()
+  }
+
+  private scanSharedFiles(): void {
+    for (const record of this.records.values()) {
+      if (!this.collaboration.has(record.id) || isTerminal(record.status)) continue
+      try {
+        this.synchronizeSharedFiles(record)
+        this.sharedFileScanErrors.delete(record.id)
+      } catch (error) {
+        const message = errorMessage(error)
+        if (this.sharedFileScanErrors.get(record.id) === message) continue
+        this.sharedFileScanErrors.set(record.id, message)
+        this.appendEvent(record.id, 'resource.shared_scan_failed', { error: message })
+      }
+    }
+  }
+
+  private synchronizeSharedFiles(record: FleetRunRecord): void {
+    const directory = join(record.projectRoot, '.fleet', record.id)
+    const runtime = this.collaboration.get(record.id)
+    if (runtime === undefined) return
+    const registered = runtime.resources.listResources()
+    const byPath = new Map(registered.map(resource => [resolve(resource.path), resource]))
+    const versions = this.sharedFileVersions.get(record.id) ?? new Map<string, string>()
+    this.sharedFileVersions.set(record.id, versions)
+    const seen = new Set<string>()
+
+    const visit = (parent: string): void => {
+      for (const entry of readdirSync(parent, { withFileTypes: true })) {
+        const path = join(parent, entry.name)
+        if (entry.isDirectory()) {
+          visit(path)
+          continue
+        }
+        if (!entry.isFile()) continue
+        let info: ReturnType<typeof statSync>
+        try {
+          info = statSync(path)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+          throw error
+        }
+        const absolutePath = resolve(path)
+        seen.add(absolutePath)
+        const name = relative(directory, path).split(sep).join('/')
+        const version = `${String(info.mtimeMs)}:${String(info.size)}`
+        const previous = versions.get(name)
+        const existing = byPath.get(absolutePath)
+        versions.set(name, version)
+        if (previous === version || (previous === undefined && existing !== undefined
+          && (existing.size === undefined || existing.size === info.size))) continue
+
+        runtime.resources.addResource('fleet-filesystem', {
+          id: existing?.id ?? `shared:${name}`,
+          path,
+          label: name,
+          ...(existing?.mediaType === undefined ? {} : { mediaType: existing.mediaType }),
+          size: info.size,
+        })
+      }
+    }
+    if (existsSync(directory)) visit(directory)
+    for (const resource of registered) {
+      const path = resolve(resource.path)
+      if (!pathInside(directory, path) || seen.has(path)) continue
+      versions.delete(relative(directory, path).split(sep).join('/'))
+      runtime.resources.removeResource('fleet-filesystem', resource.id)
+    }
   }
 
   private async settleFinishedWork(record: FleetRunRecord): Promise<void> {
@@ -4858,13 +5030,21 @@ export class FleetRunService {
     readonly resources: Array<Extract<FleetResourceEvent, { type: 'resource_added' }>['resource']>
     readonly memberStatuses: FleetMemberStatusEvent[]
   } {
+    const resources = new Map<string, Extract<FleetResourceEvent, { type: 'resource_added' }>['resource']>()
+    for (const event of events) {
+      if (event.type === 'resource.resource_added') {
+        const resource = (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource
+        resources.set(resource.id, resource)
+      } else if (event.type === 'resource.resource_removed') {
+        const removal = (event.data as Extract<FleetResourceEvent, { type: 'resource_removed' }>).removal
+        resources.delete(removal.resource.id)
+      }
+    }
     return {
       coordination: events
         .filter(event => event.type.startsWith('coordination.'))
         .map(event => event.data as FleetCoordinationEvent),
-      resources: events
-        .filter(event => event.type === 'resource.resource_added')
-        .map(event => (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource),
+      resources: [...resources.values()],
       memberStatuses: events
         .filter(event => event.type === 'member_status.updated' || event.type === 'member_status.cleared')
         .map(event => event.data as FleetMemberStatusEvent),

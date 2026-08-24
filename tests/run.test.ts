@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 
@@ -1022,11 +1022,10 @@ describe('FleetRunService', () => {
       kind: 'markdown',
       body: '# Current plan\n\n- Verify the preview.\n',
       size: 38,
-      history: [{
-        id: revision.id,
-        updatedBy: run.members[0]?.sessionId ?? String(launcher.id),
-        operation: 'updated',
-      }],
+      history: [
+        { id: revision.id, updatedBy: 'lead', operation: 'updated' },
+        { id: 'resource-added:team-plan', updatedBy: 'team-assistant', operation: 'created' },
+      ],
     })
     await expect(service.readResourcePreview(run.id, 'team-plan', undefined, revision.id)).resolves.toMatchObject({
       revision: {
@@ -1053,6 +1052,79 @@ describe('FleetRunService', () => {
 
     service.end(launcher as unknown as Agent, 'Resource preview test complete.')
     await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('discovers shared-directory files on the host without mutating during projection reads', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const initial = service.readWebTeamProjection(run.id, 0, 1_000)
+    const initialSequence = initial.events.at(-1)?.sequence ?? 0
+    const sharedDirectory = join(root, '.fleet', run.id, 'notes')
+    const progressPath = join(sharedDirectory, 'progress.md')
+    mkdirSync(sharedDirectory, { recursive: true })
+    writeFileSync(progressPath, '# Progress\n\nDirect Agent output.\n')
+
+    expect(service.readWebTeamProjection(run.id, initialSequence, 1_000).events).toEqual([])
+    vi.advanceTimersByTime(5_000)
+    const added = service.readWebTeamProjection(run.id, initialSequence, 1_000)
+    expect(added.events).toContainEqual(expect.objectContaining({
+      type: 'resource.resource_added',
+      data: expect.objectContaining({
+        resource: expect.objectContaining({
+          id: 'shared:notes/progress.md',
+          label: 'notes/progress.md',
+          path: progressPath,
+          createdBy: 'fleet-filesystem',
+        }),
+      }),
+    }))
+    await expect(service.readResourcePreview(run.id, 'shared:notes/progress.md')).resolves.toMatchObject({
+      kind: 'markdown',
+      body: '# Progress\n\nDirect Agent output.\n',
+      history: [{ updatedBy: 'fleet-filesystem', operation: 'created' }],
+    })
+
+    const addedSequence = added.events.at(-1)?.sequence ?? initialSequence
+    writeFileSync(progressPath, '# Progress\n\nDirect Agent output updated.\n')
+    expect(service.readWebTeamProjection(run.id, addedSequence, 1_000).events).toEqual([])
+    vi.advanceTimersByTime(5_000)
+    const updated = service.readWebTeamProjection(run.id, addedSequence, 1_000)
+    expect(updated.events).toContainEqual(expect.objectContaining({
+      type: 'resource.resource_added',
+      data: expect.objectContaining({ resource: expect.objectContaining({ id: 'shared:notes/progress.md' }) }),
+    }))
+    await expect(service.readResourcePreview(run.id, 'shared:notes/progress.md')).resolves.toMatchObject({
+      body: '# Progress\n\nDirect Agent output updated.\n',
+    })
+
+    const updatedSequence = updated.events.at(-1)?.sequence ?? addedSequence
+    unlinkSync(progressPath)
+    expect(service.readWebTeamProjection(run.id, updatedSequence, 1_000).events).toEqual([])
+    vi.advanceTimersByTime(5_000)
+    expect(service.readWebTeamProjection(run.id, updatedSequence, 1_000).events).toContainEqual(
+      expect.objectContaining({
+        type: 'resource.resource_removed',
+        data: expect.objectContaining({
+          removal: expect.objectContaining({
+            removedBy: 'fleet-filesystem',
+            resource: expect.objectContaining({ id: 'shared:notes/progress.md' }),
+          }),
+        }),
+      }),
+    )
+    expect(service.resourceStore(run.id).listResources()).not.toContainEqual(
+      expect.objectContaining({ id: 'shared:notes/progress.md' }),
+    )
+    await expect(service.readResourcePreview(run.id, 'shared:notes/progress.md'))
+      .rejects.toThrow('Unknown Fleet resource')
+
     disconnect()
   })
 

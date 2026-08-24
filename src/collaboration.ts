@@ -1,3 +1,6 @@
+import { unlinkSync } from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -508,6 +511,15 @@ export class FleetCollaborationService {
                 : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
             ),
             resourceWrite: permissions.has('resource.write'),
+            deleteShared: path => {
+              const root = resolve(input.projectRoot, input.sharedDirectory)
+              const target = resolve(root, path)
+              const nested = relative(root, target)
+              if (nested === '' || nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) {
+                throw new Error('Fleet shared delete path must stay inside the Team shared directory')
+              }
+              unlinkSync(target)
+            },
           })
         }
       }

@@ -40,10 +40,17 @@ export interface FleetResourceRevision {
   readonly updatedAt: string
 }
 
+export interface FleetResourceRemoval {
+  readonly resource: FleetResource
+  readonly removedBy: string
+  readonly removedAt: string
+}
+
 export type FleetResourceEvent =
   | { readonly type: 'work_claimed'; readonly claim: WorkClaim; readonly overlaps: WorkOverlap[] }
   | { readonly type: 'work_released'; readonly agentId: string }
   | { readonly type: 'resource_added'; readonly resource: FleetResource }
+  | { readonly type: 'resource_removed'; readonly removal: FleetResourceRemoval }
   | { readonly type: 'resource_revised'; readonly revision: FleetResourceRevision }
 
 interface StoredWorkClaim extends WorkClaim {
@@ -134,6 +141,21 @@ export class FleetResources {
     }
     this.files.set(resource.id, resource)
     this.emit({ type: 'resource_added', resource })
+    return { ...resource }
+  }
+
+  removeResource(agentId: string, id: string): FleetResource | undefined {
+    const resource = this.files.get(id)
+    if (resource === undefined) return undefined
+    this.files.delete(id)
+    this.emit({
+      type: 'resource_removed',
+      removal: {
+        resource: { ...resource },
+        removedBy: agentId,
+        removedAt: new Date().toISOString(),
+      },
+    })
     return { ...resource }
   }
 
