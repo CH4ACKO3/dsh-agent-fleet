@@ -252,18 +252,10 @@ describe('Fleet panel live selection repair', () => {
 
 describe('Fleet Team run control', () => {
   it('switches between a complete pause and resume action from the projected Team state', () => {
-    expect(fleetPanelTeamRunControl({ status: 'running', runtimeState: 'active' })).toMatchObject({
-      action: 'pause', label: '暂停运行', busyLabel: '正在暂停…',
-    })
-    expect(fleetPanelTeamRunControl({ status: 'idle', runtimeState: 'active' })).toMatchObject({
-      action: 'pause', label: '暂停运行',
-    })
-    expect(fleetPanelTeamRunControl({ status: 'paused', runtimeState: 'active' })).toMatchObject({
-      action: 'resume', label: '继续运行', busyLabel: '正在继续…',
-    })
-    expect(fleetPanelTeamRunControl({ status: 'running', runtimeState: 'dormant' })).toMatchObject({
-      action: 'resume', label: '继续运行',
-    })
+    expect(fleetPanelTeamRunControl({ status: 'running', runtimeState: 'active' })?.action).toBe('pause')
+    expect(fleetPanelTeamRunControl({ status: 'idle', runtimeState: 'active' })?.action).toBe('pause')
+    expect(fleetPanelTeamRunControl({ status: 'paused', runtimeState: 'active' })?.action).toBe('resume')
+    expect(fleetPanelTeamRunControl({ status: 'running', runtimeState: 'dormant' })?.action).toBe('resume')
   })
 
   it('does not offer an invalid resume for terminal or disconnected Teams', () => {

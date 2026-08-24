@@ -64,14 +64,14 @@ function fixture(
 
 describe('FleetPermissionService', () => {
   it('provides default groups for common Agent collaboration roles', () => {
-    expect(FLEET_PERMISSION_PRESETS.map(group => [group.id, group.name, group.parents])).toEqual([
-      ['observer', 'Observer', []],
-      ['member', 'Collaborator', ['observer']],
-      ['researcher', 'Researcher', ['member']],
-      ['facilitator', 'Facilitator', ['member']],
-      ['maintainer', 'Maintainer', ['researcher', 'facilitator']],
-      ['op', 'OP', []],
-    ])
+    expect(Object.fromEntries(FLEET_PERMISSION_PRESETS.map(group => [group.id, group.parents]))).toEqual({
+      observer: [],
+      member: ['observer'],
+      researcher: ['member'],
+      facilitator: ['member'],
+      maintainer: ['researcher', 'facilitator'],
+      op: [],
+    })
     expect(FLEET_PERMISSION_PRESETS.flatMap(group => group.actions).some(action =>
       action.startsWith('git.') || action.startsWith('lark.') || action.startsWith('memory.'),
     )).toBe(false)

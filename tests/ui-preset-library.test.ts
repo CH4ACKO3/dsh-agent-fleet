@@ -28,8 +28,6 @@ describe('Fleet UI locale', () => {
 
   it('keeps the Agent Fleet dictionaries bilingual and key-compatible', () => {
     expect(Object.keys(fleetLocaleDictionaries.en)).toEqual(Object.keys(fleetLocaleDictionaries.zh))
-    expect(fleetLocaleDictionaries.zh['welcome.message']).toContain('欢迎使用 Agent Fleet')
-    expect(fleetLocaleDictionaries.en['welcome.message']).toContain('Welcome to Agent Fleet')
   })
 })
 

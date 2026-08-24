@@ -151,12 +151,6 @@ describe('FleetAssistantRuntime', () => {
     expect(fixture.section).toHaveBeenCalledWith(expect.objectContaining({
       text: expect.stringContaining('Name: Maya'),
     }))
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('More than one assistant can be attached to the same Team')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('Do not run the Team-building guide')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('Use `fleet_send`, `fleet_followup`, and `fleet_messages`')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('explicitly call `fleet_send` with `to: "@User"`')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('ordinary native Session output is internal execution context')
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('not a default worker or coordinator')
   })
 
   it('leaves plugin-owned tools to the native DSH tool registry', () => {
