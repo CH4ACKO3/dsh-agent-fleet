@@ -2222,6 +2222,58 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('starts another member turn with a system prompt when a quiet mentioned message remains unread', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    lead.status = 'running'
+    reviewer.status = 'running'
+
+    const sent = service.messageHub(run.id).send(lead, {
+      to: '#main',
+      text: 'Please inspect the latest result after this turn.',
+      mentions: ['@reviewer'],
+      delivery: 'quiet',
+    })
+    expect(service.messageHub(run.id).pendingWakeups(reviewer.id)).toEqual([])
+    const messagesAfterInjection = reviewer.messages.length
+
+    service.recordMemberSessionEvent(reviewer.id, {
+      type: 'turn/end',
+      seq: 1,
+      time: Date.now(),
+      data: { turn: 1, reason: { kind: 'completed' } },
+    })
+    reviewer.completeTurn()
+    service.agentStatusChanged(reviewer as unknown as Agent)
+
+    expect(reviewer.messages).toHaveLength(messagesAfterInjection + 1)
+    expect(reviewer.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining(`[Fleet #main] New message ${sent.messageId}`),
+      }),
+    ])
+    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'coordination.system_prompt', data: expect.stringContaining('message_notice') }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('unread_message') }),
+    ]))
+
+    service.finish(launcher as unknown as Agent, 'cancelled', 'Unread continuation verified.', run.id)
+    await service.wait(run.id, 1_000)
+    service.end(launcher as unknown as Agent, 'Unread continuation Team closed.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
   it('pauses and resumes a Team without resuming members that were already paused individually', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)

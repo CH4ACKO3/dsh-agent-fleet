@@ -1,5 +1,5 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type {
   AgentDirectory,
@@ -9,6 +9,7 @@ import type {
   CloseMeetingInput,
   FleetCoordinationEvent,
   FleetChannel,
+  FleetDelivery,
   FleetInboxItem,
   FleetMessage,
   FleetMessageKind,
@@ -17,6 +18,8 @@ import type {
   FleetMeeting,
   FleetMessagePermission,
   FleetTarget,
+  FleetSystemPromptInput,
+  FleetSystemPromptResult,
   FleetVote,
   InitializeChannelInput,
   MessageAgent,
@@ -39,6 +42,11 @@ interface Waiter {
   readonly agentId: string
   finish(result: WaitResult): void
   fail(error: unknown): void
+}
+
+interface PendingSystemPrompt {
+  readonly message: UserMessage
+  readonly queue: 'nextStep' | 'nextTurn'
 }
 
 function snapshot<T>(value: T): T {
@@ -567,6 +575,67 @@ export class MessageHub {
     return snapshot([...(this.pendingWakeupsByAgent.get(agentId)?.values() ?? [])])
   }
 
+  sendSystemPrompt(agentId: string, prompt: FleetSystemPromptInput): FleetSystemPromptResult {
+    this.assertOpen()
+    const target = this.requireAgent(agentId)
+    const text = prompt.text.trim()
+    if (text.length === 0) throw new Error('Fleet system prompt cannot be empty')
+    if (text.length > MAX_MESSAGE_LENGTH) {
+      throw new Error(`Fleet system prompt cannot exceed ${MAX_MESSAGE_LENGTH} characters`)
+    }
+    const coalesceKey = prompt.coalesceKey?.trim()
+    if (prompt.coalesceKey !== undefined && coalesceKey?.length === 0) {
+      throw new Error('Fleet system prompt coalesceKey cannot be empty')
+    }
+    if (prompt.relatedMessageId !== undefined) this.requireVisibleMessage(agentId, prompt.relatedMessageId)
+    const normalized: FleetSystemPromptInput = {
+      ...prompt,
+      text,
+      ...(coalesceKey === undefined ? {} : { coalesceKey }),
+    }
+    const created = createUserMessage({
+      content: [{ type: 'text', text }],
+      source: coalesceKey === undefined
+        ? { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' }
+        : {
+            kind: 'plugin',
+            plugin: 'dsh-agent-fleet',
+            form: 'snapshot',
+            sections: [{ name: `system:${coalesceKey}`, text }],
+          },
+    })
+    const pending = coalesceKey === undefined ? undefined : this.findPendingSystemPrompt(target, coalesceKey)
+    if (pending !== undefined && prompt.delivery !== 'interrupt'
+      && (prompt.delivery === 'quiet' || pending.queue === 'nextTurn')) {
+      const replacement = { ...created, id: pending.message.id }
+      if (typeof target.inbox?.replace === 'function'
+        && target.inbox.replace(pending.message.id, replacement)) {
+        return this.recordSystemPrompt(target, replacement, normalized, 'replaced')
+      }
+    }
+    let input = created
+    if (pending !== undefined && typeof target.inbox?.remove === 'function'
+      && target.inbox.remove(pending.message.id)) {
+      input = { ...created, id: pending.message.id }
+    }
+    const disposition = this.dispatchContext(target, input, prompt.delivery)
+    return this.recordSystemPrompt(target, input, normalized, disposition)
+  }
+
+  followupUnread(target: MessageAgent): FleetMessage | undefined {
+    const unread = this.inbox(target, { unreadOnly: true, limit: 1 }).at(-1)?.message
+    if (unread === undefined) return undefined
+    const sender = `@${unread.fromName ?? unread.from}`
+    this.sendSystemPrompt(target.id, {
+      kind: 'message_notice',
+      text: `[Fleet ${unread.conversation}] New message ${unread.id} from ${sender}. Call fleet_messages to read it.`,
+      delivery: 'wakeup',
+      coalesceKey: this.messageNoticeKey(unread),
+      relatedMessageId: unread.id,
+    })
+    return unread
+  }
+
   read(sender: MessageAgent, input: ReadMessagesInput): ReadMessagesResult {
     this.assertOpen()
     this.requireAgent(sender.id)
@@ -607,7 +676,7 @@ export class MessageHub {
       if (message.from !== sender.id && this.markAcknowledged(sender.id, message.id)) acknowledged = true
     }
     if (input.conversation.startsWith('#') && !hasMore) {
-      this.removePendingChannelNotice(sender, input.conversation)
+      this.removePendingSystemPrompt(sender, `unread:${input.conversation}`)
     }
     if (acknowledged) this.changed([sender.id])
     return {
@@ -1391,7 +1460,7 @@ export class MessageHub {
     const resourceText = message.resources.length === 0
       ? ''
       : `\nResources: ${message.resources.join(', ')}`
-    const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
+    const sender = `@${message.fromName ?? message.from}`
     const text = notice
       ? `[Fleet ${message.conversation}] New message ${message.id} from ${sender}. Call fleet_messages to read it.`
       : `[Fleet ${message.conversation} | ${message.id} | from=${sender}] ${message.text}${resourceText}`
@@ -1399,76 +1468,101 @@ export class MessageHub {
       content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'relay' },
     })
-    if (wake && message.delivery === 'interrupt') {
+    this.dispatchContext(target, input, wake ? message.delivery : 'quiet')
+    this.rememberDelivery(target.id, String(input.id), message.id)
+    this.emit({
+      type: 'inbox',
+      action: 'delivered',
+      agentId: target.id,
+      messageId: message.id,
+      contextMessageId: input.id,
+    })
+  }
+
+  private dispatchContext(
+    target: MessageAgent,
+    input: UserMessage,
+    delivery: FleetDelivery,
+  ): FleetSystemPromptResult['disposition'] {
+    if (delivery === 'interrupt') {
       target.cancel({ kind: 'user' }, { keepInbox: true })
       target.steer(input)
-    } else if (wake) target.followup(input)
-    else target.inject(input)
-    this.rememberDelivery(target.id, String(input.id), message.id)
-    this.emit({
-      type: 'inbox',
-      action: 'delivered',
-      agentId: target.id,
-      messageId: message.id,
-      contextMessageId: input.id,
-    })
-  }
-
-  private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
-    const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
-    const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.`
-    const input = createUserMessage({
-      content: [{ type: 'text', text }],
-      source: {
-        kind: 'plugin',
-        plugin: 'dsh-agent-fleet',
-        form: 'snapshot',
-        sections: [{ name: `unread:${message.conversation}`, text }],
-      },
-    })
-    const inbox = target.inbox
-    if (inbox !== undefined && typeof inbox.replace === 'function') {
-      const pending = this.findPendingChannelNotice(target, message.conversation)
-      if (pending !== undefined && inbox.replace(pending.id, { ...input, id: pending.id })) {
-        this.rememberDelivery(target.id, String(pending.id), message.id)
-        this.emit({
-          type: 'inbox',
-          action: 'delivered',
-          agentId: target.id,
-          messageId: message.id,
-          contextMessageId: pending.id,
-        })
-        return
-      }
+      return 'interrupted'
+    }
+    if (delivery === 'wakeup') {
+      target.followup(input)
+      return 'followed-up'
     }
     target.inject(input)
-    this.rememberDelivery(target.id, String(input.id), message.id)
-    this.emit({
-      type: 'inbox',
-      action: 'delivered',
-      agentId: target.id,
-      messageId: message.id,
-      contextMessageId: input.id,
-    })
+    return 'injected'
   }
 
-  private findPendingChannelNotice(target: MessageAgent, conversation: FleetTarget): ReturnType<typeof createUserMessage> | undefined {
+  private recordSystemPrompt(
+    target: MessageAgent,
+    input: UserMessage,
+    prompt: FleetSystemPromptInput,
+    disposition: FleetSystemPromptResult['disposition'],
+  ): FleetSystemPromptResult {
+    this.emit({
+      type: 'system_prompt',
+      action: disposition,
+      agentId: target.id,
+      contextMessageId: String(input.id),
+      prompt,
+    })
+    if (prompt.relatedMessageId !== undefined) {
+      this.rememberDelivery(target.id, String(input.id), prompt.relatedMessageId)
+      this.emit({
+        type: 'inbox',
+        action: 'delivered',
+        agentId: target.id,
+        messageId: prompt.relatedMessageId,
+        contextMessageId: input.id,
+      })
+    }
+    return { contextMessageId: String(input.id), disposition }
+  }
+
+  private messageNoticeKey(message: FleetMessage): string {
+    return message.conversation.startsWith('#')
+      ? `unread:${message.conversation}`
+      : `unread-message:${message.id}`
+  }
+
+  private findPendingSystemPrompt(target: MessageAgent, coalesceKey: string): PendingSystemPrompt | undefined {
     const inbox = target.inbox
     if (inbox === undefined) return undefined
-    const sectionName = `unread:${conversation}`
-    return [...inbox.nextStep, ...inbox.nextTurn].find(message => {
+    const sectionName = `system:${coalesceKey}`
+    const matches = (message: UserMessage): boolean => {
       const source = message.source
       return source.kind === 'plugin'
         && source.plugin === 'dsh-agent-fleet'
         && source.form === 'snapshot'
         && source.sections.some(section => section.name === sectionName)
-    })
+    }
+    const nextTurn = inbox.nextTurn.find(matches)
+    if (nextTurn !== undefined) return { message: nextTurn, queue: 'nextTurn' }
+    const nextStep = inbox.nextStep.find(matches)
+    return nextStep === undefined ? undefined : { message: nextStep, queue: 'nextStep' }
   }
 
-  private removePendingChannelNotice(target: MessageAgent, conversation: FleetTarget): void {
-    const pending = this.findPendingChannelNotice(target, conversation)
-    const inbox = target.inbox
-    if (pending !== undefined && inbox !== undefined && typeof inbox.remove === 'function') inbox.remove(pending.id)
+  private removePendingSystemPrompt(target: MessageAgent, coalesceKey: string): void {
+    const pending = this.findPendingSystemPrompt(target, coalesceKey)
+    if (pending !== undefined && typeof target.inbox?.remove === 'function') {
+      target.inbox.remove(pending.message.id)
+    }
+  }
+
+  private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
+    const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
+    const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.`
+    this.sendSystemPrompt(target.id, {
+      kind: 'message_notice',
+      text,
+      delivery: 'quiet',
+      coalesceKey: this.messageNoticeKey(message),
+      relatedMessageId: message.id,
+    })
   }
 
   private deliverMeeting(

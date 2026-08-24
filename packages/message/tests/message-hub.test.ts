@@ -8,6 +8,7 @@ import type { AgentDirectory, MessageAgent } from '../src/types.js'
 class FakeAgent implements MessageAgent {
   private readonly injectedMessages: Parameters<MessageAgent['inject']>[0][] = []
   private readonly pendingMessages: Parameters<MessageAgent['inject']>[0][] = []
+  private readonly pendingTurnMessages: Parameters<MessageAgent['followup']>[0][] = []
   readonly followedUp: string[] = []
   readonly steered: string[] = []
   readonly cancellations: Array<{ readonly kind: 'user' | 'parent'; readonly keepInbox?: boolean }> = []
@@ -15,22 +16,24 @@ class FakeAgent implements MessageAgent {
 
   constructor(readonly id: string) {
     const pending = this.pendingMessages
+    const pendingTurn = this.pendingTurnMessages
     const injected = this.injectedMessages
     this.inbox = {
-      get nextTurn() { return [] },
+      get nextTurn() { return pendingTurn },
       get nextStep() { return pending },
       replace(messageId, newMessage) {
-        const pendingIndex = pending.findIndex(message => message.id === messageId)
-        if (pendingIndex < 0) return false
-        pending[pendingIndex] = newMessage
+        const queue = [pending, pendingTurn].find(messages => messages.some(message => message.id === messageId))
+        if (queue === undefined) return false
+        const pendingIndex = queue.findIndex(message => message.id === messageId)
+        queue[pendingIndex] = newMessage
         const injectedIndex = injected.findIndex(message => message.id === messageId)
         if (injectedIndex >= 0) injected[injectedIndex] = newMessage
         return true
       },
       remove(messageId) {
-        const pendingIndex = pending.findIndex(message => message.id === messageId)
-        if (pendingIndex < 0) return false
-        pending.splice(pendingIndex, 1)
+        const queue = [pending, pendingTurn].find(messages => messages.some(message => message.id === messageId))
+        if (queue === undefined) return false
+        queue.splice(queue.findIndex(message => message.id === messageId), 1)
         return true
       },
     }
@@ -51,6 +54,7 @@ class FakeAgent implements MessageAgent {
 
   followup(message: Parameters<MessageAgent['followup']>[0]): void {
     this.followedUp.push(message.content[0]?.type === 'text' ? message.content[0].text : '')
+    this.pendingTurnMessages.push(message)
   }
 
   steer(message: Parameters<MessageAgent['steer']>[0]): void {
@@ -397,6 +401,58 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(hub.pendingWakeups(reviewer.id)).toEqual([])
+  })
+
+  it('delivers, promotes, coalesces, and interrupts system prompts without creating Fleet messages', () => {
+    const { hub, reviewer } = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    hub.onEvent(event => { events.push(event) })
+
+    const quiet = hub.sendSystemPrompt(reviewer.id, {
+      kind: 'task_notice',
+      text: 'Task state changed.',
+      delivery: 'quiet',
+      coalesceKey: 'task:task_1',
+    })
+    expect(quiet.disposition).toBe('injected')
+    expect(reviewer.inbox.nextStep).toHaveLength(1)
+    expect(reviewer.inbox.nextTurn).toHaveLength(0)
+
+    const promoted = hub.sendSystemPrompt(reviewer.id, {
+      kind: 'task_notice',
+      text: 'Task is now due.',
+      delivery: 'wakeup',
+      coalesceKey: 'task:task_1',
+    })
+    expect(promoted).toEqual({ contextMessageId: quiet.contextMessageId, disposition: 'followed-up' })
+    expect(reviewer.inbox.nextStep).toHaveLength(0)
+    expect(reviewer.inbox.nextTurn).toHaveLength(1)
+    expect(reviewer.followedUp.at(-1)).toBe('Task is now due.')
+
+    const replaced = hub.sendSystemPrompt(reviewer.id, {
+      kind: 'task_notice',
+      text: 'Task due reminder updated.',
+      delivery: 'quiet',
+      coalesceKey: 'task:task_1',
+    })
+    expect(replaced).toEqual({ contextMessageId: quiet.contextMessageId, disposition: 'replaced' })
+    expect(reviewer.inbox.nextTurn[0]?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'Task due reminder updated.' }),
+    ])
+
+    expect(hub.sendSystemPrompt(reviewer.id, {
+      kind: 'network_recovery',
+      text: 'Retry only after checking external side effects.',
+      delivery: 'interrupt',
+      coalesceKey: 'task:task_1',
+    }).disposition).toBe('interrupted')
+    expect(reviewer.inbox.nextTurn).toHaveLength(0)
+    expect(reviewer.cancellations).toEqual([{ kind: 'user', keepInbox: true }])
+    expect(reviewer.steered.at(-1)).toContain('external side effects')
+    expect(hub.search(reviewer)).toEqual([])
+    expect(hub.inbox(reviewer)).toEqual([])
+    expect(events.filter(event => event.type === 'system_prompt').map(event => event.action))
+      .toEqual(['injected', 'followed-up', 'replaced', 'interrupted'])
   })
 
   it('cancels the current step and steers an urgent direct message while preserving pending work', () => {
