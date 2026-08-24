@@ -104,16 +104,6 @@ const MEETING_SCHEMA = {
   },
 } as const
 
-const READ_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    messages: { type: 'array', required: true, items: MESSAGE_SCHEMA },
-    hasMore: { type: 'boolean', required: true },
-    revision: { type: 'integer', required: true },
-  },
-} as const
-
 const REACTION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -153,7 +143,6 @@ const MESSAGE_RESULT_SCHEMA = {
     action: { type: 'string', enum: ['search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'] },
     messages: { type: 'array', items: MESSAGE_SCHEMA },
     inbox: { type: 'array', items: INBOX_ITEM_SCHEMA },
-    item: INBOX_ITEM_SCHEMA,
     reaction: REACTION_SCHEMA,
     reactions: { type: 'array', items: REACTION_SCHEMA },
     pin: PIN_SCHEMA,
@@ -263,12 +252,6 @@ function messageOutput(): {
           inbox: value.inbox.map((item, index) => ({
             message: compact[index], reasons: item.reasons, acknowledged: item.acknowledged,
           })),
-        }) }]
-      }
-      if (value.item !== undefined) {
-        return [{ type: 'text', text: JSON.stringify({
-          action: value.action,
-          item: { ...value.item, message: compactMessages([value.item.message as FleetMessage])[0] },
         }) }]
       }
       return [{ type: 'text', text: JSON.stringify(value) }]

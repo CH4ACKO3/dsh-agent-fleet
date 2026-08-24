@@ -13,6 +13,7 @@ import type {
   AgentDirectory,
   FleetCoordinationEvent,
   FleetMessagePermission,
+  FleetSystemNotificationKind,
   MessageAgent,
   SendMessageInput,
   SendMessageResult,
@@ -336,7 +337,8 @@ export class FleetCollaborationService {
     const notifyMembers = (
       members: readonly string[],
       text: string,
-      kind: 'task_notification' | 'calendar_notification',
+      kind: FleetSystemNotificationKind,
+      coalesceKey: string,
       delivery: 'quiet' | 'wakeup' = 'quiet',
     ): string[] => {
       const delivered: string[] = []
@@ -344,7 +346,7 @@ export class FleetCollaborationService {
         const agentId = memberIdsByName.get(member)
         if (agentId === undefined || agentDirectory.get(agentId) === undefined) continue
         try {
-          messages.send(productivity, { to: `@${agentId}`, text, delivery, kind })
+          messages.sendSystemNotification(agentId, { kind, text, delivery, coalesceKey })
           delivered.push(member)
         } catch {}
       }
@@ -354,14 +356,16 @@ export class FleetCollaborationService {
       notifyMembers(
         recipients,
         `[Fleet task due] ${task.title} (${task.id})`,
-        'task_notification',
+        'task_notice',
+        `task:${task.id}`,
         'wakeup',
       ))
     const scheduler = new FleetScheduler(memberDirectory, agentId => canManage(agentId, 'schedule'), (task, recipients) =>
       notifyMembers(
         recipients,
         `[Fleet schedule due] ${task.title}\n${task.instructions}`.trim(),
-        'task_notification',
+        'schedule_notice',
+        `schedule:${task.id}`,
         'wakeup',
       ))
     const calendar = new FleetCalendar(memberDirectory, event => {
@@ -404,7 +408,8 @@ export class FleetCollaborationService {
           notifyMembers(
             recipients,
             `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`,
-            'task_notification',
+            'task_notice',
+            `task:${event.task.id}`,
             event.action === 'created' || event.action === 'completed' ? 'wakeup' : 'quiet',
           )
         }
@@ -415,14 +420,20 @@ export class FleetCollaborationService {
           notifyMembers(
             event.task.assignees.filter(member => member !== event.actor),
             `[Fleet schedule ${event.action}] ${event.task.title} (${event.task.id})`,
-            'task_notification',
+            'schedule_notice',
+            `schedule:${event.task.id}`,
           )
         }
       }),
       calendar.onEvent(event => {
         input.onCalendar?.(event, calendar.state())
         const recipients = [event.event.organizer, ...event.event.attendees].filter(member => member !== event.actor)
-        notifyMembers(recipients, `[Fleet calendar ${event.action}] ${event.event.title} (${event.event.id})`, 'calendar_notification')
+        notifyMembers(
+          recipients,
+          `[Fleet calendar ${event.action}] ${event.event.title} (${event.event.id})`,
+          'calendar_notice',
+          `calendar:${event.event.id}`,
+        )
       }),
     ]
     interface ToolBinding {

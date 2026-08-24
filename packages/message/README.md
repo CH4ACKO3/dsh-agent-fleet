@@ -21,6 +21,11 @@ Team run 时，它们同时进入该 run 的持久协作轨迹。实际投递直
 但不负责保存文件内容。安装 Resources 后，可以先用 `fleet_resource add` 注册普通文件或
 二进制文件，再由接收方用 `fleet_resource get` 解析资源 ID。
 
+运行时指令、恢复提醒、生产力变更和消息提示统一走 `FleetSystemNotification`。它们只管理
+原生 Agent 上下文的静默注入、唤醒、打断与折叠，不进入 Fleet 消息历史，也没有独立已读
+状态；关联真实消息时只记录投递关系，真实消息仍必须通过 `fleet_messages read/text` 读取。
+所有原生 `inject`、`followup` 和 `steer` 分发都收敛在 MessageHub 内部。
+
 Agent 目标可以使用 Core 注册的 Fleet 名称（例如 `@reviewer`）或原生 DSH Agent ID。
 频道使用 `#channel`。与 Core 一起安装时，只有已注册 Fleet 成员能够参与通信，消息中
 同时保留原生 ID 并展示 Fleet 名称；Message 单独安装时仍按原生 Agent ID 工作。

@@ -25,7 +25,6 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -1541,21 +1540,20 @@ export class FleetRunService {
     const roster = record.members
       .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
       .join('\n')
+    const messages = this.requireRuntime(record.id).messages
     for (const member of available) {
-      const prompt = createUserMessage({
-        content: [{
-          type: 'text',
-          text: [
-            `[Fleet work ${work.id}]`,
-            `Team: ${record.name}`,
-            `Your Fleet identity: @${member.displayName ?? member.name}`,
-            `Members:\n${roster}`,
-            `Work:\n${task}`,
-          ].join('\n\n'),
-        }],
-        source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+      messages.sendSystemNotification(member.sessionId, {
+        kind: 'work_start',
+        text: [
+          `[Fleet work ${work.id}]`,
+          `Team: ${record.name}`,
+          `Your Fleet identity: @${member.displayName ?? member.name}`,
+          `Members:\n${roster}`,
+          `Work:\n${task}`,
+        ].join('\n\n'),
+        delivery: 'wakeup',
+        coalesceKey: `work-start:${work.id}`,
       })
-      this.core.followup(this.runtimeMemberName(record.id, member.name), prompt)
     }
     return this.describeRecord(running)
   }
@@ -1779,31 +1777,28 @@ export class FleetRunService {
           }).inbox
           if (inbox !== undefined && inbox.nextTurn.length > 0) continue
           if (inbox !== undefined && inbox.nextStep.length > 0) {
-            this.core.followup(this.runtimeMemberName(record.id, member.name), createUserMessage({
-              content: [{
-                type: 'text',
-                text: `[Fleet work ${record.work.id} resumed.] Continue the pending Fleet work already in your inbox and re-establish peer coordination.`,
-              }],
-              source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
-            }))
+            runtime.messages.sendSystemNotification(member.sessionId, {
+              kind: 'work_resume',
+              text: `[Fleet work ${record.work.id} resumed.] Continue the pending Fleet work already in your inbox and re-establish peer coordination.`,
+              delivery: 'wakeup',
+              coalesceKey: `work-resume:${record.work.id}`,
+            })
             continue
           }
-          const recovery = createUserMessage({
-            content: [{
-              type: 'text',
-              text: [
-                `[Fleet work ${record.work.id} resumed after a process restart.]`,
-                `Your Fleet identity: @${member.displayName ?? member.name}`,
-                `Members:\n${roster}`,
-                'Your persisted Session context is available. Inspect current Fleet Channels, Meetings, Votes, Team resource files, and resource references before continuing.',
-                'Previous advisory work claims were released by the restart; declare your current paths again before editing.',
-                'The previous turn may have been interrupted; verify external side effects before retrying any tool action.',
-                `Work:\n${task}`,
-              ].join('\n\n'),
-            }],
-            source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+          runtime.messages.sendSystemNotification(member.sessionId, {
+            kind: 'work_resume',
+            text: [
+              `[Fleet work ${record.work.id} resumed after a process restart.]`,
+              `Your Fleet identity: @${member.displayName ?? member.name}`,
+              `Members:\n${roster}`,
+              'Your persisted Session context is available. Inspect current Fleet Channels, Meetings, Votes, Team resource files, and resource references before continuing.',
+              'Previous advisory work claims were released by the restart; declare your current paths again before editing.',
+              'The previous turn may have been interrupted; verify external side effects before retrying any tool action.',
+              `Work:\n${task}`,
+            ].join('\n\n'),
+            delivery: 'wakeup',
+            coalesceKey: `work-resume:${record.work.id}`,
           })
-          this.core.followup(this.runtimeMemberName(record.id, member.name), recovery)
         }
       }
 
@@ -2410,10 +2405,12 @@ export class FleetRunService {
       this.appendEvent(record.id, 'member_attached', member)
       if (record.status === 'running' && record.work?.status === 'running') {
         const work = readFileSync(record.work.taskPath, 'utf8').trim()
-        this.core.followup(this.runtimeMemberName(record.id, view.id), createUserMessage({
-          content: [{ type: 'text', text: `[Fleet member joined active work ${record.work.id}.]\n\n${work}` }],
-          source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
-        }))
+        runtime.messages.sendSystemNotification(agent.id, {
+          kind: 'member_joined',
+          text: `[Fleet member joined active work ${record.work.id}.]\n\n${work}`,
+          delivery: 'wakeup',
+          coalesceKey: `member-joined:${record.work.id}`,
+        })
       }
       return structuredClone(member)
     } catch (error) {
@@ -3264,33 +3261,22 @@ export class FleetRunService {
     const record = this.records.get(runId)
     if (record?.status !== 'running' || record.work?.status !== 'running') return
 
-    let wokePending = false
+    let wokeUnread = false
     for (const member of record.members) {
       if (this.networkRecoveries.has(member.sessionId)) continue
       const live = this.liveMember(member)
       if (live?.status !== 'idle') continue
       const pending = runtime.messages.pendingWakeups(member.sessionId)
-      if (pending.length === 0) continue
-      live.followup(createUserMessage({
-        content: [{
-          type: 'text',
-          text: [
-            `[Fleet work ${record.work.id} continuation]`,
-            'You still have a wake-up message that has not been answered in its Fleet conversation.',
-            ...pending.map(message => `- ${message.conversation} ${message.id} from @${message.fromName ?? message.from}`),
-            'Read the conversation, continue the requested work, and post a response in that same conversation.',
-          ].join('\n'),
-        }],
-        source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
-      }))
+      const unread = runtime.messages.followupUnread(live)
+      if (unread === undefined) continue
       this.appendEvent(runId, 'member_continued', {
         member: member.name,
-        reason: 'pending_wakeup',
-        messages: pending.map(message => message.id),
+        reason: pending.length > 0 ? 'pending_wakeup' : 'unread_message',
+        messages: [unread.id],
       })
-      wokePending = true
+      wokeUnread = true
     }
-    if (wokePending) return
+    if (wokeUnread) return
 
     const online = record.members.flatMap(member => {
       const live = this.liveMember(member)
@@ -3303,17 +3289,16 @@ export class FleetRunService {
     )) {
       const agent = this.ctx.agents.get(SessionId(member.sessionId))
       if (agent?.status !== 'idle') continue
-      agent.followup(createUserMessage({
-        content: [{
-          type: 'text',
-          text: [
-            `[Fleet work ${record.work.id} continuation]`,
-            'The Team still has active work, but every member is idle and no explicit wake-up reply is pending.',
-            'Inspect the current Channels, Meetings, Votes, shared files, and member status. Claim the next useful step, ask the relevant peers for review, or propose a finish/blocked Vote with evidence.',
-          ].join('\n\n'),
-        }],
-        source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
-      }))
+      runtime.messages.sendSystemNotification(member.sessionId, {
+        kind: 'team_quiescent',
+        text: [
+          `[Fleet work ${record.work.id} continuation]`,
+          'The Team still has active work, but every member is idle and no explicit wake-up reply is pending.',
+          'Inspect the current Channels, Meetings, Votes, shared files, and member status. Claim the next useful step, ask the relevant peers for review, or propose a finish/blocked Vote with evidence.',
+        ].join('\n\n'),
+        delivery: 'wakeup',
+        coalesceKey: `team-quiescent:${record.work.id}`,
+      })
       this.appendEvent(runId, 'member_continued', {
         member: member.name,
         reason: 'team_quiescent',
@@ -3395,17 +3380,16 @@ export class FleetRunService {
       return
     }
     if (agent.status !== 'idle') return
-    agent.followup(createUserMessage({
-      content: [{
-        type: 'text',
-        text: [
-          `[Fleet work ${record.work.id} network recovery]`,
-          'Your previous model request ended after its transient network retries were exhausted.',
-          'Connectivity may now be available. Re-check the Team state, verify whether any external action already completed, then continue the interrupted work without duplicating irreversible actions.',
-        ].join('\n\n'),
-      }],
-      source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
-    }))
+    this.requireRuntime(record.id).messages.sendSystemNotification(sessionId, {
+      kind: 'network_recovery',
+      text: [
+        `[Fleet work ${record.work.id} network recovery]`,
+        'Your previous model request ended after its transient network retries were exhausted.',
+        'Connectivity may now be available. Re-check the Team state, verify whether any external action already completed, then continue the interrupted work without duplicating irreversible actions.',
+      ].join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `network-recovery:${record.work.id}`,
+    })
     this.appendEvent(record.id, 'member_network_recovery_woken', {
       member: recovery.member,
       sessionId,
@@ -3919,6 +3903,7 @@ export class FleetRunService {
     if (event.type === 'coordination.message') {
       const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'message' }>
       if (coordination.message.from === participant.sessionId) return undefined
+      // Preserve replay behavior for journals written before productivity updates moved to system notifications.
       if (coordination.message.kind === 'task_notification' || coordination.message.kind === 'calendar_notification') {
         return undefined
       }
@@ -4025,6 +4010,9 @@ export class FleetRunService {
       return coordination.meeting.participants.some(sessionId =>
         this.participants(record).some(member => member.name === view.id && member.sessionId === sessionId),
       )
+    }
+    if (coordination.type === 'system_notification') {
+      return this.participants(record).some(member => member.name === view.id && member.sessionId === coordination.agentId)
     }
     if (coordination.type === 'inbox') {
       return this.participants(record).some(member => member.name === view.id && member.sessionId === coordination.agentId)

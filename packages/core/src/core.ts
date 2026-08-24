@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import type {
   AgentRuntime,
@@ -309,14 +308,6 @@ export class FleetCore {
       throw new Error(`only creator ${member.createdBy ?? 'unknown'} can stop Fleet Agent ${member.name}`)
     }
     return this.stopManaged(member.name)
-  }
-
-  inject(name: string, message: UserMessage): void {
-    this.requireLive(this.requireMember(memberName(name)).id).inject(message)
-  }
-
-  followup(name: string, message: UserMessage): void {
-    this.requireLive(this.requireMember(memberName(name)).id).followup(message)
   }
 
   whenIdle(name: string): Promise<void> {
