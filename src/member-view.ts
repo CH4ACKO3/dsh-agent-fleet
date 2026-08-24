@@ -40,6 +40,8 @@ export interface FleetActorProfile {
   readonly prompt: string
   readonly provider?: string
   readonly model?: string
+  readonly reasoningEffort?: string
+  readonly maxTokens?: number
 }
 
 /** Serializable source of truth for one Fleet member's runtime view. */

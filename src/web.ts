@@ -19,7 +19,7 @@ import {
 
 import type { FleetMemberView } from './member-view.js'
 import type { FleetPermissionService } from './authorization/permissions.js'
-import type { FleetRunService, FleetWorkStatus } from './run.js'
+import type { FleetMemberRequestPatch, FleetRunService, FleetWorkStatus } from './run.js'
 import type { FleetSetupService } from './setup.js'
 
 export interface FleetWebProjectInput {
@@ -53,16 +53,17 @@ export interface FleetWebSendInput {
 export interface FleetWebMemberInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'add' | 'update' | 'pause' | 'resume' | 'remove' | 'permissions' | 'reset_permissions'
+  readonly action: 'add' | 'update' | 'configure' | 'pause' | 'resume' | 'remove' | 'permissions' | 'reset_permissions'
   readonly member?: string
   readonly view?: FleetMemberView
+  readonly request?: FleetMemberRequestPatch
   readonly groups?: readonly string[]
 }
 
 export interface FleetWebControlInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'start' | 'finish' | 'pause' | 'resume' | 'close'
+  readonly action: 'start' | 'finish' | 'pause' | 'resume' | 'wake' | 'close'
   readonly taskPath?: string
   readonly status?: Exclude<FleetWorkStatus, 'running'>
   readonly summary?: string
@@ -227,6 +228,11 @@ export class FleetWebRemote extends TypertRemoteService {
         return this.runs.updateMember(caller, {
           runId: teamId, member: required(input.member, 'member'), view: input.view,
         })
+      case 'configure':
+        if (input.request === undefined) throw new Error('member configure requires request')
+        return this.runs.configureMember(caller, {
+          runId: teamId, member: required(input.member, 'member'), request: input.request,
+        })
       case 'pause': return this.runs.pauseMember(caller, teamId, required(input.member, 'member'))
       case 'resume': return this.runs.resumeMember(caller, teamId, required(input.member, 'member'))
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))
@@ -260,6 +266,7 @@ export class FleetWebRemote extends TypertRemoteService {
       case 'resume': return team.status === 'paused' && team.runtimeState === 'active'
         ? this.runs.resumeTeam(caller, team.id)
         : this.runs.resume(caller, { runId: team.id, projectRoot: team.projectRoot })
+      case 'wake': return this.runs.wakeTeam(caller, team.id)
       case 'start': return Promise.resolve(this.runs.start(caller, {
         runId: team.id, projectRoot: team.projectRoot, taskPath: required(input.taskPath, 'taskPath'),
       }))

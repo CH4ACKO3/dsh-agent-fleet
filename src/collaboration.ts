@@ -61,7 +61,7 @@ export interface FleetCollaborationTeam {
   attachMember(agentId: string, view: FleetMemberView): void
   rebindMember(previousAgentId: string, agentId: string, view: FleetMemberView): void
   detachMember(agentId: string): void
-  updateMemberView(view: FleetMemberView): void
+  updateMemberView(view: FleetMemberView, refreshTools?: boolean): void
   removeMemberView(member: string): void
   retireMember(input: {
     readonly agentId: string
@@ -598,10 +598,12 @@ export class FleetCollaborationService {
         memberNamesById.delete(agentId)
         if (memberIdsByName.get(name) === agentId) memberIdsByName.delete(name)
       },
-      updateMemberView: (view) => {
+      updateMemberView: (view, refreshTools = true) => {
         memberViews.set(view.id, structuredClone(view))
         defaultVoterNames.add(view.id)
-        for (const binding of [...toolBindings]) if (binding.member === view.id) refreshBinding(binding)
+        if (refreshTools) {
+          for (const binding of [...toolBindings]) if (binding.member === view.id) refreshBinding(binding)
+        }
       },
       retireMember: ({ agentId, member, successorAgentId, successor }) => {
         messages.retireAgent(agentId, successorAgentId)

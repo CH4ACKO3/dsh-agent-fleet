@@ -14,6 +14,7 @@ import type {
   ResumeRuntimeAgentInput,
   RuntimeAgent,
   RuntimeAgentHandle,
+  RuntimeRequestConfig,
 } from '@dsh-agent-fleet/core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -35,6 +36,7 @@ class FakeAgent implements RuntimeAgent {
   status: 'idle' | 'running' = 'idle'
   readonly options: { readonly provider?: string; readonly model?: string; readonly maxTokens?: number }
   readonly messages: UserMessage[] = []
+  readonly requestConfigurations: Array<RuntimeRequestConfig | undefined> = []
   readonly inbox = {
     nextTurn: [] as UserMessage[],
     nextStep: [] as UserMessage[],
@@ -122,16 +124,25 @@ class FakeRuntime implements AgentRuntime {
 
   create(_owner: RuntimeAgent, input: CreateRuntimeAgentInput): Promise<RuntimeAgentHandle> {
     this.creates.push(input)
-    const agent = this.add(input.id, input.cwd ?? '')
+    const agent = this.add(input.id, input.cwd ?? '', {
+      ...(input.provider === undefined ? {} : { provider: input.provider }),
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+    })
     return Promise.resolve({
       agent,
+      configure: config => { agent.requestConfigurations.push(config) },
       dispose: async () => { this.agents.delete(agent.id) },
     })
   }
 
   resume(_owner: RuntimeAgent, input: ResumeRuntimeAgentInput): Promise<RuntimeAgentHandle> {
     this.resumes.push(input)
-    const agent = this.add(this.resumedIds.get(input.id) ?? input.id, '')
+    const agent = this.add(this.resumedIds.get(input.id) ?? input.id, '', {
+      ...(input.provider === undefined ? {} : { provider: input.provider }),
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+    })
     const pending = this.resumeInboxes.get(input.id)
     if (pending !== undefined) {
       agent.inbox.nextTurn.push(...(pending.nextTurn ?? []))
@@ -139,6 +150,7 @@ class FakeRuntime implements AgentRuntime {
     }
     return Promise.resolve({
       agent,
+      configure: config => { agent.requestConfigurations.push(config) },
       dispose: async () => { this.agents.delete(agent.id) },
     })
   }
@@ -318,6 +330,9 @@ function setup(root: string, options?: {
         }
         return Promise.resolve()
       },
+    },
+    llm: {
+      resolveCallConfig: (config: RuntimeRequestConfig) => Promise.resolve(structuredClone(config)),
     },
     fs: {
       ...containment,
@@ -562,6 +577,89 @@ describe('FleetRunService', () => {
     service.end(launcher as unknown as Agent, 'Team export test complete.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
+  })
+
+  it('hot-configures a running member for its next model step and restores that choice', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      provider: 'provider-old',
+      model: 'model-old',
+    })
+    const leadMember = run.members.find(member => member.name === 'lead')
+    const lead = first.runtime.get(leadMember?.sessionId ?? '')
+    if (leadMember === undefined || lead === undefined) throw new Error('expected live lead member')
+    lead.status = 'running'
+    const createCount = first.runtime.creates.length
+    const resumeCount = first.runtime.resumes.length
+
+    await expect(first.service.configureMember(first.launcher as unknown as Agent, {
+      runId: run.id,
+      member: 'lead',
+      request: {
+        provider: 'provider-new',
+        model: 'model-new',
+        reasoningEffort: 'high',
+        maxTokens: 2_048,
+      },
+    })).resolves.toMatchObject({
+      member: {
+        name: 'lead',
+        sessionId: leadMember.sessionId,
+        provider: 'provider-new',
+        model: 'model-new',
+        reasoningEffort: 'high',
+        maxTokens: 2_048,
+        status: 'running',
+      },
+      request: {
+        provider: 'provider-new', model: 'model-new', reasoningEffort: 'high', maxTokens: 2_048,
+      },
+      effectiveFrom: 'next-model-step',
+    })
+    expect(first.runtime.creates).toHaveLength(createCount)
+    expect(first.runtime.resumes).toHaveLength(resumeCount)
+    expect(lead.requestConfigurations).toEqual([{
+      provider: 'provider-new', model: 'model-new', reasoningEffort: 'high', maxTokens: 2_048,
+    }])
+    expect(first.service.readTrace(run.id, 0, 100).events).toContainEqual(expect.objectContaining({
+      type: 'member_view_updated',
+      data: expect.stringContaining('request_configured'),
+    }))
+
+    lead.completeTurn()
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
+    await second.service.resume(second.launcher as unknown as Agent, { runId: run.id, projectRoot: root })
+    expect(second.runtime.resumes.find(input => input.id === leadMember.sessionId)).toMatchObject({
+      provider: 'provider-new', model: 'model-new', reasoningEffort: 'high', maxTokens: 2_048,
+    })
+    const resumedLead = second.runtime.get(leadMember.sessionId)
+    if (resumedLead === undefined) throw new Error('expected resumed lead member')
+    resumedLead.status = 'running'
+    await expect(second.service.configureMember(second.launcher as unknown as Agent, {
+      runId: run.id,
+      member: 'lead',
+      request: { reasoningEffort: null, maxTokens: null },
+    })).resolves.toMatchObject({
+      request: { provider: 'provider-new', model: 'model-new' },
+      effectiveFrom: 'next-model-step',
+    })
+    expect(resumedLead.requestConfigurations.at(-1)).toEqual({
+      provider: 'provider-new', model: 'model-new',
+    })
+    second.service.end(second.launcher as unknown as Agent, 'Hot configuration verified.', run.id)
+    await second.service.wait(run.id, 1_000)
+    second.disconnect()
   })
 
   it('exports and imports a paused Team archive with Sessions, shared files, workspace, and plugin data', async () => {
@@ -2381,13 +2479,14 @@ describe('FleetRunService', () => {
   })
 
   it('pauses and resumes a Team without resuming members that were already paused individually', async () => {
-    const { root, configPath } = fixture()
+    const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
       configPath,
       projectRoot: root,
       requiredPaths: [],
     })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
 
     await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
     const paused = await service.pauseTeam(launcher as unknown as Agent, run.id)
@@ -2405,17 +2504,50 @@ describe('FleetRunService', () => {
 
     const resumed = await service.resumeTeam(launcher as unknown as Agent, run.id)
     expect(resumed).toMatchObject({
-      status: 'idle',
+      status: 'running',
       teamPausedMembers: [],
       members: [
         expect.objectContaining({ name: 'lead', status: 'idle' }),
         expect.objectContaining({ name: 'reviewer', status: 'paused' }),
       ],
     })
-    expect(runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')).toBeDefined()
+    const resumedLead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    expect(resumedLead?.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('Team resumed after a pause') }),
+    ])
     expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
 
     service.end(launcher as unknown as Agent, 'Team pause controls verified.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('explicitly wakes every online member without interrupting the active work', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    const leadMessages = lead.messages.length
+    const reviewerMessages = reviewer.messages.length
+
+    expect(service.wakeTeam(launcher as unknown as Agent, run.id)).toMatchObject({ status: 'running' })
+    expect(lead.messages).toHaveLength(leadMessages + 1)
+    expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
+    expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
+      type: 'team_woken',
+      data: expect.stringContaining('"reason":"manual"'),
+    }))
+
+    service.finish(launcher as unknown as Agent, 'cancelled', 'Team wake verified.', run.id)
+    await service.wait(run.id, 1_000)
+    service.end(launcher as unknown as Agent, 'Wake test Team closed.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })

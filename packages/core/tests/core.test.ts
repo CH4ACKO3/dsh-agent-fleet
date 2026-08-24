@@ -9,6 +9,7 @@ import type {
   RotateRuntimeAgentInput,
   RuntimeAgent,
   RuntimeAgentHandle,
+  RuntimeRequestConfig,
 } from '../src/types.js'
 
 class FakeAgent implements RuntimeAgent {
@@ -16,6 +17,7 @@ class FakeAgent implements RuntimeAgent {
   readonly cancellations: Array<{ readonly kind: 'user' | 'parent' }> = []
   readonly injected: UserMessage[] = []
   readonly followedUp: UserMessage[] = []
+  readonly configurations: Array<RuntimeRequestConfig | undefined> = []
 
   constructor(readonly id: string) {}
 
@@ -57,6 +59,7 @@ class FakeRuntime implements AgentRuntime {
     const agent = this.add(input.id)
     return Promise.resolve({
       agent,
+      configure: config => { agent.configurations.push(config) },
       dispose: async () => {
         this.agents.delete(agent.id)
       },
@@ -198,6 +201,27 @@ describe('FleetCore', () => {
     expect(() => core.cancel(reviewer, 'worker')).toThrow('cannot cancel')
     expect(core.cancel(lead, 'worker')).toMatchObject({ name: 'worker' })
     expect(worker.cancellations).toEqual([{ kind: 'parent' }])
+  })
+
+  it('updates a managed Agent request configuration without recreating it', async () => {
+    const { core, runtime, lead } = setup()
+    const created = await core.create(lead, { name: 'worker', role: 'Worker' })
+    const worker = runtime.get(created.id)
+    if (worker === undefined) throw new Error('expected created worker')
+
+    core.configureManaged('worker', {
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      maxTokens: 2_048,
+    })
+
+    expect(runtime.creates).toHaveLength(1)
+    expect(core.get('worker')).toMatchObject({ id: created.id, status: 'idle' })
+    expect(worker.configurations).toEqual([{
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      maxTokens: 2_048,
+    }])
   })
 
   it('rebinds a managed member after an archive rotation', async () => {

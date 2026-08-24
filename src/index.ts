@@ -73,7 +73,7 @@ async function installFleetWebNotifications(ctx: FleetWebBindingContext, runs: F
 
 export function apply(ctx: Context): void {
   ctx.plugin(Core)
-  ctx.inject(['fleetCore', 'agents', 'sessions', 'tools', 'fs'], (scope) => {
+  ctx.inject(['fleetCore', 'agents', 'sessions', 'tools', 'fs', 'llm'], (scope) => {
     const archives = new FleetArchiveRegistry()
     const authorization = new FleetAuthorizationService()
     const configuration = new FleetConfigurationRegistry()

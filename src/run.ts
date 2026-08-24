@@ -25,11 +25,12 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
-import type { FleetCore } from '@dsh-agent-fleet/core'
+import type { FleetCore, RuntimeRequestConfig } from '@dsh-agent-fleet/core'
 import type {
   FleetMemberStatusBoard,
   FleetMemberStatusEvent,
@@ -109,6 +110,8 @@ export interface FleetRunMember {
   readonly sessionId: string
   readonly provider?: string
   readonly model?: string
+  readonly reasoningEffort?: string
+  readonly maxTokens?: number
   readonly status?: 'idle' | 'running' | 'waiting' | 'error' | 'offline' | 'paused' | 'unknown'
 }
 
@@ -679,6 +682,25 @@ export interface UpdateFleetMemberInput {
   readonly view: FleetMemberView
 }
 
+export interface FleetMemberRequestPatch {
+  readonly provider?: string
+  readonly model?: string
+  readonly reasoningEffort?: string | null
+  readonly maxTokens?: number | null
+}
+
+export interface ConfigureFleetMemberInput {
+  readonly runId: string
+  readonly member: string
+  readonly request: FleetMemberRequestPatch
+}
+
+export interface FleetMemberRequestConfiguration {
+  readonly member: FleetRunMember
+  readonly request: RuntimeRequestConfig
+  readonly effectiveFrom: 'next-model-step'
+}
+
 const TERMINAL = new Set<FleetRunStatus>(['closed', 'failed'])
 const MAX_ASSISTANT_MESSAGE_LENGTH = 16_000
 const TEAM_PROJECTION_MESSAGE_LIMIT = 500
@@ -995,9 +1017,14 @@ function normalizedMemberView(value: FleetMemberView, label = 'member'): FleetMe
   const color = memberColor(raw, label)
   const provider = optionalText(raw.provider, `${label}.provider`)
   const model = optionalText(raw.model, `${label}.model`)
+  const reasoningEffort = optionalText(raw.reasoningEffort, `${label}.reasoningEffort`)
+  const maxTokens = raw.maxTokens
   const id = text(raw.id, `${label}.id`)
   if (raw.canVote !== undefined && typeof raw.canVote !== 'boolean') {
     throw new Error(`${label}.canVote must be a boolean`)
+  }
+  if (maxTokens !== undefined && (!Number.isSafeInteger(maxTokens) || Number(maxTokens) <= 0)) {
+    throw new Error(`${label}.maxTokens must be a positive integer`)
   }
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) throw new Error(`${label}.id must use lower-kebab-case`)
   return {
@@ -1009,6 +1036,8 @@ function normalizedMemberView(value: FleetMemberView, label = 'member'): FleetMe
     prompt: optionalText(raw.prompt, `${label}.prompt`),
     ...(provider.length === 0 ? {} : { provider }),
     ...(model.length === 0 ? {} : { model }),
+    ...(reasoningEffort.length === 0 ? {} : { reasoningEffort }),
+    ...(maxTokens === undefined ? {} : { maxTokens: Number(maxTokens) }),
     ...(raw.canVote === undefined ? {} : { canVote: raw.canVote }),
     toolGroups: memberToolGroups(raw.toolGroups, `${label}.toolGroups`),
     permissions: memberPermissions(raw.permissions, `${label}.permissions`),
@@ -1515,6 +1544,7 @@ export class FleetRunService {
       for (const member of template.members) {
         const memberProvider = member.provider ?? input.provider
         const memberModel = member.model ?? input.model
+        const memberMaxTokens = member.maxTokens ?? input.maxTokens
         const agent = await this.core.create(launcher, {
           name: this.runtimeMemberName(record.id, member.id),
           archiveId: this.memberArchiveId(record.id, member.id),
@@ -1525,7 +1555,10 @@ export class FleetRunService {
           persona: persona(template, member),
           ...(memberProvider === undefined ? {} : { provider: memberProvider }),
           ...(memberModel === undefined ? {} : { model: memberModel }),
-          ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+          ...(member.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: ReasoningEffortId(member.reasoningEffort) }),
+          ...(memberMaxTokens === undefined ? {} : { maxTokens: memberMaxTokens }),
           setup: childCtx => installMemberTools(childCtx, runtime, member.id),
         })
         created.push(member.id)
@@ -1759,6 +1792,10 @@ export class FleetRunService {
           ...agentOptions,
           ...(memberTemplate.provider === undefined ? {} : { provider: memberTemplate.provider }),
           ...(memberTemplate.model === undefined ? {} : { model: memberTemplate.model }),
+          ...(memberTemplate.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: ReasoningEffortId(memberTemplate.reasoningEffort) }),
+          ...(memberTemplate.maxTokens === undefined ? {} : { maxTokens: memberTemplate.maxTokens }),
         }
         const resumed = await this.core.resume(launcher, {
           id: member.sessionId,
@@ -1796,6 +1833,10 @@ export class FleetRunService {
             ...agentOptions,
             ...(memberTemplate.provider === undefined ? {} : { provider: memberTemplate.provider }),
             ...(memberTemplate.model === undefined ? {} : { model: memberTemplate.model }),
+            ...(memberTemplate.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: ReasoningEffortId(memberTemplate.reasoningEffort) }),
+            ...(memberTemplate.maxTokens === undefined ? {} : { maxTokens: memberTemplate.maxTokens }),
           }
           const agent = await this.core.create(launcher, {
             name: this.runtimeMemberName(record.id, memberTemplate.id),
@@ -2058,6 +2099,8 @@ export class FleetRunService {
       prompt: view.prompt,
       ...(view.provider === undefined ? {} : { provider: view.provider }),
       ...(view.model === undefined ? {} : { model: view.model }),
+      ...(view.reasoningEffort === undefined ? {} : { reasoningEffort: view.reasoningEffort }),
+      ...(view.maxTokens === undefined ? {} : { maxTokens: view.maxTokens }),
       toolGroups: [...view.toolGroups],
       permissions: [...view.permissions],
       contacts: structuredClone(view.contacts),
@@ -2467,8 +2510,6 @@ export class FleetRunService {
     validateMemberContacts([...this.effectiveMemberViews(record), view], new Set(template.channels.map(channel => channel.id)),
       record.assistants.map(assistant => assistant.view.id))
     const effectiveTemplate: TeamTemplate = { ...template, members: [...this.effectiveMemberViews(record), view] }
-    const provider = view.provider ?? record.agentOptions?.provider
-    const model = view.model ?? record.agentOptions?.model
     runtime.updateMemberView(view)
     this.appendEvent(record.id, 'member_view_added', { view })
     let created = false
@@ -2481,9 +2522,7 @@ export class FleetRunService {
         role: view.role,
         cwd: record.projectRoot,
         persona: persona(effectiveTemplate, view),
-        ...(provider === undefined ? {} : { provider }),
-        ...(model === undefined ? {} : { model }),
-        ...(record.agentOptions?.maxTokens === undefined ? {} : { maxTokens: record.agentOptions.maxTokens }),
+        ...this.memberRuntimeOptions(record, view),
         setup: childCtx => installMemberTools(childCtx, runtime, view.id),
       })
       created = true
@@ -2557,8 +2596,6 @@ export class FleetRunService {
     }
     if (this.core.get(runtimeName).status === 'running') throw new Error(`Fleet member ${member.name} must be idle before updating`)
     const runtime = this.requireRuntime(record.id)
-    const provider = view.provider ?? record.agentOptions?.provider
-    const model = view.model ?? record.agentOptions?.model
     this.appendEvent(record.id, 'member_view_updated', { view })
     runtime.updateMemberView(view)
     const live = this.ctx.agents.get(SessionId(member.sessionId))
@@ -2574,9 +2611,7 @@ export class FleetRunService {
         color: view.color ?? member.color ?? generateFleetMemberColor(),
         role: view.role,
         persona: persona(effectiveTemplate, view),
-        ...(provider === undefined ? {} : { provider }),
-        ...(model === undefined ? {} : { model }),
-        ...(record.agentOptions?.maxTokens === undefined ? {} : { maxTokens: record.agentOptions.maxTokens }),
+        ...this.memberRuntimeOptions(record, view),
         setup: childCtx => installMemberTools(childCtx, runtime, view.id),
       })
       if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
@@ -2605,6 +2640,7 @@ export class FleetRunService {
           color: member.color ?? currentView.color ?? generateFleetMemberColor(),
           role: currentView.role,
           persona: persona({ ...template, members: this.effectiveMemberViews(record) }, currentView),
+          ...this.memberRuntimeOptions(record, currentView),
           setup: childCtx => installMemberTools(childCtx, runtime, currentView.id),
         })
         if (restored.id === member.sessionId) runtime.attachMember(restored.id, currentView)
@@ -2631,6 +2667,85 @@ export class FleetRunService {
       }
       throw error
     }
+  }
+
+  async configureMember(
+    caller: Agent,
+    input: ConfigureFleetMemberInput,
+  ): Promise<FleetMemberRequestConfiguration> {
+    const record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const member = record.members.find(candidate => candidate.name === input.member)
+    if (member === undefined) throw new Error(`unknown Fleet member ${input.member}`)
+    if (input.request.provider === undefined
+      && input.request.model === undefined
+      && input.request.reasoningEffort === undefined
+      && input.request.maxTokens === undefined) {
+      throw new Error('Fleet member request configuration cannot be empty')
+    }
+    const currentView = this.effectiveMemberViews(record).find(view => view.id === member.name)
+    if (currentView === undefined) throw new Error(`missing Fleet member view ${member.name}`)
+    const current = this.memberRequestConfig(record, member, currentView)
+    const provider = input.request.provider === undefined ? current?.provider : input.request.provider.trim()
+    const model = input.request.model === undefined ? current?.model : input.request.model.trim()
+    if (provider === undefined || provider.length === 0) throw new Error('Fleet member request provider is required')
+    if (model === undefined || model.length === 0) throw new Error('Fleet member request model is required')
+    let reasoningEffort = current?.reasoningEffort
+    if (input.request.reasoningEffort === null) reasoningEffort = undefined
+    else if (input.request.reasoningEffort !== undefined) {
+      const effort = input.request.reasoningEffort.trim()
+      if (effort.length === 0) throw new Error('Fleet member request reasoningEffort cannot be empty')
+      reasoningEffort = ReasoningEffortId(effort)
+    }
+    const maxTokens = input.request.maxTokens === undefined
+      ? current?.maxTokens
+      : input.request.maxTokens === null
+        ? undefined
+        : input.request.maxTokens
+    if (maxTokens !== undefined && (!Number.isSafeInteger(maxTokens) || maxTokens <= 0)) {
+      throw new Error('Fleet member request maxTokens must be a positive integer')
+    }
+    await this.ctx.llm.resolveCallConfig({
+      provider,
+      model,
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+    })
+    const request: RuntimeRequestConfig = {
+      provider,
+      model,
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+    }
+    const {
+      provider: _currentProvider,
+      model: _currentModel,
+      reasoningEffort: _currentReasoningEffort,
+      maxTokens: _currentMaxTokens,
+      ...baseView
+    } = currentView
+    const view = normalizedMemberView({
+      ...baseView,
+      provider: request.provider,
+      model: request.model,
+      ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+      ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }),
+    })
+    const runtime = this.collaboration.get(record.id)
+    const runtimeName = this.runtimeMemberName(record.id, member.name)
+    const managed = this.core.list().some(candidate => candidate.name === runtimeName && candidate.managed)
+    if (managed) this.core.configureManaged(runtimeName, request)
+    try {
+      runtime?.updateMemberView(view, false)
+      this.appendEvent(record.id, 'member_view_updated', { view, reason: 'request_configured' })
+    } catch (error) {
+      runtime?.updateMemberView(currentView, false)
+      if (managed) this.core.configureManaged(runtimeName, current)
+      throw error
+    }
+    const updated = this.status(record.id).members.find(candidate => candidate.name === member.name)
+    if (updated === undefined) throw new Error(`Fleet member ${member.name} disappeared while configuring its request`)
+    return { member: updated, request, effectiveFrom: 'next-model-step' }
   }
 
   async removeMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
@@ -2700,8 +2815,42 @@ export class FleetRunService {
     const resumed = this.replaceRecord(record.id, { status, teamPausedMembers: [] })
     this.requireRuntime(record.id).activateProductivity()
     this.appendEvent(record.id, 'team_status', { status, resumedFrom: 'paused' })
+    if (status === 'running') this.wakeTeamMembers(resumed, 'team_resumed')
     this.notify(resumed)
     return this.describeRecord(resumed)
+  }
+
+  wakeTeam(caller: Agent, runId?: string): FleetRunRecord {
+    const record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    if (record.status !== 'running' || record.work?.status !== 'running') {
+      throw new Error(`Fleet team ${record.id} has no active work to wake`)
+    }
+    this.wakeTeamMembers(record, 'manual')
+    return this.describeRecord(record)
+  }
+
+  private wakeTeamMembers(record: FleetRunRecord, reason: 'manual' | 'team_resumed'): void {
+    if (record.status !== 'running' || record.work?.status !== 'running') return
+    const runtime = this.requireRuntime(record.id)
+    const members: string[] = []
+    for (const member of record.members.filter(candidate => this.memberCanReply(candidate))) {
+      this.clearNetworkRecovery(member.sessionId)
+      runtime.messages.sendSystemNotification(member.sessionId, {
+        kind: 'team_wake',
+        text: [
+          `[Fleet work ${record.work.id} team wake-up]`,
+          reason === 'team_resumed'
+            ? 'The Team resumed after a pause. Continue the active work from the latest persisted Team state.'
+            : 'The Team was explicitly woken. Continue the active work from the latest Team state.',
+          'Inspect relevant Channels, Meetings, Votes, shared files, and member status before acting. Verify external side effects before retrying interrupted work.',
+        ].join('\n\n'),
+        delivery: 'wakeup',
+        coalesceKey: `team-wake:${record.work.id}`,
+      })
+      members.push(member.name)
+    }
+    this.appendEvent(record.id, 'team_woken', { reason, members })
   }
 
   async pauseMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
@@ -2767,8 +2916,6 @@ export class FleetRunService {
       await this.core.stopManaged(runtimeName)
       runtime.detachMember(member.sessionId)
     }
-    const provider = view.provider ?? record.agentOptions?.provider
-    const model = view.model ?? record.agentOptions?.model
     const resumed = await this.core.resume(caller, {
       id: member.sessionId,
       name: runtimeName,
@@ -2777,9 +2924,7 @@ export class FleetRunService {
       color: view.color ?? member.color ?? generateFleetMemberColor(),
       role: view.role,
       persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
-      ...(provider === undefined ? {} : { provider }),
-      ...(model === undefined ? {} : { model }),
-      ...(record.agentOptions?.maxTokens === undefined ? {} : { maxTokens: record.agentOptions.maxTokens }),
+      ...this.memberRuntimeOptions(record, view),
       setup: childCtx => installMemberTools(childCtx, runtime, view.id),
     })
     if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
@@ -4370,12 +4515,34 @@ export class FleetRunService {
 
   private describeRecord(record: FleetRunRecord): FleetRunRecord {
     const live = new Map(this.core.list().map(member => [member.name, member.status]))
+    const activeViews = this.collaboration.get(record.id)?.memberViews
+    const cachedViews = this.memberViewSnapshots.get(record.id)
+    const views = new Map(
+      activeViews === undefined
+        ? (cachedViews ?? []).map(view => [view.id, view])
+        : [...activeViews.entries()],
+    )
     return recordSnapshot({
       ...record,
       runtimeState: this.dormantRunIds.has(record.id) ? 'dormant' : 'active',
       members: record.members.map(member => {
         const nativeStatus = live.get(this.runtimeMemberName(record.id, member.name))
-        const liveAgent = this.ctx.agents.get(SessionId(member.sessionId))
+        const view = views.get(member.name)
+        const liveAgent = this.liveMember(member)
+        const request = view === undefined
+          ? {
+              ...((member.provider ?? liveAgent?.options.provider) === undefined
+                ? {}
+                : { provider: member.provider ?? liveAgent?.options.provider }),
+              ...((member.model ?? liveAgent?.options.model) === undefined
+                ? {}
+                : { model: member.model ?? liveAgent?.options.model }),
+              ...(member.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(member.reasoningEffort) }),
+              ...((member.maxTokens ?? liveAgent?.options.maxTokens) === undefined
+                ? {}
+                : { maxTokens: member.maxTokens ?? liveAgent?.options.maxTokens }),
+            }
+          : this.memberRequestConfig(record, member, view)
         const status = member.status === 'paused' || member.status === 'offline'
           ? member.status
           : this.abnormalSessionIds.has(member.sessionId)
@@ -4385,8 +4552,10 @@ export class FleetRunService {
               : nativeStatus ?? (isTerminal(record.status) ? 'offline' : 'unknown')
         return {
           ...member,
-          ...(liveAgent?.options.provider === undefined ? {} : { provider: liveAgent.options.provider }),
-          ...(liveAgent?.options.model === undefined ? {} : { model: liveAgent.options.model }),
+          ...(request?.provider === undefined ? {} : { provider: request.provider }),
+          ...(request?.model === undefined ? {} : { model: request.model }),
+          ...(request?.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+          ...(request?.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }),
           status,
         }
       }),
@@ -4517,6 +4686,40 @@ export class FleetRunService {
   private liveMember(member: FleetRunMember): Agent | undefined {
     if (member.status === 'paused') return undefined
     return this.ctx.agents.get(SessionId(member.sessionId))
+  }
+
+  private memberRuntimeOptions(record: FleetRunRecord, view: FleetMemberView) {
+    const provider = view.provider ?? record.agentOptions?.provider
+    const model = view.model ?? record.agentOptions?.model
+    const maxTokens = view.maxTokens ?? record.agentOptions?.maxTokens
+    return {
+      ...(provider === undefined ? {} : { provider }),
+      ...(model === undefined ? {} : { model }),
+      ...(view.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: ReasoningEffortId(view.reasoningEffort) }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+    }
+  }
+
+  private memberRequestConfig(
+    record: FleetRunRecord,
+    member: FleetRunMember,
+    view: FleetMemberView,
+  ): RuntimeRequestConfig | undefined {
+    const configured = this.memberRuntimeOptions(record, view)
+    const live = this.liveMember(member)
+    const provider = configured.provider ?? live?.options.provider
+    const model = configured.model ?? live?.options.model
+    if (provider === undefined || model === undefined) return undefined
+    return {
+      provider,
+      model,
+      ...(configured.reasoningEffort === undefined ? {} : { reasoningEffort: configured.reasoningEffort }),
+      ...(configured.maxTokens === undefined
+        ? live?.options.maxTokens === undefined ? {} : { maxTokens: live.options.maxTokens }
+        : { maxTokens: configured.maxTokens }),
+    }
   }
 
   private memberCanReply(member: FleetRunMember): boolean {
@@ -4850,6 +5053,8 @@ const RUN_MEMBER_SCHEMA = {
     sessionId: { type: 'string', required: true },
     provider: { type: 'string' },
     model: { type: 'string' },
+    reasoningEffort: { type: 'string' },
+    maxTokens: { type: 'integer' },
     status: { type: 'string', enum: ['idle', 'running', 'waiting', 'error', 'offline', 'paused', 'unknown'] },
   },
 } as const
@@ -4866,6 +5071,8 @@ const MEMBER_VIEW_SCHEMA = {
     prompt: { type: 'string', required: true },
     provider: { type: 'string' },
     model: { type: 'string' },
+    reasoningEffort: { type: 'string' },
+    maxTokens: { type: 'integer' },
     canVote: { type: 'boolean' },
     toolGroups: { type: 'array', required: true, items: { type: 'string' } },
     permissions: { type: 'array', required: true, items: { type: 'string' } },
@@ -4961,7 +5168,7 @@ const RUN_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'wait', 'finish', 'close'] },
+    action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'wake', 'list', 'status', 'wait', 'finish', 'close'] },
     runs: { type: 'array', items: RUN_SCHEMA },
     run: RUN_SCHEMA,
   },
@@ -5076,10 +5283,21 @@ const ACTIVITY_RESULT_SCHEMA = {
 
 const MEMBER_MANAGEMENT_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
-    action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'pause', 'resume', 'remove'] },
+    action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'configure', 'pause', 'resume', 'remove'] },
     run: RUN_SCHEMA, member: RUN_MEMBER_SCHEMA,
     members: { type: 'array', items: RUN_MEMBER_SCHEMA },
     views: { type: 'array', items: MEMBER_VIEW_SCHEMA },
+    request: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        provider: { type: 'string', required: true },
+        model: { type: 'string', required: true },
+        reasoningEffort: { type: 'string' },
+        maxTokens: { type: 'integer' },
+      },
+    },
+    effectiveFrom: { type: 'string', const: 'next-model-step' },
   },
 } as const
 
@@ -5146,9 +5364,9 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_run',
-    description: 'Control a persistent Fleet Team lifecycle: create it, pause or resume its member runtimes, submit work, poll a short wait slice, directly finish current work, or close the Team.',
+    description: 'Control a persistent Fleet Team lifecycle: create it, pause, resume or wake its member runtimes, submit work, poll a short wait slice, directly finish current work, or close the Team.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'wait', 'finish', 'close'] },
+      action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'wake', 'list', 'status', 'wait', 'finish', 'close'] },
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team where supported.' },
       team_config: { type: 'string', description: 'Team JSON path required for create.' },
       task: { type: 'string', description: 'Work Markdown path required for start.' },
@@ -5191,6 +5409,9 @@ export function installRunTools(
       }
       if (args.action === 'pause') {
         return { action: 'pause' as const, run: await service.pauseTeam(caller, args.run_id) }
+      }
+      if (args.action === 'wake') {
+        return { action: 'wake' as const, run: service.wakeTeam(caller, args.run_id) }
       }
       if (args.action === 'resume') {
         if (args.run_id === undefined) throw new Error('fleet_run resume requires run_id')
@@ -5450,12 +5671,23 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_member',
-    description: 'List or dynamically add, update, pause, resume, and remove formal Fleet Team members. Updates restart the idle DSH Agent with the same persisted Session and new member view.',
+    description: 'List or dynamically add, update, configure, pause, resume, and remove formal Fleet Team members. Configure changes only the next model step without pausing or restarting the member; structural updates restart an idle member with its persisted Session.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'pause', 'resume', 'remove'] },
+      action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'configure', 'pause', 'resume', 'remove'] },
       run_id: { type: 'string', description: 'Team id.' },
-      member: { type: 'string', description: 'Member id required for update, pause, resume, or remove.' },
+      member: { type: 'string', description: 'Member id required for update, configure, pause, resume, or remove.' },
       view: { ...MEMBER_VIEW_SCHEMA, description: 'Complete member view required for add or update.' },
+      request: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Partial next-model-step request configuration. Null clears reasoning_effort or max_tokens.',
+        properties: {
+          provider: { type: 'string' },
+          model: { type: 'string' },
+          reasoning_effort: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          max_tokens: { oneOf: [{ type: 'integer' }, { type: 'null' }] },
+        },
+      },
     },
     output: jsonOutput(MEMBER_MANAGEMENT_RESULT_SCHEMA),
     async execute(args, exec) {
@@ -5476,6 +5708,22 @@ export function installRunTools(
         return { action: 'add' as const, run: service.status(record.id), member }
       }
       if (args.member === undefined) throw new Error(`fleet_member ${args.action} requires member`)
+      if (args.action === 'configure') {
+        if (args.request === undefined) throw new Error('fleet_member configure requires request')
+        const configured = await service.configureMember(caller, {
+          runId: record.id,
+          member: args.member,
+          request: {
+            ...(args.request.provider === undefined ? {} : { provider: args.request.provider }),
+            ...(args.request.model === undefined ? {} : { model: args.request.model }),
+            ...(args.request.reasoning_effort === undefined
+              ? {}
+              : { reasoningEffort: args.request.reasoning_effort }),
+            ...(args.request.max_tokens === undefined ? {} : { maxTokens: args.request.max_tokens }),
+          },
+        })
+        return { action: 'configure' as const, run: service.status(record.id), ...configured }
+      }
       if (args.action === 'pause' || args.action === 'resume') {
         const member = args.action === 'pause'
           ? await service.pauseMember(caller, record.id, args.member)

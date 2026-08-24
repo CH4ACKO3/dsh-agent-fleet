@@ -111,6 +111,17 @@ function optionalBooleanField(
   return { [key]: value }
 }
 
+function optionalPositiveIntegerField(
+  source: Record<string, unknown>,
+  key: string,
+  label: string,
+): Record<string, number> {
+  const value = source[key]
+  if (value === undefined) return {}
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) throw new Error(`${label} must be a positive integer`)
+  return { [key]: Number(value) }
+}
+
 function normalizeMember(
   value: unknown,
   index: number,
@@ -131,6 +142,8 @@ function normalizeMember(
     prompt: optionalText(member.prompt, `members[${index}].prompt`),
     ...optionalStringField(member, 'provider', `members[${index}].provider`),
     ...optionalStringField(member, 'model', `members[${index}].model`),
+    ...optionalStringField(member, 'reasoningEffort', `members[${index}].reasoningEffort`),
+    ...optionalPositiveIntegerField(member, 'maxTokens', `members[${index}].maxTokens`),
     ...optionalBooleanField(member, 'canVote', `members[${index}].canVote`),
     ...(member.toolGroups === undefined ? {} : { toolGroups: structuredClone(member.toolGroups) }),
     ...(member.permissions === undefined ? {} : { permissions: structuredClone(member.permissions) }),
