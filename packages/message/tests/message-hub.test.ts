@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 import { MessageHub } from '../src/hub.js'
 import { installMessageTools } from '../src/index.js'
@@ -103,7 +102,7 @@ describe('MessageHub', () => {
     })
   })
 
-  it('records read receipts only after an explicit read or a response to a full delivery', () => {
+  it('records read progress only for text returned by explicit read operations', () => {
     const { hub, lead, reviewer, qa } = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []
     hub.onEvent(event => { events.push(event) })
@@ -121,7 +120,7 @@ describe('MessageHub', () => {
       contextMessageId: reviewer.inbox.nextStep[0]?.id,
     })
     expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: direct.messageId,
+      type: 'inbox', action: 'read', agentId: reviewer.id, messageId: direct.messageId,
     }))
     const restored = setup()
     restored.hub.restore(events)
@@ -129,15 +128,23 @@ describe('MessageHub', () => {
       acknowledged: false,
       message: expect.objectContaining({ id: direct.messageId }),
     }))
+    expect(hub.search(reviewer, { query: 'interface boundary' })).toHaveLength(1)
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: 'inbox', action: 'read', agentId: reviewer.id, messageId: direct.messageId,
+    }))
 
     hub.send(reviewer, {
       to: '@lead',
       text: 'Confirmed.',
       delivery: 'quiet',
     })
-    expect(events).toContainEqual({
-      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: direct.messageId,
-    })
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: 'inbox', action: 'read', agentId: reviewer.id, messageId: direct.messageId,
+    }))
+    expect(hub.inbox(reviewer)).toContainEqual(expect.objectContaining({
+      acknowledged: false,
+      message: expect.objectContaining({ id: direct.messageId }),
+    }))
 
     const channel = hub.send(lead, {
       to: '#general',
@@ -145,86 +152,71 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'inbox', action: 'acknowledged', agentId: qa.id, messageId: channel.messageId,
+      type: 'inbox', action: 'read', agentId: qa.id, messageId: channel.messageId,
     }))
     hub.read(qa, { conversation: '#general' })
     expect(events).toContainEqual({
-      type: 'inbox', action: 'acknowledged', agentId: qa.id, messageId: channel.messageId,
+      type: 'inbox', action: 'read', agentId: qa.id, messageId: channel.messageId,
+      through: 'General progress update.'.length,
     })
   })
 
-  it('acknowledges an entered delivery only after one complete model output', () => {
-    const { hub, lead, reviewer } = setup()
-    const events: Parameters<MessageHub['restore']>[0][number][] = []
-    hub.onEvent(event => { events.push(event) })
-    const sent = hub.send(lead, {
-      to: '@reviewer',
-      text: 'Check this before continuing.',
-      delivery: 'quiet',
-    })
-    const context = reviewer.inbox.nextStep[0]
-    if (context === undefined) throw new Error('expected delivered context')
-    const entered = {
-      type: 'user/message', seq: 1, time: 1, data: context,
-    } as SessionEvent
-    hub.observeSessionEvent(reviewer.id, entered, [entered])
-    hub.observeSessionEvent(reviewer.id, {
-      type: 'assistant/chunk', seq: 2, time: 2,
-      data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'checking' } },
-    } as SessionEvent, [entered])
-    hub.observeSessionEvent(reviewer.id, {
-      type: 'assistant/message', seq: 3, time: 3,
-      data: {
-        turn: 1,
-        step: 1,
-        interrupted: true,
-        message: { id: 'partial', role: 'assistant', content: [{ type: 'reasoning', text: 'checking' }], source: { kind: 'model', provider: 'test', model: 'test' } },
-      },
-    } as SessionEvent, [entered])
-    expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: sent.messageId,
-    }))
-
-    const complete = {
-      type: 'tool/call', seq: 4, time: 4,
-      data: { turn: 1, step: 1, callId: 'call-1', name: 'fleet_messages', arguments: '{}' },
-    } as SessionEvent
-    hub.observeSessionEvent(reviewer.id, complete, [entered, complete])
-    expect(events).toContainEqual({
-      type: 'inbox', action: 'acknowledged', agentId: reviewer.id, messageId: sent.messageId,
-    })
-  })
-
-  it('restores delivery sources and acknowledges complete reasoning after restart', () => {
+  it('persists partial read progress and resumes from it after restart', () => {
     const first = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []
     first.hub.onEvent(event => { events.push(event) })
+    const text = 'x'.repeat(5_000)
     const sent = first.hub.send(first.lead, {
       to: '@reviewer',
-      text: 'Resume this review after restart.',
+      text,
       delivery: 'quiet',
     })
-    const context = first.reviewer.inbox.nextStep[0]
-    if (context === undefined) throw new Error('expected delivered context')
-    const entered = { type: 'user/message', seq: 7, time: 7, data: context } as SessionEvent
-    const complete = {
-      type: 'assistant/message', seq: 8, time: 8,
-      data: {
-        turn: 2,
-        step: 1,
-        message: { id: 'reasoned', role: 'assistant', content: [{ type: 'reasoning', text: 'Reviewed.' }], source: { kind: 'model', provider: 'test', model: 'test' } },
-      },
-    } as SessionEvent
-    const second = setup()
-    const restoredEvents = [...events]
-    second.hub.restore(restoredEvents)
-    second.hub.onEvent(event => { restoredEvents.push(event) })
-
-    second.hub.observeSessionEvent(second.reviewer.id, complete, [entered, complete])
-
-    expect(restoredEvents).toContainEqual({
-      type: 'inbox', action: 'acknowledged', agentId: second.reviewer.id, messageId: sent.messageId,
+    expect(first.hub.read(first.reviewer, {
+      conversation: '@lead', maxChars: 2_000,
+    }).messages).toEqual([expect.objectContaining({
+      id: sent.messageId,
+      text: 'x'.repeat(2_000),
+      readRange: { start: 0, end: 2_000, total: 5_000 },
+    })])
+    expect(first.hub.inbox(first.reviewer, { unreadOnly: true })).toHaveLength(1)
+    expect(events).toContainEqual({
+      type: 'inbox', action: 'read', agentId: first.reviewer.id, messageId: sent.messageId, through: 2_000,
     })
+
+    const second = setup()
+    second.hub.restore(events)
+    expect(second.hub.readMessageText(second.reviewer, sent.messageId, undefined, 3_000)).toEqual({
+      messageId: sent.messageId,
+      offset: 2_000,
+      text: 'x'.repeat(3_000),
+      totalLength: 5_000,
+      hasMore: false,
+      readThrough: 5_000,
+    })
+    expect(second.hub.inbox(second.reviewer, { unreadOnly: true })).toEqual([])
+  })
+
+  it('rejects text offsets that skip unread content', () => {
+    const { hub, lead, reviewer } = setup()
+    const sent = hub.send(lead, { to: '@reviewer', text: 'abcdef', delivery: 'quiet' })
+
+    expect(() => hub.readMessageText(reviewer, sent.messageId, 2, 2)).toThrow('skips unread text')
+    expect(hub.readMessageText(reviewer, sent.messageId, undefined, 2)).toMatchObject({
+      offset: 0, text: 'ab', readThrough: 2,
+    })
+    expect(() => hub.readMessageText(reviewer, sent.messageId, 4, 2)).toThrow('next unread offset is 2')
+  })
+
+  it('treats legacy acknowledged receipts as fully read during replay', () => {
+    const first = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    first.hub.onEvent(event => { events.push(event) })
+    const sent = first.hub.send(first.lead, { to: '@reviewer', text: 'Legacy receipt.', delivery: 'quiet' })
+    events.push({ type: 'inbox', action: 'acknowledged', agentId: first.reviewer.id, messageId: sent.messageId })
+
+    const second = setup()
+    second.hub.restore(events)
+    expect(second.hub.inbox(second.reviewer, { unreadOnly: true })).toEqual([])
   })
 
   it('bounds live and restored message history while continuing to emit every persisted event', () => {
@@ -238,7 +230,7 @@ describe('MessageHub', () => {
     })
     first.hub.pin(first.lead, oldest.messageId)
     first.hub.react(first.lead, { messageId: oldest.messageId, reaction: 'reviewing' })
-    first.hub.acknowledge(first.reviewer, oldest.messageId)
+    first.hub.readMessageText(first.reviewer, oldest.messageId)
 
     for (let index = 0; index < 1_000; index += 1) {
       first.hub.send(first.lead, {
@@ -466,7 +458,9 @@ describe('MessageHub', () => {
 
   it('coalesces unread Channel activity into one mutable pending snapshot', () => {
     const { hub, lead, reviewer, qa } = setup()
-    hub.send(lead, {
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    hub.onEvent(event => { events.push(event) })
+    const first = hub.send(lead, {
       to: '#general',
       text: 'First background update.',
       delivery: 'quiet',
@@ -483,6 +477,24 @@ describe('MessageHub', () => {
     expect(qa.injected[0]).toContain('from reviewer')
     expect(qa.injected[0]).not.toContain('First background update')
     expect(qa.injected[0]).not.toContain('Second background update')
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: 'inbox', action: 'read', agentId: qa.id,
+    }))
+
+    expect(hub.read(qa, { conversation: '#general', limit: 1 })).toMatchObject({
+      messages: [expect.objectContaining({ id: first.messageId })],
+      hasMore: true,
+    })
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'inbox', action: 'read', agentId: qa.id, messageId: first.messageId,
+    }))
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: 'inbox', action: 'read', agentId: qa.id, messageId: sent.messageId,
+    }))
+    expect(hub.read(qa, { conversation: '#general', limit: 1 })).toMatchObject({
+      messages: [expect.objectContaining({ id: sent.messageId })],
+      hasMore: false,
+    })
   })
 
   it('starts a new Channel snapshot after the previous one was claimed', () => {
@@ -621,7 +633,7 @@ describe('MessageHub', () => {
         message: expect.objectContaining({ id: sent.messageId }),
       }),
     ])
-    expect(first.hub.acknowledge(first.reviewer, sent.messageId).acknowledged).toBe(true)
+    expect(first.hub.read(first.reviewer, { conversation: '#research' }).messages).toHaveLength(1)
     expect(first.hub.react(first.reviewer, { messageId: sent.messageId, reaction: 'ack' })).toMatchObject({
       members: ['reviewer'],
     })
@@ -766,11 +778,11 @@ describe('MessageHub', () => {
     expect(text).not.toContain(reviewer.id)
   })
 
-  it('previews long messages and reads the remaining text in bounded chunks', () => {
+  it('renders exactly the bounded text marked read and continues from persistent progress', () => {
     const { hub, lead, reviewer } = setup()
     const longText = 'a'.repeat(5_000)
     const sent = hub.send(lead, { to: '@reviewer', text: longText, delivery: 'quiet' })
-    const page = hub.read(reviewer, { conversation: '@lead' })
+    const page = hub.read(reviewer, { conversation: '@lead', maxChars: 2_000 })
     const registered: Array<{
       readonly name: string
       readonly output: { render(args: unknown, value: unknown): readonly { readonly type: string; readonly text?: string }[] }
@@ -781,22 +793,25 @@ describe('MessageHub', () => {
     const rendered = registered.find(candidate => candidate.name === 'fleet_messages')
       ?.output.render({ action: 'read' }, page)[0]?.text ?? ''
 
+    expect(rendered).toContain('"read_range":{"start":0,"end":2000,"total":5000}')
     expect(rendered).toContain('"text_more":{"action":"text","message_id":"msg_1","offset":2000,"total_length":5000}')
     expect(rendered.length).toBeLessThan(3_000)
-    expect(hub.readMessageText(reviewer, sent.messageId, 2_000, 2_000)).toEqual({
+    expect(hub.readMessageText(reviewer, sent.messageId, undefined, 2_000)).toEqual({
       messageId: sent.messageId,
       offset: 2_000,
       text: 'a'.repeat(2_000),
       totalLength: 5_000,
       hasMore: true,
       nextOffset: 4_000,
+      readThrough: 4_000,
     })
-    expect(hub.readMessageText(reviewer, sent.messageId, 4_000, 2_000)).toEqual({
+    expect(hub.readMessageText(reviewer, sent.messageId, undefined, 2_000)).toEqual({
       messageId: sent.messageId,
       offset: 4_000,
       text: 'a'.repeat(1_000),
       totalLength: 5_000,
       hasMore: false,
+      readThrough: 5_000,
     })
   })
 

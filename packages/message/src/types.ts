@@ -77,10 +77,23 @@ export interface ReadMessagesInput {
   readonly conversation: FleetTarget
   readonly after?: string
   readonly limit?: number
+  readonly maxChars?: number
+  readonly unreadOnly?: boolean
+}
+
+export interface FleetMessageReadRange {
+  readonly start: number
+  readonly end: number
+  readonly total: number
+}
+
+export interface FleetReadMessage extends FleetMessage {
+  /** Exact text range returned by this read operation. */
+  readonly readRange: FleetMessageReadRange
 }
 
 export interface ReadMessagesResult {
-  readonly messages: FleetMessage[]
+  readonly messages: FleetReadMessage[]
   readonly hasMore: boolean
   readonly revision: number
 }
@@ -92,6 +105,7 @@ export interface FleetMessageTextChunk {
   readonly totalLength: number
   readonly hasMore: boolean
   readonly nextOffset?: number
+  readonly readThrough: number
 }
 
 export interface SearchMessagesInput {
@@ -248,4 +262,13 @@ export type FleetCoordinationEvent =
       /** Native DSH UserMessage id injected into this Agent's context. */
       readonly contextMessageId: string
     }
+  | {
+      readonly type: 'inbox'
+      readonly action: 'read'
+      readonly agentId: string
+      readonly messageId: string
+      /** Cumulative contiguous character offset returned by fleet_messages read/text. */
+      readonly through: number
+    }
+  /** Legacy persisted terminal receipt. New writes use the cumulative read action. */
   | { readonly type: 'inbox'; readonly action: 'acknowledged'; readonly agentId: string; readonly messageId: string }

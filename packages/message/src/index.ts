@@ -5,7 +5,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
 import { MessageHub } from './hub.js'
-import type { FleetMessage, FleetTarget, FleetVote, MessageAgent } from './types.js'
+import type { FleetMessage, FleetReadMessage, FleetTarget, FleetVote, MessageAgent } from './types.js'
 
 export * from './hub.js'
 export * from './types.js'
@@ -39,6 +39,15 @@ const MESSAGE_SCHEMA = {
     mentions: { type: 'array', required: true, items: { type: 'string' } },
     delivery: { type: 'string', required: true, enum: ['quiet', 'wakeup', 'interrupt'] },
     createdAt: { type: 'string', required: true },
+    readRange: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        start: { type: 'integer', required: true },
+        end: { type: 'integer', required: true },
+        total: { type: 'integer', required: true },
+      },
+    },
   },
 } as const
 
@@ -141,7 +150,7 @@ const MESSAGE_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', enum: ['search', 'inbox', 'ack', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'] },
+    action: { type: 'string', enum: ['search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'] },
     messages: { type: 'array', items: MESSAGE_SCHEMA },
     inbox: { type: 'array', items: INBOX_ITEM_SCHEMA },
     item: INBOX_ITEM_SCHEMA,
@@ -161,6 +170,7 @@ const MESSAGE_RESULT_SCHEMA = {
         totalLength: { type: 'integer', required: true },
         hasMore: { type: 'boolean', required: true },
         nextOffset: { type: 'integer' },
+        readThrough: { type: 'integer', required: true },
       },
     },
   },
@@ -191,7 +201,7 @@ function messageOutput(): {
         from: message.fromName ?? message.from,
         text: preview.text,
         ...(preview.shown < message.text.length
-          ? { text_more: { action: 'text', message_id: message.id, offset: preview.shown, total_length: message.text.length } }
+          ? { text_more: { action: 'text', message_id: message.id, total_length: message.text.length } }
           : {}),
         ...(message.replyTo === undefined ? {} : { reply_to: message.replyTo }),
         ...(message.resources.length === 0 ? {} : { resources: message.resources }),
@@ -201,14 +211,46 @@ function messageOutput(): {
       }
     })
   }
+  const readMessages = (messages: readonly FleetReadMessage[]): Record<string, unknown>[] => messages.map(message => ({
+    id: message.id,
+    sequence: message.sequence,
+    ...(message.kind === 'text' ? {} : { kind: message.kind }),
+    conversation: message.conversation,
+    from: message.fromName ?? message.from,
+    text: message.text,
+    read_range: {
+      start: message.readRange.start,
+      end: message.readRange.end,
+      total: message.readRange.total,
+    },
+    ...(message.readRange.end < message.readRange.total
+      ? {
+          text_more: {
+            action: 'text',
+            message_id: message.id,
+            offset: message.readRange.end,
+            total_length: message.readRange.total,
+          },
+        }
+      : {}),
+    ...(message.replyTo === undefined ? {} : { reply_to: message.replyTo }),
+    ...(message.resources.length === 0 ? {} : { resources: message.resources }),
+    ...(message.mentions.length === 0 ? {} : { mentions: message.mentions }),
+    ...(message.delivery === 'quiet' ? {} : { delivery: message.delivery }),
+    created_at: message.createdAt,
+  }))
   return {
     schema: MESSAGE_RESULT_SCHEMA,
     render: (_args, value) => {
       if (value.chunk !== undefined) return [{ type: 'text', text: JSON.stringify(value) }]
       if (value.messages !== undefined) {
+        const messages = value.messages as Array<FleetMessage & { readonly readRange?: unknown }>
+        const rendered = messages.every(message => message.readRange !== undefined)
+          ? readMessages(messages as FleetReadMessage[])
+          : compactMessages(messages)
         return [{ type: 'text', text: JSON.stringify({
           ...(value.action === undefined ? {} : { action: value.action }),
-          messages: compactMessages(value.messages as FleetMessage[]),
+          messages: rendered,
           ...(value.hasMore === undefined ? {} : { hasMore: value.hasMore }),
           ...(value.revision === undefined ? {} : { revision: value.revision }),
         }) }]
@@ -464,18 +506,19 @@ export function installMessageTools(
 
   register(defineTool({
     name: 'fleet_messages',
-    description: 'Read or search Fleet messages, continue long message text in bounded chunks, inspect and acknowledge the calling member inbox, react to messages, and manage pinned messages.',
+    description: 'Read Fleet message text progressively, search without marking results read, continue long text in bounded chunks, inspect the calling member inbox, react to messages, and manage pinned messages. Only text returned by read or text advances persistent per-message read progress; notifications and replies do not.',
     parameters: {
-      action: { type: 'string', enum: ['read', 'search', 'inbox', 'ack', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'], description: 'Defaults to read. Use text with message_id and offset when a result contains text_more.' },
+      action: { type: 'string', enum: ['read', 'search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'], description: 'Defaults to read. Use text with message_id and the returned offset to continue a partially read message.' },
       conversation: { type: 'string', description: 'Conversation in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
-      limit: { type: 'integer', description: 'For list actions, 1-100 messages (default 50). For text continuation, 1-12000 characters (default 4000).' },
+      limit: { type: 'integer', description: 'For read, 1-50 messages (default 10). For other list actions, up to 100. For text continuation, 1-12000 characters (default 4000).' },
+      max_chars: { type: 'integer', description: 'For read, total returned message text budget from 1 through 12000 characters (default 4000).' },
       query: { type: 'string', description: 'Case-insensitive text query for search.' },
       from: { type: 'string', description: 'Optional sender filter for search.' },
       resource: { type: 'string', description: 'Optional resource id filter for search.' },
-      unread_only: { type: 'boolean', description: 'For inbox, return only unacknowledged items.' },
-      message_id: { type: 'string', description: 'Message id for text continuation, ack, react, reactions, pin, or unpin.' },
-      offset: { type: 'integer', description: 'Character offset for text continuation. Use the offset returned in text_more.' },
+      unread_only: { type: 'boolean', description: 'For read, defaults true and skips fully read messages; set false to inspect history. For inbox, return only unread items.' },
+      message_id: { type: 'string', description: 'Message id for text continuation, react, reactions, pin, or unpin.' },
+      offset: { type: 'integer', description: 'Character offset for text continuation. Omit to continue from recorded progress, or use the exact offset returned in text_more.' },
       reaction: { type: 'string', description: 'Reaction label for react.' },
       remove: { type: 'boolean', description: 'Remove the calling member reaction instead of adding it.' },
     },
@@ -494,6 +537,8 @@ export function installMessageTools(
           conversation: args.conversation as FleetTarget,
           ...(args.after === undefined ? {} : { after: args.after }),
           ...(args.limit === undefined ? {} : { limit: args.limit }),
+          ...(args.max_chars === undefined ? {} : { maxChars: args.max_chars }),
+          ...(args.unread_only === undefined ? {} : { unreadOnly: args.unread_only }),
         }))
       }
       if (action === 'search') {
@@ -518,10 +563,9 @@ export function installMessageTools(
       if (action === 'text') {
         return Promise.resolve({
           action,
-          chunk: hub.readMessageText(caller, args.message_id, args.offset ?? 0, args.limit ?? 4_000),
+          chunk: hub.readMessageText(caller, args.message_id, args.offset, args.limit ?? 4_000),
         })
       }
-      if (action === 'ack') return Promise.resolve({ action, item: hub.acknowledge(caller, args.message_id) })
       if (action === 'reactions') return Promise.resolve({ action, reactions: hub.listReactions(caller, args.message_id) })
       if (action === 'react') {
         if (args.reaction === undefined) throw new Error('fleet_messages react requires reaction')

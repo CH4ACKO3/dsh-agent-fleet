@@ -362,9 +362,18 @@ function projectionReceiptMessageId(event: StoredFleetEvent): string | undefined
   if (event.type !== 'coordination.inbox' || typeof event.data !== 'object' || event.data === null) return undefined
   const data = event.data as Record<string, unknown>
   return data.type === 'inbox'
-    && (data.action === 'delivered' || data.action === 'acknowledged')
+    && (data.action === 'delivered' || data.action === 'read' || data.action === 'acknowledged')
     && typeof data.messageId === 'string'
     ? data.messageId
+    : undefined
+}
+
+function projectionReceiptKey(event: StoredFleetEvent): string | undefined {
+  const messageId = projectionReceiptMessageId(event)
+  if (messageId === undefined || typeof event.data !== 'object' || event.data === null) return undefined
+  const data = event.data as Record<string, unknown>
+  return typeof data.agentId === 'string' && typeof data.action === 'string'
+    ? `${data.action}:${data.agentId}:${messageId}`
     : undefined
 }
 
@@ -372,7 +381,7 @@ function projectionReceiptMessageId(event: StoredFleetEvent): string | undefined
 function compactTeamProjectionEvents(events: readonly StoredFleetEvent[]): StoredFleetEvent[] {
   const state = new Map<string, StoredFleetEvent>()
   const messages: StoredFleetEvent[] = []
-  const receipts: StoredFleetEvent[] = []
+  const receipts = new Map<string, StoredFleetEvent>()
   const activity: StoredFleetEvent[] = []
   for (const event of events) {
     if (event.type.startsWith('session.')) continue
@@ -385,8 +394,9 @@ function compactTeamProjectionEvents(events: readonly StoredFleetEvent[]): Store
       messages.push(event)
       continue
     }
-    if (projectionReceiptMessageId(event) !== undefined) {
-      receipts.push(event)
+    const receiptKey = projectionReceiptKey(event)
+    if (receiptKey !== undefined) {
+      receipts.set(receiptKey, event)
       continue
     }
     if (isProjectionActivity(event)) activity.push(event)
@@ -399,7 +409,7 @@ function compactTeamProjectionEvents(events: readonly StoredFleetEvent[]): Store
   return [
     ...state.values(),
     ...retainedMessages,
-    ...receipts.filter(event => retainedMessageIds.has(projectionReceiptMessageId(event) ?? '')),
+    ...[...receipts.values()].filter(event => retainedMessageIds.has(projectionReceiptMessageId(event) ?? '')),
     ...activity.slice(-TEAM_PROJECTION_ACTIVITY_LIMIT),
   ].sort((left, right) => left.sequence - right.sequence)
 }
@@ -3226,7 +3236,6 @@ export class FleetRunService {
     const member = runtime.memberNamesById.get(sessionId)
     if (member === undefined || this.records.get(runId) === undefined) return
     const agent = this.ctx.agents.get(SessionId(sessionId))
-    runtime.messages.observeSessionEvent(sessionId, event, agent?.session.events ?? [])
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     if (event.type === 'assistant/chunk') return

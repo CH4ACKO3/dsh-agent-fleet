@@ -324,16 +324,27 @@ function stateEventKey(event: WireEvent): string | undefined {
 function receiptMessageId(event: WireEvent): string | undefined {
   if (event.type !== 'coordination.inbox') return undefined
   const data = asRecord(event.data)
-  return data?.type === 'inbox' && (data.action === 'delivered' || data.action === 'acknowledged')
+  return data?.type === 'inbox'
+    && (data.action === 'delivered' || data.action === 'read' || data.action === 'acknowledged')
     ? string(data.messageId)
     : undefined
+}
+
+function receiptKey(event: WireEvent): string | undefined {
+  const messageId = receiptMessageId(event)
+  const data = asRecord(event.data)
+  const agentId = string(data?.agentId)
+  const action = string(data?.action)
+  return messageId === undefined || agentId === undefined || action === undefined
+    ? undefined
+    : `${action}:${agentId}:${messageId}`
 }
 
 /** Keep current entity state plus a bounded recent message/activity window; raw Session events use the trace endpoint. */
 function compactTeamEvents(events: readonly WireEvent[]): WireEvent[] {
   const state = new Map<string, WireEvent>()
   const messages: WireEvent[] = []
-  const receipts: WireEvent[] = []
+  const receipts = new Map<string, WireEvent>()
   const activity: WireEvent[] = []
   for (const event of events) {
     if (event.type.startsWith('session.')) continue
@@ -346,8 +357,9 @@ function compactTeamEvents(events: readonly WireEvent[]): WireEvent[] {
       messages.push(event)
       continue
     }
-    if (receiptMessageId(event) !== undefined) {
-      receipts.push(event)
+    const currentReceiptKey = receiptKey(event)
+    if (currentReceiptKey !== undefined) {
+      receipts.set(currentReceiptKey, event)
       continue
     }
     if (activityKind(event.type) !== undefined) activity.push(event)
@@ -360,7 +372,7 @@ function compactTeamEvents(events: readonly WireEvent[]): WireEvent[] {
   return [
     ...state.values(),
     ...retainedMessages,
-    ...receipts.filter(event => retainedMessageIds.has(receiptMessageId(event) ?? '')),
+    ...[...receipts.values()].filter(event => retainedMessageIds.has(receiptMessageId(event) ?? '')),
     ...activity.slice(-MAX_TEAM_ACTIVITY),
   ].toSorted((left, right) => left.sequence - right.sequence)
 }
@@ -613,7 +625,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const rawMessages: Array<{ readonly event: WireEvent; readonly message: Readonly<Record<string, unknown>> }> = []
   const channelVisibleSessions = new Map<string, readonly string[]>()
   const meetingParticipants = new Map<string, readonly string[]>()
-  const acknowledgedMembersByMessage = new Map<string, Set<string>>()
+  const readThroughByMessage = new Map<string, Map<string, number>>()
   const contextSourcesByMessage = new Map<string, Map<string, FleetChatReceiptSource>>()
 
   for (const event of cache.events) {
@@ -699,10 +711,16 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         const sources = contextSourcesByMessage.get(messageId) ?? new Map<string, FleetChatReceiptSource>()
         sources.set(member.id, { memberId: member.id, sessionId: agentId, contextMessageId })
         contextSourcesByMessage.set(messageId, sources)
-      } else if (data.action === 'acknowledged') {
-        const readers = acknowledgedMembersByMessage.get(messageId) ?? new Set<string>()
-        readers.add(member.id)
-        acknowledgedMembersByMessage.set(messageId, readers)
+      } else if (data.action === 'read' || data.action === 'acknowledged') {
+        const through = data.action === 'acknowledged'
+          ? Number.MAX_SAFE_INTEGER
+          : typeof data.through === 'number' && Number.isSafeInteger(data.through) && data.through >= 0
+            ? data.through
+            : undefined
+        if (through === undefined) continue
+        const readers = readThroughByMessage.get(messageId) ?? new Map<string, number>()
+        readers.set(member.id, Math.max(readers.get(member.id) ?? 0, through))
+        readThroughByMessage.set(messageId, readers)
       }
       continue
     }
@@ -866,14 +884,14 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const contacts = views.get(runMember.name)?.contacts?.channels
       return contacts === '*' || contacts?.includes(channel) === true ? [runMember.sessionId] : []
     })
-    const readMembers = acknowledgedMembersByMessage.get(id) ?? new Set<string>()
+    const readThrough = readThroughByMessage.get(id) ?? new Map<string, number>()
     const visibleMemberIds = visibleSessions.flatMap(sessionId => {
       const member = membersBySession.get(sessionId)
       return member === undefined ? [] : [member.id]
     })
     const readMemberIds = visibleSessions.flatMap(sessionId => {
       const member = membersBySession.get(sessionId)
-      return member !== undefined && readMembers.has(member.id) ? [member.id] : []
+      return member !== undefined && (readThrough.get(member.id) ?? 0) >= text.length ? [member.id] : []
     })
     const readMemberIdSet = new Set(readMemberIds)
     const sources = visibleSessions.flatMap(sessionId => {

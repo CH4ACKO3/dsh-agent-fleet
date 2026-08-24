@@ -6,7 +6,7 @@ DSH Agent Fleet 的进程内通信组件。
 
 - `fleet_send`：静默私信或频道发言；
 - `fleet_followup`：唤醒指定 Agent；
-- `fleet_messages`：读取私信或频道历史；
+- `fleet_messages`：渐进读取私信或频道历史，并按消息持久记录实际读到的正文范围；
 - `fleet_wait`：等待下一次消息或频道变化；
 - `fleet_channel`：列出、创建、更新和归档频道；
 - `fleet_meeting`：列出、发起和结束会议。
@@ -14,7 +14,10 @@ DSH Agent Fleet 的进程内通信组件。
 
 Message 单独安装时，消息历史、频道、会议和 Vote 只保存在当前进程；由根插件启动
 Team run 时，它们同时进入该 run 的持久协作轨迹。实际投递直接使用 DSH Agent 的 `inject` 和
-`followup`；模块不维护第二套 inbox、ack、恢复或重试状态。消息可以携带资源 ID，
+`followup`；投递通知、进入模型上下文、回复或 Vote 都不会自动把消息标成已读。只有
+`fleet_messages read` 和 `fleet_messages text` 真正返回的连续正文范围会推进每条消息的
+持久 `readThrough`；正文全部返回后才算已读。读取同时受消息数和字符数限制，长消息可从
+已记录的位置继续。消息可以携带资源 ID，
 但不负责保存文件内容。安装 Resources 后，可以先用 `fleet_resource add` 注册普通文件或
 二进制文件，再由接收方用 `fleet_resource get` 解析资源 ID。
 

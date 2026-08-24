@@ -154,7 +154,7 @@ describe('Fleet Web panel source', () => {
             createdAt: '2026-08-21T10:05:30.000Z',
             type: 'coordination.inbox',
             data: {
-              type: 'inbox', action: 'acknowledged', agentId: 'member-session', messageId: 'message-user',
+              type: 'inbox', action: 'read', agentId: 'member-session', messageId: 'message-user', through: 29,
             },
           },
           {

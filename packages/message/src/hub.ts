@@ -1,5 +1,4 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 import type {
   AgentDirectory,
@@ -84,15 +83,6 @@ function directConversation(left: string, right: string): string {
   return [left, right].sort().join('\u0000')
 }
 
-function isCompleteAgentOutput(event: SessionEvent): boolean {
-  if (event.type === 'tool/call') return true
-  if (event.type !== 'assistant/message' || event.data.interrupted === true) return false
-  return event.data.message.content.some(block => {
-    if (block.type === 'text' || block.type === 'reasoning') return block.text.trim().length > 0
-    return block.type === 'tool-call' || block.type === 'image'
-  })
-}
-
 export interface MessageHubOptions {
   readonly validateTaskReference?: (taskId: string, assigneeId?: string) => void
 }
@@ -103,9 +93,7 @@ export class MessageHub {
   private readonly votes = new Map<string, FleetVote>()
   private readonly reactions = new Map<string, FleetMessageReaction>()
   private readonly pins = new Map<string, FleetMessagePin>()
-  private readonly acknowledgedByAgent = new Map<string, Set<string>>()
-  private readonly deliveredContextByAgent = new Map<string, Map<string, string>>()
-  private readonly enteredContextByAgent = new Map<string, Set<string>>()
+  private readonly readThroughByAgent = new Map<string, Map<string, number>>()
   private readonly history: FleetMessage[] = []
   private readonly pendingWakeupsByAgent = new Map<string, Map<string, FleetMessage>>()
   private readonly observers = new Set<(event: FleetCoordinationEvent) => void>()
@@ -132,9 +120,7 @@ export class MessageHub {
     this.votes.clear()
     this.reactions.clear()
     this.pins.clear()
-    this.acknowledgedByAgent.clear()
-    this.deliveredContextByAgent.clear()
-    this.enteredContextByAgent.clear()
+    this.readThroughByAgent.clear()
     this.history.length = 0
     this.pendingWakeupsByAgent.clear()
     this.agentRevisions.clear()
@@ -175,16 +161,9 @@ export class MessageHub {
         if (event.action === 'unpinned') this.pins.delete(event.pin.messageId)
         else this.pins.set(event.pin.messageId, snapshot(event.pin))
       } else if (event.type === 'inbox') {
-        if (event.action === 'delivered') {
-          this.rememberDelivery(event.agentId, event.contextMessageId, event.messageId)
-        } else {
-          let acknowledged = this.acknowledgedByAgent.get(event.agentId)
-          if (acknowledged === undefined) {
-            acknowledged = new Set()
-            this.acknowledgedByAgent.set(event.agentId, acknowledged)
-          }
-          acknowledged.add(event.messageId)
-          this.forgetDelivery(event.agentId, event.messageId)
+        if (event.action === 'read') this.rememberReadThrough(event.agentId, event.messageId, event.through)
+        else if (event.action === 'acknowledged') {
+          this.rememberReadThrough(event.agentId, event.messageId, Number.MAX_SAFE_INTEGER)
         }
       }
     }
@@ -215,31 +194,6 @@ export class MessageHub {
     this.assertOpen()
     this.observers.add(observer)
     return () => { this.observers.delete(observer) }
-  }
-
-  observeSessionEvent(agentId: string, event: SessionEvent, sessionEvents: readonly SessionEvent[] = []): void {
-    const delivered = this.deliveredContextByAgent.get(agentId)
-    if (delivered === undefined) return
-    const entered = this.enteredContextByAgent.get(agentId) ?? new Set<string>()
-    const rememberEntered = (candidate: SessionEvent): void => {
-      if (candidate.type === 'user/message' && delivered.has(String(candidate.data.id))) {
-        entered.add(String(candidate.data.id))
-      }
-    }
-    rememberEntered(event)
-    if (entered.size > 0) this.enteredContextByAgent.set(agentId, entered)
-    if (!isCompleteAgentOutput(event)) return
-    for (const candidate of sessionEvents) {
-      if (candidate.seq <= event.seq) rememberEntered(candidate)
-    }
-    let changed = false
-    for (const contextMessageId of [...entered]) {
-      const messageId = delivered.get(contextMessageId)
-      if (messageId !== undefined && this.markAcknowledged(agentId, messageId)) changed = true
-      entered.delete(contextMessageId)
-    }
-    if (entered.size === 0) this.enteredContextByAgent.delete(agentId)
-    if (changed) this.changed([agentId])
   }
 
   connectAgent(agentId: string, channelIds: readonly string[] = []): void {
@@ -366,26 +320,14 @@ export class MessageHub {
     for (const [id, pin] of this.pins) {
       if (pin.pinnedBy === previousId) this.pins.set(id, { ...pin, pinnedBy: nextId })
     }
-    const acknowledged = this.acknowledgedByAgent.get(previousId)
-    if (acknowledged !== undefined) {
-      const next = this.acknowledgedByAgent.get(nextId) ?? new Set<string>()
-      for (const messageId of acknowledged) next.add(messageId)
-      this.acknowledgedByAgent.set(nextId, next)
-      this.acknowledgedByAgent.delete(previousId)
-    }
-    const delivered = this.deliveredContextByAgent.get(previousId)
-    if (delivered !== undefined) {
-      const next = this.deliveredContextByAgent.get(nextId) ?? new Map<string, string>()
-      for (const [contextMessageId, messageId] of delivered) next.set(contextMessageId, messageId)
-      this.deliveredContextByAgent.set(nextId, next)
-      this.deliveredContextByAgent.delete(previousId)
-    }
-    const entered = this.enteredContextByAgent.get(previousId)
-    if (entered !== undefined) {
-      const next = this.enteredContextByAgent.get(nextId) ?? new Set<string>()
-      for (const contextMessageId of entered) next.add(contextMessageId)
-      this.enteredContextByAgent.set(nextId, next)
-      this.enteredContextByAgent.delete(previousId)
+    const readThrough = this.readThroughByAgent.get(previousId)
+    if (readThrough !== undefined) {
+      const next = this.readThroughByAgent.get(nextId) ?? new Map<string, number>()
+      for (const [messageId, through] of readThrough) {
+        next.set(messageId, Math.max(next.get(messageId) ?? 0, through))
+      }
+      this.readThroughByAgent.set(nextId, next)
+      this.readThroughByAgent.delete(previousId)
     }
     const previousRevision = this.agentRevisions.get(previousId)
     if (previousRevision !== undefined) {
@@ -487,9 +429,7 @@ export class MessageHub {
     }
 
     this.pendingWakeupsByAgent.delete(agentId)
-    this.acknowledgedByAgent.delete(agentId)
-    this.deliveredContextByAgent.delete(agentId)
-    this.enteredContextByAgent.delete(agentId)
+    this.readThroughByAgent.delete(agentId)
     for (const [key, reaction] of this.reactions) {
       if (!reaction.members.includes(agentId)) continue
       const members = reaction.members.filter(member => member !== agentId)
@@ -570,9 +510,13 @@ export class MessageHub {
   read(sender: MessageAgent, input: ReadMessagesInput): ReadMessagesResult {
     this.assertOpen()
     this.requireAgent(sender.id)
-    const limit = input.limit ?? 50
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
-      throw new Error('limit must be an integer from 1 through 100')
+    const limit = input.limit ?? 10
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+      throw new Error('limit must be an integer from 1 through 50')
+    }
+    const maxChars = input.maxChars ?? 4_000
+    if (!Number.isSafeInteger(maxChars) || maxChars < 1 || maxChars > 12_000) {
+      throw new Error('maxChars must be an integer from 1 through 12000')
     }
 
     let messages: FleetMessage[]
@@ -594,22 +538,48 @@ export class MessageHub {
       throw new Error(`invalid Fleet conversation ${input.conversation}`)
     }
 
-    let start = Math.max(0, messages.length - limit)
+    let candidates: FleetMessage[]
     if (input.after !== undefined) {
       const index = messages.findIndex(message => message.id === input.after)
       if (index < 0) throw new Error(`message ${input.after} is not in this conversation`)
-      start = index + 1
+      candidates = messages.slice(index + 1)
+    } else if (input.unreadOnly === false) {
+      candidates = messages.slice(-limit)
+    } else {
+      candidates = messages
     }
-    const page = messages.slice(start, start + limit)
-    const hasMore = start + page.length < messages.length
-    let acknowledged = false
-    for (const message of page) {
-      if (message.from !== sender.id && this.markAcknowledged(sender.id, message.id)) acknowledged = true
+    if (input.unreadOnly !== false) {
+      candidates = candidates.filter(message => message.from !== sender.id && !this.isFullyRead(sender.id, message))
     }
-    if (input.conversation.startsWith('#') && !hasMore) {
+
+    const page: ReadMessagesResult['messages'][number][] = []
+    let remaining = maxChars
+    let inspected = 0
+    let partial = false
+    let changed = false
+    for (const message of candidates) {
+      if (page.length >= limit || remaining === 0) break
+      inspected += 1
+      const total = message.text.length
+      const current = message.from === sender.id ? 0 : this.readThrough(sender.id, message.id)
+      const start = current > 0 && current < total ? current : 0
+      const end = Math.min(total, start + remaining)
+      const text = message.text.slice(start, end)
+      page.push({ ...message, text, readRange: { start, end, total } })
+      remaining -= text.length
+      if (message.from !== sender.id && end > current) {
+        changed = this.markReadThrough(sender.id, message, end) || changed
+      }
+      if (end < total) {
+        partial = true
+        break
+      }
+    }
+    const hasMore = partial || inspected < candidates.length
+    if (input.conversation.startsWith('#') && !this.hasUnreadChannelMessage(sender.id, input.conversation)) {
       this.removePendingChannelNotice(sender, input.conversation)
     }
-    if (acknowledged) this.changed([sender.id])
+    if (changed) this.changed([sender.id])
     return {
       messages: snapshot(page),
       hasMore,
@@ -617,25 +587,38 @@ export class MessageHub {
     }
   }
 
-  readMessageText(sender: MessageAgent, messageId: string, offset = 0, limit = 4_000): import('./types.js').FleetMessageTextChunk {
+  readMessageText(sender: MessageAgent, messageId: string, offset?: number, limit = 4_000): import('./types.js').FleetMessageTextChunk {
     this.assertOpen()
     this.requireAgent(sender.id)
-    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('offset must be a non-negative integer')
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 12_000) {
       throw new Error('limit must be an integer from 1 through 12000')
     }
     const message = this.requireVisibleMessage(sender.id, messageId)
-    if (offset > message.text.length) throw new Error(`offset ${String(offset)} is beyond message ${messageId}`)
-    const text = message.text.slice(offset, offset + limit)
-    const nextOffset = offset + text.length
+    const current = message.from === sender.id ? 0 : this.readThrough(sender.id, message.id)
+    const start = offset ?? (current > 0 && current < message.text.length ? current : 0)
+    if (!Number.isSafeInteger(start) || start < 0) throw new Error('offset must be a non-negative integer')
+    if (start > message.text.length) throw new Error(`offset ${String(start)} is beyond message ${messageId}`)
+    if (message.from !== sender.id && current < message.text.length && start > current) {
+      throw new Error(`offset ${String(start)} skips unread text; next unread offset is ${String(current)}`)
+    }
+    const text = message.text.slice(start, start + limit)
+    const nextOffset = start + text.length
     const hasMore = nextOffset < message.text.length
+    const changed = message.from !== sender.id && nextOffset > current
+      ? this.markReadThrough(sender.id, message, nextOffset)
+      : false
+    if (message.conversation.startsWith('#') && !this.hasUnreadChannelMessage(sender.id, message.conversation)) {
+      this.removePendingChannelNotice(sender, message.conversation)
+    }
+    if (changed) this.changed([sender.id])
     return {
       messageId,
-      offset,
+      offset: start,
       text,
       totalLength: message.text.length,
       hasMore,
       ...(hasMore ? { nextOffset } : {}),
+      readThrough: Math.min(message.text.length, Math.max(current, nextOffset)),
     }
   }
 
@@ -664,7 +647,6 @@ export class MessageHub {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new Error('limit must be an integer from 1 through 100')
     }
-    const acknowledged = this.acknowledgedByAgent.get(sender.id)
     const items = this.history.flatMap((message): FleetInboxItem[] => {
       if (message.from === sender.id || !this.canSeeMessage(sender.id, message)) return []
       const reasons: FleetInboxItem['reasons'] = []
@@ -672,18 +654,11 @@ export class MessageHub {
       if (message.mentions.includes(sender.id)) reasons.push('mention')
       if (message.conversation.startsWith('meeting:')) reasons.push('meeting')
       if (reasons.length === 0) return []
-      const isAcknowledged = acknowledged?.has(message.id) === true
+      const isAcknowledged = this.isFullyRead(sender.id, message)
       if (input.unreadOnly === true && isAcknowledged) return []
       return [{ message: snapshot(message), reasons, acknowledged: isAcknowledged }]
     })
     return items.slice(-limit)
-  }
-
-  acknowledge(sender: MessageAgent, messageId: string): FleetInboxItem {
-    const item = this.inbox(sender, { limit: 100 }).find(candidate => candidate.message.id === messageId)
-    if (item === undefined) throw new Error(`message ${messageId} is not in Agent ${sender.id}'s inbox`)
-    if (this.markAcknowledged(sender.id, messageId)) this.changed([sender.id])
-    return { ...item, acknowledged: true }
   }
 
   react(sender: MessageAgent, input: { readonly messageId: string; readonly reaction: string; readonly remove?: boolean }): FleetMessageReaction {
@@ -1054,7 +1029,7 @@ export class MessageHub {
       if (input.voters !== undefined) this.requireContact(sender.id, voter)
       if (!this.canRead(channel, voter)) throw new Error(`Agent ${voter} cannot access #${channel.id}`)
     }
-    this.clearPendingWakeups(sender.id, input.channel, true)
+    this.clearPendingWakeups(sender.id, input.channel)
     const vote: FleetVote = {
       id: `vote_${String(++this.voteSequence)}`,
       channel: `#${channel.id}`,
@@ -1114,7 +1089,7 @@ export class MessageHub {
       }
     }
     this.votes.set(vote.id, vote)
-    this.clearPendingWakeups(sender.id, vote.channel, true)
+    this.clearPendingWakeups(sender.id, vote.channel)
     this.emit({ type: 'vote', action: 'cast', vote })
     this.appendMessage(sender.id, {
       to: vote.channel,
@@ -1211,7 +1186,7 @@ export class MessageHub {
     if (targetId === sender.id) throw new Error('an Agent cannot message itself')
     this.requireContact(sender.id, targetId)
     const target = this.requireAgent(targetId)
-    this.clearPendingWakeups(sender.id, input.to, true)
+    this.clearPendingWakeups(sender.id, input.to)
     const message = this.appendMessage(sender.id, input, text, resources, [], input.kind ?? 'text')
     const wake = input.delivery !== 'quiet'
     this.addPendingWakeup(target.id, message)
@@ -1241,7 +1216,7 @@ export class MessageHub {
       }
     }
 
-    this.clearPendingWakeups(sender.id, input.to, true)
+    this.clearPendingWakeups(sender.id, input.to)
     const recipients = this.agents.list().filter(agent =>
       agent.id !== sender.id && this.canRead(channel, agent.id),
     )
@@ -1271,7 +1246,7 @@ export class MessageHub {
   ): SendMessageResult {
     const meeting = this.requireMeeting(sender.id, meetingId(input.to))
     if (meeting.status === 'closed') throw new Error(`meeting ${meeting.id} is closed`)
-    this.clearPendingWakeups(sender.id, input.to, true)
+    this.clearPendingWakeups(sender.id, input.to)
     const message = this.appendMessage(sender.id, input, text, resources, [], input.kind ?? 'text')
     const wake = input.delivery !== 'quiet'
     for (const participant of meeting.participants) {
@@ -1333,15 +1308,14 @@ export class MessageHub {
     for (const [key, reaction] of this.reactions) {
       if (reaction.messageId === messageId) this.reactions.delete(key)
     }
-    for (const [agentId, acknowledged] of this.acknowledgedByAgent) {
-      acknowledged.delete(messageId)
-      if (acknowledged.size === 0) this.acknowledgedByAgent.delete(agentId)
+    for (const [agentId, readThrough] of this.readThroughByAgent) {
+      readThrough.delete(messageId)
+      if (readThrough.size === 0) this.readThroughByAgent.delete(agentId)
     }
     for (const [agentId, pending] of this.pendingWakeupsByAgent) {
       pending.delete(messageId)
       if (pending.size === 0) this.pendingWakeupsByAgent.delete(agentId)
     }
-    for (const agentId of this.deliveredContextByAgent.keys()) this.forgetDelivery(agentId, messageId)
   }
 
   private pruneMessageMetadata(): void {
@@ -1352,18 +1326,11 @@ export class MessageHub {
     for (const [key, reaction] of this.reactions) {
       if (!retained.has(reaction.messageId)) this.reactions.delete(key)
     }
-    for (const [agentId, acknowledged] of this.acknowledgedByAgent) {
-      for (const messageId of acknowledged) {
-        if (!retained.has(messageId)) acknowledged.delete(messageId)
+    for (const [agentId, readThrough] of this.readThroughByAgent) {
+      for (const messageId of readThrough.keys()) {
+        if (!retained.has(messageId)) readThrough.delete(messageId)
       }
-      if (acknowledged.size === 0) this.acknowledgedByAgent.delete(agentId)
-    }
-    for (const agentId of this.deliveredContextByAgent.keys()) {
-      const delivered = this.deliveredContextByAgent.get(agentId)
-      if (delivered === undefined) continue
-      for (const messageId of delivered.values()) {
-        if (!retained.has(messageId)) this.forgetDelivery(agentId, messageId)
-      }
+      if (readThrough.size === 0) this.readThroughByAgent.delete(agentId)
     }
   }
 
@@ -1404,7 +1371,6 @@ export class MessageHub {
       target.steer(input)
     } else if (wake) target.followup(input)
     else target.inject(input)
-    this.rememberDelivery(target.id, String(input.id), message.id)
     this.emit({
       type: 'inbox',
       action: 'delivered',
@@ -1430,7 +1396,6 @@ export class MessageHub {
     if (inbox !== undefined && typeof inbox.replace === 'function') {
       const pending = this.findPendingChannelNotice(target, message.conversation)
       if (pending !== undefined && inbox.replace(pending.id, { ...input, id: pending.id })) {
-        this.rememberDelivery(target.id, String(pending.id), message.id)
         this.emit({
           type: 'inbox',
           action: 'delivered',
@@ -1442,7 +1407,6 @@ export class MessageHub {
       }
     }
     target.inject(input)
-    this.rememberDelivery(target.id, String(input.id), message.id)
     this.emit({
       type: 'inbox',
       action: 'delivered',
@@ -1489,7 +1453,7 @@ export class MessageHub {
   }
 
   private addPendingWakeup(agentId: string, message: FleetMessage): void {
-    if (this.acknowledgedByAgent.get(agentId)?.has(message.id) === true) return
+    if (this.isFullyRead(agentId, message)) return
     let pending = this.pendingWakeupsByAgent.get(agentId)
     if (pending === undefined) {
       pending = new Map()
@@ -1498,7 +1462,7 @@ export class MessageHub {
     pending.set(message.id, message)
   }
 
-  private clearPendingWakeups(agentId: string, conversation: FleetTarget, acknowledge = false): void {
+  private clearPendingWakeups(agentId: string, conversation: FleetTarget): void {
     const pending = this.pendingWakeupsByAgent.get(agentId)
     if (pending === undefined) return
     for (const [id, message] of pending) {
@@ -1508,7 +1472,6 @@ export class MessageHub {
         : conversation === message.conversation
       if (!same) continue
       pending.delete(id)
-      if (acknowledge) this.markAcknowledged(agentId, id)
     }
     if (pending.size === 0) this.pendingWakeupsByAgent.delete(agentId)
   }
@@ -1542,39 +1505,41 @@ export class MessageHub {
     }
   }
 
-  private markAcknowledged(agentId: string, messageId: string): boolean {
-    let acknowledged = this.acknowledgedByAgent.get(agentId)
-    if (acknowledged === undefined) {
-      acknowledged = new Set()
-      this.acknowledgedByAgent.set(agentId, acknowledged)
+  private readThrough(agentId: string, messageId: string): number {
+    return this.readThroughByAgent.get(agentId)?.get(messageId) ?? 0
+  }
+
+  private isFullyRead(agentId: string, message: FleetMessage): boolean {
+    return this.readThrough(agentId, message.id) >= message.text.length
+  }
+
+  private rememberReadThrough(agentId: string, messageId: string, through: number): boolean {
+    if (!Number.isSafeInteger(through) || through < 0) {
+      throw new Error(`invalid read offset ${String(through)} for message ${messageId}`)
     }
-    if (acknowledged.has(messageId)) return false
-    acknowledged.add(messageId)
-    const pending = this.pendingWakeupsByAgent.get(agentId)
-    pending?.delete(messageId)
-    if (pending?.size === 0) this.pendingWakeupsByAgent.delete(agentId)
-    this.forgetDelivery(agentId, messageId)
-    this.emit({ type: 'inbox', action: 'acknowledged', agentId, messageId })
+    const messages = this.readThroughByAgent.get(agentId) ?? new Map<string, number>()
+    const current = messages.get(messageId) ?? 0
+    if (through <= current) return false
+    messages.set(messageId, through)
+    this.readThroughByAgent.set(agentId, messages)
     return true
   }
 
-  private rememberDelivery(agentId: string, contextMessageId: string, messageId: string): void {
-    const delivered = this.deliveredContextByAgent.get(agentId) ?? new Map<string, string>()
-    delivered.set(contextMessageId, messageId)
-    this.deliveredContextByAgent.set(agentId, delivered)
+  private markReadThrough(agentId: string, message: FleetMessage, through: number): boolean {
+    if (!this.rememberReadThrough(agentId, message.id, through)) return false
+    if (through >= message.text.length) {
+      const pending = this.pendingWakeupsByAgent.get(agentId)
+      pending?.delete(message.id)
+      if (pending?.size === 0) this.pendingWakeupsByAgent.delete(agentId)
+    }
+    this.emit({ type: 'inbox', action: 'read', agentId, messageId: message.id, through })
+    return true
   }
 
-  private forgetDelivery(agentId: string, messageId: string): void {
-    const delivered = this.deliveredContextByAgent.get(agentId)
-    if (delivered === undefined) return
-    const entered = this.enteredContextByAgent.get(agentId)
-    for (const [contextMessageId, deliveredMessageId] of delivered) {
-      if (deliveredMessageId !== messageId) continue
-      delivered.delete(contextMessageId)
-      entered?.delete(contextMessageId)
-    }
-    if (delivered.size === 0) this.deliveredContextByAgent.delete(agentId)
-    if (entered?.size === 0) this.enteredContextByAgent.delete(agentId)
+  private hasUnreadChannelMessage(agentId: string, conversation: FleetTarget): boolean {
+    return this.history.some(message => message.conversation === conversation
+      && message.from !== agentId
+      && !this.isFullyRead(agentId, message))
   }
 
   private requireAgent(id: string): MessageAgent {

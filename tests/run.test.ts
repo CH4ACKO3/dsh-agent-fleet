@@ -1543,7 +1543,7 @@ describe('FleetRunService', () => {
         delivery: 'quiet',
       })
     }
-    service.messageHub(run.id).read(reviewer, { conversation: '#main', limit: 100 })
+    service.messageHub(run.id).read(reviewer, { conversation: '#main', limit: 50 })
     for (let sequence = 0; sequence < 300; sequence += 1) {
       lead.session.events.push({
         seq: sequence,
@@ -1567,7 +1567,7 @@ describe('FleetRunService', () => {
     }
     expect(journalReads).toBe(0)
     expect(projectedEvents.filter(event => event.type === 'coordination.message')).toHaveLength(500)
-    expect(projectedEvents.filter(event => event.type === 'coordination.inbox')).toHaveLength(1_100)
+    expect(projectedEvents.filter(event => event.type === 'coordination.inbox')).toHaveLength(1_030)
     expect(projectedEvents).toContainEqual(expect.objectContaining({
       type: 'member_status.updated',
       data: expect.objectContaining({
@@ -2601,7 +2601,7 @@ describe('FleetRunService', () => {
     expect(sequences.length).toBeGreaterThan(1_000)
     expect(sequences).toEqual([...sequences].sort((left, right) => left - right))
     expect(new Set(sequences).size).toBe(sequences.length)
-    expect(messages.read(reviewer, { conversation: '@lead', limit: 100 }).messages).toHaveLength(100)
+    expect(messages.read(reviewer, { conversation: '@lead', limit: 50 }).messages).toHaveLength(50)
 
     service.end(launcher as unknown as Agent, 'Sustained collaboration test complete.', run.id)
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'closed', settled: true })
