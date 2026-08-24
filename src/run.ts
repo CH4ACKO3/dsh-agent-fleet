@@ -68,6 +68,7 @@ import {
   FLEET_MEMBER_PERMISSIONS,
   FLEET_MEMBER_TOOL_GROUPS,
   fleetMemberCanAccessChannel,
+  fleetMemberCanContact,
 } from './member-view.js'
 import {
   FLEET_TASK_STATE_NAMESPACE,
@@ -157,6 +158,28 @@ export interface FleetTraceEvent {
   readonly sourceSequence?: number
   readonly type: string
   readonly data: string
+}
+
+export interface FleetProgressItem {
+  readonly sequence: number
+  readonly createdAt: string
+  readonly kind: 'output' | 'tool_call' | 'tool_result' | 'error'
+  readonly name?: string
+  readonly text?: string
+}
+
+export interface FleetMemberProgress {
+  readonly runId: string
+  readonly member: string
+  readonly displayName?: string
+  readonly runtimeStatus: NonNullable<FleetRunMember['status']>
+  readonly declaredStatus?: {
+    readonly text: string
+    readonly updatedAt?: string
+  }
+  readonly items: FleetProgressItem[]
+  readonly cursor: number
+  readonly hasMore: boolean
 }
 
 export interface FleetJournalEvent {
@@ -437,6 +460,78 @@ interface SessionEventLike {
   readonly time: number
   readonly type: string
   readonly data: unknown
+}
+
+function clippedProgressText(value: string, maxChars: number): string {
+  const text = value.trim()
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}...`
+}
+
+function progressMessageText(value: unknown): string {
+  if (typeof value !== 'object' || value === null) return ''
+  const data = value as Readonly<Record<string, unknown>>
+  const message = typeof data.message === 'object' && data.message !== null
+    ? data.message as Readonly<Record<string, unknown>>
+    : data
+  if (typeof message.content === 'string') return message.content
+  if (!Array.isArray(message.content)) return ''
+  return message.content.flatMap(block => {
+    if (typeof block === 'string') return [block]
+    if (typeof block !== 'object' || block === null) return []
+    const item = block as Readonly<Record<string, unknown>>
+    return item.type === 'text' && typeof item.text === 'string' ? [item.text] : []
+  }).join('\n')
+}
+
+function memberProgressItem(
+  event: SessionEventLike,
+  includeOutputs: boolean,
+  maxChars: number,
+): FleetProgressItem | undefined {
+  const createdAt = new Date(event.time).toISOString()
+  if (event.type === 'assistant/message') {
+    const data = typeof event.data === 'object' && event.data !== null
+      ? event.data as Readonly<Record<string, unknown>>
+      : {}
+    if (data.interrupted === true) return undefined
+    const text = clippedProgressText(progressMessageText(data), maxChars)
+    return text === '' ? undefined : { sequence: event.seq, createdAt, kind: 'output', text }
+  }
+  if (event.type === 'tool/call') {
+    const data = typeof event.data === 'object' && event.data !== null
+      ? event.data as Readonly<Record<string, unknown>>
+      : {}
+    const name = typeof data.name === 'string' ? data.name : 'tool'
+    const text = includeOutputs && typeof data.arguments === 'string'
+      ? clippedProgressText(data.arguments, maxChars)
+      : ''
+    return {
+      sequence: event.seq,
+      createdAt,
+      kind: 'tool_call',
+      name,
+      ...(text === '' ? {} : { text }),
+    }
+  }
+  if (event.type === 'tool/result' && includeOutputs) {
+    const text = clippedProgressText(progressMessageText(event.data), maxChars)
+    return text === '' ? undefined : { sequence: event.seq, createdAt, kind: 'tool_result', text }
+  }
+  if (event.type === 'turn/end') {
+    const data = typeof event.data === 'object' && event.data !== null
+      ? event.data as Readonly<Record<string, unknown>>
+      : {}
+    const reason = typeof data.reason === 'object' && data.reason !== null
+      ? data.reason as Readonly<Record<string, unknown>>
+      : {}
+    if (reason.kind !== 'error') return undefined
+    const error = typeof reason.error === 'object' && reason.error !== null
+      ? reason.error as Readonly<Record<string, unknown>>
+      : {}
+    const text = typeof error.message === 'string' ? clippedProgressText(error.message, maxChars) : 'Agent turn failed'
+    return { sequence: event.seq, createdAt, kind: 'error', text }
+  }
+  return undefined
 }
 
 interface SessionPersistenceLike {
@@ -3630,6 +3725,94 @@ export class FleetRunService {
     }
   }
 
+  async readMemberProgress(
+    caller: Agent,
+    runId: string | undefined,
+    memberReference: string,
+    options: {
+      readonly afterSequence?: number
+      readonly limit?: number
+      readonly includeOutputs?: boolean
+      readonly maxCharsPerItem?: number
+    } = {},
+  ): Promise<FleetMemberProgress> {
+    const record = this.requireCallerRecord(caller, runId)
+    this.requireParticipant(record, caller)
+    const callerId = String(caller.id)
+    const callerParticipant = this.participants(record).find(candidate => candidate.sessionId === callerId)
+    const callerView = callerParticipant === undefined
+      ? undefined
+      : this.memberViews(record.id).find(view => view.id === callerParticipant.name)
+    if (callerParticipant === undefined || callerView === undefined) {
+      throw new Error(`Agent ${callerId} is not a Fleet participant`)
+    }
+    const canRead = this.authorization?.has(record.id, callerView, 'member-status.read')
+      ?? callerView.toolGroups.includes('status')
+    if (!canRead) throw new Error(`Agent ${callerId} is not authorized for member-status.read`)
+
+    const reference = memberReference.startsWith('@') ? memberReference.slice(1) : memberReference
+    const views = this.memberViews(record.id)
+    const matches = this.participants(record).flatMap(candidate => {
+      const view = views.find(value => value.id === candidate.name)
+      return candidate.name === reference || view?.name === reference ? [{ participant: candidate, view }] : []
+    })
+    if (matches.length === 0) throw new Error(`unknown Fleet member ${memberReference}`)
+    if (matches.length > 1) throw new Error(`ambiguous Fleet member ${memberReference}`)
+    const { participant: member, view: memberView } = matches[0] as typeof matches[number]
+    if (member.name !== callerParticipant.name && !fleetMemberCanContact(callerView, member.name)) {
+      throw new Error(`Fleet member @${callerView.id} cannot inspect @${member.name}`)
+    }
+
+    const afterSequence = options.afterSequence
+    const limit = options.limit ?? 5
+    const maxChars = options.maxCharsPerItem ?? 800
+    if (afterSequence !== undefined && (!Number.isSafeInteger(afterSequence) || afterSequence < 0)) {
+      throw new Error('afterSequence must be a non-negative integer')
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) {
+      throw new Error('limit must be an integer from 1 through 10')
+    }
+    if (!Number.isSafeInteger(maxChars) || maxChars < 100 || maxChars > 2_000) {
+      throw new Error('maxCharsPerItem must be an integer from 100 through 2000')
+    }
+
+    const live = this.ctx.agents.get(SessionId(member.sessionId))
+    const events: readonly SessionEventLike[] = live === undefined
+      ? (await this.requirePersistence().inspect(SessionId(member.sessionId))).events
+      : live.session.events
+    const projected = events.flatMap(event => {
+      const item = memberProgressItem(event, options.includeOutputs ?? false, maxChars)
+      return item === undefined ? [] : [item]
+    })
+    const eligible = afterSequence === undefined
+      ? projected
+      : projected.filter(item => item.sequence > afterSequence)
+    const items = afterSequence === undefined ? eligible.slice(-limit) : eligible.slice(0, limit)
+    const hasMore = eligible.length > items.length
+    const sourceCursor = events.at(-1)?.seq ?? 0
+    const cursor = hasMore ? items.at(-1)?.sequence ?? afterSequence ?? sourceCursor : sourceCursor
+    const current = this.describeRecord(record)
+    const runtimeStatus = current.members.find(candidate => candidate.name === member.name)?.status
+      ?? current.assistants.find(candidate => candidate.view.id === member.name)?.status
+      ?? 'unknown'
+    const declared = this.requireRuntime(record.id).memberStatuses.get(callerId, member.name)
+    return {
+      runId: record.id,
+      member: member.name,
+      ...(memberView === undefined ? {} : { displayName: memberView.name }),
+      runtimeStatus,
+      ...(declared.message === '' ? {} : {
+        declaredStatus: {
+          text: declared.message,
+          ...(declared.updatedAt === undefined ? {} : { updatedAt: declared.updatedAt }),
+        },
+      }),
+      items,
+      cursor,
+      hasMore,
+    }
+  }
+
   async readMemberTraceTail(
     runId: string | undefined,
     memberName: string,
@@ -4834,6 +5017,44 @@ const TRACE_RESULT_SCHEMA = {
   },
 } as const
 
+const PROGRESS_ITEM_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    sequence: { type: 'integer', required: true },
+    createdAt: { type: 'string', required: true },
+    kind: { type: 'string', required: true, enum: ['output', 'tool_call', 'tool_result', 'error'] },
+    name: { type: 'string' },
+    text: { type: 'string' },
+  },
+} as const
+
+const PROGRESS_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    runId: { type: 'string', required: true },
+    member: { type: 'string', required: true },
+    displayName: { type: 'string' },
+    runtimeStatus: {
+      type: 'string',
+      required: true,
+      enum: ['idle', 'running', 'waiting', 'error', 'offline', 'paused', 'unknown'],
+    },
+    declaredStatus: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', required: true },
+        updatedAt: { type: 'string' },
+      },
+    },
+    items: { type: 'array', required: true, items: PROGRESS_ITEM_SCHEMA },
+    cursor: { type: 'integer', required: true },
+    hasMore: { type: 'boolean', required: true },
+  },
+} as const
+
 const ACTIVITY_ITEM_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
     id: { type: 'string', required: true }, sequence: { type: 'integer', required: true },
@@ -5164,6 +5385,31 @@ export function installRunTools(
       return args.member === undefined
         ? service.readTrace(args.run_id, args.after_sequence ?? 0, limit, projectRoot)
         : service.readMemberTrace(args.run_id, args.member, args.after_sequence ?? -1, limit, projectRoot)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_progress',
+    description: 'Read one reachable Team member\'s current runtime state, self-declared status, and bounded recent Session progress without exposing their full private context.',
+    parameters: {
+      run_id: { type: 'string', description: 'Team id; inferred when the caller belongs to exactly one active Team.' },
+      member: { type: 'string', required: true, description: 'Member id, display name, or @member to inspect.' },
+      after_sequence: { type: 'integer', description: 'Return progress after this cursor. Omit to read the latest items.' },
+      limit: { type: 'integer', description: 'Maximum progress items from 1 through 10. Defaults to 5.' },
+      include_outputs: { type: 'boolean', description: 'Include clipped tool arguments and results. Defaults to false.' },
+      max_output_chars_per_item: { type: 'integer', description: 'Maximum text per item from 100 through 2000 characters. Defaults to 800.' },
+    },
+    output: jsonOutput(PROGRESS_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_progress')
+      return service.readMemberProgress(caller, args.run_id, args.member, {
+        ...(args.after_sequence === undefined ? {} : { afterSequence: args.after_sequence }),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        ...(args.include_outputs === undefined ? {} : { includeOutputs: args.include_outputs }),
+        ...(args.max_output_chars_per_item === undefined
+          ? {}
+          : { maxCharsPerItem: args.max_output_chars_per_item }),
+      })
     },
   }))
 

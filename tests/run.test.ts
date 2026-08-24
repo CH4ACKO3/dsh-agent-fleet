@@ -838,7 +838,7 @@ describe('FleetRunService', () => {
       },
     } as unknown as Context)
     expect(restrict).toHaveBeenCalledWith({
-      deny: ['fleet_agent', 'fleet_run', 'fleet_archive', 'fleet_assistant', 'fleet_trace', 'fleet_setup', 'fleet_member'],
+      deny: ['fleet_agent', 'fleet_run', 'fleet_archive', 'fleet_assistant', 'fleet_trace', 'fleet_setup', 'fleet_progress', 'fleet_member'],
     })
     expect(register.mock.calls.map(call => (call[0] as { name: string }).name)).toEqual([
       'fleet_send',
@@ -1352,6 +1352,110 @@ describe('FleetRunService', () => {
       limit: 40,
       cursor: { segment: 1, beforeSeq: 20 },
     }))
+    disconnect()
+  })
+
+  it('reads bounded recent progress without exposing reasoning or full tool output by default', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet peers')
+    reviewer.status = 'running'
+    service.agentStatusChanged(reviewer as unknown as Agent)
+    service.memberStatusBoard(run.id).set(reviewer.id, 'Reproducing the latest result')
+    reviewer.session.events.push(
+      {
+        seq: 1,
+        time: 1_000,
+        type: 'user/message',
+        data: { content: [{ type: 'text', text: 'private input' }] },
+      },
+      {
+        seq: 2,
+        time: 2_000,
+        type: 'assistant/message',
+        data: { message: { content: [{ type: 'reasoning', text: 'private reasoning' }] } },
+      },
+      {
+        seq: 3,
+        time: 3_000,
+        type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: 'Found a reproducible discrepancy.' }] } },
+      },
+      {
+        seq: 4,
+        time: 4_000,
+        type: 'tool/call',
+        data: { callId: 'call-1', name: 'bash', arguments: '{"command":"pnpm test --filter reproduction"}' },
+      },
+      {
+        seq: 5,
+        time: 5_000,
+        type: 'tool/result',
+        data: { message: { content: [{ type: 'text', text: 'All reproduction checks passed.' }] } },
+      },
+      {
+        seq: 6,
+        time: 6_000,
+        type: 'assistant/message',
+        data: { interrupted: true, message: { content: [{ type: 'text', text: 'partial output' }] } },
+      },
+    )
+
+    await expect(service.readMemberProgress(lead as unknown as Agent, run.id, '@reviewer')).resolves.toMatchObject({
+      runId: run.id,
+      member: 'reviewer',
+      displayName: 'Reviewer',
+      runtimeStatus: 'running',
+      declaredStatus: { text: 'Reproducing the latest result', updatedAt: expect.any(String) },
+      cursor: 6,
+      hasMore: false,
+      items: [
+        { sequence: 3, kind: 'output', text: 'Found a reproducible discrepancy.' },
+        { sequence: 4, kind: 'tool_call', name: 'bash' },
+      ],
+    })
+
+    await expect(service.readMemberProgress(lead as unknown as Agent, run.id, 'Reviewer', {
+      afterSequence: 3,
+      includeOutputs: true,
+      maxCharsPerItem: 100,
+    })).resolves.toMatchObject({
+      cursor: 6,
+      items: [
+        { sequence: 4, kind: 'tool_call', name: 'bash', text: '{"command":"pnpm test --filter reproduction"}' },
+        { sequence: 5, kind: 'tool_result', text: 'All reproduction checks passed.' },
+      ],
+    })
+    disconnect()
+  })
+
+  it('limits progress inspection to reachable members', async () => {
+    const { root, configPath } = fixture()
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
+      core: { members: Array<{ id: string; contacts: { members: '*' | string[] } }> }
+    }
+    const lead = config.core.members.find(member => member.id === 'lead')
+    if (lead === undefined) throw new Error('expected lead configuration')
+    lead.contacts.members = []
+    writeFileSync(configPath, JSON.stringify(config))
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const leadAgent = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (leadAgent === undefined) throw new Error('expected live Fleet lead')
+
+    await expect(service.readMemberProgress(leadAgent as unknown as Agent, run.id, '@reviewer'))
+      .rejects.toThrow('cannot inspect @reviewer')
     disconnect()
   })
 

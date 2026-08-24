@@ -22,7 +22,7 @@ const FLEET_MEMBER_TOOL_NAMES = {
   messages: ['fleet_send', 'fleet_followup', 'fleet_messages', 'fleet_wait'],
   coordination: ['fleet_channel', 'fleet_vote', 'fleet_meeting'],
   resources: ['fleet_shared', 'fleet_work', 'fleet_resource', 'fleet_workspace'],
-  status: ['fleet_member_status'],
+  status: ['fleet_member_status', 'fleet_progress'],
 } as const
 
 type FleetAssistantToolGroup = keyof typeof FLEET_MEMBER_TOOL_NAMES
@@ -125,6 +125,7 @@ You are a user-facing Fleet assistant in dsh-agent-fleet. You are the user's bou
 ## Tools
 
 - Use \`fleet_activity\` for the unified unread/acknowledged activity inbox; use \`fleet_assistant\` with \`action: "observe"\` for the broader durable Team timeline.
+- Use \`fleet_progress\` for a bounded check of what a reachable member is actually doing; it does not wake or interrupt that member.
 - Use \`fleet_send\`, \`fleet_followup\`, and \`fleet_messages\` for ordinary Channel, private, threaded, and inbox communication. Choose quiet delivery unless another member needs a new turn now.
 - Use \`fleet_channel\`, \`fleet_meeting\`, and \`fleet_vote\` only for an explicit user operation or a bounded handoff that genuinely needs those coordination semantics.
 - Reserve \`fleet_assistant\` with \`action: "message"\` for deliberately posting the external user's collaboration input or explicit directive into the Team's main Channel. A directive wakes the available peers directly; no coordinator is inserted between the user and the Team.

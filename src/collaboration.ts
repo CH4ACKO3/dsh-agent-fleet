@@ -545,6 +545,7 @@ export class FleetCollaborationService {
               'fleet_assistant',
               'fleet_trace',
               'fleet_setup',
+              ...(permissions.has('member-status.read') ? [] : ['fleet_progress']),
               ...(permissions.has('team.manage') || effective.op ? [] : ['fleet_member']),
             ],
           }))
