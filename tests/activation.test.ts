@@ -41,7 +41,7 @@ describe('Fleet UI activation bridge', () => {
       setup: { phase: 'operating', configuration },
       run: { id: 'team-created', members: [{ name: 'lead' }, { name: 'reviewer' }] },
     }))
-    const sendConversationMessage = vi.fn()
+    const sendUserConversationMessage = vi.fn()
     const incoming = createUserMessage({
       source: { kind: 'user' },
       content: [{ type: 'text', text: encodeFleetActivation({ mode: 'configuration', configuration }, '开始工作') }],
@@ -53,7 +53,7 @@ describe('Fleet UI activation bridge', () => {
       [incoming],
       undefined,
       {
-        runs: { attachAssistant: vi.fn(), sendConversationMessage } as never,
+        runs: { attachAssistant: vi.fn(), sendUserConversationMessage } as never,
         assistant: { activate: vi.fn() } as never,
         meta: { activate: vi.fn() } as never,
       },
@@ -61,7 +61,7 @@ describe('Fleet UI activation bridge', () => {
 
     expect(stage).toHaveBeenCalledWith(agent, { configuration })
     expect(create).toHaveBeenCalledWith(agent)
-    expect(sendConversationMessage).toHaveBeenCalledWith(agent, {
+    expect(sendUserConversationMessage).toHaveBeenCalledWith({
       runId: 'team-created',
       to: '#main',
       text: '开始工作',

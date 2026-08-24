@@ -197,6 +197,16 @@ const team: FleetPanelTeamSnapshot = {
       color: '#9867c5',
     },
   ],
+  assistants: [
+    {
+      id: 'team-assistant',
+      name: 'Halle',
+      role: 'Team assistant',
+      responsibility: 'Relay updates between the operator and the Team',
+      color: '#4f76c7',
+      sessionId: 'assistant-session',
+    },
+  ],
   messages: [],
   resources: [
     { id: 'plan', name: 'Plan', kind: 'plan', path: '/workspace/.fleet/plan.md', detail: 'Current plan' },
@@ -220,6 +230,12 @@ describe('Fleet panel live selection repair', () => {
   it('keeps valid selections and extension-owned tool state unchanged', () => {
     expect(resolveFleetPanelItem(team, 'chat', '@alex-session')).toBe('@alex-session')
     expect(resolveFleetPanelItem(team, 'extension.memory', 'memory-page')).toBe('memory-page')
+  })
+
+  it('treats a Team assistant as a first-class profile and context navigation target', () => {
+    expect(resolveFleetPanelItem(team, 'team', 'team-assistant')).toBe('team-assistant')
+    expect(resolveFleetPanelItem(team, 'agent', 'team-assistant::@context'))
+      .toBe('team-assistant::@context')
   })
 
   it('keeps member-to-member direct conversations out of the operator chat view', () => {

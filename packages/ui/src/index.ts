@@ -47,11 +47,13 @@ import {
 import {
   getFleetModelDirectory,
   getFleetTeamDirectorySnapshot,
+  sendFleetAssistantMailboxMessage,
   subscribeFleetTeamDirectory,
   type FleetModelDirectory,
   type FleetModelDirectoryState,
   type FleetPanelTeamSummary,
 } from './team-panel.js'
+import { useFleetMetaAssistantSession } from './meta-assistant.js'
 import { uploadFleetSetupFile } from './web-client.js'
 
 const STYLE_ID = 'dsh-agent-fleet-team-entry'
@@ -5791,6 +5793,7 @@ export function withFleetComposerActivation(
       getCurrentFleetSessionId,
     )
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : currentSessionId
+    const fleetAssistant = useFleetMetaAssistantSession(sessionId)
     const activation = useSyncExternalStore(
       subscribeFleetActivation,
       () => getFleetActivationSnapshot(sessionId),
@@ -5799,6 +5802,22 @@ export function withFleetComposerActivation(
     const meta = activation?.request.mode === 'meta'
     const inputActions = props.inputActions as NativeInputActions | undefined
     const keyboard = props.keyboard as NativeComposerKeyboard | undefined
+    const latestDraft = useRef(input?.draft ?? '')
+    latestDraft.current = input?.draft ?? ''
+    const mailboxSending = useRef(false)
+
+    const submitMailbox = (draft: string, setDraft: (text: string) => void): void => {
+      const text = draft.trim()
+      if (sessionId === undefined || text.length === 0 || mailboxSending.current) return
+      mailboxSending.current = true
+      latestDraft.current = ''
+      setDraft('')
+      void sendFleetAssistantMailboxMessage(sessionId, text).catch(() => {
+        if (latestDraft.current.length === 0) setDraft(draft)
+      }).finally(() => {
+        mailboxSending.current = false
+      })
+    }
 
     useEffect(() => {
       if (input?.phase !== 'plain' || inputActions === undefined) return
@@ -5809,20 +5828,24 @@ export function withFleetComposerActivation(
 
     const decoratedActions = inputActions === undefined
       ? undefined
-      : withSubmitOverride(inputActions, () => submitWithFleetActivation(
-            sessionId,
-            input?.draft ?? '',
-            text => inputActions.setDraft(text),
-            () => inputActions.submit(),
-          ))
+      : withSubmitOverride(inputActions, () => fleetAssistant
+        ? submitMailbox(input?.draft ?? '', text => inputActions.setDraft(text))
+        : submitWithFleetActivation(
+          sessionId,
+          input?.draft ?? '',
+          text => inputActions.setDraft(text),
+          () => inputActions.submit(),
+        ))
     const decoratedKeyboard = keyboard === undefined
       ? undefined
-      : withSubmitOverride(keyboard, (mode?: unknown) => submitWithFleetActivation(
-            sessionId,
-            keyboard.snapshot.draft,
-            text => keyboard.setDraft(text),
-            () => keyboard.submit(mode),
-          ))
+      : withSubmitOverride(keyboard, (mode?: unknown) => fleetAssistant
+        ? submitMailbox(keyboard.snapshot.draft, text => keyboard.setDraft(text))
+        : submitWithFleetActivation(
+          sessionId,
+          keyboard.snapshot.draft,
+          text => keyboard.setDraft(text),
+          () => keyboard.submit(mode),
+        ))
 
     return jsxs(Fragment, {
       children: [
@@ -5839,6 +5862,11 @@ export function withFleetComposerActivation(
             placeholder: isChineseLocale()
               ? '询问 Agent Fleet 关于团队插件的问题'
               : 'Ask Agent Fleet about the Team plugin',
+          } : fleetAssistant ? {
+            disabled: false,
+            placeholder: isChineseLocale()
+              ? '发送私聊消息给团队助理'
+              : 'Send a private message to the Team assistant',
           } : {}),
           inputActions: decoratedActions,
           keyboard: decoratedKeyboard,

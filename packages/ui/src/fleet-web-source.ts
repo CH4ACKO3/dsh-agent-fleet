@@ -298,8 +298,11 @@ function stateEventKey(event: WireEvent): string | undefined {
     const id = string(nestedRecord(event.data, 'meeting')?.id)
     return id === undefined ? undefined : `meeting:${id}`
   }
-  if (event.type === 'resource.resource_added') {
-    const id = string(nestedRecord(event.data, 'resource')?.id)
+  if (event.type === 'resource.resource_added' || event.type === 'resource.resource_removed') {
+    const data = event.type === 'resource.resource_removed'
+      ? nestedRecord(event.data, 'removal')
+      : asRecord(event.data)
+    const id = string(nestedRecord(data, 'resource')?.id)
     return id === undefined ? undefined : `resource:${id}`
   }
   if (event.type === 'workspace.assigned') {
@@ -460,6 +463,13 @@ function runDirectorySignature(runs: readonly WireRun[]): string {
     run.projectRoot,
     run.status,
     run.members.map(member => [member.name, member.displayName, member.role, member.sessionId, member.status]),
+    (run.assistants ?? []).map(assistant => [
+      assistant.sessionId,
+      assistant.view?.id,
+      assistant.view?.name,
+      assistant.view?.role,
+      assistant.status,
+    ]),
   ]))
 }
 
@@ -483,6 +493,11 @@ function activityAction(value: unknown): string {
 
 function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, FleetPanelMember>): string {
   const data = asRecord(event.data)
+  const actorName = (actorId: string | undefined): string => actorId === undefined
+    ? '团队成员'
+    : membersBySession.get(actorId)?.name
+      ?? [...membersBySession.values()].find(member => member.id === actorId)?.name
+      ?? (actorId === 'fleet-filesystem' ? '文件系统自动发现' : actorId)
   if (event.type === 'member_status.updated') {
     const status = nestedRecord(event.data, 'status')
     return `${string(status?.member) ?? '团队成员'} 更新了成员自述：${string(status?.message) ?? ''}`
@@ -498,11 +513,16 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
   }
   if (event.type === 'resource.resource_added') {
     const resource = nestedRecord(event.data, 'resource')
-    return `添加了共享资源 ${string(resource?.label) ?? basename(string(resource?.path) ?? '文件')}`
+    return `${actorName(string(resource?.createdBy))} 添加了共享资源 ${string(resource?.label) ?? basename(string(resource?.path) ?? '文件')}`
+  }
+  if (event.type === 'resource.resource_removed') {
+    const removal = nestedRecord(event.data, 'removal')
+    const resource = nestedRecord(removal, 'resource')
+    return `${actorName(string(removal?.removedBy))} 删除了共享资源 ${string(resource?.label) ?? basename(string(resource?.path) ?? '文件')}`
   }
   if (event.type === 'resource.resource_revised') {
     const revision = nestedRecord(event.data, 'revision')
-    return `更新了共享资源 ${string(revision?.resourceId) ?? '文件'}`
+    return `${actorName(string(revision?.updatedBy))} 更新了共享资源 ${string(revision?.resourceId) ?? '文件'}`
   }
   if (event.type.startsWith('resource.document_')) {
     const document = nestedRecord(event.data, 'document')
@@ -597,7 +617,6 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       ...(assistant.view?.provider === undefined ? {} : { provider: assistant.view.provider }),
       ...(assistant.view?.model === undefined ? {} : { model: assistant.view.model }),
       sessionId: assistant.sessionId,
-      operator: true,
     }
   })
   const membersBySession = new Map(cache.run.members.flatMap((member, index) => {
@@ -615,7 +634,11 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     if (previousSessionId !== undefined) membersBySession.set(previousSessionId, projected)
     if (sessionId !== undefined) membersBySession.set(sessionId, projected)
   }
-  const assistantsBySession = new Map((cache.run.assistants ?? []).map(assistant => [assistant.sessionId, assistant]))
+  const assistantsBySession = new Map(assistants.flatMap(assistant => assistant.sessionId === undefined
+    ? []
+    : [[assistant.sessionId, assistant] as const]))
+  const participantsBySession = new Map([...membersBySession, ...assistantsBySession])
+  const participants = [...members, ...assistants]
   const channels = new Map<string, FleetPanelConversation>()
   const meetings = new Map<string, FleetPanelConversation>()
   const resources = new Map<string, FleetPanelResource>()
@@ -668,10 +691,10 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         ...((string(channel?.topic) ?? string(channel?.summary)) === undefined
           ? {}
           : { topic: string(channel?.topic) ?? string(channel?.summary) ?? '' }),
-        memberCount: channelMembers.length === 0 ? members.length : channelMembers.length,
+        memberCount: channelMembers.length === 0 ? participants.length : channelMembers.length,
         activeCount: channelMembers.length === 0
-          ? members.filter(isPresent).length
-          : channelMembers.filter(memberId => isPresent(membersBySession.get(memberId))).length,
+          ? participants.filter(isPresent).length
+          : channelMembers.filter(memberId => isPresent(participantsBySession.get(memberId))).length,
       })
       continue
     }
@@ -689,7 +712,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         name: string(meeting?.title) ?? id,
         topic: string(meeting?.agenda) ?? '团队会议',
         memberCount: participants.length,
-        activeCount: participants.filter(memberId => isPresent(membersBySession.get(memberId))).length,
+        activeCount: participants.filter(memberId => isPresent(participantsBySession.get(memberId))).length,
       })
       continue
     }
@@ -703,7 +726,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const messageId = string(data?.messageId)
       const agentId = string(data?.agentId)
       if (data?.type !== 'inbox' || messageId === undefined || agentId === undefined) continue
-      const member = membersBySession.get(agentId)
+      const member = participantsBySession.get(agentId)
       if (member === undefined) continue
       if (data.action === 'delivered') {
         const contextMessageId = string(data.contextMessageId)
@@ -745,6 +768,11 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       })
       continue
     }
+    if (event.type === 'resource.resource_removed') {
+      const id = string(nestedRecord(nestedRecord(event.data, 'removal'), 'resource')?.id)
+      if (id !== undefined) resources.delete(id)
+      continue
+    }
   }
 
   const workspacesByPath = new Map<string, FleetPanelWorkspace>()
@@ -769,16 +797,23 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     directParticipants.set(id, [runMember.sessionId])
     channels.set(id, { id, kind: 'direct', name: member.name, topic: member.role, peerId: member.id })
   }
+  for (const assistant of assistants) {
+    if (assistant.sessionId === undefined) continue
+    const id = `@${assistant.sessionId}`
+    directParticipants.set(id, [assistant.sessionId])
+    channels.set(id, { id, kind: 'direct', name: assistant.name, topic: assistant.role, peerId: assistant.id })
+  }
 
   const senderFace = (sessionId: string, fromName?: string): FleetChatMember => {
     const member = membersBySession.get(sessionId)
     if (member !== undefined) return member
     const assistant = assistantsBySession.get(sessionId)
-    if (assistant !== undefined || isFleetUser(sessionId)) return {
+    if (assistant !== undefined) return assistant
+    if (isFleetUser(sessionId)) return {
       id: 'operator',
-      name: assistant?.view?.name ?? fromName ?? 'You',
-      role: assistant?.view?.role ?? '外部观察者',
-      color: assistant?.view?.color ?? '#737985',
+      name: fromName ?? 'You',
+      role: '外部观察者',
+      color: '#737985',
       presence: 'active',
       operator: true,
     }
@@ -806,10 +841,16 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         const member = membersBySession.get(participant)
         return member === undefined ? [] : [[member.id, member] as const]
       })).values()]
+      const attachedAssistants = participants.flatMap(participant => {
+        const assistant = assistantsBySession.get(participant)
+        return assistant === undefined ? [] : [assistant]
+      })
       const fleetUsers = participants.filter(isFleetUser)
       if (participants.length === 2 && formal.length === 1 && fleetUsers.length === 1) {
         const currentSession = cache.run.members.find(member => member.name === formal[0]?.id)?.sessionId
         conversationId = `@${currentSession ?? recipient}`
+      } else if (participants.length === 2 && attachedAssistants.length === 1 && fleetUsers.length === 1) {
+        conversationId = `@${attachedAssistants[0]?.sessionId ?? recipient}`
       } else {
         const stableParticipants = participants.map(participant => {
           const member = membersBySession.get(participant)
@@ -867,6 +908,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     const sender = senderFace(from, string(message.fromName))
     const senderMember = membersBySession.get(from)
     const directRecipientMember = target.startsWith('@') ? membersBySession.get(target.slice(1)) : undefined
+    const directRecipientAssistant = target.startsWith('@') ? assistantsBySession.get(target.slice(1)) : undefined
     const visibleSessions = cache.run.members.flatMap(runMember => {
       if (runMember.sessionId === from || senderMember?.id === runMember.name) return []
       if (target.startsWith('@')) {
@@ -884,18 +926,21 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const contacts = views.get(runMember.name)?.contacts?.channels
       return contacts === '*' || contacts?.includes(channel) === true ? [runMember.sessionId] : []
     })
+    if (directRecipientAssistant?.sessionId !== undefined && directRecipientAssistant.sessionId !== from) {
+      visibleSessions.push(directRecipientAssistant.sessionId)
+    }
     const readThrough = readThroughByMessage.get(id) ?? new Map<string, number>()
     const visibleMemberIds = visibleSessions.flatMap(sessionId => {
-      const member = membersBySession.get(sessionId)
+      const member = participantsBySession.get(sessionId)
       return member === undefined ? [] : [member.id]
     })
     const readMemberIds = visibleSessions.flatMap(sessionId => {
-      const member = membersBySession.get(sessionId)
+      const member = participantsBySession.get(sessionId)
       return member !== undefined && (readThrough.get(member.id) ?? 0) >= text.length ? [member.id] : []
     })
     const readMemberIdSet = new Set(readMemberIds)
     const sources = visibleSessions.flatMap(sessionId => {
-      const member = membersBySession.get(sessionId)
+      const member = participantsBySession.get(sessionId)
       const source = member === undefined ? undefined : contextSourcesByMessage.get(id)?.get(member.id)
       return source === undefined ? [] : [source]
     })
@@ -973,6 +1018,7 @@ function directory(runs: readonly WireRun[]): FleetPanelTeamDirectory {
     teams: runs.map(run => ({
       teamId: run.id,
       teamName: run.name,
+      assistantSessionIds: (run.assistants ?? []).map(assistant => assistant.sessionId),
       color: color(run.id),
       status: run.status,
       ...(run.runtimeState === undefined ? {} : { runtimeState: run.runtimeState }),
@@ -1308,8 +1354,11 @@ export function createFleetWebPanelSource(
       const conversation = snapshot.team?.teamId === input.teamId
         ? snapshot.team.conversations.find(candidate => candidate.id === input.conversationId)
         : undefined
-      if (conversation === undefined) throw new Error('当前 Fleet 会话已不可用')
-      const target = conversation.id
+      const assistantDirect = input.conversationId.startsWith('@')
+        && snapshot.directory.teams.find(team => team.teamId === input.teamId)
+          ?.assistantSessionIds?.includes(input.conversationId.slice(1)) === true
+      if (conversation === undefined && !assistantDirect) throw new Error('当前 Fleet 会话已不可用')
+      const target = conversation?.id ?? input.conversationId
       if (!target.startsWith('#') && !target.startsWith('@') && !target.startsWith('meeting:')) {
         throw new Error('团队成员之间的私聊在外部观察者视图中只读')
       }
@@ -1325,7 +1374,7 @@ export function createFleetWebPanelSource(
         mode: 'conversation',
         to: target,
         text,
-        delivery: input.delivery ?? (conversation.kind === 'direct' ? 'wakeup' : 'quiet'),
+        delivery: input.delivery ?? (conversation?.kind === 'direct' || assistantDirect ? 'wakeup' : 'quiet'),
         ...(resources.length === 0 ? {} : { resources }),
         ...(mentions.length === 0 ? {} : { mentions }),
       }, lifetime.signal))
