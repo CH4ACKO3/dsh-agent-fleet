@@ -194,6 +194,10 @@ importers:
         version: 4.4.3
 
   packages/dsh-fleet-patchouli:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: ^3.18.1
+        version: 3.18.1
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1

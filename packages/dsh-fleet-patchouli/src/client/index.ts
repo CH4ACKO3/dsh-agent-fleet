@@ -1,5 +1,5 @@
 import type { ChangeEvent, ComponentType, ReactElement, ReactNode } from 'react'
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const TOOL_ID = 'memory'
@@ -58,6 +58,7 @@ interface MemoryEntry {
   readonly member?: string
   readonly conversation?: string
   readonly effort?: string
+  readonly agent?: boolean
   readonly algorithm?: string
   readonly providers: readonly string[]
 }
@@ -99,6 +100,7 @@ export function fleetMemoryEntry(activity: FleetActivity): MemoryEntry | undefin
     const member = text(data?.member)
     const conversation = text(data?.conversation)
     const effort = text(data?.effort)
+    const agent = typeof data?.agent === 'boolean' ? data.agent : undefined
     const algorithm = text(data?.algorithm)
     return {
       activity,
@@ -107,6 +109,7 @@ export function fleetMemoryEntry(activity: FleetActivity): MemoryEntry | undefin
       ...(member === undefined ? {} : { member }),
       ...(conversation === undefined ? {} : { conversation }),
       ...(effort === undefined ? {} : { effort }),
+      ...(agent === undefined ? {} : { agent }),
       ...(algorithm === undefined ? {} : { algorithm }),
       providers: stringList(data?.providers),
     }
@@ -115,6 +118,7 @@ export function fleetMemoryEntry(activity: FleetActivity): MemoryEntry | undefin
 }
 
 function Icon({ name, size = 18 }: { readonly name: 'memory' | 'write' | 'recall' | 'chevron' | 'search'; readonly size?: number }): ReactElement {
+  const maskId = useId()
   const common = {
     width: size,
     height: size,
@@ -128,10 +132,30 @@ function Icon({ name, size = 18 }: { readonly name: 'memory' | 'write' | 'recall
   }
   if (name === 'memory') return jsxs('svg', {
     ...common,
+    viewBox: '0 0 20 20',
     children: [
-      jsx('path', { d: 'M10.2 16.8V8.5c0-2.7 1.8-4.7 4.8-5.5.4 3.5-1.1 6-4.8 6.8' }),
-      jsx('path', { d: 'M9.8 13.3c0-2.7-1.6-4.5-4.8-5.3-.2 3.4 1.4 5.4 4.8 5.9' }),
-      jsx('path', { d: 'M6 17h8' }),
+      jsx('defs', {
+        children: jsxs('mask', {
+          id: maskId,
+          children: [
+            jsx('rect', { width: 20, height: 20, fill: 'white' }),
+            jsx('path', {
+              d: 'M2.2 9.1c3.7-.3 5.4-2.2 6-5.7 3.1 1.2 4.5 3.5 4 6.2-.5 2.7-2.7 4.5-5.5 4.3-2.2-.1-3.9-1.3-4.5-3.1Z',
+              fill: 'black',
+              stroke: 'black',
+              strokeWidth: 1.8,
+            }),
+          ],
+        }),
+      }),
+      jsxs('g', {
+        mask: `url(#${maskId})`,
+        children: [
+          jsx('path', { d: 'm2.2 6.7 7.8-4.3 7.8 4.3-7.8 4.4-7.8-4.4Z' }),
+          jsx('path', { d: 'M2.2 7v7.1l7.8 4.1 7.8-4.1V7M10 11.1v7.1' }),
+        ],
+      }),
+      jsx('path', { d: 'M2.2 9.1c3.7-.3 5.4-2.2 6-5.7 3.1 1.2 4.5 3.5 4 6.2-.5 2.7-2.7 4.5-5.5 4.3-2.2-.1-3.9-1.3-4.5-3.1' }),
     ],
   })
   if (name === 'write') return jsxs('svg', {
@@ -264,6 +288,7 @@ function detailTags(entry: MemoryEntry): readonly ReactNode[] {
   if (entry.member !== undefined) tags.push(jsx('span', { children: entry.member }, 'member'))
   if (entry.conversation !== undefined) tags.push(jsx('span', { children: entry.conversation }, 'conversation'))
   if (entry.effort !== undefined) tags.push(jsx('span', { children: `effort · ${entry.effort}` }, 'effort'))
+  if (entry.agent !== undefined) tags.push(jsx('span', { children: entry.agent ? 'Agent' : 'Local' }, 'agent'))
   if (entry.algorithm !== undefined) tags.push(jsx('span', { children: entry.algorithm }, 'algorithm'))
   for (const provider of entry.providers) tags.push(jsx('span', { children: provider }, `provider:${provider}`))
   return tags

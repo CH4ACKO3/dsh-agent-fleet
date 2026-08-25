@@ -78,6 +78,28 @@ describe('Fleet Patchouli processor', () => {
     )
   })
 
+  it('keeps effort independent from optional Agent participation', async () => {
+    const local = vi.fn().mockResolvedValue({ handled: true, items: ['local'] })
+    const agent = vi.fn().mockResolvedValue({ handled: true, items: ['agent'] })
+    const plugin = createFleetMemoryProcessor([
+      { id: 'local', minimumEffort: 'high', filter: () => true, retrieve: local },
+      { id: 'agent', minimumEffort: 'high', requiresAgent: true, filter: () => true, retrieve: agent },
+    ])
+    const meta = {
+      source: { type: 'agent-loop', id: 'test' },
+      scope: '/workspace',
+      attributes: { fleetEffort: 'high', fleetAgent: false },
+    }
+
+    await expect(plugin.retrieve({ meta, data: { query: 'history' } }, {})).resolves.toMatchObject({
+      effort: 'high',
+      agent: false,
+      items: ['local'],
+    })
+    expect(local).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ effort: 'high', agent: false }))
+    expect(agent).not.toHaveBeenCalled()
+  })
+
   it('defaults native Fleet memory retrieval to medium effort without attributes', async () => {
     const low = vi.fn().mockResolvedValue({ handled: true, items: ['low'] })
     const medium = vi.fn().mockResolvedValue({ handled: true, items: ['medium'] })
@@ -174,6 +196,7 @@ describe('Fleet Patchouli processor', () => {
       resultCount: 2,
       algorithm: 'history',
       effort: 'medium',
+      agent: true,
     })
     expect(recordRecallAudit).toHaveBeenCalledOnce()
 

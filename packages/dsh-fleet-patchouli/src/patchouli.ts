@@ -40,6 +40,7 @@ export interface MemoryPlugin {
 
 export interface FleetMemoryAlgorithmContext {
   readonly effort: FleetMemoryEffort
+  readonly agent: boolean
   readonly signal?: AbortSignal
   /** Queue a successful recall for audit after the complete processor request settles. */
   readonly deferRecallAudit?: (audit: FleetMemoryRecallAudit) => void
@@ -55,12 +56,15 @@ export interface FleetMemoryRecallAudit {
 export interface FleetMemoryCommittedRecallAudit extends FleetMemoryRecallAudit {
   readonly algorithm: string
   readonly effort: FleetMemoryEffort
+  readonly agent: boolean
 }
 
 /** One independently selectable processing block behind the Fleet Patchouli adapter. */
 export interface FleetMemoryAlgorithm {
   readonly id: string
   readonly minimumEffort?: FleetMemoryEffort
+  /** Skip this block when the caller opted out of Agent participation. */
+  readonly requiresAgent?: boolean
   filter(call: MemoryRouteCall): boolean
   update?(
     request: MemoryRequest,
@@ -87,6 +91,7 @@ export function fleetMemoryEffortForCall(call: MemoryRouteCall): FleetMemoryEffo
 export function fleetMemoryEffortForRequest(
   operation: 'update' | 'retrieve',
   request: MemoryRequest,
+  fallback: FleetMemoryEffort = DEFAULT_FLEET_MEMORY_EFFORT,
 ): FleetMemoryEffort {
   const routed = request.meta.attributes?.fleetEffort
   if (routed === 'low' || routed === 'medium' || routed === 'high') return routed
@@ -98,7 +103,25 @@ export function fleetMemoryEffortForRequest(
       if (requested === 'low' || requested === 'medium' || requested === 'high') return requested
     }
   }
-  return DEFAULT_FLEET_MEMORY_EFFORT
+  return fallback
+}
+
+export function fleetMemoryAgentForRequest(
+  operation: 'update' | 'retrieve',
+  request: MemoryRequest,
+  fallback = true,
+): boolean {
+  const routed = request.meta.attributes?.fleetAgent
+  if (typeof routed === 'boolean') return routed
+  if (operation === 'retrieve' && typeof request.data === 'object' && request.data !== null
+    && !Array.isArray(request.data)) {
+    const metadata = (request.data as Record<string, unknown>).metadata
+    if (typeof metadata === 'object' && metadata !== null && !Array.isArray(metadata)) {
+      const requested = (metadata as Record<string, unknown>).fleetAgent
+      if (typeof requested === 'boolean') return requested
+    }
+  }
+  return fallback
 }
 
 export function fleetMemoryEffortAtLeast(
