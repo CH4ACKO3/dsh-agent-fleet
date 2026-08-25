@@ -22,6 +22,8 @@ import {
 } from './runtime-chat.js'
 import {
   configureFleetActivationSessions,
+  getCurrentFleetSessionId,
+  subscribeCurrentFleetSession,
   type FleetActivationClientSessions,
 } from './activation.js'
 import {
@@ -418,6 +420,14 @@ const panelStyles = `
   -webkit-mask: url('/dsh-harmony/assets/harmony-icon-mono.png') center / contain no-repeat;
   mask: url('/dsh-harmony/assets/harmony-icon-mono.png') center / contain no-repeat;
   display: block;
+}
+
+.dsh-fleet-panel-harmony-icon-probe {
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
 }
 
 .dsh-fleet-panel-rail-tools {
@@ -2886,9 +2896,32 @@ button.dsh-fleet-panel-team-title:focus-visible {
   background: var(--dsw-alias-state-warning-primary, #c38b36);
 }
 
+.dsh-fleet-panel-activity-dot[data-kind="memory"] {
+  background: #8b6bbd;
+}
+
 .dsh-fleet-panel-activity-copy {
+  min-width: 0;
   font-size: 13px;
   line-height: 19px;
+  overflow-wrap: anywhere;
+}
+
+.dsh-fleet-panel-activity-row[data-kind="memory"] .dsh-fleet-panel-activity-copy {
+  align-items: baseline;
+  gap: 8px;
+  display: flex;
+}
+
+.dsh-fleet-panel-activity-memory-operation {
+  flex: none;
+  color: color-mix(in srgb, #8060ae 72%, var(--dsw-alias-label-primary));
+  background: color-mix(in srgb, #8b6bbd 13%, transparent);
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .dsh-fleet-panel-activity-time {
@@ -3272,7 +3305,9 @@ export interface FleetPanelWorkspace {
 
 export interface FleetPanelActivity {
   readonly id: string
-  readonly kind: 'message' | 'resource' | 'decision' | 'member'
+  readonly kind: 'message' | 'resource' | 'decision' | 'member' | 'memory'
+  readonly type?: string
+  readonly data?: unknown
   readonly text: string
   readonly createdAt: string
 }
@@ -3299,6 +3334,8 @@ export interface FleetPanelTeamSummary {
   readonly teamId: string
   readonly teamName: string
   readonly assistantSessionIds?: readonly string[]
+  readonly assistantSessionAliases?: Readonly<Record<string, string>>
+  readonly assistantParticipantIds?: Readonly<Record<string, string>>
   readonly color?: string
   readonly unread?: number
   readonly needsAttention?: boolean
@@ -3908,6 +3945,24 @@ function PanelIcon({ name, size = 18 }: { readonly name: PanelIconName; readonly
   })
 }
 
+function HarmonyBrandIcon(): ReactElement {
+  const [available, setAvailable] = useState(false)
+  return jsxs(Fragment, {
+    children: [
+      available
+        ? jsx('span', { className: 'dsh-fleet-panel-harmony-icon', 'aria-hidden': 'true' })
+        : jsx(PanelIcon, { name: 'team', size: 21 }),
+      jsx('img', {
+        className: 'dsh-fleet-panel-harmony-icon-probe',
+        src: '/dsh-harmony/assets/harmony-icon-mono.png?fleet-brand-probe=1',
+        alt: '',
+        'aria-hidden': 'true',
+        onLoad: () => { setAvailable(true) },
+      }),
+    ],
+  })
+}
+
 const operator: FleetPanelMember = {
   id: 'operator', name: 'You', role: '外部观察者', responsibility: '观察并向团队提供协作输入',
   color: '#737985', presence: 'active', operator: true,
@@ -3948,10 +4003,12 @@ export function sendFleetAssistantMailboxMessage(sessionId: string, text: string
   const team = source?.getSnapshot().directory.teams.find(candidate =>
     candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
   if (source === undefined || team === undefined) return Promise.reject(new Error('当前 Session 未连接 Fleet Team 助理'))
+  const recipient = team.assistantParticipantIds?.[sessionId]
+  if (recipient === undefined) return Promise.reject(new Error('当前 Session 没有稳定的 Fleet Team 助理身份'))
   return source.sendMessage({
     sessionId,
     teamId: team.teamId,
-    conversationId: `@${sessionId}`,
+    conversationId: `@${recipient}`,
     content: [{ type: 'text', text }],
     delivery: 'wakeup',
   })
@@ -3962,10 +4019,12 @@ function fleetAssistantMailbox(snapshot: FleetPanelSnapshot, sessionId: string |
   const summary = snapshot.directory.teams.find(candidate =>
     candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
   if (summary === undefined) return undefined
+  const assistantSessionId = summary.assistantSessionAliases?.[sessionId] ?? sessionId
+  const assistantId = summary.assistantParticipantIds?.[sessionId]
   const team = snapshot.team?.teamId === summary.teamId ? snapshot.team : undefined
-  const assistant = team?.assistants?.find(candidate => candidate.sessionId === sessionId)
+  const assistant = team?.assistants?.find(candidate => candidate.id === assistantId)
   const fallbackAssistant: FleetChatMember = {
-    id: `assistant-${sessionId}`,
+    id: assistantId ?? `assistant-${assistantSessionId}`,
     name: 'Agent Fleet',
     role: panelText('团队助理', 'Team assistant'),
     color: summary.color ?? '#4f76c7',
@@ -3980,7 +4039,7 @@ function fleetAssistantMailbox(snapshot: FleetPanelSnapshot, sessionId: string |
     state: snapshot.connection?.status === 'disconnected'
       ? 'error'
       : team === undefined ? 'loading' : 'open',
-    messages: (team?.messages ?? []).filter(message => message.conversationId === `@${sessionId}`).map(message => ({
+    messages: (team?.messages ?? []).filter(message => message.conversationId === `@${assistantId ?? assistantSessionId}`).map(message => ({
       id: message.id,
       sender: message.sender?.operator === true
         ? operator
@@ -4353,7 +4412,12 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
     nativeChatRuntime = props
     if (!initialized) queueMicrotask(publishNativeChatRuntime)
     const welcome = useFleetMetaWelcome()
-    const sessionId = typeof props.sessionId === 'string' ? props.sessionId : undefined
+    const currentSessionId = useSyncExternalStore(
+      subscribeCurrentFleetSession,
+      getCurrentFleetSessionId,
+      getCurrentFleetSessionId,
+    )
+    const sessionId = typeof props.sessionId === 'string' ? props.sessionId : currentSessionId
     const fleetAssistant = useFleetMetaAssistantSession(sessionId)
     const fleetSnapshot = useSyncExternalStore(
       subscribeFleetTeamDirectory,
@@ -4660,7 +4724,7 @@ export function resolveFleetPanelItem(
       || team.workspaces?.some(item => item.id === requested) === true
     ? requested
     : initialItem(team, tool)
-  if (tool === 'activity') return ['all', 'message', 'resource', 'decision'].includes(requested)
+  if (tool === 'activity') return ['all', 'message', 'resource', 'decision', 'memory'].includes(requested)
     ? requested
     : 'all'
   if (tool === 'agent') {
@@ -5153,11 +5217,11 @@ export function FleetTeamPanel({
         id: 'fleet.activity.select',
         label: '筛选 Fleet 团队动态',
         scope: 'fleet',
-        description: '只允许选择 all、message、resource、decision 四种现有动态视图。输入筛选名或 {"kind":"…"}。',
-        options: () => ['all', 'message', 'resource', 'decision'],
+        description: '只允许选择 all、message、resource、decision、memory 五种现有动态视图。输入筛选名或 {"kind":"…"}。',
+        options: () => ['all', 'message', 'resource', 'decision', 'memory'],
         perform: input => {
           const kind = typeof input === 'string' ? input : fleetActionId(input, 'kind')
-          if (!['all', 'message', 'resource', 'decision'].includes(kind)) throw new Error(`Unknown Fleet activity filter ${JSON.stringify(kind)}`)
+          if (!['all', 'message', 'resource', 'decision', 'memory'].includes(kind)) throw new Error(`Unknown Fleet activity filter ${JSON.stringify(kind)}`)
           setItems(current => ({ ...current, [`${activeTeam.teamId}:activity`]: kind }))
           setActiveTool('activity')
           setNavigationOpen(false)
@@ -5180,7 +5244,7 @@ export function FleetTeamPanel({
         'data-joyride-action': FLEET_VIEW_ACTIONS.home,
         title: '团队首页',
         onClick: showTeamDirectory,
-        children: jsx('span', { className: 'dsh-fleet-panel-harmony-icon', 'aria-hidden': 'true' }),
+        children: jsx(HarmonyBrandIcon, {}),
       }),
       jsx('div', {
         className: 'dsh-fleet-panel-rail-tools',
@@ -6830,10 +6894,11 @@ function ResourcesSidebar(owner: FleetPanelPaneOwner): ReactElement {
 function ActivitySidebar(owner: FleetPanelPaneOwner): ReactElement {
   const [query, setQuery] = useState('')
   const filters = [
-    ['all', '全部动态', '消息、资源和决策'],
+    ['all', '全部动态', '消息、资源、决策和记忆'],
     ['message', '消息', '频道与私聊'],
     ['resource', '资源', '共享文件与引用'],
     ['decision', '决策', '投票与共识'],
+    ['memory', '记忆', '历史写入与召回'],
   ] as const
   return jsx(PaneSidebar, {
     owner,
@@ -9216,9 +9281,23 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
         ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '当前筛选下没有动态' })
         : activity.map(item => jsxs('div', {
             className: 'dsh-fleet-panel-activity-row',
+            'data-kind': item.kind,
             children: [
               jsx('span', { className: 'dsh-fleet-panel-activity-dot', 'data-kind': item.kind }),
-              jsx('span', { className: 'dsh-fleet-panel-activity-copy', children: item.text }),
+              jsxs('span', {
+                className: 'dsh-fleet-panel-activity-copy',
+                children: [
+                  item.type === 'memory.stored' && jsx('span', {
+                    className: 'dsh-fleet-panel-activity-memory-operation',
+                    children: '记忆写入',
+                  }),
+                  item.type === 'memory.recalled' && jsx('span', {
+                    className: 'dsh-fleet-panel-activity-memory-operation',
+                    children: '记忆召回',
+                  }),
+                  jsx('span', { children: item.text }),
+                ],
+              }),
               jsx('time', {
                 className: 'dsh-fleet-panel-activity-time',
                 dateTime: item.createdAt,

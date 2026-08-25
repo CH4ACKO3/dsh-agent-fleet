@@ -575,7 +575,7 @@ export function withFleetGlobalConversationView(
     const actions = props.actions as { readonly setView?: (view: string) => void } | undefined
     const useSession = props.useSession as NativeUseSession
     const decoratedUseSession: NativeUseSession = (selector, equality) => useSession(
-      source => selector(meta || fleetSelected ? establishedMetaSession(source) : source),
+      source => selector(meta || fleetSelected || fleetAssistant ? establishedMetaSession(source) : source),
       equality,
     )
 

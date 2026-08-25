@@ -2,6 +2,8 @@ import { unlinkSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import type { Scope } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   FleetMemberStatusBoard,
@@ -55,9 +57,13 @@ import {
   type FleetCalendarEventChange,
   type FleetCalendarState,
 } from './productivity/calendar.js'
+import { fleetTeamEvents } from './team-events.js'
+import type { FleetTeamEventDispatch } from './team-events.js'
 
 export interface FleetCollaborationTeam {
   readonly id: string
+  readonly ctx: Context
+  readonly events: FleetTeamEventDispatch
   readonly messages: MessageHub
   readonly resources: FleetResources
   readonly memberStatuses: FleetMemberStatusBoard
@@ -359,7 +365,15 @@ export class FleetCollaborationService {
     }
     const resources = new FleetResources(this.ctx.fs)
     const memberStatuses = new FleetMemberStatusBoard(memberDirectory)
-    const messages = new MessageHub(agentDirectory)
+    let events: FleetTeamEventDispatch
+    let teamScope: Scope
+    const messages = new MessageHub(agentDirectory, {
+      beforeSend: (sender, message) => events.waterfall(
+        'fleet/message/pre-send',
+        { sender, input: message },
+        () => ({ kind: 'send', input: message }),
+      ),
+    })
     const canManage = (agentId: string, namespace: string): boolean => {
       const member = memberNamesById.get(agentId)
       if (member === undefined) return false
@@ -618,6 +632,8 @@ export class FleetCollaborationService {
     let closed = false
     const team: FleetCollaborationTeam = {
       id: input.id,
+      get ctx() { return teamScope.ctx },
+      get events() { return events },
       messages,
       resources,
       memberStatuses,
@@ -739,8 +755,22 @@ export class FleetCollaborationService {
         tasks.close()
         scheduler.close()
         calendar.close()
+        events.emit('fleet/team/disposed', {})
+        void teamScope.dispose().catch(error => {
+          this.ctx.logger('dsh-agent-fleet').warn(
+            `Could not dispose Fleet Team ${input.id} scope: ${String(error)}`,
+          )
+        })
       },
     }
+    teamScope = typeof (this.ctx as Context & { plugin?: unknown }).plugin === 'function'
+      ? createScope(this.ctx, team)
+      : {
+          ctx: this.ctx,
+          rawDispose: () => {},
+          dispose: () => Promise.resolve(),
+        }
+    events = fleetTeamEvents(this.ctx, team)
     this.teams.set(input.id, team)
     return team
   }

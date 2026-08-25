@@ -106,6 +106,26 @@ describe('MessageHub', () => {
     })
   })
 
+  it('applies the send admission hook before validation and persistence', () => {
+    const lead = new FakeAgent('lead')
+    const reviewer = new FakeAgent('reviewer')
+    const agents = new Map([lead, reviewer].map(agent => [agent.id, agent]))
+    let reject = false
+    const hub = new MessageHub({ get: id => agents.get(id), list: () => [...agents.values()] }, {
+      beforeSend: (_sender, input) => reject
+        ? { kind: 'reject', reason: 'Messages are paused for review.' }
+        : { kind: 'send', input: { ...input, text: `[reviewed] ${input.text}` } },
+    })
+
+    hub.send(lead, { to: '@reviewer', text: 'Inspect this.', delivery: 'quiet' })
+    expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]?.text).toBe('[reviewed] Inspect this.')
+
+    reject = true
+    expect(() => hub.send(lead, { to: '@reviewer', text: 'Do not persist.', delivery: 'quiet' }))
+      .toThrow('Messages are paused for review.')
+    expect(hub.search(lead, { query: 'Do not persist.' })).toEqual([])
+  })
+
   it('records read progress only for text returned by explicit read operations', () => {
     const { hub, lead, reviewer, qa } = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []

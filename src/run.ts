@@ -3,6 +3,7 @@ import {
   appendFileSync,
   closeSync,
   cpSync,
+  createReadStream,
   existsSync,
   fstatSync,
   lstatSync,
@@ -20,6 +21,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { readFile as readFileAsync } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -43,6 +45,7 @@ import {
 } from '@dsh-agent-fleet/core/names'
 import type {
   FleetCoordinationEvent,
+  FleetMessage,
   FleetTarget,
   MessageHub,
   SendMessageResult,
@@ -97,6 +100,8 @@ export type FleetWorkStatus = 'running' | 'finished' | 'blocked' | 'failed' | 'c
 export interface FleetWorkRecord {
   readonly id: string
   readonly taskPath: string
+  /** Immutable accepted work text used for restart, without changing the caller's source file. */
+  readonly acceptedTaskPath?: string
   readonly status: FleetWorkStatus
   readonly startedAt: string
   readonly endedAt?: string
@@ -140,6 +145,11 @@ export interface FleetRunRecord {
   }
   readonly members: FleetRunMember[]
   readonly assistants: FleetRunAssistant[]
+  /** Runtime projection of historical assistant Sessions onto their current Session. */
+  readonly assistantSessionAliases?: {
+    readonly sessionId: string
+    readonly currentSessionId: string
+  }[]
   readonly status: FleetRunStatus
   /** Members stopped by the current Team-level pause. Individually paused members are not included. */
   readonly teamPausedMembers?: string[]
@@ -196,6 +206,30 @@ export interface FleetJournalEvent {
   readonly data: unknown
 }
 
+export interface FleetHistorySearchInput {
+  readonly query?: string
+  readonly member?: string
+  readonly types?: readonly string[]
+  readonly typePrefixes?: readonly string[]
+  readonly afterSequence?: number
+  readonly beforeSequence?: number
+  readonly createdAfter?: string
+  readonly createdBefore?: string
+  /** Read only the recent file tail. Intended for low-effort, recent-activity queries. */
+  readonly recentBytes?: number
+  /** Apply the Fleet participant's current event visibility before returning matches. */
+  readonly visibleToSessionId?: string
+  readonly limit: number
+}
+
+export interface FleetHistorySearchResult {
+  readonly runId: string
+  /** Newest matching event first. */
+  readonly events: FleetJournalEvent[]
+  readonly hasMore: boolean
+  readonly truncated: boolean
+}
+
 export interface FleetTeamProjection {
   readonly run: FleetRunRecord
   readonly memberViews: FleetMemberView[]
@@ -231,11 +265,18 @@ export interface FleetResourcePreview {
   readonly id: string
   readonly kind: 'markdown' | 'text'
   readonly body: string
+  /** Present only for a failed item in a batch preview request. */
+  readonly error?: string
   readonly mediaType?: string
   readonly size?: number
   readonly history: readonly FleetResourceRevisionSummary[]
   readonly historyTruncated: boolean
   readonly revision?: FleetResourceRevisionDetail
+}
+
+export interface FleetResourcePreviewRequest {
+  readonly id: string
+  readonly revisionId?: string
 }
 
 export interface FleetResourceRevisionSummary {
@@ -250,6 +291,36 @@ export interface FleetResourceRevisionSummary {
 export interface FleetResourceRevisionDetail extends FleetResourceRevisionSummary {
   readonly before: string | null
   readonly after: string
+}
+
+export interface FleetResourceRevisionSnippetRequest {
+  readonly id: string
+  readonly revisionId: string
+  readonly query: string
+  readonly maxChars?: number
+}
+
+export interface FleetResourceRevisionSnippet {
+  readonly id: string
+  readonly revisionId: string
+  readonly matched: boolean
+  readonly snippet?: string
+  readonly error?: string
+}
+
+export interface FleetResourceContentSnippetRequest {
+  readonly id: string
+  readonly query: string
+  readonly maxChars?: number
+}
+
+export interface FleetResourceContentSnippet {
+  readonly id: string
+  readonly matched: boolean
+  readonly snippet?: string
+  readonly history: readonly FleetResourceRevisionSummary[]
+  readonly historyTruncated: boolean
+  readonly error?: string
 }
 
 export type FleetActivityKind = 'message' | 'task' | 'calendar' | 'meeting' | 'vote' | 'document' | 'schedule' | 'member'
@@ -456,12 +527,48 @@ function stableCoordinationEvent(
   return { ...event, data }
 }
 
+interface FleetResourcePreviewState {
+  readonly actorNames: ReadonlyMap<string, string>
+  readonly resources: ReadonlyMap<string, {
+    readonly created: FleetResource
+    readonly latest: FleetResource
+  }>
+  readonly revisions: ReadonlyMap<string, {
+    readonly history: readonly (FleetResourceRevisionSummary & { readonly resourceId: string })[]
+    readonly count: number
+    readonly hasCreated: boolean
+    readonly selected: ReadonlyMap<string, FleetResourceRevisionSummary & { readonly resourceId: string }>
+  }>
+}
+
 function projectionEntityId(data: unknown, key: string): string | undefined {
   if (typeof data !== 'object' || data === null) return undefined
   const entity = (data as Record<string, unknown>)[key]
   if (typeof entity !== 'object' || entity === null) return undefined
   const id = (entity as Record<string, unknown>).id
   return typeof id === 'string' && id.length > 0 ? id : undefined
+}
+
+function workspaceEventResourceIds(event: StoredFleetEvent): string[] | undefined {
+  if (!event.type.startsWith('workspace.') || typeof event.data !== 'object' || event.data === null) return undefined
+  const data = event.data as Readonly<Record<string, unknown>>
+  const candidates = event.type === 'workspace.assigned'
+    ? data.workspaces
+    : data.workspace === undefined ? data.workspaceId : [data.workspace]
+  const workspaces = Array.isArray(candidates) ? candidates : [candidates]
+  if (workspaces.length === 0) return undefined
+  const identifiers = workspaces.map(candidate => {
+    if (typeof candidate === 'string') return candidate.length > 0 ? candidate : undefined
+    if (typeof candidate !== 'object' || candidate === null) return undefined
+    const workspace = candidate as Readonly<Record<string, unknown>>
+    const path = workspace.path
+    if (typeof path === 'string' && path.length > 0) return path
+    const id = workspace.id ?? workspace.workspaceId
+    return typeof id === 'string' && id.length > 0 ? id : undefined
+  })
+  return identifiers.every((identifier): identifier is string => identifier !== undefined)
+    ? [...new Set(identifiers)]
+    : undefined
 }
 
 function projectionStateKey(event: StoredFleetEvent): string | undefined {
@@ -510,6 +617,11 @@ function projectionStateKey(event: StoredFleetEvent): string | undefined {
 }
 
 function isProjectionActivity(event: StoredFleetEvent): boolean {
+  if (event.type === 'memory.stored' || event.type === 'memory.recalled') {
+    if (typeof event.data !== 'object' || event.data === null) return false
+    const count = (event.data as Record<string, unknown>)[event.type === 'memory.stored' ? 'storedCount' : 'resultCount']
+    return typeof count === 'number' && Number.isSafeInteger(count) && count > 0
+  }
   return event.type.startsWith('resource.')
     || event.type.startsWith('workspace.')
     || event.type.startsWith('task.')
@@ -1025,14 +1137,26 @@ function relocateArchiveEvents(
       })]
     }
     if (event.type === 'work_started') {
-      const data = event.data as { readonly workId: string; readonly taskPath: string }
+      const data = event.data as {
+        readonly workId: string
+        readonly taskPath: string
+        readonly acceptedTaskPath?: string
+      }
+      const currentTaskPath = join(targetRunDirectory, 'current-work.md')
       return [JSON.stringify({
         ...event,
         data: {
           ...data,
           taskPath: data.workId === currentWorkId
-            ? join(targetRunDirectory, 'current-work.md')
+            ? currentTaskPath
             : relocateArchivePath(data.taskPath, sourceRoot, targetRoot, sourceTeamId, targetTeamId),
+          ...(data.acceptedTaskPath === undefined ? {} : {
+            acceptedTaskPath: data.workId === currentWorkId
+              ? currentTaskPath
+              : relocateArchivePath(
+                data.acceptedTaskPath, sourceRoot, targetRoot, sourceTeamId, targetTeamId,
+              ),
+          }),
         },
       })]
     }
@@ -1087,12 +1211,20 @@ function migrateLegacyRunEvents(source: string, legacyRun: string, runDirectory:
       })]
     }
     if (event.type === 'work_started') {
-      const data = event.data as { readonly taskPath: string }
+      const data = event.data as { readonly taskPath: string; readonly acceptedTaskPath?: string }
       return [JSON.stringify({
         ...event,
-        data: { ...data, taskPath: pathInside(legacyRun, data.taskPath)
-          ? resolve(runDirectory, relative(legacyRun, data.taskPath))
-          : data.taskPath },
+        data: {
+          ...data,
+          taskPath: pathInside(legacyRun, data.taskPath)
+            ? resolve(runDirectory, relative(legacyRun, data.taskPath))
+            : data.taskPath,
+          ...(data.acceptedTaskPath === undefined ? {} : {
+            acceptedTaskPath: pathInside(legacyRun, data.acceptedTaskPath)
+              ? resolve(runDirectory, relative(legacyRun, data.acceptedTaskPath))
+              : data.acceptedTaskPath,
+          }),
+        },
       })]
     }
     if (event.type === 'resource.resource_added') {
@@ -1425,10 +1557,20 @@ async function installMemberTools(
   runtime: FleetCollaborationTeam,
   member: string,
   exposeHostFleetTools = false,
+  source?: 'create' | 'resume',
 ): Promise<void> {
   await childCtx.inject(['fs', 'tools'], (scope) => {
     return runtime.installTools(scope, member, { exposeHostFleetTools })
   })
+  if (source !== undefined) {
+    if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
+    await runtime.events.serial('fleet/member/setup', {
+      member,
+      source,
+      agent: childCtx.agent,
+      ctx: childCtx,
+    })
+  }
 }
 
 /**
@@ -1513,6 +1655,14 @@ function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kin
   return undefined
 }
 
+function boundedTextSnippet(text: string, query: string, maximum: number): string | undefined {
+  const index = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase())
+  if (index < 0) return undefined
+  const start = Math.max(0, index - Math.floor(maximum / 3))
+  const value = text.slice(start, start + maximum)
+  return `${start > 0 ? '…' : ''}${value}${start + value.length < text.length ? '…' : ''}`
+}
+
 interface MemberToolActivity {
   readonly calls: Map<string, { readonly explicitWait: boolean }>
   lastInteractionAt: number
@@ -1535,6 +1685,7 @@ export class FleetRunService {
   private readonly teamProjectionEvents = new Map<string, StoredFleetEvent[]>()
   private readonly teamProjectionIdentities = new Map<string, FleetParticipantIdentities>()
   private readonly memberViewSnapshots = new Map<string, FleetMemberView[]>()
+  private readonly assistantSessionsByView = new Map<string, Map<string, Set<string>>>()
   private readonly waiters = new Set<RunWaiter>()
   private readonly finalizations = new Map<string, Promise<void>>()
   private readonly resumingRunIds = new Set<string>()
@@ -1777,7 +1928,7 @@ export class FleetRunService {
             ? {}
             : { reasoningEffort: ReasoningEffortId(member.reasoningEffort) }),
           ...(memberMaxTokens === undefined ? {} : { maxTokens: memberMaxTokens }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.id),
+          setup: childCtx => installMemberTools(childCtx, runtime, member.id, false, 'create'),
         })
         created.push(member.id)
         runtime.memberIdsByName.set(member.id, agent.id)
@@ -1835,6 +1986,7 @@ export class FleetRunService {
       const idle = this.replaceRecord(record.id, { status: 'idle' })
       this.appendEvent(record.id, 'team_status', { status: 'idle' })
       runtime.activateProductivity()
+      runtime.events.emit('fleet/team/session-start', { source: 'create' })
       return this.describeRecord(idle)
     } catch (error) {
       for (const name of created.reverse()) {
@@ -1875,14 +2027,30 @@ export class FleetRunService {
     if (task.length === 0) throw new Error('Fleet work cannot be empty')
     const available = record.members.filter(member => this.memberCanReply(member))
     if (available.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
+    const decision = this.requireRuntime(record.id).events.waterfall(
+      'fleet/work/pre-start',
+      { proposal: { taskPath, task } },
+      () => ({ kind: 'start', task }),
+    )
+    if (decision.kind === 'reject') throw new Error(decision.reason.trim() || 'Fleet work was rejected')
+    const acceptedTask = decision.task.trim()
+    if (acceptedTask.length === 0) throw new Error('Fleet work hook produced an empty work description')
+    const workId = `work_${randomUUID()}`
+    const workDirectory = join(this.runDirectory(record), 'work')
+    const acceptedTaskPath = join(workDirectory, `${workId}.md`)
+    mkdirSync(workDirectory, { recursive: true })
+    const temporaryTaskPath = join(workDirectory, `.${workId}.${process.pid}.tmp`)
+    writeFileSync(temporaryTaskPath, `${acceptedTask}\n`, 'utf8')
+    renameSync(temporaryTaskPath, acceptedTaskPath)
     const work: FleetWorkRecord = {
-      id: `work_${randomUUID()}`,
+      id: workId,
       taskPath,
+      acceptedTaskPath,
       status: 'running',
       startedAt: new Date().toISOString(),
     }
     const running = this.replaceRecord(record.id, { status: 'running', work })
-    this.appendEvent(record.id, 'work_started', { workId: work.id, taskPath })
+    this.appendEvent(record.id, 'work_started', { workId: work.id, taskPath, acceptedTaskPath })
 
     const roster = record.members
       .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
@@ -1896,7 +2064,7 @@ export class FleetRunService {
           `Team: ${record.name}`,
           `Your Fleet identity: @${member.displayName ?? member.name}`,
           `Members:\n${roster}`,
-          `Work:\n${task}`,
+          `Work:\n${acceptedTask}`,
         ].join('\n\n'),
         delivery: 'wakeup',
         coalesceKey: `work-start:${work.id}`,
@@ -2027,7 +2195,7 @@ export class FleetRunService {
             ...memberTemplate,
             name: member.displayName ?? memberTemplate.name,
           }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.name),
+          setup: childCtx => installMemberTools(childCtx, runtime, member.name, false, 'resume'),
           ...memberAgentOptions,
         })
         runtime.memberIdsByName.set(member.name, resumed.id)
@@ -2065,7 +2233,7 @@ export class FleetRunService {
             role: memberTemplate.role,
             cwd: record.projectRoot,
             persona: persona(effectiveTemplate, memberTemplate),
-            setup: childCtx => installMemberTools(childCtx, runtime, memberTemplate.id),
+            setup: childCtx => installMemberTools(childCtx, runtime, memberTemplate.id, false, 'create'),
             ...memberAgentOptions,
           })
           const member: FleetRunMember = {
@@ -2119,7 +2287,7 @@ export class FleetRunService {
         && (record.status === 'running' || record.status === 'starting')
         && record.work?.status === 'running'
       ) {
-        const task = readFileSync(record.work.taskPath, 'utf8').trim()
+        const task = this.readWorkTask(record)
         const roster = members
           .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
           .join('\n')
@@ -2178,6 +2346,7 @@ export class FleetRunService {
         teamPausedMembers: [],
       })
       runtime.activateProductivity()
+      runtime.events.emit('fleet/team/session-start', { source: 'resume' })
       if (approvedWorkVote !== undefined && approvedWorkVote.type === 'vote') {
         const initiatorSessionId = this.restoredSessionId(events, approvedWorkVote.vote.initiator)
         const participants = this.participants(record)
@@ -2380,8 +2549,9 @@ export class FleetRunService {
         mkdirSync(stagedShared, { recursive: true })
       }
       cpSync(record.configPath, join(fleetDirectory, 'team.json'))
-      if (record.work !== undefined && existsSync(record.work.taskPath)) {
-        cpSync(record.work.taskPath, join(fleetDirectory, 'current-work.md'))
+      const currentWorkPath = record.work?.acceptedTaskPath ?? record.work?.taskPath
+      if (currentWorkPath !== undefined && existsSync(currentWorkPath)) {
+        cpSync(currentWorkPath, join(fleetDirectory, 'current-work.md'))
       }
 
       const sessionsDirectory = join(staging, 'sessions')
@@ -2588,7 +2758,7 @@ export class FleetRunService {
         })),
         status: 'paused',
         ...(archivedRecord.work === undefined ? {} : {
-          work: { ...archivedRecord.work, taskPath: finalTaskPath },
+          work: { ...archivedRecord.work, taskPath: finalTaskPath, acceptedTaskPath: finalTaskPath },
         }),
       }
       const eventsPath = join(preparedRunDirectory, 'events.jsonl')
@@ -2748,7 +2918,7 @@ export class FleetRunService {
         cwd: record.projectRoot,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'create'),
       })
       created = true
       runtime.attachMember(agent.id, view)
@@ -2763,7 +2933,7 @@ export class FleetRunService {
       record = this.replaceRecord(record.id, { members: [...record.members, member] })
       this.appendEvent(record.id, 'member_attached', member)
       if (record.status === 'running' && record.work?.status === 'running') {
-        const work = readFileSync(record.work.taskPath, 'utf8').trim()
+        const work = this.readWorkTask(record)
         runtime.messages.sendSystemNotification(agent.id, {
           kind: 'member_joined',
           text: `[Fleet member joined active work ${record.work.id}.]\n\n${work}`,
@@ -2837,7 +3007,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
       })
       if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
       else runtime.rebindMember(member.sessionId, resumed.id, view)
@@ -2866,7 +3036,7 @@ export class FleetRunService {
           role: currentView.role,
           persona: persona({ ...template, members: this.effectiveMemberViews(record) }, currentView),
           ...this.memberRuntimeOptions(record, currentView),
-          setup: childCtx => installMemberTools(childCtx, runtime, currentView.id),
+          setup: childCtx => installMemberTools(childCtx, runtime, currentView.id, false, 'resume'),
         })
         if (restored.id === member.sessionId) runtime.attachMember(restored.id, currentView)
         else runtime.rebindMember(member.sessionId, restored.id, currentView)
@@ -3286,7 +3456,7 @@ export class FleetRunService {
       role: view.role,
       persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
       ...this.memberRuntimeOptions(record, view),
-      setup: childCtx => installMemberTools(childCtx, runtime, view.id),
+      setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
     })
     if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
     else runtime.rebindMember(member.sessionId, resumed.id, view)
@@ -3473,17 +3643,6 @@ export class FleetRunService {
     }
     const recipients = record.members.filter(member => this.memberCanReply(member)).map(member => member.name)
     if (recipients.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
-    const message: FleetAssistantMessage = {
-      id: `assistant_message_${randomUUID()}`,
-      runId: record.id,
-      kind: input.kind,
-      text: content,
-      recipients,
-      assistantSessionId: String(caller.id),
-      assistantId: assistant.view.id,
-      assistantName: assistant.view.name,
-      createdAt: new Date().toISOString(),
-    }
     const channel = parseTeamTemplate(
       JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
       this.configuration,
@@ -3501,12 +3660,24 @@ export class FleetRunService {
       action: 'message.wakeup',
       resource: { kind: 'conversation', id: `#${channel.id}` },
     })
-    this.requireRuntime(record.id).messages.send(caller, {
+    const messages = this.requireRuntime(record.id).messages
+    const sent = messages.send(caller, {
       to: `#${channel.id}`,
       text: content,
       delivery: input.kind === 'directive' ? 'wakeup' : 'quiet',
       ...(input.kind === 'directive' ? { mentions: recipients.map(member => `@${member}`) } : {}),
     })
+    const message: FleetAssistantMessage = {
+      id: `assistant_message_${randomUUID()}`,
+      runId: record.id,
+      kind: input.kind,
+      text: messages.getMessage(caller, sent.messageId).text,
+      recipients,
+      assistantSessionId: String(caller.id),
+      assistantId: assistant.view.id,
+      assistantName: assistant.view.name,
+      createdAt: new Date().toISOString(),
+    }
     this.appendEvent(record.id, 'assistant_message', message)
     return structuredClone(message)
   }
@@ -3800,10 +3971,40 @@ export class FleetRunService {
     runId: string,
     type:
       | `resource.document_${'created' | 'updated' | 'commented' | 'resolved' | 'reverted'}`
-      | `workspace.${'attached' | 'detached' | 'assigned'}`,
+      | `workspace.${'attached' | 'detached' | 'assigned'}`
+      | `memory.${'stored' | 'recalled'}`,
     data: unknown,
   ): void {
     this.appendEvent(runId, type, data)
+  }
+
+  participantSessionIds(runId: string, participant: string): string[] {
+    const record = this.requireRecord(runId)
+    return this.participantSessionIdsForRecord(record, participant)
+  }
+
+  async searchParticipantMessages(
+    runId: string,
+    participant: string,
+    query: string,
+    limit: number,
+  ): Promise<FleetMessage[]> {
+    const record = this.requireRecord(runId)
+    const binding = this.participants(record).find(candidate => candidate.name === participant)
+    if (binding === undefined) throw new Error(`unknown Fleet participant ${participant}`)
+    const result = await this.searchTeamHistory(record.id, {
+      query,
+      types: ['coordination.message'],
+      visibleToSessionId: binding.sessionId,
+      limit,
+    })
+    return result.events.flatMap(event => {
+      if (event.type !== 'coordination.message') return []
+      const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'message' }>
+      return coordination.message.text.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+        ? [coordination.message]
+        : []
+    })
   }
 
   private clearMemberActivity(sessionId: string): void {
@@ -4068,6 +4269,120 @@ export class FleetRunService {
     }
   }
 
+  async searchTeamHistory(
+    runId: string,
+    input: FleetHistorySearchInput,
+    signal?: AbortSignal,
+  ): Promise<FleetHistorySearchResult> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1_000) {
+      throw new Error('Fleet history search limit must be an integer from 1 through 1000')
+    }
+    if (input.recentBytes !== undefined
+      && (!Number.isSafeInteger(input.recentBytes) || input.recentBytes < 65_536 || input.recentBytes > 8 * 1_024 * 1_024)) {
+      throw new Error('Fleet history search recentBytes must be an integer from 65536 through 8388608')
+    }
+    const afterSequence = input.afterSequence ?? 0
+    const beforeSequence = input.beforeSequence ?? Number.MAX_SAFE_INTEGER
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new Error('Fleet history search afterSequence must be a non-negative integer')
+    }
+    if (!Number.isSafeInteger(beforeSequence) || beforeSequence < 1) {
+      throw new Error('Fleet history search beforeSequence must be a positive integer')
+    }
+    const createdAfter = input.createdAfter === undefined ? undefined : Date.parse(input.createdAfter)
+    const createdBefore = input.createdBefore === undefined ? undefined : Date.parse(input.createdBefore)
+    if (createdAfter !== undefined && !Number.isFinite(createdAfter)) {
+      throw new Error('Fleet history search createdAfter must be a valid timestamp')
+    }
+    if (createdBefore !== undefined && !Number.isFinite(createdBefore)) {
+      throw new Error('Fleet history search createdBefore must be a valid timestamp')
+    }
+
+    const record = this.requireRecord(runId)
+    const path = join(this.runDirectory(record), 'events.jsonl')
+    if (!existsSync(path)) return { runId: record.id, events: [], hasMore: false, truncated: false }
+    let identities = this.teamProjectionIdentities.get(record.id)
+    if (identities === undefined) {
+      identities = fleetParticipantIdentities(record, this.storedEvents(record))
+      this.teamProjectionIdentities.set(record.id, identities)
+    }
+    const query = input.query?.trim().toLocaleLowerCase() || undefined
+    const member = input.member?.trim() || undefined
+    const types = new Set(input.types?.filter(type => type.length > 0) ?? [])
+    const prefixes = input.typePrefixes?.filter(prefix => prefix.length > 0) ?? []
+    const matches: StoredFleetEvent[] = []
+    let hasMore = false
+    const visibility = (() => {
+      if (input.visibleToSessionId === undefined) return undefined
+      const runtime = this.collaboration.get(record.id)
+      const agent = this.ctx.agents.get(SessionId(input.visibleToSessionId))
+      const member = runtime?.memberNamesById.get(input.visibleToSessionId)
+      const view = member === undefined ? undefined : runtime?.memberViews.get(member)
+      if (runtime === undefined || agent === undefined || view === undefined) {
+        throw new Error(`Fleet participant ${input.visibleToSessionId} is unavailable for history search`)
+      }
+      return {
+        view,
+        channels: new Set(runtime.messages.listChannels(agent).map(channel => channel.id)),
+        meetings: new Set(runtime.messages.listMeetings(agent).map(meeting => meeting.id)),
+      }
+    })()
+
+    const consider = (line: string): void => {
+      if (line.length === 0 || (query !== undefined && !line.toLocaleLowerCase().includes(query))) return
+      const event = stableCoordinationEvent(JSON.parse(line) as StoredFleetEvent, identities)
+      if (event.sequence <= afterSequence || event.sequence >= beforeSequence) return
+      if (types.size > 0 || prefixes.length > 0) {
+        if (!types.has(event.type) && !prefixes.some(prefix => event.type.startsWith(prefix))) return
+      }
+      if (member !== undefined) {
+        const data = typeof event.data === 'object' && event.data !== null
+          ? event.data as Record<string, unknown>
+          : undefined
+        if (event.member?.name !== member && data?.member !== member && data?.actor !== member) return
+      }
+      if (createdAfter !== undefined || createdBefore !== undefined) {
+        const createdAt = Date.parse(event.createdAt)
+        if (!Number.isFinite(createdAt)
+          || (createdAfter !== undefined && createdAt <= createdAfter)
+          || (createdBefore !== undefined && createdAt >= createdBefore)) return
+      }
+      if (visibility !== undefined
+        && !this.visibleToMember(record, visibility.view, visibility.channels, visibility.meetings, event)) return
+      if (matches.length === input.limit) {
+        matches.shift()
+        hasMore = true
+      }
+      matches.push(event)
+    }
+
+    const start = input.recentBytes === undefined
+      ? 0
+      : Math.max(0, statSync(path).size - input.recentBytes)
+    const stream = createReadStream(path, { encoding: 'utf8', start })
+    let pending = ''
+    let discardPartialLine = start > 0
+    for await (const chunk of stream) {
+      signal?.throwIfAborted()
+      pending += chunk
+      let newline = pending.indexOf('\n')
+      while (newline >= 0) {
+        if (discardPartialLine) discardPartialLine = false
+        else consider(pending.slice(0, newline).replace(/\r$/u, ''))
+        pending = pending.slice(newline + 1)
+        newline = pending.indexOf('\n')
+      }
+    }
+    signal?.throwIfAborted()
+    if (!discardPartialLine) consider(pending.replace(/\r$/u, ''))
+    return {
+      runId: record.id,
+      events: matches.reverse().map(event => this.journalEvent(event, identities)),
+      hasMore,
+      truncated: start > 0,
+    }
+  }
+
   readTeamProjection(runId: string, afterSequence: number, limit: number): FleetTeamProjection {
     const record = this.requireRecord(runId)
     const stored = this.storedEvents(record)
@@ -4149,44 +4464,297 @@ export class FleetRunService {
     signal?: AbortSignal,
     revisionId?: string,
   ): Promise<FleetResourcePreview> {
+    const previews = await this.readResourcePreviews(runId, [{
+      id: resourceId,
+      ...(revisionId === undefined ? {} : { revisionId }),
+    }], signal)
+    const preview = previews[0]!
+    if (preview.error !== undefined) throw new Error(preview.error)
+    return preview
+  }
+
+  async readResourcePreviews(
+    runId: string,
+    requests: readonly FleetResourcePreviewRequest[],
+    signal?: AbortSignal,
+  ): Promise<FleetResourcePreview[]> {
     const record = this.requireRecord(runId)
-    const events = this.storedEvents(record)
-    const actorName = (actorId: string): string => {
-      const current = this.participants(record).find(participant => participant.sessionId === actorId)
-      if (current !== undefined) return current.name
-      for (const event of events) {
-        if (event.type === 'member_session_rotated') {
-          const data = event.data as { readonly member?: unknown; readonly previousSessionId?: unknown; readonly sessionId?: unknown }
-          if ((data.previousSessionId === actorId || data.sessionId === actorId) && typeof data.member === 'string') {
-            return data.member
-          }
-        }
-        if (event.type === 'assistant_rebound') {
-          const data = event.data as { readonly previousSessionId?: unknown; readonly sessionId?: unknown; readonly view?: { readonly id?: unknown } }
-          if ((data.previousSessionId === actorId || data.sessionId === actorId) && typeof data.view?.id === 'string') {
-            return data.view.id
+    if (requests.length === 0) return []
+    const state = await this.resourcePreviewState(record, requests, signal)
+    const previews = new Array<FleetResourcePreview>(requests.length)
+    let next = 0
+    const workers = Array.from({ length: Math.min(4, requests.length) }, async () => {
+      while (next < requests.length) {
+        const index = next
+        next += 1
+        const request = requests[index]!
+        try {
+          previews[index] = await this.readResourcePreviewFromState(
+            record,
+            request.id,
+            state,
+            signal,
+            request.revisionId,
+          )
+        } catch (error) {
+          signal?.throwIfAborted()
+          previews[index] = {
+            id: request.id,
+            kind: 'text',
+            body: '',
+            error: errorMessage(error),
+            history: [],
+            historyTruncated: false,
           }
         }
       }
-      return actorId
+    })
+    await Promise.all(workers)
+    return previews
+  }
+
+  async readResourceContentSnippets(
+    runId: string,
+    requests: readonly FleetResourceContentSnippetRequest[],
+    signal?: AbortSignal,
+  ): Promise<FleetResourceContentSnippet[]> {
+    const record = this.requireRecord(runId)
+    if (requests.length === 0) return []
+    const normalized = requests.map(request => ({
+      ...request,
+      maxChars: Math.min(2_000, Math.max(64, request.maxChars ?? 360)),
+    }))
+    const state = await this.resourcePreviewState(record, normalized, signal)
+    const results = new Array<FleetResourceContentSnippet>(normalized.length)
+    let next = 0
+    const workers = Array.from({ length: Math.min(4, normalized.length) }, async () => {
+      while (next < normalized.length) {
+        signal?.throwIfAborted()
+        const index = next
+        next += 1
+        const request = normalized[index]!
+        try {
+          const indexedResource = state.resources.get(request.id)
+          if (indexedResource === undefined) throw new Error(`Unknown Fleet resource: ${request.id}`)
+          const resource = indexedResource.latest
+          if (resourcePreviewKind(resource) === undefined) throw new Error('This file type does not support inline preview')
+          const target = await this.ctx.fs.resolve(resource.path, signal === undefined ? {} : { signal })
+          const info = await this.ctx.fs.stat(target, signal)
+          if (info === undefined) throw new Error(`Fleet resource file does not exist: ${resource.path}`)
+          if (info.type !== 'file') throw new Error(`Fleet resource is not a regular file: ${resource.path}`)
+          if (info.size !== undefined && info.size > RESOURCE_PREVIEW_MAX_BYTES) {
+            throw new Error('Fleet resource preview is limited to 2 MiB')
+          }
+          const bytes = await this.ctx.fs.readBytes(target, signal, RESOURCE_PREVIEW_MAX_BYTES)
+          const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+          const selected = boundedTextSnippet(body, request.query, request.maxChars)
+          const actorName = (actorId: string): string => state.actorNames.get(actorId) ?? actorId
+          const revisionIndex = state.revisions.get(request.id)
+          const revisions = revisionIndex?.history ?? []
+          const history = revisionIndex?.hasCreated === true
+            ? revisions
+            : [{
+                id: `resource-added:${request.id}`,
+                resourceId: request.id,
+                updatedBy: actorName(indexedResource.created.createdBy),
+                updatedAt: indexedResource.created.createdAt,
+                operation: 'created' as const,
+                available: false,
+                size: indexedResource.created.size ?? info.size ?? 0,
+              }, ...revisions]
+          results[index] = {
+            id: request.id,
+            matched: selected !== undefined,
+            ...(selected === undefined ? {} : { snippet: selected }),
+            history: history.slice(-RESOURCE_HISTORY_LIMIT).map((revision): FleetResourceRevisionSummary => ({
+              id: revision.id,
+              updatedBy: actorName(revision.updatedBy),
+              updatedAt: revision.updatedAt,
+              operation: revision.operation,
+              available: revision.available,
+              size: revision.size,
+            })).reverse(),
+            historyTruncated: (revisionIndex?.count ?? 0)
+              + (revisionIndex?.hasCreated === true ? 0 : 1) > RESOURCE_HISTORY_LIMIT,
+          }
+        } catch (error) {
+          signal?.throwIfAborted()
+          results[index] = {
+            id: request.id,
+            matched: false,
+            history: [],
+            historyTruncated: false,
+            error: errorMessage(error),
+          }
+        }
+      }
+    })
+    await Promise.all(workers)
+    return results
+  }
+
+  async readResourceRevisionSnippets(
+    runId: string,
+    requests: readonly FleetResourceRevisionSnippetRequest[],
+    signal?: AbortSignal,
+  ): Promise<FleetResourceRevisionSnippet[]> {
+    const record = this.requireRecord(runId)
+    if (requests.length === 0) return []
+    const normalized = requests.map(request => ({
+      ...request,
+      maxChars: Math.min(2_000, Math.max(64, request.maxChars ?? 360)),
+    }))
+    const state = await this.resourcePreviewState(record, normalized, signal)
+    const results = new Array<FleetResourceRevisionSnippet>(normalized.length)
+    let next = 0
+    const workers = Array.from({ length: Math.min(4, normalized.length) }, async () => {
+      while (next < normalized.length) {
+        signal?.throwIfAborted()
+        const index = next
+        next += 1
+        const request = normalized[index]!
+        try {
+          if (state.resources.get(request.id) === undefined) {
+            throw new Error(`Unknown Fleet resource: ${request.id}`)
+          }
+          const revision = state.revisions.get(request.id)?.selected.get(request.revisionId)
+          if (revision === undefined) throw new Error(`Unknown Fleet resource revision: ${request.revisionId}`)
+          if (!revision.available) throw new Error(`Fleet resource revision ${request.revisionId} is unavailable`)
+          const detail = await this.readStoredResourceRevision(record, request.revisionId, signal)
+          const selected = boundedTextSnippet(detail.after, request.query, request.maxChars)
+          results[index] = {
+            id: request.id,
+            revisionId: request.revisionId,
+            matched: selected !== undefined,
+            ...(selected === undefined ? {} : { snippet: selected }),
+          }
+        } catch (error) {
+          signal?.throwIfAborted()
+          results[index] = {
+            id: request.id,
+            revisionId: request.revisionId,
+            matched: false,
+            error: errorMessage(error),
+          }
+        }
+      }
+    })
+    await Promise.all(workers)
+    return results
+  }
+
+  private async resourcePreviewState(
+    record: FleetRunRecord,
+    requests: readonly FleetResourcePreviewRequest[],
+    signal?: AbortSignal,
+  ): Promise<FleetResourcePreviewState> {
+    const requestedIds = new Set(requests.map(request => request.id))
+    const requestedRevisions = new Map<string, Set<string>>()
+    for (const request of requests) {
+      if (request.revisionId === undefined) continue
+      const revisions = requestedRevisions.get(request.id) ?? new Set<string>()
+      revisions.add(request.revisionId)
+      requestedRevisions.set(request.id, revisions)
     }
-    const resourceEvents: Array<{ readonly type: 'added' | 'removed'; readonly resource: FleetResource }> = []
-    for (const event of events) {
+    const actorNames = new Map(this.participants(record).map(participant => [participant.sessionId, participant.name]))
+    const resources = new Map<string, { created: FleetResource; latest: FleetResource }>()
+    const eventsPath = join(this.runDirectory(record), 'events.jsonl')
+    await this.scanJsonLines(eventsPath, signal, line => {
+      if (!line.includes('member_session_rotated') && !line.includes('assistant_rebound')
+        && !line.includes('resource.resource_added') && !line.includes('resource.resource_removed')) return
+      const event = JSON.parse(line) as StoredFleetEvent
+      if (event.type === 'member_session_rotated') {
+        const data = event.data as { readonly member?: unknown; readonly previousSessionId?: unknown; readonly sessionId?: unknown }
+        if (typeof data.member === 'string') {
+          if (typeof data.previousSessionId === 'string') actorNames.set(data.previousSessionId, data.member)
+          if (typeof data.sessionId === 'string') actorNames.set(data.sessionId, data.member)
+        }
+      }
+      if (event.type === 'assistant_rebound') {
+        const data = event.data as { readonly previousSessionId?: unknown; readonly sessionId?: unknown; readonly view?: { readonly id?: unknown } }
+        if (typeof data.view?.id === 'string') {
+          if (typeof data.previousSessionId === 'string') actorNames.set(data.previousSessionId, data.view.id)
+          if (typeof data.sessionId === 'string') actorNames.set(data.sessionId, data.view.id)
+        }
+      }
       if (event.type === 'resource.resource_added') {
         const candidate = (event.data as Extract<FleetResourceEvent, { type: 'resource_added' }>).resource
-        if (candidate.id === resourceId) resourceEvents.push({ type: 'added', resource: candidate })
+        if (!requestedIds.has(candidate.id)) return
+        const current = resources.get(candidate.id)
+        resources.set(candidate.id, {
+          created: current?.created ?? candidate,
+          latest: candidate,
+        })
       }
       if (event.type === 'resource.resource_removed') {
         const removal = (event.data as Extract<FleetResourceEvent, { type: 'resource_removed' }>).removal
-        if (removal.resource.id === resourceId) resourceEvents.push({ type: 'removed', resource: removal.resource })
+        if (!requestedIds.has(removal.resource.id)) return
+        resources.delete(removal.resource.id)
       }
+    })
+    const revisionIndexes = new Map<string, {
+      readonly recent: Array<FleetResourceRevisionSummary & { readonly resourceId: string }>
+      readonly selected: Map<string, FleetResourceRevisionSummary & { readonly resourceId: string }>
+      count: number
+      hasCreated: boolean
+      cursor: number
+    }>()
+    await this.scanJsonLines(join(this.runDirectory(record), 'resource-history.jsonl'), signal, line => {
+      const revision = JSON.parse(line) as FleetResourceRevisionSummary & { readonly resourceId: string }
+      if (!requestedIds.has(revision.resourceId)) return
+      const created = resources.get(revision.resourceId)?.created.createdAt
+      if (created === undefined || revision.updatedAt < created) return
+      const index = revisionIndexes.get(revision.resourceId) ?? {
+        recent: [] as Array<FleetResourceRevisionSummary & { readonly resourceId: string }>,
+        selected: new Map<string, FleetResourceRevisionSummary & { readonly resourceId: string }>(),
+        count: 0,
+        hasCreated: false,
+        cursor: 0,
+      }
+      index.count += 1
+      index.hasCreated ||= revision.operation === 'created'
+      if (index.recent.length < RESOURCE_HISTORY_LIMIT) index.recent.push(revision)
+      else {
+        index.recent[index.cursor] = revision
+        index.cursor = (index.cursor + 1) % RESOURCE_HISTORY_LIMIT
+      }
+      if (requestedRevisions.get(revision.resourceId)?.has(revision.id) === true) {
+        index.selected.set(revision.id, revision)
+      }
+      revisionIndexes.set(revision.resourceId, index)
+    })
+    const revisions = new Map<string, {
+      readonly history: readonly (FleetResourceRevisionSummary & { readonly resourceId: string })[]
+      readonly count: number
+      readonly hasCreated: boolean
+      readonly selected: ReadonlyMap<string, FleetResourceRevisionSummary & { readonly resourceId: string }>
+    }>()
+    for (const [resourceId, index] of revisionIndexes) {
+      const history = index.count <= RESOURCE_HISTORY_LIMIT
+        ? index.recent
+        : [...index.recent.slice(index.cursor), ...index.recent.slice(0, index.cursor)]
+      revisions.set(resourceId, {
+        history,
+        count: index.count,
+        hasCreated: index.hasCreated,
+        selected: index.selected,
+      })
     }
-    const lastRemoval = resourceEvents.findLastIndex(event => event.type === 'removed')
-    const activeResourceEvents = resourceEvents.slice(lastRemoval + 1)
-    const latestResourceEvent = activeResourceEvents.at(-1)
-    const resource = latestResourceEvent?.type === 'added' ? latestResourceEvent.resource : undefined
-    if (resource === undefined) throw new Error(`Unknown Fleet resource: ${resourceId}`)
-    const createdResource = activeResourceEvents.find(event => event.type === 'added')?.resource ?? resource
+    return { actorNames, resources, revisions }
+  }
+
+  private async readResourcePreviewFromState(
+    record: FleetRunRecord,
+    resourceId: string,
+    state: FleetResourcePreviewState,
+    signal?: AbortSignal,
+    revisionId?: string,
+  ): Promise<FleetResourcePreview> {
+    const actorName = (actorId: string): string => state.actorNames.get(actorId) ?? actorId
+    const indexedResource = state.resources.get(resourceId)
+    if (indexedResource === undefined) throw new Error(`Unknown Fleet resource: ${resourceId}`)
+    const resource = indexedResource.latest
+    const createdResource = indexedResource.created
     const kind = resourcePreviewKind(resource)
     if (kind === undefined) throw new Error('This file type does not support inline preview')
 
@@ -4199,9 +4767,9 @@ export class FleetRunService {
     }
     const bytes = await this.ctx.fs.readBytes(target, signal, RESOURCE_PREVIEW_MAX_BYTES)
     const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-    const revisions = this.storedResourceRevisionSummaries(record).filter(revision =>
-      revision.resourceId === resourceId && revision.updatedAt >= createdResource.createdAt)
-    const history = revisions.some(revision => revision.operation === 'created')
+    const revisionIndex = state.revisions.get(resourceId)
+    const revisions = revisionIndex?.history ?? []
+    const history = revisionIndex?.hasCreated === true
       ? revisions
       : [{
           id: `resource-added:${resourceId}`,
@@ -4214,7 +4782,7 @@ export class FleetRunService {
         }, ...revisions]
     const selected = revisionId === undefined
       ? undefined
-      : revisions.find(revision => revision.id === revisionId)
+      : revisionIndex?.selected.get(revisionId)
     if (revisionId !== undefined && selected === undefined) {
       throw new Error(`Unknown Fleet resource revision: ${revisionId}`)
     }
@@ -4232,7 +4800,7 @@ export class FleetRunService {
         available: revision.available,
         size: revision.size,
       })).reverse(),
-      historyTruncated: history.length > RESOURCE_HISTORY_LIMIT,
+      historyTruncated: (revisionIndex?.count ?? 0) + (revisionIndex?.hasCreated === true ? 0 : 1) > RESOURCE_HISTORY_LIMIT,
       ...(selected === undefined || !selected.available ? {} : {
         revision: {
           id: selected.id,
@@ -4388,7 +4956,7 @@ export class FleetRunService {
     if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
     const tail: Array<{ readonly sessionId: string; readonly event: SessionEventLike }> = []
     let hasMore = false
-    const sessionIds = this.participantSessionIds(record, member.name)
+    const sessionIds = this.participantSessionIdsForRecord(record, member.name)
     outer: for (let sessionIndex = sessionIds.length - 1; sessionIndex >= 0; sessionIndex -= 1) {
       const sessionId = sessionIds[sessionIndex]
       if (sessionId === undefined) continue
@@ -4475,7 +5043,7 @@ export class FleetRunService {
     const record = this.requireRecord(runId)
     const member = this.participants(record).find(candidate => candidate.name === memberName)
     if (member === undefined) throw new Error(`unknown Fleet run member ${memberName}`)
-    const memberSessions = new Set(this.participantSessionIds(record, member.name))
+    const memberSessions = new Set(this.participantSessionIdsForRecord(record, member.name))
     if (!memberSessions.has(sourceSessionId)) {
       throw new Error(`Session ${sourceSessionId} does not belong to Fleet member ${memberName}`)
     }
@@ -4730,7 +5298,14 @@ export class FleetRunService {
       }) ?? view.toolGroups.includes('resources')
     }
     if (event.type.startsWith('workspace.')) {
-      return this.authorization?.has(record.id, view, 'workspace.read') ?? view.toolGroups.includes('resources')
+      const resources = workspaceEventResourceIds(event)
+      if (this.authorization === undefined || resources === undefined) return false
+      return resources.every(id => this.authorization!.authorize({
+        teamId: record.id,
+        subject,
+        action: 'workspace.read',
+        resource: { kind: 'workspace', id },
+      }))
     }
     if (event.type.startsWith('member_status.')) {
       return this.authorization?.has(record.id, view, 'member-status.read') ?? view.toolGroups.includes('status')
@@ -4775,8 +5350,7 @@ export class FleetRunService {
     if (!conversation.startsWith('@')) return false
     const targetSessionId = conversation.slice(1)
     const target = this.participants(record).find(member => member.sessionId === targetSessionId)?.name ?? targetSessionId
-    const sender = coordination.message.fromName
-      ?? this.participants(record).find(member => member.sessionId === coordination.message.from)?.name
+    const sender = this.participants(record).find(member => member.sessionId === coordination.message.from)?.name
       ?? coordination.message.from
     return sender === view.id || target === view.id
   }
@@ -5022,9 +5596,14 @@ export class FleetRunService {
         ? (cachedViews ?? []).map(view => [view.id, view])
         : [...activeViews.entries()],
     )
+    const knownAssistantSessions = this.assistantSessionsByView.get(record.id)
+    const assistantSessionAliases = record.assistants.flatMap(assistant =>
+      [...(knownAssistantSessions?.get(assistant.view.id) ?? new Set([assistant.sessionId]))]
+        .map(sessionId => ({ sessionId, currentSessionId: assistant.sessionId })))
     return recordSnapshot({
       ...record,
       runtimeState: this.dormantRunIds.has(record.id) ? 'dormant' : 'active',
+      ...(assistantSessionAliases.length === 0 ? {} : { assistantSessionAliases }),
       members: record.members.map(member => {
         const nativeStatus = live.get(this.runtimeMemberName(record.id, member.name))
         const view = views.get(member.name)
@@ -5180,7 +5759,7 @@ export class FleetRunService {
     return `fleet/${runId}/members/${memberName}`
   }
 
-  private participantSessionIds(record: FleetRunRecord, memberName: string): string[] {
+  private participantSessionIdsForRecord(record: FleetRunRecord, memberName: string): string[] {
     const current = this.participants(record).find(participant => participant.name === memberName)
     if (current === undefined) return []
     const sessionIds: string[] = []
@@ -5443,27 +6022,31 @@ export class FleetRunService {
       data,
       ...(options.member === undefined ? {} : { member: options.member }),
     }
+    this.rememberAssistantSessionEvent(runId, event)
     appendFileSync(join(this.runDirectory(record), 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
+    if (!event.type.startsWith('session.')) {
+      this.collaboration.get(runId)?.events.emit('fleet/team/event', { event: structuredClone(event) })
+    }
     if (event.type === 'member_view_added' || event.type === 'member_view_updated' || event.type === 'member_view_removed'
       || event.type === 'team_requests_configured') {
       this.memberViewSnapshots.delete(runId)
     }
+    const currentIdentities = this.teamProjectionIdentities.get(runId)
+    if (currentIdentities !== undefined && !event.type.startsWith('session.')) {
+      const update = fleetParticipantIdentities(record, [event])
+      this.teamProjectionIdentities.set(runId, {
+        stableByReference: new Map([
+          ...currentIdentities.stableByReference,
+          ...update.stableByReference,
+        ]),
+        conversationKeyByParticipant: new Map([
+          ...currentIdentities.conversationKeyByParticipant,
+          ...update.conversationKeyByParticipant,
+        ]),
+      })
+    }
     const projection = this.teamProjectionEvents.get(runId)
     if (projection !== undefined && !event.type.startsWith('session.')) {
-      const currentIdentities = this.teamProjectionIdentities.get(runId)
-      if (currentIdentities !== undefined) {
-        const update = fleetParticipantIdentities(record, [event])
-        this.teamProjectionIdentities.set(runId, {
-          stableByReference: new Map([
-            ...currentIdentities.stableByReference,
-            ...update.stableByReference,
-          ]),
-          conversationKeyByParticipant: new Map([
-            ...currentIdentities.conversationKeyByParticipant,
-            ...update.conversationKeyByParticipant,
-          ]),
-        })
-      }
       this.cacheTeamProjection(runId, compactTeamProjectionEvents([...projection, event]))
     }
     this.emitChange()
@@ -5483,6 +6066,11 @@ export class FleetRunService {
       this.teamProjectionIdentities.delete(oldest)
       this.memberViewSnapshots.delete(oldest)
     }
+  }
+
+  private readWorkTask(record: FleetRunRecord): string {
+    if (record.work === undefined) throw new Error(`Fleet team ${record.id} has no work description`)
+    return readFileSync(record.work.acceptedTaskPath ?? record.work.taskPath, 'utf8').trim()
   }
 
   private lastStoredSequence(record: FleetRunRecord): number {
@@ -5526,17 +6114,28 @@ export class FleetRunService {
       : []
   }
 
-  private storedResourceRevisionSummaries(
-    record: FleetRunRecord,
-  ): Array<FleetResourceRevisionSummary & { readonly resourceId: string }> {
-    const path = join(this.runDirectory(record), 'resource-history.jsonl')
-    return existsSync(path)
-      ? readFileSync(path, 'utf8').split('\n').flatMap(line => (
-          line.length === 0
-            ? []
-            : [JSON.parse(line) as FleetResourceRevisionSummary & { readonly resourceId: string }]
-        ))
-      : []
+  private async scanJsonLines(
+    path: string,
+    signal: AbortSignal | undefined,
+    visit: (line: string) => void,
+  ): Promise<void> {
+    if (!existsSync(path)) return
+    const stream = createReadStream(path, { encoding: 'utf8' })
+    let pending = ''
+    for await (const chunk of stream) {
+      signal?.throwIfAborted()
+      pending += chunk
+      let newline = pending.indexOf('\n')
+      while (newline >= 0) {
+        const line = pending.slice(0, newline).replace(/\r$/u, '')
+        if (line.length > 0) visit(line)
+        pending = pending.slice(newline + 1)
+        newline = pending.indexOf('\n')
+      }
+    }
+    signal?.throwIfAborted()
+    const tail = pending.replace(/\r$/u, '')
+    if (tail.length > 0) visit(tail)
   }
 
   private storedResourceRevision(
@@ -5548,6 +6147,21 @@ export class FleetRunService {
       throw new Error(`Fleet resource revision ${revisionId} is unavailable`)
     }
     const revision = JSON.parse(readFileSync(path, 'utf8')) as Extract<FleetResourceEvent, { type: 'resource_revised' }>['revision']
+    return { before: revision.before, after: revision.after }
+  }
+
+  private async readStoredResourceRevision(
+    record: FleetRunRecord,
+    revisionId: string,
+    signal?: AbortSignal,
+  ): Promise<Pick<FleetResourceRevisionDetail, 'before' | 'after'>> {
+    const path = join(this.runDirectory(record), 'resource-revisions', `${revisionId}.json`)
+    if (!existsSync(path) || statSync(path).size > RESOURCE_REVISION_MAX_BYTES + 4_096) {
+      throw new Error(`Fleet resource revision ${revisionId} is unavailable`)
+    }
+    const source = await readFileAsync(path, { encoding: 'utf8', signal })
+    signal?.throwIfAborted()
+    const revision = JSON.parse(source) as Extract<FleetResourceEvent, { type: 'resource_revised' }>['revision']
     return { before: revision.before, after: revision.after }
   }
 
@@ -5619,6 +6233,11 @@ export class FleetRunService {
                 taskPath: pathInside(legacyDirectory, legacyRecord.work.taskPath)
                   ? resolve(directory, relative(legacyDirectory, legacyRecord.work.taskPath))
                   : legacyRecord.work.taskPath,
+                ...(legacyRecord.work.acceptedTaskPath === undefined ? {} : {
+                  acceptedTaskPath: pathInside(legacyDirectory, legacyRecord.work.acceptedTaskPath)
+                    ? resolve(directory, relative(legacyDirectory, legacyRecord.work.acceptedTaskPath))
+                    : legacyRecord.work.acceptedTaskPath,
+                }),
               },
             }),
           }
@@ -5663,6 +6282,7 @@ export class FleetRunService {
   private openDormantTeam(record: FleetRunRecord): void {
     this.records.set(record.id, record)
     const events = this.storedEvents(record)
+    this.indexAssistantSessions(record, events)
     this.eventSequences.set(record.id, this.lastStoredSequence(record))
     const bindings = new Map<string, string>()
     for (const event of events) {
@@ -5678,6 +6298,38 @@ export class FleetRunService {
       runtime.memberNamesById.set(member.sessionId, member.name)
     }
     runtime.restore(this.collaborationState(record, events))
+  }
+
+  private indexAssistantSessions(record: FleetRunRecord, events: readonly StoredFleetEvent[]): void {
+    const byView = new Map(record.assistants.map(assistant => [
+      assistant.view.id,
+      new Set([assistant.sessionId]),
+    ] as const))
+    this.assistantSessionsByView.set(record.id, byView)
+    for (const event of events) this.rememberAssistantSessionEvent(record.id, event)
+  }
+
+  private rememberAssistantSessionEvent(runId: string, event: StoredFleetEvent): void {
+    if (event.type !== 'assistant_attached' && event.type !== 'assistant_rebound') return
+    if (typeof event.data !== 'object' || event.data === null) return
+    const data = event.data as {
+      readonly previousSessionId?: unknown
+      readonly sessionId?: unknown
+      readonly view?: { readonly id?: unknown }
+    }
+    if (typeof data.view?.id !== 'string') return
+    let byView = this.assistantSessionsByView.get(runId)
+    if (byView === undefined) {
+      byView = new Map()
+      this.assistantSessionsByView.set(runId, byView)
+    }
+    let sessions = byView.get(data.view.id)
+    if (sessions === undefined) {
+      sessions = new Set()
+      byView.set(data.view.id, sessions)
+    }
+    if (typeof data.previousSessionId === 'string') sessions.add(data.previousSessionId)
+    if (typeof data.sessionId === 'string') sessions.add(data.sessionId)
   }
 
   private readTeamReference(path: string): StoredTeamReference {
@@ -5822,6 +6474,7 @@ const RUN_WORK_SCHEMA = {
   properties: {
     id: { type: 'string', required: true },
     taskPath: { type: 'string', required: true },
+    acceptedTaskPath: { type: 'string' },
     status: { type: 'string', required: true, enum: ['running', 'finished', 'blocked', 'failed', 'cancelled'] },
     startedAt: { type: 'string', required: true },
     endedAt: { type: 'string' },
@@ -5844,6 +6497,17 @@ const RUN_SCHEMA = {
     agentOptions: RUN_AGENT_OPTIONS_SCHEMA,
     members: { type: 'array', required: true, items: RUN_MEMBER_SCHEMA },
     assistants: { type: 'array', required: true, items: RUN_ASSISTANT_SCHEMA },
+    assistantSessionAliases: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sessionId: { type: 'string', required: true },
+          currentSessionId: { type: 'string', required: true },
+        },
+      },
+    },
     teamPausedMembers: { type: 'array', items: { type: 'string' } },
     runtimeState: { type: 'string', enum: ['active', 'dormant'] },
     work: RUN_WORK_SCHEMA,

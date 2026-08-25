@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -19,7 +19,7 @@ import type {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { FleetRunService } from '../src/run.js'
-import type { FleetRunMember } from '../src/run.js'
+import type { FleetResourcePreview, FleetRunMember } from '../src/run.js'
 import { FleetArchiveRegistry } from '../src/archive.js'
 import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
@@ -320,6 +320,8 @@ function setup(root: string, options?: {
   readonly launcher: FakeAgent
   readonly persisted: Map<string, FakeEvent[]>
   readonly persistedHeaders: Map<string, SessionHeader>
+  readonly context: Context
+  readonly authorization: FleetAuthorizationService
   disconnect(): void
 } {
   const runtime = new FakeRuntime(options?.resumeInboxes, options?.resumedIds)
@@ -327,72 +329,69 @@ function setup(root: string, options?: {
   const core = new FleetCore(runtime)
   const persisted = options?.persisted ?? new Map<string, FakeEvent[]>()
   const persistedHeaders = options?.persistedHeaders ?? new Map<string, SessionHeader>()
-  const context = {
-    on: () => () => {},
-    get: (name: string) => name === 'sessionPersistence'
-      ? {
-          inspect: (id: string) => {
-            const agent = runtime.get(id)
-            const meta = persistedHeaders.get(id) ?? (agent === undefined ? undefined : {
-              version: 0,
-              id: SessionId(id),
-              createdAt: 0,
-              cwd: agent.session.header.cwd,
-            })
-            return Promise.resolve({ ...(meta === undefined ? {} : { meta }), events: persisted.get(id) ?? [] })
-          },
-          list: () => Promise.resolve([...persistedHeaders.values()]),
-          create: (meta: SessionHeader) => {
-            persistedHeaders.set(String(meta.id), structuredClone(meta))
-            return Promise.resolve()
-          },
-          append: (id: string, events: readonly FakeEvent[]) => {
-            persisted.set(id, structuredClone([...events]))
-            return Promise.resolve()
-          },
-        }
-      : name === 'sessionArchive' ? options?.sessionArchive : undefined,
-    agents: { get: (id: string) => runtime.get(id) },
-    sessions: {
-      flush: (session: FakeAgent['session']) => {
-        const agent = [...runtime.agents.values()].find(candidate => candidate.session === session)
-        if (agent !== undefined) {
-          persisted.set(agent.id, structuredClone(session.events))
-          persistedHeaders.set(agent.id, {
-            version: 0,
-            id: SessionId(agent.id),
-            createdAt: 0,
-            cwd: agent.session.header.cwd,
-          })
-        }
-        return Promise.resolve()
-      },
+  const context = new Context()
+  context.provide('sessionPersistence', {
+    inspect: (id: string) => {
+      const agent = runtime.get(id)
+      const meta = persistedHeaders.get(id) ?? (agent === undefined ? undefined : {
+        version: 0,
+        id: SessionId(id),
+        createdAt: 0,
+        cwd: agent.session.header.cwd,
+      })
+      return Promise.resolve({ ...(meta === undefined ? {} : { meta }), events: persisted.get(id) ?? [] })
     },
-    llm: {
-      resolveCallConfig: (config: RuntimeRequestConfig) => Promise.resolve(structuredClone(config)),
+    list: () => Promise.resolve([...persistedHeaders.values()]),
+    create: (meta: SessionHeader) => {
+      persistedHeaders.set(String(meta.id), structuredClone(meta))
+      return Promise.resolve()
     },
-    fs: {
-      ...containment,
-      resolve: async (path: string) => {
-        const resolved = realpathSync(path)
-        return { targetKey: resolved, displayPath: resolved }
-      },
-      stat: async (target: FsTarget) => {
-        if (!existsSync(target.displayPath)) return undefined
-        const info = statSync(target.displayPath)
-        return {
-          version: `${String(info.mtimeMs)}:${String(info.size)}`,
-          type: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
-          size: info.size,
-        }
-      },
-      readBytes: async (target: FsTarget, _signal: AbortSignal | undefined, maxBytes: number) => {
-        const bytes = readFileSync(target.displayPath)
-        if (bytes.byteLength > maxBytes) throw new Error('file too large')
-        return bytes
-      },
+    append: (id: string, events: readonly FakeEvent[]) => {
+      persisted.set(id, structuredClone([...events]))
+      return Promise.resolve()
     },
-  } as unknown as Context
+  })
+  context.provide('agents', { get: (id: string) => runtime.get(id) })
+  context.provide('sessions', {
+    flush: (session: FakeAgent['session']) => {
+      const agent = [...runtime.agents.values()].find(candidate => candidate.session === session)
+      if (agent !== undefined) {
+        persisted.set(agent.id, structuredClone(session.events))
+        persistedHeaders.set(agent.id, {
+          version: 0,
+          id: SessionId(agent.id),
+          createdAt: 0,
+          cwd: agent.session.header.cwd,
+        })
+      }
+      return Promise.resolve()
+    },
+  })
+  context.provide('llm', {
+    resolveCallConfig: (config: RuntimeRequestConfig) => Promise.resolve(structuredClone(config)),
+  })
+  context.provide('fs', {
+    ...containment,
+    resolve: async (path: string) => {
+      const resolved = realpathSync(path)
+      return { targetKey: resolved, displayPath: resolved }
+    },
+    stat: async (target: FsTarget) => {
+      if (!existsSync(target.displayPath)) return undefined
+      const info = statSync(target.displayPath)
+      return {
+        version: `${String(info.mtimeMs)}:${String(info.size)}`,
+        type: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
+        size: info.size,
+      }
+    },
+    readBytes: async (target: FsTarget, _signal: AbortSignal | undefined, maxBytes: number) => {
+      const bytes = readFileSync(target.displayPath)
+      if (bytes.byteLength > maxBytes) throw new Error('file too large')
+      return bytes
+    },
+  })
+  if (options?.sessionArchive !== undefined) context.provide('sessionArchive', options.sessionArchive)
   const authorization = new FleetAuthorizationService()
   const collaboration = new FleetCollaborationService(context, authorization)
   const service = new FleetRunService(context, core, collaboration, {
@@ -408,7 +407,12 @@ function setup(root: string, options?: {
     launcher,
     persisted,
     persistedHeaders,
-    disconnect: () => { service.close() },
+    context,
+    authorization,
+    disconnect: () => {
+      service.close()
+      void context.fiber.dispose()
+    },
   }
 }
 
@@ -1021,7 +1025,7 @@ describe('FleetRunService', () => {
         contacts: { members: [], channels: ['delivery'] },
       }],
     })))
-    const { service, runtime, launcher, disconnect } = setup(root, {
+    const { service, runtime, launcher, context, disconnect } = setup(root, {
       launcherOptions: { provider: 'default-provider', model: 'default-model' },
     })
 
@@ -1071,7 +1075,10 @@ describe('FleetRunService', () => {
     const restrict = vi.fn(() => () => {})
     const guard = vi.fn(() => () => {})
     const get = vi.fn((name: string) => name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
+    const memberSetup = vi.fn()
+    context.on('fleet/member/setup', memberSetup)
     await runtime.creates[0]?.setup?.({
+      agent: runtime.get(run.members[0]?.sessionId ?? '') as unknown as Agent,
       inject: (_deps: readonly string[], callback: (scope: Context) => void) => {
         callback({ tools: { register, restrict, guard, get } } as unknown as Context)
         return Promise.resolve()
@@ -1113,6 +1120,11 @@ describe('FleetRunService', () => {
       'fleet_vote',
       'fleet_meeting',
     ])
+    expect(memberSetup).toHaveBeenCalledWith(expect.objectContaining({
+      team: expect.objectContaining({ id: run.id }),
+      member: 'product-lead',
+      source: 'create',
+    }))
     const actionEnum = (name: string): readonly string[] | undefined =>
       (register.mock.calls.find(call => (call[0] as { name: string }).name === name)?.[0] as {
         parameters?: { readonly properties?: { readonly action?: { readonly enum?: readonly string[] } } }
@@ -1200,6 +1212,224 @@ describe('FleetRunService', () => {
 
     service.end(launcher as unknown as Agent, 'Resource preview test complete.')
     await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('builds one journal index for a batch of resource previews', async () => {
+    const { root, configPath } = fixture()
+    const firstPath = join(root, 'first.md')
+    const secondPath = join(root, 'second.txt')
+    writeFileSync(firstPath, '# First\n')
+    writeFileSync(secondPath, 'Second\n')
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const resources = service.resourceStore(run.id)
+    resources.addResource(String(launcher.id), { id: 'first', path: firstPath })
+    resources.addResource(String(launcher.id), { id: 'second', path: secondPath })
+    const eventsPath = join(root, '.fleet-registry', run.id, 'events.jsonl')
+    appendFileSync(eventsPath, `${Array.from({ length: 20_000 }, (_, index) => JSON.stringify({
+      sequence: 10_000 + index,
+      createdAt: '2026-08-25T00:00:00.000Z',
+      type: 'coordination.message',
+      data: { text: `unrelated-${String(index)}`, detail: 'x'.repeat(128) },
+    })).join('\n')}\n`)
+    const resourceHistoryPath = join(root, '.fleet-registry', run.id, 'resource-history.jsonl')
+    appendFileSync(resourceHistoryPath, `${Array.from({ length: 5_000 }, (_, index) => JSON.stringify({
+      id: `revision-${String(index)}`,
+      resourceId: 'first',
+      updatedBy: String(launcher.id),
+      updatedAt: new Date(Date.UTC(2027, 0, 1, 0, 0, index)).toISOString(),
+      operation: 'updated',
+      available: false,
+      size: index,
+    })).join('\n')}\n`)
+    const internal = service as unknown as {
+      storedEvents: (record: unknown) => unknown[]
+      scanJsonLines: (path: string, signal: AbortSignal | undefined, visit: (line: string) => void) => Promise<void>
+    }
+    const scanJsonLines = internal.scanJsonLines.bind(service)
+    const scans: string[] = []
+    internal.storedEvents = () => {
+      throw new Error('batch resource preview must not load the complete journal')
+    }
+    internal.scanJsonLines = async (path, signal, visit) => {
+      scans.push(path)
+      await scanJsonLines(path, signal, visit)
+    }
+
+    const previews = await service.readResourcePreviews(run.id, [
+      { id: 'first', revisionId: 'revision-0' },
+      { id: 'second' },
+    ])
+    expect(previews).toEqual([
+      expect.objectContaining({
+        id: 'first',
+        body: '# First\n',
+        historyTruncated: true,
+      }),
+      expect.objectContaining({ id: 'second', body: 'Second\n' }),
+    ])
+    expect(previews[0]?.history).toHaveLength(500)
+    expect(scans.filter(path => path.endsWith(`${sep}events.jsonl`))).toHaveLength(1)
+    expect(scans.filter(path => path.endsWith(`${sep}resource-history.jsonl`))).toHaveLength(1)
+
+    disconnect()
+  })
+
+  it('reads only bounded revision snippets with four workers and cancellation', async () => {
+    const { root, configPath } = fixture()
+    const currentPath = join(root, 'revision-source.md')
+    writeFileSync(currentPath, '# Current\n')
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const resources = service.resourceStore(run.id)
+    resources.addResource(String(launcher.id), { id: 'revision-source', path: currentPath })
+    const revisions = Array.from({ length: 12 }, (_, index) => {
+      const after = index === 0
+        ? `${'x'.repeat(1024 * 1024)} needle ${'y'.repeat(256 * 1024)}`
+        : `revision ${String(index)} contains needle and bounded context`
+      const revision = resources.recordRevision(
+        run.members[0]?.sessionId ?? String(launcher.id),
+        'revision-source',
+        null,
+        after,
+      )
+      if (revision === undefined) throw new Error('expected stored resource revision')
+      return revision
+    })
+    const internal = service as unknown as {
+      readStoredResourceRevision: (
+        record: unknown,
+        revisionId: string,
+        signal?: AbortSignal,
+      ) => Promise<{ readonly before: string | null; readonly after: string }>
+    }
+    const readStoredResourceRevision = internal.readStoredResourceRevision.bind(service)
+    let active = 0
+    let peak = 0
+    internal.readStoredResourceRevision = async (record, revisionId, signal) => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise<void>(resolve => { setImmediate(resolve) })
+      try {
+        return await readStoredResourceRevision(record, revisionId, signal)
+      } finally {
+        active -= 1
+      }
+    }
+
+    unlinkSync(currentPath)
+    const snippets = await service.readResourceRevisionSnippets(run.id, [
+      ...revisions.map(revision => ({
+        id: 'revision-source',
+        revisionId: revision.id,
+        query: 'needle',
+        maxChars: 180,
+      })),
+      { id: 'revision-source', revisionId: 'missing-revision', query: 'needle' },
+    ])
+    expect(peak).toBe(4)
+    expect(snippets).toHaveLength(13)
+    expect(snippets.slice(0, 12).every(result =>
+      result.matched && (result.snippet?.length ?? Number.POSITIVE_INFINITY) <= 182)).toBe(true)
+    expect(snippets[12]).toMatchObject({ matched: false, error: expect.stringContaining('Unknown Fleet resource revision') })
+
+    const controller = new AbortController()
+    controller.abort()
+    await expect(service.readResourceRevisionSnippets(run.id, [{
+      id: 'revision-source',
+      revisionId: revisions[0]!.id,
+      query: 'needle',
+    }], controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+
+    disconnect()
+  })
+
+  it('bounds resource reads and isolates a failed batch item', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, context, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const resources = service.resourceStore(run.id)
+    const requests = Array.from({ length: 9 }, (_, index) => {
+      const id = `resource-${String(index)}`
+      const path = join(root, `${id}.txt`)
+      writeFileSync(path, `body-${String(index)}\n`)
+      resources.addResource(String(launcher.id), { id, path })
+      return { id }
+    })
+    requests.splice(4, 0, { id: 'missing-resource' })
+    const internal = service as unknown as {
+      readResourcePreviewFromState: (
+        record: unknown,
+        resourceId: string,
+        state: unknown,
+        signal?: AbortSignal,
+        revisionId?: string,
+      ) => Promise<FleetResourcePreview>
+    }
+    const readResourcePreviewFromState = internal.readResourcePreviewFromState.bind(service)
+    let active = 0
+    let peak = 0
+    internal.readResourcePreviewFromState = async (record, resourceId, state, signal, revisionId) => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise<void>(resolve => { setImmediate(resolve) })
+      try {
+        return await readResourcePreviewFromState(record, resourceId, state, signal, revisionId)
+      } finally {
+        active -= 1
+      }
+    }
+
+    const previews = await service.readResourcePreviews(run.id, requests)
+    expect(peak).toBe(4)
+    expect(previews).toHaveLength(requests.length)
+    expect(previews[4]).toMatchObject({
+      id: 'missing-resource',
+      body: '',
+      error: expect.stringContaining('Unknown Fleet resource'),
+    })
+    expect(previews[5]).toMatchObject({ id: 'resource-4', body: 'body-4\n' })
+    await expect(service.readResourcePreview(run.id, 'missing-resource')).rejects.toThrow('Unknown Fleet resource')
+
+    const fs = context.fs as unknown as {
+      readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>
+    }
+    const readBytes = fs.readBytes.bind(context.fs)
+    let activeContentReads = 0
+    let peakContentReads = 0
+    fs.readBytes = async (target, signal, maxBytes) => {
+      activeContentReads += 1
+      peakContentReads = Math.max(peakContentReads, activeContentReads)
+      await new Promise<void>(resolve => { setImmediate(resolve) })
+      try {
+        return await readBytes(target, signal, maxBytes)
+      } finally {
+        activeContentReads -= 1
+      }
+    }
+    const snippets = await service.readResourceContentSnippets(run.id, requests.map(request => ({
+      id: request.id,
+      query: 'body',
+      maxChars: 64,
+    })))
+    expect(peakContentReads).toBe(4)
+    expect(snippets).toHaveLength(requests.length)
+    expect(snippets[4]).toMatchObject({ id: 'missing-resource', matched: false, error: expect.any(String) })
+    expect(snippets.filter(result => result.matched).every(result => (result.snippet?.length ?? 0) <= 66)).toBe(true)
+
     disconnect()
   })
 
@@ -1510,6 +1740,10 @@ describe('FleetRunService', () => {
         expect.objectContaining({ sessionId: replacementAssistant.id, sequence: 7 }),
       ]),
     })
+    expect(rebound.run.assistantSessionAliases).toEqual(expect.arrayContaining([
+      { sessionId: secondAssistant.id, currentSessionId: replacementAssistant.id },
+      { sessionId: replacementAssistant.id, currentSessionId: replacementAssistant.id },
+    ]))
     expect(hub.listMeetings(replacementAssistant)).toContainEqual(expect.objectContaining({
       id: 'user-review',
       participants: expect.arrayContaining([attached.assistant.view.id]),
@@ -1526,6 +1760,19 @@ describe('FleetRunService', () => {
       data: expect.objectContaining({
         message: expect.objectContaining({ text: 'Please surface this decision to the user.' }),
       }),
+    }))
+    expect(service.participantSessionIds(run.id, attached.assistant.view.id)).toEqual(expect.arrayContaining([
+      secondAssistant.id,
+      replacementAssistant.id,
+    ]))
+    await expect(service.searchParticipantMessages(
+      run.id,
+      attached.assistant.view.id,
+      'surface this decision',
+      10,
+    )).resolves.toContainEqual(expect.objectContaining({
+      conversationId: `dm:assistant:${attached.assistant.view.id}:member:lead`,
+      from: 'lead',
     }))
 
     const finishVote = hub.createVote(replacementAssistant, {
@@ -1622,6 +1869,73 @@ describe('FleetRunService', () => {
     expect(persisted.size).toBe(2)
     expect(core.list()).toEqual([])
     expect(readFileSync(join(root, '.fleet-registry', run.id, 'run.json'), 'utf8')).toContain('"status": "closed"')
+    disconnect()
+  })
+
+  it('runs Team lifecycle, work, message, and durable-event hooks at their commit boundaries', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, context, disconnect } = setup(root)
+    const starts: string[] = []
+    const events: string[] = []
+    const disposed: string[] = []
+    let rejectWork = true
+
+    context.on('fleet/team/session-start', ({ team, source }) => {
+      starts.push(`${team.id}:${source}`)
+      team.ctx.on('fleet/message/pre-send', (_payload, next) => {
+        const decision = next()
+        return decision.kind === 'reject'
+          ? decision
+          : { kind: 'send', input: { ...decision.input, text: `[hook] ${decision.input.text}` } }
+      })
+    })
+    context.on('fleet/team/event', ({ event }) => { events.push(event.type) })
+    context.on('fleet/team/disposed', ({ team }) => { disposed.push(team.id) })
+    context.on('fleet/work/pre-start', (_payload, next) => {
+      const decision = next()
+      return decision.kind === 'reject'
+        ? decision
+        : { kind: 'start', task: `${decision.task}\n\nHook-added acceptance criteria.` }
+    })
+    context.on('fleet/work/pre-start', (_payload, next) => {
+      return rejectWork ? { kind: 'reject', reason: 'Work is not admitted yet.' } : next()
+    })
+
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    expect(starts).toEqual([`${run.id}:create`])
+
+    expect(() => service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root }))
+      .toThrow('Work is not admitted yet.')
+    expect(events).not.toContain('work_started')
+    rejectWork = false
+    const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const acceptedTaskPath = running.work?.acceptedTaskPath
+    expect(acceptedTaskPath).toBeDefined()
+    expect(readFileSync(acceptedTaskPath ?? '', 'utf8')).toContain('Hook-added acceptance criteria.')
+    expect(runtime.get(run.members[0]?.sessionId ?? '')?.messages.at(-1)?.content)
+      .toEqual([expect.objectContaining({ text: expect.stringContaining('Hook-added acceptance criteria.') })])
+
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    service.messageHub(run.id).send(lead, { to: '@reviewer', text: 'Review the hook.', delivery: 'quiet' })
+    expect(service.messageHub(run.id).read(reviewer, { conversation: '@lead' }).messages.at(-1)?.text)
+      .toBe('[hook] Review the hook.')
+    expect(service.sendAssistantMessage(launcher as unknown as Agent, {
+      runId: run.id,
+      kind: 'collaboration',
+      text: 'User-facing note.',
+    }).text).toBe('[hook] User-facing note.')
+    expect(events).toContain('work_started')
+    expect(events).toContain('coordination.message')
+
+    service.end(launcher as unknown as Agent, 'Hook lifecycle test complete.', run.id)
+    await service.wait(run.id, 1_000)
+    expect(disposed).toEqual([run.id])
     disconnect()
   })
 
@@ -1984,6 +2298,30 @@ describe('FleetRunService', () => {
       workspaces: [{ name: 'source', path: join(root, 'src'), access: 'write' }],
       actor: 'lead',
     })
+    service.recordDataEvent(run.id, 'memory.stored', {
+      sourceSequence: 1,
+      eventType: 'work_started',
+      providers: ['patchouli-test'],
+      storedCount: 1,
+    })
+    service.recordDataEvent(run.id, 'memory.recalled', {
+      member: 'lead',
+      query: 'Why did we choose this plan?',
+      providers: ['patchouli-test'],
+      resultCount: 2,
+    })
+    service.recordDataEvent(run.id, 'memory.stored', {
+      sourceSequence: 0,
+      eventType: 'work_started',
+      providers: ['patchouli-test'],
+      storedCount: 0,
+    })
+    service.recordDataEvent(run.id, 'memory.recalled', {
+      member: 'lead',
+      query: 'No matching Team memory',
+      providers: ['patchouli-test'],
+      resultCount: 0,
+    })
     const internal = service as unknown as { storedEvents: (record: unknown) => unknown[] }
     const storedEvents = internal.storedEvents.bind(service)
     let journalReads = 0
@@ -2033,6 +2371,12 @@ describe('FleetRunService', () => {
     expect(projectedEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'resource.document_updated' }),
       expect.objectContaining({ type: 'workspace.assigned' }),
+      expect.objectContaining({ type: 'memory.stored' }),
+      expect.objectContaining({ type: 'memory.recalled' }),
+    ]))
+    expect(projectedEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'memory.stored', data: expect.objectContaining({ sourceSequence: 0 }) }),
+      expect.objectContaining({ type: 'memory.recalled', data: expect.objectContaining({ query: 'No matching Team memory' }) }),
     ]))
     expect(projectedEvents.some(event => event.type.startsWith('session.'))).toBe(false)
     expect(readFileSync(join(root, '.fleet-registry', run.id, 'events.jsonl'), 'utf8')).not.toContain('"type":"session.')
@@ -2045,6 +2389,103 @@ describe('FleetRunService', () => {
 
     service.end(launcher as unknown as Agent, 'Projection reliability test complete.')
     await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('searches a large Team journal in one bounded newest-first pass', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const eventsPath = join(root, '.fleet-registry', run.id, 'events.jsonl')
+    const lines = Array.from({ length: 20_000 }, (_, offset) => {
+      const sequence = offset + 1
+      const milestone = sequence % 1_000 === 0
+      return JSON.stringify({
+        sequence,
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, sequence)).toISOString(),
+        type: milestone ? 'task.updated' : 'coordination.message',
+        data: milestone
+          ? { member: 'lead', text: `Milestone ${String(sequence)}`, detail: 'x'.repeat(256) }
+          : { member: 'reviewer', text: `Routine ${String(sequence)}` },
+      })
+    })
+    writeFileSync(eventsPath, `${lines.join('\n')}\n`, 'utf8')
+
+    await expect(service.searchTeamHistory(run.id, {
+      query: 'milestone',
+      member: 'lead',
+      typePrefixes: ['task.'],
+      afterSequence: 5_000,
+      limit: 3,
+    })).resolves.toMatchObject({
+      runId: run.id,
+      hasMore: true,
+      events: [
+        { sequence: 20_000, type: 'task.updated' },
+        { sequence: 19_000, type: 'task.updated' },
+        { sequence: 18_000, type: 'task.updated' },
+      ],
+    })
+
+    disconnect()
+  })
+
+  it('applies workspace resource authorization to visible history events', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, authorization, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = run.members.find(member => member.name === 'lead')
+    if (lead === undefined) throw new Error('expected Fleet lead')
+    const allowed = join(root, 'allowed-workspace')
+    const denied = join(root, 'denied-workspace')
+    authorization.registerNamespace({
+      namespace: 'workspace',
+      actions: [{ id: 'read', description: 'Read workspace mounts.' }],
+      defaultActions: ({ member }) => member.toolGroups.includes('resources') ? ['read'] : [],
+    })
+    authorization.installResourcePolicy({
+      authorize: (input, baseline) => input.resource?.kind === 'workspace'
+        ? input.resource.id === 'workspace-id-only' || (baseline && input.resource.id !== denied)
+        : baseline,
+    })
+    service.recordDataEvent(run.id, 'workspace.attached', {
+      workspace: { id: 'workspace-allowed', path: allowed },
+    })
+    service.recordDataEvent(run.id, 'workspace.attached', {
+      workspace: { id: 'workspace-denied', path: denied },
+    })
+    service.recordDataEvent(run.id, 'workspace.assigned', {
+      member: 'lead',
+      workspaces: [
+        { id: 'workspace-allowed', path: allowed },
+        { id: 'workspace-denied', path: denied },
+      ],
+    })
+    service.recordDataEvent(run.id, 'workspace.detached', { workspaceId: 'workspace-id-only' })
+    service.recordDataEvent(run.id, 'workspace.detached', { actor: 'lead' })
+
+    const result = await service.searchTeamHistory(run.id, {
+      typePrefixes: ['workspace.'],
+      visibleToSessionId: lead.sessionId,
+      limit: 20,
+    })
+    expect(result.events).toHaveLength(2)
+    expect(result.events).toEqual(expect.arrayContaining([expect.objectContaining({
+      type: 'workspace.attached',
+      data: { workspace: { id: 'workspace-allowed', path: allowed } },
+    }), expect.objectContaining({
+      type: 'workspace.detached',
+      data: { workspaceId: 'workspace-id-only' },
+    })]))
+
     disconnect()
   })
 
@@ -2394,6 +2835,10 @@ describe('FleetRunService', () => {
           role: assistantBeforeRestart.view.role,
         },
       }],
+      assistantSessionAliases: expect.arrayContaining([
+        { sessionId: assistantBeforeRestart.sessionId, currentSessionId: 'replacement-launcher' },
+        { sessionId: 'replacement-launcher', currentSessionId: 'replacement-launcher' },
+      ]),
     })
     expect(second.runtime.resumes).toEqual([
       expect.objectContaining({ id: leadId, provider: 'test-provider', model: 'test-model' }),

@@ -84,6 +84,10 @@ interface WireRun {
   readonly projectRoot: string
   readonly members: readonly WireMember[]
   readonly assistants?: readonly WireAssistant[]
+  readonly assistantSessionAliases?: readonly {
+    readonly sessionId: string
+    readonly currentSessionId: string
+  }[]
   readonly status: FleetPanelTeamSnapshot['status']
   readonly runtimeState?: 'active' | 'dormant'
   readonly startedAt: string
@@ -283,6 +287,7 @@ function formatBytes(size: number | undefined): string | undefined {
 function activityKind(type: string): FleetPanelActivity['kind'] | undefined {
   if (type === 'coordination.message') return 'message'
   if (type.startsWith('resource.') || type.startsWith('workspace.')) return 'resource'
+  if (type.startsWith('memory.')) return 'memory'
   if (type === 'coordination.vote' || type.startsWith('work_') || type === 'team_status'
     || type.startsWith('task.') || type.startsWith('schedule.') || type.startsWith('calendar.')) return 'decision'
   if (type.startsWith('member_') || type.startsWith('assistant_')) return 'member'
@@ -534,6 +539,20 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
     if (event.type === 'workspace.assigned') return `更新了 ${member ?? '团队成员'} 的工作区挂载`
     if (event.type === 'workspace.detached') return `移除了工作区 ${string(workspace?.name) ?? string(data?.workspaceId) ?? ''}`.trim()
     return `挂载了工作区 ${string(workspace?.name) ?? string(workspace?.path) ?? ''}`.trim()
+  }
+  if (event.type === 'memory.stored') {
+    const conversation = string(data?.conversation)
+    const location = conversation === undefined ? '团队历史' : `${conversation} 的历史`
+    const storedCount = typeof data?.storedCount === 'number' ? data.storedCount : undefined
+    return `${location}已写入团队记忆库${storedCount === undefined ? '' : `（${String(storedCount)} 条）`}`
+  }
+  if (event.type === 'memory.recalled') {
+    const member = string(data?.member) ?? '团队成员'
+    const conversation = string(data?.conversation)
+    const location = conversation === undefined ? '团队记忆' : `${conversation} 的记忆`
+    const query = string(data?.query)?.trim()
+    const resultCount = typeof data?.resultCount === 'number' ? data.resultCount : undefined
+    return `${member} 从${location}召回了${resultCount === undefined ? '有效结果' : `${String(resultCount)} 条结果`}${query === undefined || query === '' ? '' : `：“${query}”`}`
   }
   if (event.type.startsWith('task.')) {
     const task = nestedRecord(event.data, 'task')
@@ -1029,6 +1048,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     return kind === undefined ? [] : [{
       id: `${cache.run.id}:${String(event.sequence)}`,
       kind,
+      type: event.type,
+      data: event.data,
       text: activityText(event, membersBySession),
       createdAt: event.createdAt,
     }]
@@ -1054,16 +1075,33 @@ function directory(runs: readonly WireRun[]): FleetPanelTeamDirectory {
   const active = runs.filter(run => run.status !== 'closed').map(run => run.id)
   const archived = runs.filter(run => run.status === 'closed').map(run => run.id)
   return {
-    teams: runs.map(run => ({
-      teamId: run.id,
-      teamName: run.name,
-      assistantSessionIds: (run.assistants ?? []).map(assistant => assistant.sessionId),
-      color: color(run.id),
-      status: run.status,
-      ...(run.runtimeState === undefined ? {} : { runtimeState: run.runtimeState }),
-      primaryWorkspace: basename(run.projectRoot),
-      ...(run.status === 'failed' ? { needsAttention: true } : {}),
-    })),
+    teams: runs.map(run => {
+      const currentSessionIds = (run.assistants ?? []).map(assistant => assistant.sessionId)
+      const aliases = Object.fromEntries(
+        (run.assistantSessionAliases ?? currentSessionIds.map(sessionId => ({
+          sessionId,
+          currentSessionId: sessionId,
+        }))).map(alias => [alias.sessionId, alias.currentSessionId]),
+      )
+      const participantByCurrentSession = new Map((run.assistants ?? []).flatMap(assistant =>
+        typeof assistant.view?.id === 'string' ? [[assistant.sessionId, assistant.view.id] as const] : []))
+      const assistantParticipantIds = Object.fromEntries(Object.entries(aliases).flatMap(([sessionId, currentSessionId]) => {
+        const participantId = participantByCurrentSession.get(currentSessionId)
+        return participantId === undefined ? [] : [[sessionId, participantId]]
+      }))
+      return {
+        teamId: run.id,
+        teamName: run.name,
+        assistantSessionIds: [...new Set([...currentSessionIds, ...Object.keys(aliases)])],
+        assistantSessionAliases: aliases,
+        assistantParticipantIds,
+        color: color(run.id),
+        status: run.status,
+        ...(run.runtimeState === undefined ? {} : { runtimeState: run.runtimeState }),
+        primaryWorkspace: basename(run.projectRoot),
+        ...(run.status === 'failed' ? { needsAttention: true } : {}),
+      }
+    }),
     groups: [
       { id: 'ungrouped', name: '未分组', kind: 'ungrouped', teamIds: active },
       { id: 'archived', name: '已归档', kind: 'archived', teamIds: archived },

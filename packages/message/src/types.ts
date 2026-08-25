@@ -104,6 +104,14 @@ export interface FleetSystemNotificationResult {
   readonly disposition: 'injected' | 'followed-up' | 'interrupted' | 'replaced'
 }
 
+export type SendMessageDecision = {
+  readonly kind: 'reject'
+  readonly reason: string
+} | {
+  readonly kind: 'send'
+  readonly input: SendMessageInput
+}
+
 export interface ReadMessagesInput {
   readonly conversation: FleetTarget
   readonly after?: string

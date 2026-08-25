@@ -13,3 +13,4 @@ minimumReleaseAgeExclude:
   - dsh-harmony
   - dsh-harmony-react
   - the-binding-of-dsh@0.1.4
+  - the-binding-of-dsh@0.1.5

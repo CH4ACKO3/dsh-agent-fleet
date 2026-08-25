@@ -877,6 +877,10 @@ describe('Fleet Web panel source', () => {
         sessionId: 'assistant-current', status: 'idle',
         view: { id: 'team-assistant', name: 'Hailey', role: 'Assistant' },
       }],
+      assistantSessionAliases: [
+        { sessionId: 'assistant-old', currentSessionId: 'assistant-current' },
+        { sessionId: 'assistant-current', currentSessionId: 'assistant-current' },
+      ],
     }
     const message = (sequence: number, id: string, from: string, recipient: string) => ({
       sequence,
@@ -919,6 +923,17 @@ describe('Fleet Web panel source', () => {
 
     await source.refresh()
     const team = source.getSnapshot().team
+    expect(source.getSnapshot().directory.teams[0]).toMatchObject({
+      assistantSessionIds: ['assistant-current', 'assistant-old'],
+      assistantSessionAliases: {
+        'assistant-old': 'assistant-current',
+        'assistant-current': 'assistant-current',
+      },
+      assistantParticipantIds: {
+        'assistant-old': 'team-assistant',
+        'assistant-current': 'team-assistant',
+      },
+    })
     const haileyMessages = team?.messages.filter(item => item.id.startsWith('hailey-')) ?? []
     expect(new Set(haileyMessages.map(item => item.conversationId)).size).toBe(1)
     expect(haileyMessages[0]?.conversationId).toBe('dm:assistant:team-assistant:member:builder')
