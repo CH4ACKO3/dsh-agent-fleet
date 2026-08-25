@@ -1,19 +1,17 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {
-  FleetAuthorizationNamespace,
   FleetCollaborationTeam,
   FleetTeamLiveEvent,
 } from 'dsh-agent-fleet'
 import type {} from 'dsh-agent-fleet'
+import { FLEET_MEMORY_PROCESSOR_ID } from './patchouli.js'
 import type { MemoryData, MemoryPluginOutcome, PatchouliCore } from './patchouli.js'
 
 export const name = 'dsh-fleet-patchouli/adapter'
 
 const SOURCE = { type: 'fleet', id: name } as const
 
-type IntegrationContext = Context & Pick<Context, 'fleetAuthorization' | 'fleetCollaboration' | 'fleetRuns'> & {
+type IntegrationContext = Context & Pick<Context, 'fleetRuns'> & {
   readonly patchouli: PatchouliCore
 }
 
@@ -29,9 +27,39 @@ interface QueuedEvent {
 }
 
 interface TeamQueue {
-  readonly items: QueuedEvent[]
+  readonly items: (QueuedEvent | undefined)[]
+  head: number
+  size: number
+  dropped: number
+  running: boolean
   worker: Promise<void>
 }
+
+const TEAM_QUEUE_CAPACITY = 256
+
+const SHARED_EVENT_TYPES = new Set([
+  'team_created',
+  'team_resumed',
+  'team_settled',
+  'team_status',
+  'team_woken',
+  'work_started',
+  'work_status',
+  'work_vote_bound',
+  'member_attached',
+  'member_continued',
+  'member_detached',
+  'member_network_recovery_scheduled',
+  'member_network_recovery_woken',
+  'member_paused',
+  'member_resumed',
+  'member_session_rotated',
+  'member_update_failed',
+  'member_updated',
+  'member_view_added',
+  'member_view_removed',
+  'member_view_updated',
+])
 
 function teamScope(teamId: string): string {
   return `fleet:${teamId}:shared`
@@ -52,11 +80,7 @@ function directConversation(left: string, right: string): string {
 
 function eventRoute(team: FleetCollaborationTeam, event: FleetTeamLiveEvent): EventRoute | undefined {
   if (!event.type.startsWith('coordination.')) {
-    return event.type.startsWith('team_')
-      || event.type.startsWith('work_')
-      || event.type.startsWith('member_')
-      ? { scope: teamScope(team.id) }
-      : undefined
+    return SHARED_EVENT_TYPES.has(event.type) ? { scope: teamScope(team.id) } : undefined
   }
   if (typeof event.data !== 'object' || event.data === null) return undefined
   const data = event.data as Record<string, unknown>
@@ -114,31 +138,26 @@ function eventRoute(team: FleetCollaborationTeam, event: FleetTeamLiveEvent): Ev
   return undefined
 }
 
-function recallRoute(
-  teamId: string,
-  member: string,
-  conversation: string | undefined,
-  hasMember: (member: string) => boolean,
-): EventRoute {
-  if (conversation === undefined) return { scope: teamScope(teamId) }
-  const target = conversation.trim()
-  if (target.startsWith('@')) {
-    const peer = target.slice(1)
-    if (!hasMember(peer)) throw new Error(`unknown Fleet member ${peer}`)
-    const direct = directConversation(member, peer)
-    return { scope: conversationScope(teamId, direct), conversation: target }
-  }
-  if (target.startsWith('#') || target.startsWith('meeting:')) {
-    return { scope: conversationScope(teamId, target), conversation: target }
-  }
-  throw new Error('conversation must use #channel, @member, or meeting:id form')
+function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : undefined
 }
 
-function output(outcomes: readonly MemoryPluginOutcome<MemoryData>[]): string {
-  if (outcomes.length === 0) return 'No installed Patchouli provider accepted this Fleet recall request.'
-  return outcomes.map(outcome => outcome.ok
-    ? `[${outcome.pluginId}] ${JSON.stringify(outcome.value)}`
-    : `[${outcome.pluginId}] error: ${outcome.error}`).join('\n\n')
+function safeMemberView(event: FleetTeamLiveEvent): FleetTeamLiveEvent {
+  if (event.type !== 'member_view_added' && event.type !== 'member_view_updated') return event
+  const data = record(event.data)
+  const view = record(data?.view)
+  if (view === undefined) return { ...event, data: {} }
+  const safe = Object.fromEntries(['id', 'name', 'color', 'role', 'responsibility']
+    .flatMap(key => view[key] === undefined ? [] : [[key, view[key]]]))
+  return {
+    ...event,
+    data: {
+      view: safe,
+      ...(typeof data?.reason === 'string' ? { reason: data.reason } : {}),
+    },
+  }
 }
 
 function eventContent(event: FleetTeamLiveEvent): string {
@@ -151,18 +170,31 @@ function publicTimelineRoute(route: EventRoute): boolean {
     || route.conversation.startsWith('meeting:')
 }
 
-function successfulProviders(outcomes: readonly MemoryPluginOutcome<MemoryData>[]): string[] {
-  return outcomes.flatMap(outcome => outcome.ok ? [outcome.pluginId] : [])
+function effectiveWrites(outcomes: readonly MemoryPluginOutcome<MemoryData>[]): {
+  readonly providers: readonly string[]
+  readonly storedCount: number
+} {
+  const providers: string[] = []
+  let storedCount = 0
+  for (const outcome of outcomes) {
+    if (!outcome.ok || outcome.pluginId !== FLEET_MEMORY_PROCESSOR_ID
+      || typeof outcome.value !== 'object' || outcome.value === null || Array.isArray(outcome.value)) continue
+    const result = outcome.value as Record<string, unknown>
+    if (result.handled !== true || typeof result.stored !== 'number'
+      || !Number.isSafeInteger(result.stored) || result.stored < 1) continue
+    providers.push(outcome.pluginId)
+    storedCount += result.stored
+  }
+  return { providers, storedCount }
 }
 
 function warnFailures(
   ctx: Context,
-  operation: 'update' | 'retrieve',
   outcomes: readonly MemoryPluginOutcome<MemoryData>[],
 ): void {
   const logger = ctx.logger(name)
-  for (const outcome of outcomes) {
-    if (!outcome.ok) logger.warn(`Patchouli ${operation} through ${outcome.pluginId} failed: ${outcome.error}`)
+  for (const outcome of outcomes) if (!outcome.ok) {
+    logger.warn(`Patchouli update through ${outcome.pluginId} failed: ${outcome.error}`)
   }
 }
 
@@ -179,6 +211,7 @@ function install(scope: IntegrationContext): () => Promise<void> {
           scope: route.scope,
           attributes: {
             fleetPoint: 'team/event',
+            fleetEffort: 'low',
             teamId: team.id,
             eventType: event.type,
             sequence: event.sequence,
@@ -192,13 +225,14 @@ function install(scope: IntegrationContext): () => Promise<void> {
           content: eventContent(event),
         },
       }, lifetime.signal)
-      warnFailures(scope, 'update', outcomes)
-      const providers = successfulProviders(outcomes)
-      if (providers.length > 0 && publicTimelineRoute(route)) {
+      warnFailures(scope, outcomes)
+      const writes = effectiveWrites(outcomes)
+      if (writes.storedCount > 0 && publicTimelineRoute(route)) {
         scope.fleetRuns.recordDataEvent(team.id, 'memory.stored', {
           sourceSequence: event.sequence,
           eventType: event.type,
-          providers,
+          providers: writes.providers,
+          storedCount: writes.storedCount,
           ...(route.conversation === undefined ? {} : { conversation: route.conversation }),
         })
       }
@@ -211,7 +245,11 @@ function install(scope: IntegrationContext): () => Promise<void> {
 
   const drain = async (teamId: string, queue: TeamQueue): Promise<void> => {
     while (!lifetime.signal.aborted) {
-      const item = queue.items.shift()
+      if (queue.size === 0) break
+      const item = queue.items[queue.head]
+      queue.items[queue.head] = undefined
+      queue.head = (queue.head + 1) % TEAM_QUEUE_CAPACITY
+      queue.size -= 1
       if (item === undefined) break
       await dispatch(item)
     }
@@ -221,14 +259,35 @@ function install(scope: IntegrationContext): () => Promise<void> {
   const enqueue = (team: FleetCollaborationTeam, event: FleetTeamLiveEvent): void => {
     const route = eventRoute(team, event)
     if (route === undefined) return
-    const queued: QueuedEvent = { team, event, route }
-    const existing = queues.get(team.id)
-    if (existing !== undefined) {
-      existing.items.push(queued)
-      return
+    const queued: QueuedEvent = { team, event: safeMemberView(event), route }
+    let queue = queues.get(team.id)
+    if (queue === undefined) {
+      queue = {
+        items: new Array<QueuedEvent | undefined>(TEAM_QUEUE_CAPACITY),
+        head: 0,
+        size: 0,
+        dropped: 0,
+        running: false,
+        worker: Promise.resolve(),
+      }
+      queues.set(team.id, queue)
     }
-    const queue: TeamQueue = { items: [queued], worker: Promise.resolve() }
-    queues.set(team.id, queue)
+    if (queue.size === TEAM_QUEUE_CAPACITY) {
+      // These are replayable Patchouli indexing inputs; the durable Fleet journal is untouched.
+      queue.items[queue.head] = undefined
+      queue.head = (queue.head + 1) % TEAM_QUEUE_CAPACITY
+      queue.size -= 1
+      queue.dropped += 1
+      if (queue.dropped === 1 || queue.dropped % 100 === 0) {
+        scope.logger(name).warn(
+          `Patchouli event queue for Fleet team ${team.id} dropped ${String(queue.dropped)} old derived indexing events; the Fleet journal remains intact`,
+        )
+      }
+    }
+    queue.items[(queue.head + queue.size) % TEAM_QUEUE_CAPACITY] = queued
+    queue.size += 1
+    if (queue.running) return
+    queue.running = true
     queue.worker = drain(team.id, queue).catch(error => {
       if (!lifetime.signal.aborted) scope.logger(name).warn(
         `Patchouli event worker for Fleet team ${team.id} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -237,96 +296,9 @@ function install(scope: IntegrationContext): () => Promise<void> {
     })
   }
 
-  const namespace: FleetAuthorizationNamespace = {
-    namespace: 'memory',
-    actions: [{ id: 'recall', description: 'Recall historical Team information through Patchouli.' }],
-    defaultActions: () => ['recall'],
-    installTools(ctx, input) {
-      return ctx.tools.register(defineTool({
-        name: 'fleet_recall',
-        description: 'Recall older Team events and conversations from Patchouli. The tool call stays visible in the Team member trace.',
-        parameters: {
-          query: { type: 'string', required: true, description: 'What historical information to find.' },
-          conversation: { type: 'string', description: 'Optional #channel, @member, or meeting:id scope. Omit for shared Team history.' },
-          limit: { type: 'integer', description: 'Optional positive result limit requested from each Patchouli provider.' },
-        },
-        output: {
-          schema: { type: 'string' },
-          render: (_args, value) => [{ type: 'text', text: value }],
-        },
-        async execute(args, exec) {
-          const agent = exec.agent as Agent | undefined
-          if (agent === undefined) throw new Error('fleet_recall requires a calling Agent')
-          const actor = scope.fleetAuthorization.actorForAgent(String(agent.id))
-          if (actor === undefined || actor.teamId !== input.teamId || actor.subject.id !== input.member.id) {
-            throw new Error(`Agent ${String(agent.id)} is not an active member of Fleet team ${input.teamId}`)
-          }
-          scope.fleetAuthorization.require({
-            teamId: input.teamId,
-            subject: actor.subject,
-            action: 'memory.recall',
-          })
-          const query = args.query.trim()
-          if (query.length === 0) throw new Error('fleet_recall query cannot be empty')
-          if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1)) {
-            throw new Error('fleet_recall limit must be a positive safe integer')
-          }
-          const route = recallRoute(input.teamId, input.member.id, args.conversation, input.hasMember)
-          if (route.conversation !== undefined) {
-            scope.fleetAuthorization.require({
-              teamId: input.teamId,
-              subject: actor.subject,
-              action: 'message.read',
-              resource: { kind: 'conversation', id: route.conversation.startsWith('dm:') ? args.conversation ?? '' : route.conversation },
-            })
-            const team = scope.fleetCollaboration.require(input.teamId)
-            if (route.conversation.startsWith('#')
-              && !team.messages.listChannels(agent).some(channel => `#${channel.id}` === route.conversation)) {
-              throw new Error(`Fleet conversation ${route.conversation} is not visible to ${input.member.id}`)
-            }
-            if (route.conversation.startsWith('meeting:')
-              && !team.messages.listMeetings(agent).some(meeting => `meeting:${meeting.id}` === route.conversation)) {
-              throw new Error(`Fleet conversation ${route.conversation} is not visible to ${input.member.id}`)
-            }
-          }
-          const outcomes = await scope.patchouli.retrieve({
-            meta: {
-              source: SOURCE,
-              scope: route.scope,
-              attributes: {
-                fleetPoint: 'tool/recall',
-                teamId: input.teamId,
-                member: input.member.id,
-                ...(route.conversation === undefined ? {} : { conversation: route.conversation }),
-              },
-            },
-            data: {
-              query,
-              ...(args.limit === undefined ? {} : { limit: args.limit }),
-            },
-          }, exec.signal)
-          warnFailures(scope, 'retrieve', outcomes)
-          const providers = successfulProviders(outcomes)
-          if (publicTimelineRoute(route)) {
-            scope.fleetRuns.recordDataEvent(input.teamId, 'memory.recalled', {
-              member: input.member.id,
-              query: query.length <= 240 ? query : `${query.slice(0, 239)}…`,
-              providers,
-              ...(route.conversation === undefined ? {} : { conversation: route.conversation }),
-            })
-          }
-          return output(outcomes)
-        },
-        presentCall: args => ({ card: 'generic', title: 'Recall Team history', kind: 'read', rawInput: args.query }),
-      }))
-    },
-  }
-
-  const stopNamespace = scope.fleetAuthorization.registerNamespace(namespace)
   const stopEvents = scope.on('fleet/team/event', ({ team, event }) => { enqueue(team, event) })
   return async () => {
     stopEvents()
-    stopNamespace()
     lifetime.abort(new Error('dsh-fleet-patchouli disposed'))
     await Promise.allSettled([...queues.values()].map(queue => queue.worker))
     queues.clear()
@@ -340,5 +312,5 @@ export function apply(ctx: Context): void {
       callback: (scope: IntegrationContext) => () => Promise<void>,
     ): void
   }
-  host.inject(['fleetAuthorization', 'fleetCollaboration', 'fleetRuns', 'patchouli'], install)
+  host.inject(['fleetRuns', 'patchouli'], install)
 }

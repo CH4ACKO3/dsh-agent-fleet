@@ -38,8 +38,8 @@
       "category": "runtime",
       "compatibility": {
         "requires": {
-          "dsh-harmony": ">=0.8.1 <0.9.0",
-          "the-binding-of-dsh": ">=0.1.2 <0.2.0"
+          "dsh-harmony": ">=0.8.6 <0.9.0",
+          "the-binding-of-dsh": ">=0.1.5 <0.2.0"
         }
       }
     },
@@ -55,7 +55,7 @@
     },
     "harmony": {
       "requires": {
-        "the-binding-of-dsh": ">=0.1.2 <0.2.0"
+        "the-binding-of-dsh": ">=0.1.5 <0.2.0"
       },
       "patches": [
         "./harmony/hero-team-entry.cjs"
@@ -80,11 +80,11 @@
     "@dsh-agent-fleet/core": "workspace:*",
     "@dsh-agent-fleet/message": "workspace:*",
     "@dsh-agent-fleet/resources": "workspace:*",
-    "dsh-harmony": ">=0.8.1 <0.9.0",
-    "dsh-harmony-react": "^0.3.1",
+    "dsh-harmony": ">=0.8.6 <0.9.0",
+    "dsh-harmony-react": "^0.3.2",
     "dsh-hover-hint": "workspace:*",
     "tar": "^7.5.22",
-    "the-binding-of-dsh": ">=0.1.2 <0.2.0"
+    "the-binding-of-dsh": ">=0.1.5 <0.2.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

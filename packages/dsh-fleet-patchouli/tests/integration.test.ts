@@ -2,43 +2,34 @@ import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 
 import type {
-  FleetAuthorizationNamespace,
   FleetCollaborationTeam,
   FleetTeamLiveEvent,
 } from 'dsh-agent-fleet'
 import { apply } from '../src/adapter.js'
+import { FLEET_MEMORY_PROCESSOR_ID } from '../src/patchouli.js'
 
-const member = {
-  id: 'lead', name: 'Lead', role: 'Lead', prompt: '',
-  toolGroups: ['messages'], permissions: [], contacts: { members: '*', channels: '*' },
-} as const
-
-function setup() {
-  let namespace: FleetAuthorizationNamespace | undefined
+function setup(
+  updateValue: unknown = { handled: true, stored: 1 },
+  providedUpdate?: ReturnType<typeof vi.fn>,
+) {
   let eventListener: ((payload: { team: FleetCollaborationTeam; event: FleetTeamLiveEvent }) => void) | undefined
   let dispose: (() => Promise<void>) | undefined
-  const update = vi.fn().mockResolvedValue([{ pluginId: 'test-memory', ok: true, value: { stored: true } }])
-  const retrieve = vi.fn().mockResolvedValue([{ pluginId: 'test-memory', ok: true, value: { answer: 'remembered' } }])
+  const update = providedUpdate ?? vi.fn().mockResolvedValue([{
+    pluginId: FLEET_MEMORY_PROCESSOR_ID,
+    ok: true,
+    value: updateValue,
+  }])
   const recordDataEvent = vi.fn()
-  const requireAuthorization = vi.fn()
+  const warn = vi.fn()
   const team = {
     id: 'team-1',
     memberNamesById: new Map([['session-lead', 'lead'], ['session-reviewer', 'reviewer']]),
-    messages: { listChannels: () => [], listMeetings: () => [] },
   } as unknown as FleetCollaborationTeam
   const scope = {
-    patchouli: { update, retrieve },
-    fleetAuthorization: {
-      registerNamespace: (value: FleetAuthorizationNamespace) => { namespace = value; return () => {} },
-      actorForAgent: (id: string) => id === 'session-lead'
-        ? { teamId: 'team-1', subject: { kind: 'member', id: 'lead' } }
-        : undefined,
-      require: requireAuthorization,
-    },
-    fleetCollaboration: { require: () => team },
+    patchouli: { update },
     fleetRuns: { recordDataEvent },
     on: (_name: string, listener: typeof eventListener) => { eventListener = listener; return () => {} },
-    logger: () => ({ warn: vi.fn() }),
+    logger: () => ({ warn }),
   }
   let dependencies: readonly string[] = []
   apply({
@@ -51,18 +42,16 @@ function setup() {
     dependencies,
     dispose: () => dispose?.(),
     event: (event: FleetTeamLiveEvent) => eventListener?.({ team, event }),
-    namespace: () => namespace,
     recordDataEvent,
-    requireAuthorization,
-    retrieve,
     update,
+    warn,
   }
 }
 
 describe('dsh-fleet-patchouli', () => {
   it('activates only after Fleet and Patchouli services are available and routes durable events by visibility scope', async () => {
     const fixture = setup()
-    expect(fixture.dependencies).toEqual(['fleetAuthorization', 'fleetCollaboration', 'fleetRuns', 'patchouli'])
+    expect(fixture.dependencies).toEqual(['fleetRuns', 'patchouli'])
 
     fixture.event({ sequence: 1, createdAt: '2026-08-24T00:00:00.000Z', type: 'work_status', data: { status: 'finished' } })
     fixture.event({
@@ -90,7 +79,7 @@ describe('dsh-fleet-patchouli', () => {
     await vi.waitFor(() => { expect(fixture.update).toHaveBeenCalledTimes(2) })
     expect(fixture.update.mock.calls[0]?.[0].meta.scope).toBe('fleet:team-1:shared')
     expect(fixture.update.mock.calls[0]?.[0]).toMatchObject({
-      meta: { attributes: { fleetPoint: 'team/event', eventType: 'work_status' } },
+      meta: { attributes: { fleetPoint: 'team/event', fleetEffort: 'low', eventType: 'work_status' } },
       data: { content: expect.stringContaining('work_status') },
     })
     expect(fixture.update.mock.calls[0]?.[0].meta.attributes).not.toHaveProperty('point')
@@ -99,51 +88,78 @@ describe('dsh-fleet-patchouli', () => {
     expect(fixture.recordDataEvent).toHaveBeenCalledWith('team-1', 'memory.stored', {
       sourceSequence: 1,
       eventType: 'work_status',
-      providers: ['test-memory'],
+      providers: [FLEET_MEMORY_PROCESSOR_ID],
+      storedCount: 1,
     })
     await fixture.dispose()
   })
 
-  it('installs a visible, authorized Team recall tool with the same direct-message scope', async () => {
-    const fixture = setup()
-    const tools: Array<{ name: string; execute(args: unknown, exec: unknown): Promise<unknown> }> = []
-    fixture.namespace()?.installTools?.({
-      tools: { register: (tool: typeof tools[number]) => { tools.push(tool); return () => {} } },
-    } as unknown as Context, {
-      teamId: 'team-1', projectRoot: '/workspace', member,
-      hasMember: candidate => candidate === 'lead' || candidate === 'reviewer',
-      authorization: { toolGroups: [], actions: ['memory.recall'], op: false },
-    })
-    const tool = tools.find(candidate => candidate.name === 'fleet_recall')
-    if (tool === undefined) throw new Error('expected fleet_recall tool')
-
-    await expect(tool.execute(
-      { query: 'Why did we choose the old design?', conversation: '@reviewer', limit: 3 },
-      { agent: { id: 'session-lead' }, signal: new AbortController().signal },
-    )).resolves.toContain('remembered')
-    expect(fixture.retrieve.mock.calls[0]?.[0]).toMatchObject({
-      meta: {
-        source: { type: 'fleet', id: 'dsh-fleet-patchouli/adapter' },
-        scope: 'fleet:team-1:conversation:dm:lead:reviewer',
-        attributes: { fleetPoint: 'tool/recall', teamId: 'team-1', member: 'lead' },
-      },
-      data: { query: 'Why did we choose the old design?', limit: 3 },
-    })
-    expect(fixture.requireAuthorization).toHaveBeenCalledWith(expect.objectContaining({ action: 'memory.recall' }))
-    expect(fixture.requireAuthorization).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'message.read', resource: { kind: 'conversation', id: '@reviewer' },
-    }))
+  it.each([
+    { handled: false, reason: 'not configured' },
+    { handled: true, stored: 0 },
+  ])('does not publish timeline activity when Team memory made no write: %j', async updateValue => {
+    const fixture = setup(updateValue)
+    fixture.event({ sequence: 1, createdAt: '2026-08-24T00:00:00.000Z', type: 'work_status', data: { status: 'idle' } })
+    await fixture.dispose()
+    expect(fixture.update).toHaveBeenCalledOnce()
     expect(fixture.recordDataEvent).not.toHaveBeenCalled()
+  })
 
-    await expect(tool.execute(
-      { query: 'What did the Team decide?', limit: 2 },
-      { agent: { id: 'session-lead' }, signal: new AbortController().signal },
-    )).resolves.toContain('remembered')
-    expect(fixture.recordDataEvent).toHaveBeenCalledWith('team-1', 'memory.recalled', {
-      member: 'lead',
-      query: 'What did the Team decide?',
-      providers: ['test-memory'],
+  it('removes member prompts before routing a member view event to shared memory', async () => {
+    const fixture = setup()
+    fixture.event({
+      sequence: 1,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      type: 'member_view_updated',
+      data: {
+        view: {
+          id: 'lead',
+          name: 'Lead',
+          role: 'Researcher',
+          responsibility: 'Own the result.',
+          prompt: 'SECRET MEMBER PROMPT',
+          permissions: ['dangerous-private-detail'],
+        },
+      },
     })
+    await fixture.dispose()
+    expect(fixture.update).toHaveBeenCalledOnce()
+    const routed = fixture.update.mock.calls[0]?.[0]
+    expect(routed).toMatchObject({
+      data: {
+        event: {
+          type: 'member_view_updated',
+          data: { view: { id: 'lead', name: 'Lead', role: 'Researcher', responsibility: 'Own the result.' } },
+        },
+      },
+    })
+    expect(JSON.stringify(routed)).not.toContain('SECRET MEMBER PROMPT')
+    expect(JSON.stringify(routed)).not.toContain('dangerous-private-detail')
+  })
+
+  it('bounds per-Team backlog and keeps the newest derived indexing events', async () => {
+    let releaseFirst: (() => void) | undefined
+    const first = new Promise<readonly object[]>(resolve => {
+      releaseFirst = () => { resolve([{ pluginId: FLEET_MEMORY_PROCESSOR_ID, ok: true, value: { handled: false } }]) }
+    })
+    const update = vi.fn()
+      .mockImplementationOnce(() => first)
+      .mockResolvedValue([{ pluginId: FLEET_MEMORY_PROCESSOR_ID, ok: true, value: { handled: false } }])
+    const fixture = setup(undefined, update)
+    for (let sequence = 1; sequence <= 300; sequence += 1) {
+      fixture.event({
+        sequence,
+        createdAt: '2026-08-24T00:00:00.000Z',
+        type: 'team_status',
+        data: { status: `state-${String(sequence)}` },
+      })
+    }
+    expect(update).toHaveBeenCalledOnce()
+    releaseFirst?.()
+    await vi.waitFor(() => { expect(update).toHaveBeenCalledTimes(257) })
+    expect(update.mock.calls[1]?.[0].meta.attributes.sequence).toBe(45)
+    expect(update.mock.calls.at(-1)?.[0].meta.attributes.sequence).toBe(300)
+    expect(fixture.warn).toHaveBeenCalledWith(expect.stringContaining('dropped 1 old derived indexing events'))
     await fixture.dispose()
   })
 })

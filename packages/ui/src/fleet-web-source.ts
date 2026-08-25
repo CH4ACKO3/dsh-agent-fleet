@@ -84,6 +84,10 @@ interface WireRun {
   readonly projectRoot: string
   readonly members: readonly WireMember[]
   readonly assistants?: readonly WireAssistant[]
+  readonly assistantSessionAliases?: readonly {
+    readonly sessionId: string
+    readonly currentSessionId: string
+  }[]
   readonly status: FleetPanelTeamSnapshot['status']
   readonly runtimeState?: 'active' | 'dormant'
   readonly startedAt: string
@@ -539,15 +543,16 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
   if (event.type === 'memory.stored') {
     const conversation = string(data?.conversation)
     const location = conversation === undefined ? '团队历史' : `${conversation} 的历史`
-    const providers = Array.isArray(data?.providers) ? data.providers.length : 0
-    return `${location}已送入记忆处理${providers > 0 ? `（${String(providers)} 个处理器）` : ''}`
+    const storedCount = typeof data?.storedCount === 'number' ? data.storedCount : undefined
+    return `${location}已写入团队记忆库${storedCount === undefined ? '' : `（${String(storedCount)} 条）`}`
   }
   if (event.type === 'memory.recalled') {
     const member = string(data?.member) ?? '团队成员'
     const conversation = string(data?.conversation)
     const location = conversation === undefined ? '团队记忆' : `${conversation} 的记忆`
     const query = string(data?.query)?.trim()
-    return `${member} 查询了${location}${query === undefined || query === '' ? '' : `：“${query}”`}`
+    const resultCount = typeof data?.resultCount === 'number' ? data.resultCount : undefined
+    return `${member} 从${location}召回了${resultCount === undefined ? '有效结果' : `${String(resultCount)} 条结果`}${query === undefined || query === '' ? '' : `：“${query}”`}`
   }
   if (event.type.startsWith('task.')) {
     const task = nestedRecord(event.data, 'task')
@@ -651,6 +656,18 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const assistantsBySession = new Map(assistants.flatMap(assistant => assistant.sessionId === undefined
     ? []
     : [[assistant.sessionId, assistant] as const]))
+  for (const event of cache.events) {
+    if (event.type !== 'assistant_attached' && event.type !== 'assistant_rebound') continue
+    const data = asRecord(event.data)
+    const view = asRecord(data?.view)
+    const assistantId = string(view?.id)
+    const projected = assistantId === undefined ? undefined : assistants.find(assistant => assistant.id === assistantId)
+    if (projected === undefined) continue
+    const previousSessionId = string(data?.previousSessionId)
+    const sessionId = string(data?.sessionId)
+    if (previousSessionId !== undefined) assistantsBySession.set(previousSessionId, projected)
+    if (sessionId !== undefined) assistantsBySession.set(sessionId, projected)
+  }
   const participantsBySession = new Map([...membersBySession, ...assistantsBySession])
   const participants = [...members, ...assistants]
   const channels = new Map<string, FleetPanelConversation>()
@@ -868,14 +885,18 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       } else {
         const stableParticipants = participants.map(participant => {
           const member = membersBySession.get(participant)
-          return member === undefined ? participant : `member:${member.id}`
+          if (member !== undefined) return `member:${member.id}`
+          const assistant = assistantsBySession.get(participant)
+          return assistant === undefined ? participant : `assistant:${assistant.id}`
         })
         conversationId = `dm:${stableParticipants.toSorted().join(':')}`
         if (!channels.has(conversationId)) {
           const labels = participants.map(participant => senderFace(participant).name)
           const participantIds = participants.flatMap(participant => {
             const member = membersBySession.get(participant)
-            return member === undefined ? [] : [member.id]
+            if (member !== undefined) return [member.id]
+            const assistant = assistantsBySession.get(participant)
+            return assistant === undefined ? [] : [assistant.id]
           })
           channels.set(conversationId, {
             id: conversationId,
@@ -888,9 +909,10 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       }
       directParticipants.set(conversationId, participants.map(participant => {
         const member = membersBySession.get(participant)
-        return member === undefined
-          ? participant
-          : cache.run.members.find(candidate => candidate.name === member.id)?.sessionId ?? participant
+        if (member !== undefined) {
+          return cache.run.members.find(candidate => candidate.name === member.id)?.sessionId ?? participant
+        }
+        return assistantsBySession.get(participant)?.sessionId ?? participant
       }))
       if (conversationId.startsWith('dm:')) privateMessageSequences.add(event.sequence)
     } else if (target.startsWith('#') && !channels.has(target)) {
@@ -997,6 +1019,19 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     })
     return { ...member, visibleConversationIds }
   })
+  const projectedAssistants = assistants.map(assistant => {
+    const sessionId = assistant.sessionId
+    if (sessionId === undefined) return assistant
+    const visibleConversationIds = conversations.flatMap(conversation => {
+      if (conversation.id.startsWith('#')) return [conversation.id]
+      if (conversation.id.startsWith('meeting:')) {
+        return meetingParticipants.get(conversation.id)?.includes(sessionId) === true ? [conversation.id] : []
+      }
+      const participants = directParticipants.get(conversation.id) ?? []
+      return participants.includes(sessionId) ? [conversation.id] : []
+    })
+    return { ...assistant, visibleConversationIds }
+  })
 
   const activity: FleetPanelActivity[] = cache.events.flatMap((event): FleetPanelActivity[] => {
     if (privateMessageSequences.has(event.sequence)) return []
@@ -1004,6 +1039,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     return kind === undefined ? [] : [{
       id: `${cache.run.id}:${String(event.sequence)}`,
       kind,
+      type: event.type,
+      data: event.data,
       text: activityText(event, membersBySession),
       createdAt: event.createdAt,
     }]
@@ -1017,7 +1054,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     ...(cache.run.runtimeState === undefined ? {} : { runtimeState: cache.run.runtimeState }),
     conversations,
     members: projectedMembers,
-    assistants,
+    assistants: projectedAssistants,
     messages,
     resources: [...resources.values()],
     workspaces: [...workspacesByPath.values()],
@@ -1029,16 +1066,26 @@ function directory(runs: readonly WireRun[]): FleetPanelTeamDirectory {
   const active = runs.filter(run => run.status !== 'closed').map(run => run.id)
   const archived = runs.filter(run => run.status === 'closed').map(run => run.id)
   return {
-    teams: runs.map(run => ({
-      teamId: run.id,
-      teamName: run.name,
-      assistantSessionIds: (run.assistants ?? []).map(assistant => assistant.sessionId),
-      color: color(run.id),
-      status: run.status,
-      ...(run.runtimeState === undefined ? {} : { runtimeState: run.runtimeState }),
-      primaryWorkspace: basename(run.projectRoot),
-      ...(run.status === 'failed' ? { needsAttention: true } : {}),
-    })),
+    teams: runs.map(run => {
+      const currentSessionIds = (run.assistants ?? []).map(assistant => assistant.sessionId)
+      const aliases = Object.fromEntries(
+        (run.assistantSessionAliases ?? currentSessionIds.map(sessionId => ({
+          sessionId,
+          currentSessionId: sessionId,
+        }))).map(alias => [alias.sessionId, alias.currentSessionId]),
+      )
+      return {
+        teamId: run.id,
+        teamName: run.name,
+        assistantSessionIds: [...new Set([...currentSessionIds, ...Object.keys(aliases)])],
+        assistantSessionAliases: aliases,
+        color: color(run.id),
+        status: run.status,
+        ...(run.runtimeState === undefined ? {} : { runtimeState: run.runtimeState }),
+        primaryWorkspace: basename(run.projectRoot),
+        ...(run.status === 'failed' ? { needsAttention: true } : {}),
+      }
+    }),
     groups: [
       { id: 'ungrouped', name: '未分组', kind: 'ungrouped', teamIds: active },
       { id: 'archived', name: '已归档', kind: 'archived', teamIds: archived },

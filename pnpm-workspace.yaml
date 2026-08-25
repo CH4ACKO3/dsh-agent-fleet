@@ -12,4 +12,4 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh*'
   - dsh-harmony
   - dsh-harmony-react
-  - the-binding-of-dsh@0.1.3
+  - the-binding-of-dsh@0.1.3 || 0.1.5

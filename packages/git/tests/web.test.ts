@@ -10,7 +10,7 @@ import type { FleetRunService } from 'dsh-agent-fleet'
 import { FleetAccessService, FleetGroupService } from 'dsh-agent-fleet'
 
 import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
-import { FLEET_GIT_PERMISSIONS, FleetGitAttributionStore, FleetGitWebRemote, apply } from '../src/index.js'
+import { FLEET_GIT_PERMISSIONS, FleetGitAttributionStore, FleetGitRecallService, FleetGitWebRemote, apply } from '../src/index.js'
 
 const roots: string[] = []
 
@@ -51,6 +51,7 @@ describe('FleetGitWebRemote', () => {
     ctx.provide('fleetRuns', runs)
     ctx.provide('fleetAccess', resourceAccess)
     await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(ctx.get('fleetGitRecall', false)).toBeUndefined()
     expect(access.actionIds()).toEqual(expect.arrayContaining([
       'git.inspect', 'git.scope-check', 'git.history-rewrite', 'git.publish', 'git.repository-manage',
       'git.worktree-create', 'git.worktree-manage',
@@ -83,6 +84,26 @@ describe('FleetGitWebRemote', () => {
     }
     expect(allowed('git.repository-manage')).toBe(false)
     expect(allowed('git.worktree-manage')).toBe(false)
+  })
+
+  it('registers the recall seam only when Fleet authorization, runs, agents, and attribution are present', async () => {
+    const ctx = new Context()
+    const authorization = new FleetAuthorizationService()
+    const runs = {
+      status: () => ({ projectRoot: '/project' }),
+      readExtensionState: () => undefined,
+      writeExtensionState: () => {},
+    } as unknown as FleetRunService
+    apply(ctx)
+    ctx.provide('fleetAuthorization', authorization)
+    ctx.provide('fleetRuns', runs)
+    ctx.provide('agents', { list: () => [] } as never)
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(ctx.get('fleetGitRecall', false)).toBeUndefined()
+
+    ctx.provide('fleetGitAttributions', new FleetGitAttributionStore(runs))
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(ctx.get('fleetGitRecall', false)).toBeInstanceOf(FleetGitRecallService)
   })
 
   it('exposes strict snapshot, diff, commit, and fetch invocations', () => {

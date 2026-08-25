@@ -21,6 +21,8 @@ import {
 } from './runtime-chat.js'
 import {
   configureFleetActivationSessions,
+  getCurrentFleetSessionId,
+  subscribeCurrentFleetSession,
   type FleetActivationClientSessions,
 } from './activation.js'
 import {
@@ -2898,9 +2900,27 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-activity-copy {
+  min-width: 0;
   font-size: 13px;
   line-height: 19px;
   overflow-wrap: anywhere;
+}
+
+.dsh-fleet-panel-activity-row[data-kind="memory"] .dsh-fleet-panel-activity-copy {
+  align-items: baseline;
+  gap: 8px;
+  display: flex;
+}
+
+.dsh-fleet-panel-activity-memory-operation {
+  flex: none;
+  color: color-mix(in srgb, #8060ae 72%, var(--dsw-alias-label-primary));
+  background: color-mix(in srgb, #8b6bbd 13%, transparent);
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .dsh-fleet-panel-activity-time {
@@ -3285,6 +3305,8 @@ export interface FleetPanelWorkspace {
 export interface FleetPanelActivity {
   readonly id: string
   readonly kind: 'message' | 'resource' | 'decision' | 'member' | 'memory'
+  readonly type?: string
+  readonly data?: unknown
   readonly text: string
   readonly createdAt: string
 }
@@ -3311,6 +3333,7 @@ export interface FleetPanelTeamSummary {
   readonly teamId: string
   readonly teamName: string
   readonly assistantSessionIds?: readonly string[]
+  readonly assistantSessionAliases?: Readonly<Record<string, string>>
   readonly color?: string
   readonly unread?: number
   readonly needsAttention?: boolean
@@ -3978,10 +4001,11 @@ export function sendFleetAssistantMailboxMessage(sessionId: string, text: string
   const team = source?.getSnapshot().directory.teams.find(candidate =>
     candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
   if (source === undefined || team === undefined) return Promise.reject(new Error('当前 Session 未连接 Fleet Team 助理'))
+  const recipient = team.assistantSessionAliases?.[sessionId] ?? sessionId
   return source.sendMessage({
     sessionId,
     teamId: team.teamId,
-    conversationId: `@${sessionId}`,
+    conversationId: `@${recipient}`,
     content: [{ type: 'text', text }],
     delivery: 'wakeup',
   })
@@ -3992,10 +4016,11 @@ function fleetAssistantMailbox(snapshot: FleetPanelSnapshot, sessionId: string |
   const summary = snapshot.directory.teams.find(candidate =>
     candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
   if (summary === undefined) return undefined
+  const assistantSessionId = summary.assistantSessionAliases?.[sessionId] ?? sessionId
   const team = snapshot.team?.teamId === summary.teamId ? snapshot.team : undefined
-  const assistant = team?.assistants?.find(candidate => candidate.sessionId === sessionId)
+  const assistant = team?.assistants?.find(candidate => candidate.sessionId === assistantSessionId)
   const fallbackAssistant: FleetChatMember = {
-    id: `assistant-${sessionId}`,
+    id: `assistant-${assistantSessionId}`,
     name: 'Agent Fleet',
     role: panelText('团队助理', 'Team assistant'),
     color: summary.color ?? '#4f76c7',
@@ -4010,7 +4035,7 @@ function fleetAssistantMailbox(snapshot: FleetPanelSnapshot, sessionId: string |
     state: snapshot.connection?.status === 'disconnected'
       ? 'error'
       : team === undefined ? 'loading' : 'open',
-    messages: (team?.messages ?? []).filter(message => message.conversationId === `@${sessionId}`).map(message => ({
+    messages: (team?.messages ?? []).filter(message => message.conversationId === `@${assistantSessionId}`).map(message => ({
       id: message.id,
       sender: message.sender?.operator === true
         ? operator
@@ -4375,7 +4400,12 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
     nativeChatRuntime = props
     if (!initialized) queueMicrotask(publishNativeChatRuntime)
     const welcome = useFleetMetaWelcome()
-    const sessionId = typeof props.sessionId === 'string' ? props.sessionId : undefined
+    const currentSessionId = useSyncExternalStore(
+      subscribeCurrentFleetSession,
+      getCurrentFleetSessionId,
+      getCurrentFleetSessionId,
+    )
+    const sessionId = typeof props.sessionId === 'string' ? props.sessionId : currentSessionId
     const fleetAssistant = useFleetMetaAssistantSession(sessionId)
     const fleetSnapshot = useSyncExternalStore(
       subscribeFleetTeamDirectory,
@@ -9187,9 +9217,23 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
         ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '当前筛选下没有动态' })
         : activity.map(item => jsxs('div', {
             className: 'dsh-fleet-panel-activity-row',
+            'data-kind': item.kind,
             children: [
               jsx('span', { className: 'dsh-fleet-panel-activity-dot', 'data-kind': item.kind }),
-              jsx('span', { className: 'dsh-fleet-panel-activity-copy', children: item.text }),
+              jsxs('span', {
+                className: 'dsh-fleet-panel-activity-copy',
+                children: [
+                  item.type === 'memory.stored' && jsx('span', {
+                    className: 'dsh-fleet-panel-activity-memory-operation',
+                    children: '记忆写入',
+                  }),
+                  item.type === 'memory.recalled' && jsx('span', {
+                    className: 'dsh-fleet-panel-activity-memory-operation',
+                    children: '记忆召回',
+                  }),
+                  jsx('span', { children: item.text }),
+                ],
+              }),
               jsx('time', {
                 className: 'dsh-fleet-panel-activity-time',
                 dateTime: item.createdAt,

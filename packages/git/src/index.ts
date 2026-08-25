@@ -8,6 +8,7 @@ import type { FleetRunService } from 'dsh-agent-fleet'
 
 import { FleetGit, FleetGitNotRepositoryError, installGitTools, type FleetGitScope } from './git.js'
 import { terminalGitCommands, terminalGitPolicy, type FleetTerminalGitCommand } from './terminal.js'
+import { FleetGitRecallService } from './recall.js'
 
 import {
   FLEET_GIT_WEB_INVOCATIONS,
@@ -19,6 +20,7 @@ import {
 
 export * from './contract.js'
 export * from './git.js'
+export * from './recall.js'
 export * from './terminal.js'
 
 export const name = '@ch4acko3/dsh-agent-fleet-git'
@@ -330,6 +332,9 @@ export function apply(ctx: Context): void {
     scope.provide('fleetGitAttributions', attributions)
     return installGitTerminalPolicy(scope, attributions)
   })
+  ctx.inject(['fleetRuns', 'fleetAuthorization', 'agents', 'fleetGitAttributions'], scope => {
+    scope.provide('fleetGitRecall', new FleetGitRecallService(scope, scope.fleetGitAttributions))
+  })
   ctx.inject(['typert', 'fleetGitAttributions'], scope => {
     new FleetGitWebRemote(scope, scope.fleetGitAttributions)
     return scope.typert.register(FLEET_GIT_WEB_LOCAL)
@@ -339,6 +344,7 @@ export function apply(ctx: Context): void {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     fleetGitAttributions: FleetGitAttributionStore
+    fleetGitRecall: FleetGitRecallService
     fleetGitWeb: FleetGitWebRemote
   }
 }
