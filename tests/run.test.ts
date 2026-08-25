@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative, sep } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -32,11 +32,47 @@ interface FakeEvent {
   readonly data: unknown
 }
 
+type FakeWaterfallListener = (...args: unknown[]) => unknown
+
+class FakeAgentContext {
+  private readonly listeners = new Map<string, FakeWaterfallListener[]>()
+
+  on(name: string, listener: FakeWaterfallListener): () => void {
+    const listeners = this.listeners.get(name) ?? []
+    listeners.push(listener)
+    this.listeners.set(name, listeners)
+    return () => {
+      const index = listeners.indexOf(listener)
+      if (index >= 0) listeners.splice(index, 1)
+    }
+  }
+
+  async assemble(base: { readonly variables: Record<string, unknown> }): Promise<{ readonly variables: Record<string, unknown> }> {
+    let next = () => Promise.resolve(base)
+    for (const listener of [...(this.listeners.get('system-prompt/assemble') ?? [])].reverse()) {
+      const following = next
+      next = () => Promise.resolve(listener({}, {}, following) as Promise<typeof base>)
+    }
+    return next()
+  }
+
+  async request(base: RuntimeRequestConfig): Promise<RuntimeRequestConfig> {
+    let next = () => Promise.resolve(base)
+    for (const listener of [...(this.listeners.get('agent/request') ?? [])].reverse()) {
+      const following = next
+      next = () => Promise.resolve(listener({}, following) as Promise<RuntimeRequestConfig>)
+    }
+    return next()
+  }
+}
+
 class FakeAgent implements RuntimeAgent {
   status: 'idle' | 'running' = 'idle'
+  cancelCount = 0
   readonly options: { readonly provider?: string; readonly model?: string; readonly maxTokens?: number }
   readonly messages: UserMessage[] = []
   readonly requestConfigurations: Array<RuntimeRequestConfig | undefined> = []
+  ctx?: Context
   readonly inbox = {
     nextTurn: [] as UserMessage[],
     nextStep: [] as UserMessage[],
@@ -61,6 +97,7 @@ class FakeAgent implements RuntimeAgent {
   }
 
   cancel(): void {
+    this.cancelCount += 1
     this.completeTurn()
   }
 
@@ -662,6 +699,113 @@ describe('FleetRunService', () => {
     second.disconnect()
   })
 
+  it('hot-configures the attached assistant through one model-selection snapshot', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root, {
+      launcherOptions: { provider: 'provider-old', model: 'model-old', maxTokens: 512 },
+    })
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      provider: 'provider-old',
+      model: 'model-old',
+    })
+    const scoped = new FakeAgentContext()
+    launcher.ctx = scoped as unknown as Context
+    await service.attachAssistant(launcher as unknown as Agent, { runId: run.id })
+    const createCount = runtime.creates.length
+    const resumeCount = runtime.resumes.length
+
+    await expect(service.configureAssistant(launcher as unknown as Agent, {
+      runId: run.id,
+      request: {
+        provider: 'provider-new',
+        model: 'model-new',
+        reasoningEffort: 'high',
+        maxTokens: 2_048,
+      },
+    })).resolves.toMatchObject({
+      assistant: { sessionId: launcher.id, view: {
+        provider: 'provider-new', model: 'model-new', reasoningEffort: 'high', maxTokens: 2_048,
+      } },
+      request: {
+        provider: 'provider-new', model: 'model-new', reasoningEffort: 'high', maxTokens: 2_048,
+      },
+      effectiveFrom: 'next-model-step',
+    })
+    expect(runtime.creates).toHaveLength(createCount)
+    expect(runtime.resumes).toHaveLength(resumeCount)
+    await expect(scoped.assemble({ variables: { provider: 'provider-old', model: 'model-old' } }))
+      .resolves.toMatchObject({ variables: { provider: 'provider-new', model: 'model-new' } })
+    await expect(scoped.request({ provider: 'provider-old', model: 'model-old', maxTokens: 512 }))
+      .resolves.toEqual({
+        provider: 'provider-new', model: 'model-new', reasoningEffort: 'high', maxTokens: 2_048,
+      })
+    expect(service.readTrace(run.id, 0, 100).events).toContainEqual(expect.objectContaining({
+      type: 'assistant_view_updated',
+      data: expect.stringContaining('request_configured'),
+    }))
+
+    service.end(launcher as unknown as Agent, 'Assistant hot configuration verified.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('hot-configures every Team member and assistant through one fast path', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root, {
+      launcherOptions: { provider: 'provider-old', model: 'model-old' },
+    })
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      provider: 'provider-old',
+      model: 'model-old',
+    })
+    const scoped = new FakeAgentContext()
+    launcher.ctx = scoped as unknown as Context
+    await service.attachAssistant(launcher as unknown as Agent, { runId: run.id })
+
+    await expect(service.configureTeam(launcher as unknown as Agent, {
+      runId: run.id,
+      request: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium' },
+    })).resolves.toMatchObject({
+      memberConfigurations: [
+        { member: { name: 'lead' }, request: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium' } },
+        { member: { name: 'reviewer' }, request: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium' } },
+      ],
+      assistantConfigurations: [
+        { assistant: { sessionId: launcher.id }, request: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium' } },
+      ],
+      effectiveFrom: 'next-model-step',
+    })
+    for (const member of run.members) {
+      expect(runtime.get(member.sessionId)?.requestConfigurations.at(-1)).toEqual({
+        provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium',
+      })
+    }
+    await scoped.assemble({ variables: { provider: 'provider-old', model: 'model-old' } })
+    await expect(scoped.request({ provider: 'provider-old', model: 'model-old' })).resolves.toEqual({
+      provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium',
+    })
+    expect(service.status(run.id)).toMatchObject({
+      members: [
+        { name: 'lead', provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium' },
+        { name: 'reviewer', provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium' },
+      ],
+      assistants: [{ view: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium' } }],
+    })
+    expect(service.readTrace(run.id, 0, 100).events).toContainEqual(expect.objectContaining({
+      type: 'team_requests_configured',
+    }))
+
+    service.end(launcher as unknown as Agent, 'Team hot configuration verified.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
   it('exports and imports a paused Team archive with Sessions, shared files, workspace, and plugin data', async () => {
     const source = fixture()
     const sourceArchives = new FleetArchiveRegistry()
@@ -1174,7 +1318,7 @@ describe('FleetRunService', () => {
     expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages)
       .toContainEqual(expect.objectContaining({
         id: sent.messageId,
-        from: launcher.id,
+        from: 'team-assistant',
         text: 'The foreground assistant is checking in directly.',
       }))
     const userChannelMessage = service.sendUserConversationMessage({
@@ -1297,6 +1441,12 @@ describe('FleetRunService', () => {
       toolGroups: ['messages', 'coordination', 'resources', 'status'],
       permissions: ['meeting.manage', 'vote.create'],
     })
+    secondAssistant.session.events.push({
+      seq: 41,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: { message: { content: 'Context from the previous assistant Session.' } },
+    })
     expect(attached.run.assistants).toHaveLength(3)
     expect(attached.assistant.view).toMatchObject({
       name: 'Maya',
@@ -1341,13 +1491,41 @@ describe('FleetRunService', () => {
       runId: run.id,
       assistantId: attached.assistant.view.id,
     })
+    replacementAssistant.session.events.push({
+      seq: 7,
+      time: Date.now() + 1,
+      type: 'assistant/message',
+      data: { message: { content: 'Context from the current assistant Session.' } },
+    })
     expect(rebound.assistant).toMatchObject({
       sessionId: replacementAssistant.id,
       view: { id: attached.assistant.view.id, name: 'Maya' },
     })
+    expect(replacementAssistant.inbox.nextStep).toContainEqual(expect.objectContaining({
+      content: [expect.objectContaining({ text: expect.stringContaining('Please surface this decision to the user.') })],
+    }))
+    await expect(service.readMemberTraceTail(run.id, attached.assistant.view.id, 20)).resolves.toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({ sessionId: secondAssistant.id, sequence: 41 }),
+        expect.objectContaining({ sessionId: replacementAssistant.id, sequence: 7 }),
+      ]),
+    })
     expect(hub.listMeetings(replacementAssistant)).toContainEqual(expect.objectContaining({
       id: 'user-review',
-      participants: expect.arrayContaining([replacementAssistant.id]),
+      participants: expect.arrayContaining([attached.assistant.view.id]),
+    }))
+
+    const assistantConversation = service.readConversationProjection(
+      run.id,
+      `dm:assistant:${attached.assistant.view.id}:member:lead`,
+      Number.MAX_SAFE_INTEGER,
+      20,
+    )
+    expect(assistantConversation.events).toContainEqual(expect.objectContaining({
+      type: 'coordination.message',
+      data: expect.objectContaining({
+        message: expect.objectContaining({ text: 'Please surface this decision to the user.' }),
+      }),
     }))
 
     const finishVote = hub.createVote(replacementAssistant, {
@@ -2565,7 +2743,13 @@ describe('FleetRunService', () => {
     service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
 
     await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
-    const paused = await service.pauseTeam(launcher as unknown as Agent, run.id)
+    const runningLead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (runningLead === undefined) throw new Error('expected live lead')
+    runningLead.status = 'running'
+    const [paused, duplicatePause] = await Promise.all([
+      service.pauseTeam(launcher as unknown as Agent, run.id),
+      service.pauseTeam(launcher as unknown as Agent, run.id),
+    ])
 
     expect(paused).toMatchObject({
       status: 'paused',
@@ -2577,6 +2761,8 @@ describe('FleetRunService', () => {
     })
     expect(runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')).toBeUndefined()
     expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
+    expect(runningLead.cancelCount).toBe(1)
+    expect(duplicatePause).toEqual(paused)
 
     const resumed = await service.resumeTeam(launcher as unknown as Agent, run.id)
     expect(resumed).toMatchObject({
@@ -2641,8 +2827,24 @@ describe('FleetRunService', () => {
     first.disconnect()
     await first.core.close()
 
+    const runPath = join(dirname(run.configPath), 'run.json')
+    const interrupted = JSON.parse(readFileSync(runPath, 'utf8')) as {
+      members: Array<{ name: string; status: string }>
+    }
+    const interruptedLead = interrupted.members.find(member => member.name === 'lead')
+    if (interruptedLead === undefined) throw new Error('expected persisted lead member')
+    interruptedLead.status = 'idle'
+    writeFileSync(runPath, JSON.stringify(interrupted))
+
     const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
-    expect(second.service.status(run.id)).toMatchObject({ status: 'paused', runtimeState: 'dormant' })
+    expect(second.service.status(run.id)).toMatchObject({
+      status: 'paused',
+      runtimeState: 'dormant',
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'paused' }),
+        expect.objectContaining({ name: 'reviewer', status: 'paused' }),
+      ],
+    })
 
     const resumed = await second.service.resume(second.launcher as unknown as Agent, {
       runId: run.id,

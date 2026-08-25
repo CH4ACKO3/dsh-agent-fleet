@@ -8,6 +8,7 @@ import {
   FLEET_WEB_REMOTE,
   type FleetWebClient,
 } from '@dsh-agent-fleet/core/web'
+import { encodeFleetActivation } from '@dsh-agent-fleet/core/activation'
 import {
   FleetChatAvatar,
   FleetChatMessage,
@@ -4230,10 +4231,18 @@ interface FleetNativeSessionFace {
   open?(): Promise<void>
   resync?(): Promise<void>
   loadOlder(): Promise<void>
+  prompt?(
+    content: readonly { readonly type: 'text'; readonly text: string }[],
+    mode: 'queue' | 'steer',
+  ): Promise<{
+    readonly ok: boolean
+    readonly error?: { readonly message?: string }
+  }>
 }
 
 interface FleetNativeContext {
   session(sessionId: string): FleetNativeSessionFace | undefined
+  activateAssistant(sessionId: string, teamId: string, assistantId: string): Promise<void>
   openPath(path: string): Promise<void>
   openFile(sessionId: string, path: string): Promise<void>
   loadImage(sessionId: string, attachment: unknown): Promise<string>
@@ -4687,6 +4696,8 @@ export function FleetTeamPanel({
   } | null>(null)
   const [items, setItems] = useState<Record<string, string>>(() => ({ ...readPanelPreferences().items }))
   const [composeStates, setComposeStates] = useState<Record<string, FleetConversationComposeState>>({})
+  const assistantLoads = useRef(new Map<string, Promise<void>>())
+  const assistantLoadAttempts = useRef(new Map<string, number>())
   const [navigationOpen, setNavigationOpen] = useState(false)
   const [contextSource, setContextSource] = useState<FleetChatReceiptSource>()
   const panelNavigation = useSyncExternalStore(
@@ -4782,12 +4793,49 @@ export function FleetTeamPanel({
     setActiveTool(tool)
     setNavigationOpen(true)
   }
+  const loadConversationAssistant = (team: FleetPanelTeamSnapshot, item: string): void => {
+    const conversation = operatorConversations(team).find(candidate => candidate.id === item)
+    if (conversation?.kind !== 'direct' || !conversation.id.startsWith('@')) return
+    const assistant = team.assistants?.find(candidate => candidate.sessionId === conversation.id.slice(1))
+    if (assistant?.sessionId === undefined
+      || (assistant.runtimeStatus !== 'offline' && assistant.presence !== 'offline')) return
+    const key = `${team.teamId}:${assistant.id}`
+    if (assistantLoads.current.has(key)
+      || Date.now() - (assistantLoadAttempts.current.get(key) ?? 0) < 5_000) return
+    assistantLoadAttempts.current.set(key, Date.now())
+    const targetComposeKey = `${team.teamId}:${item}`
+    const updateCompose = (update: (current: FleetConversationComposeState) => FleetConversationComposeState): void => {
+      setComposeStates(current => ({
+        ...current,
+        [targetComposeKey]: update(current[targetComposeKey] ?? EMPTY_COMPOSE_STATE),
+      }))
+    }
+    updateCompose(current => ({ ...current, sending: true, error: null }))
+    const loading = nativeContext.activateAssistant(assistant.sessionId, team.teamId, assistant.id).then(async () => {
+      await source?.retry?.()
+    }).catch((error: unknown) => {
+      updateCompose(current => ({
+        ...current,
+        error: error instanceof Error ? error.message : '团队助理加载失败',
+      }))
+    }).finally(() => {
+      assistantLoads.current.delete(key)
+      updateCompose(current => ({ ...current, sending: false }))
+    })
+    assistantLoads.current.set(key, loading)
+  }
   const selectItem = (item: string): void => {
     if (activeTeam === undefined) return
     setContextSource(undefined)
     setItems(current => ({ ...current, [`${activeTeam.teamId}:${activeTool}`]: item }))
     setNavigationOpen(false)
+    if (activeTool === 'chat') loadConversationAssistant(activeTeam, item)
   }
+
+  useEffect(() => {
+    if (activeTeam === undefined || activeTool !== 'chat' || activeItem === '') return
+    loadConversationAssistant(activeTeam, activeItem)
+  }, [activeItem, activeTeam, activeTool])
   const selectTeam = (teamId: string): void => {
     setContextSource(undefined)
     source?.selectTeam(teamId)
@@ -6301,7 +6349,8 @@ function messageReadReceipt(
   showContext: (memberId: string) => void,
   openSource: (source: FleetChatReceiptSource) => void,
 ) {
-  const members = new Map(snapshot.members.map(member => [member.id, member]))
+  const members = new Map(teamAgents(snapshot).map(member => [member.id, member]))
+  members.set(operator.id, operator)
   return {
     readMembers: receipt.readMemberIds.flatMap(id => {
       const member = members.get(id)
@@ -6558,7 +6607,7 @@ function ChatSidebar(owner: FleetPanelPaneOwner): ReactElement {
           ]),
           jsx(SectionTitle, { children: '私聊' }),
           ...directs.map(item => {
-            const peer = owner.snapshot.members.find(member => member.id === item.peerId)
+            const peer = teamAgents(owner.snapshot).find(member => member.id === item.peerId)
             return jsx(ListRow, {
               selected: owner.activeItem === item.id,
               title: item.name,
@@ -7214,8 +7263,8 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
   useEffect(() => { setSelectedMentionIndex(0) }, [mentionKey])
 
   if (conversation === undefined) return jsx(PanelUnavailable, { label: '请选择一个频道或成员' })
-  const peer = conversation.peerId === undefined ? undefined : owner.snapshot.members.find(member => member.id === conversation.peerId)
-  const members = new Map(owner.snapshot.members.map(member => [member.id, member]))
+  const peer = conversation.peerId === undefined ? undefined : teamAgents(owner.snapshot).find(member => member.id === conversation.peerId)
+  const members = new Map(teamAgents(owner.snapshot).map(member => [member.id, member]))
   members.set(operator.id, operator)
   const messages = history.messages
   const send = (): void => { owner.sendMessage() }
@@ -7268,7 +7317,7 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
             : messages.map(message => {
                 const sender = message.sender ?? members.get(message.senderId)
                 if (sender === undefined) return null
-                const member = owner.snapshot.members.find(candidate => candidate.id === sender.id)
+                const member = teamAgents(owner.snapshot).find(candidate => candidate.id === sender.id)
                 const messageOwner: FleetPanelMessageOwner = { panel: owner, conversation, message, sender }
                 return jsx('div', {
                   className: 'dsh-fleet-panel-agent-message-row',
@@ -8451,6 +8500,16 @@ function AgentContextMain({ owner, member }: {
   const session = contextSessionId === undefined || !sessionListed
     ? undefined
     : owner.nativeContext.session(contextSessionId)
+  const subscribeSession = useCallback(
+    (listener: () => void) => session?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE,
+    [session],
+  )
+  const getSessionSnapshot = useCallback(() => session?.getSnapshot() ?? null, [session])
+  const sessionSnapshot = useSyncExternalStore(subscribeSession, getSessionSnapshot, getSessionSnapshot)
+  useEffect(() => { void session?.open?.() }, [session])
+  const assistant = owner.snapshot.assistants?.some(candidate => candidate.id === member.id) === true
+  const emptyAssistantSession = assistant && session !== undefined && nativeContextNodeCount(sessionSnapshot) === 0
+  const usePersistedTrace = session === undefined || contextSessionId === undefined || emptyAssistantSession
   return jsxs('section', {
     className: 'dsh-fleet-panel-chat',
     children: [
@@ -8461,6 +8520,8 @@ function AgentContextMain({ owner, member }: {
           ? '原生 Session 不可用，改从 Fleet 持久轨迹定位消息'
           : source !== undefined
           ? '现场加载原生 ChatView，并定位这条团队消息进入 Agent 上下文的位置'
+          : emptyAssistantSession
+          ? '当前助理 Session 尚无可见消息，显示其历次绑定的持久轨迹'
           : session === undefined
           ? '成员离线时从 Fleet 持久轨迹恢复最近上下文'
           : '复用原生 ChatView，只读呈现这个 Agent 的真实 Session',
@@ -8474,7 +8535,7 @@ function AgentContextMain({ owner, member }: {
           ],
         }),
       }),
-      session === undefined || contextSessionId === undefined
+      usePersistedTrace
         ? jsx(FleetPersistedMemberTrace, { owner, member, ...(source === undefined ? {} : { source }) }, `${owner.snapshot.teamId}:${member.id}:${source?.sessionId ?? ''}:${source?.contextMessageId ?? ''}`)
         : jsx(owner.SessionProvider, {
             sessionId: contextSessionId,
@@ -8493,7 +8554,7 @@ function AgentContextMain({ owner, member }: {
           ? `正在查看 ${member.name} 的持久消息来源 · 只读`
           : source !== undefined
           ? `正在原生 ChatView 中查看 ${member.name} 的消息来源 · 只读`
-          : session === undefined
+          : usePersistedTrace
           ? `以 ${member.name} 的视角查看持久轨迹 · 只读`
           : `以 ${member.name} 的视角查看原生 Session · 只读`,
       }),
@@ -9464,10 +9525,26 @@ function createFleetNativeContext(ctx: FleetPanelClientContext): FleetNativeCont
   const sessions = ctx.sessions as unknown as {
     readonly list: { getSnapshot(): { readonly byId: Readonly<Record<string, { readonly cwd?: string }>> } }
     binding(sessionId: string): { readonly session: FleetNativeSessionFace } | undefined
+    fork?(options: { readonly sessionId: string }): Promise<string>
   } | undefined
   const workspaces = ctx.workspaces as unknown as { openPath(path: string): Promise<void> } | undefined
   return {
     session: sessionId => sessions?.binding(sessionId)?.session,
+    activateAssistant: async (sessionId, teamId, assistantId) => {
+      const targetSessionId = sessions?.fork === undefined
+        ? sessionId
+        : await sessions.fork({ sessionId })
+      const session = sessions?.binding(targetSessionId)?.session
+      if (session?.prompt === undefined) throw new Error('团队助理 Session 当前不可加载')
+      const result = await session.prompt([{
+        type: 'text',
+        text: encodeFleetActivation(
+          { mode: 'connection', teamId, assistantId },
+          '重新连接到现有 Fleet 团队助理身份；完成连接后等待用户下一条消息，不要主动发送用户可见回复。',
+        ),
+      }], 'queue')
+      if (!result.ok) throw new Error(result.error?.message ?? '团队助理 Session 加载失败')
+    },
     openPath: path => workspaces?.openPath(path)
       ?? Promise.reject(new Error('DSH 工作区文件服务不可用')),
     openFile: (sessionId, path) => {

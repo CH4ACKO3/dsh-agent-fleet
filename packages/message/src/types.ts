@@ -1,7 +1,10 @@
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 export interface MessageAgent {
+  /** Stable Fleet participant id. */
   readonly id: string
+  /** Current native Session used only as the delivery endpoint. */
+  readonly sessionId?: string
   /** Native pending context, when the backing runtime is a DSH Agent. */
   readonly inbox?: {
     readonly nextTurn: readonly UserMessage[]
@@ -19,6 +22,7 @@ export interface AgentDirectory {
   get(id: string): MessageAgent | undefined
   list(): MessageAgent[]
   resolve?(reference: string): string
+  conversationKey?(participantId: string): string
   displayName?(id: string): string | undefined
   canContact?(senderId: string, recipientId: string): boolean
   canAccessChannel?(agentId: string, channelId: string): boolean
@@ -58,6 +62,8 @@ export interface FleetMessage {
   readonly sequence: number
   readonly kind: FleetMessageKind
   readonly conversation: FleetTarget
+  /** Stable UI/pagination identity; never contains a native Session id. */
+  readonly conversationId?: string
   readonly from: string
   readonly fromName?: string
   readonly text: string
@@ -131,6 +137,17 @@ export interface FleetMessageTextChunk {
   readonly hasMore: boolean
   readonly nextOffset?: number
   readonly readThrough: number
+}
+
+export interface FleetMessageReceipt {
+  readonly messageId: string
+  /** The conversation inbox that owns the message. */
+  readonly inbox: FleetTarget
+  /** Participants selected as readers when the message was delivered. */
+  readonly participantIds: string[]
+  readonly readParticipantIds: string[]
+  readonly unreadParticipantIds: string[]
+  readonly readThrough: Record<string, number>
 }
 
 export interface SearchMessagesInput {
@@ -289,10 +306,24 @@ export type FleetCoordinationEvent =
   | {
       readonly type: 'inbox'
       readonly action: 'delivered'
+      /** Receipt participant id. Kept as agentId for persisted-event compatibility. */
       readonly agentId: string
+      /** Native Session that owns this individual delivery attempt. */
+      readonly sessionId?: string
       readonly messageId: string
       /** Native DSH UserMessage id injected into this Agent's context. */
       readonly contextMessageId: string
+      /** Only a full delivery can advance read state when claimed. */
+      readonly content?: 'full' | 'notice'
+    }
+  | {
+      readonly type: 'inbox'
+      readonly action: 'superseded'
+      readonly agentId: string
+      readonly sessionId?: string
+      readonly messageId: string
+      readonly contextMessageId: string
+      readonly content?: 'full' | 'notice'
     }
   | {
       readonly type: 'inbox'

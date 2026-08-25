@@ -116,13 +116,15 @@ describe('MessageHub', () => {
       text: 'Please confirm the interface boundary.',
       delivery: 'quiet',
     })
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'inbox',
       action: 'delivered',
       agentId: reviewer.id,
       messageId: direct.messageId,
       contextMessageId: reviewer.inbox.nextStep[0]?.id,
-    })
+      sessionId: reviewer.id,
+      content: 'full',
+    }))
     expect(events).not.toContainEqual(expect.objectContaining({
       type: 'inbox', action: 'read', agentId: reviewer.id, messageId: direct.messageId,
     }))
@@ -162,6 +164,45 @@ describe('MessageHub', () => {
     expect(events).toContainEqual({
       type: 'inbox', action: 'read', agentId: qa.id, messageId: channel.messageId,
       through: 'General progress update.'.length,
+    })
+  })
+
+  it('does not mark a Channel message read when only its native notice is claimed', () => {
+    const { hub, lead, reviewer } = setup()
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: 'The body is available only through fleet_messages.',
+      delivery: 'quiet',
+    })
+    const notice = reviewer.inbox.nextStep[0]
+    expect(notice?.content).toEqual([
+      expect.objectContaining({ text: expect.not.stringContaining('The body is available only') }),
+    ])
+
+    expect(hub.markDeliveredContextRead(reviewer.id, String(notice?.id))).toBe(false)
+    expect(hub.receipt(sent.messageId)).toMatchObject({
+      readParticipantIds: [],
+      unreadParticipantIds: expect.arrayContaining([reviewer.id]),
+      readThrough: { reviewer: 0 },
+    })
+    expect(hub.read(reviewer, { conversation: '#general' }).messages).toContainEqual(
+      expect.objectContaining({ id: sent.messageId }),
+    )
+  })
+
+  it('marks a direct message read when its full native body is claimed', () => {
+    const { hub, lead, reviewer } = setup()
+    const sent = hub.send(lead, {
+      to: '@reviewer',
+      text: 'This full body is delivered through the native inbox.',
+      delivery: 'quiet',
+    })
+
+    expect(hub.markDeliveredContextRead(reviewer.id, String(reviewer.inbox.nextStep[0]?.id))).toBe(true)
+    expect(hub.receipt(sent.messageId)).toMatchObject({
+      readParticipantIds: [reviewer.id],
+      unreadParticipantIds: [],
+      readThrough: { reviewer: 'This full body is delivered through the native inbox.'.length },
     })
   })
 
@@ -1005,31 +1046,6 @@ describe('MessageHub', () => {
       approvals: [],
     })
     expect(hub.pendingWakeups(reviewer.id)).toEqual([])
-  })
-
-  it('rebinds private coordination and pending messages to a replacement Session', () => {
-    const { hub, agents, lead, reviewer } = setup()
-    const replacement = new FakeAgent('reviewer-replacement')
-    agents.set(replacement.id, replacement)
-    hub.createChannel(lead, { name: 'review-room', members: ['@reviewer'] })
-    hub.openMeeting(lead, {
-      id: 'review', title: 'Review', agenda: 'Review the work.', participants: ['@reviewer'],
-    })
-    const vote = hub.createVote(lead, {
-      channel: '#review-room', kind: 'message', statement: 'Accept the result.', voters: ['@reviewer'],
-    })
-    const sent = hub.send(lead, {
-      to: '@reviewer', text: 'Continue this review.', delivery: 'wakeup',
-    })
-
-    hub.rebindAgent(reviewer.id, replacement.id)
-
-    expect(hub.listChannels(replacement).map(channel => channel.id)).toContain('review-room')
-    expect(hub.listMeetings(replacement)).toContainEqual(expect.objectContaining({
-      id: 'review', participants: ['lead', replacement.id],
-    }))
-    expect(hub.getVote(replacement, vote.id)).toMatchObject({ voters: [replacement.id] })
-    expect(hub.pendingWakeups(replacement.id)).toContainEqual(expect.objectContaining({ id: sent.messageId }))
   })
 
   it('rejects a Channel Vote immediately with a required reason', () => {

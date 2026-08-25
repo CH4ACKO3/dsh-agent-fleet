@@ -637,8 +637,23 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const assistantsBySession = new Map(assistants.flatMap(assistant => assistant.sessionId === undefined
     ? []
     : [[assistant.sessionId, assistant] as const]))
+  for (const event of cache.events) {
+    if (event.type !== 'assistant_attached' && event.type !== 'assistant_rebound') continue
+    const data = asRecord(event.data)
+    const view = asRecord(data?.view)
+    const assistantId = string(view?.id)
+    const projected = assistantId === undefined ? undefined : assistants.find(assistant => assistant.id === assistantId)
+    if (projected === undefined) continue
+    const previousSessionId = string(data?.previousSessionId)
+    const sessionId = string(data?.sessionId)
+    if (previousSessionId !== undefined) assistantsBySession.set(previousSessionId, projected)
+    if (sessionId !== undefined) assistantsBySession.set(sessionId, projected)
+  }
   const participantsBySession = new Map([...membersBySession, ...assistantsBySession])
   const participants = [...members, ...assistants]
+  const participantsById = new Map(participants.map(participant => [participant.id, participant]))
+  const participantByReference = (reference: string): FleetPanelMember | undefined =>
+    participantsById.get(reference) ?? participantsBySession.get(reference)
   const channels = new Map<string, FleetPanelConversation>()
   const meetings = new Map<string, FleetPanelConversation>()
   const resources = new Map<string, FleetPanelResource>()
@@ -648,6 +663,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const rawMessages: Array<{ readonly event: WireEvent; readonly message: Readonly<Record<string, unknown>> }> = []
   const channelVisibleSessions = new Map<string, readonly string[]>()
   const meetingParticipants = new Map<string, readonly string[]>()
+  const receiptParticipantsByMessage = new Map<string, Set<string>>()
   const readThroughByMessage = new Map<string, Map<string, number>>()
   const contextSourcesByMessage = new Map<string, Map<string, FleetChatReceiptSource>>()
 
@@ -678,11 +694,14 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const channelMembers = Array.isArray(channel?.members) ? channel.members.filter((item): item is string => typeof item === 'string') : []
       const createdBy = string(channel?.createdBy)
       const open = channel?.open === true
-      channelVisibleSessions.set(`#${id}`, cache.run.members.flatMap(runMember => {
-        const contacts = views.get(runMember.name)?.contacts?.channels
-        const permitted = contacts === '*' || contacts?.includes(id) === true || createdBy === runMember.sessionId
-        const included = open || channelMembers.includes(runMember.sessionId) || createdBy === runMember.sessionId
-        return permitted && included ? [runMember.sessionId] : []
+      channelVisibleSessions.set(`#${id}`, participants.flatMap(participant => {
+        const contacts = views.get(participant.id)?.contacts?.channels
+        const permitted = contacts === '*' || contacts?.includes(id) === true
+          || createdBy === participant.id || createdBy === participant.sessionId
+        const included = open || channelMembers.includes(participant.id)
+          || (participant.sessionId !== undefined && channelMembers.includes(participant.sessionId))
+          || createdBy === participant.id || createdBy === participant.sessionId
+        return permitted && included ? [participant.id] : []
       }))
       channels.set(`#${id}`, {
         id: `#${id}`,
@@ -704,6 +723,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       if (id === undefined) continue
       const participants = Array.isArray(meeting?.participants)
         ? meeting.participants.filter((item): item is string => typeof item === 'string')
+          .map(reference => participantByReference(reference)?.id ?? reference)
         : []
       meetingParticipants.set(`meeting:${id}`, participants)
       meetings.set(`meeting:${id}`, {
@@ -726,13 +746,21 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const messageId = string(data?.messageId)
       const agentId = string(data?.agentId)
       if (data?.type !== 'inbox' || messageId === undefined || agentId === undefined) continue
-      const member = participantsBySession.get(agentId)
-      if (member === undefined) continue
+      const member = participantByReference(agentId)
+      const participantId = member?.id ?? (isFleetUser(agentId) ? 'operator' : undefined)
+      if (participantId === undefined) continue
       if (data.action === 'delivered') {
+        const delivered = receiptParticipantsByMessage.get(messageId) ?? new Set<string>()
+        delivered.add(participantId)
+        receiptParticipantsByMessage.set(messageId, delivered)
         const contextMessageId = string(data.contextMessageId)
-        if (contextMessageId === undefined) continue
+        if (contextMessageId === undefined || member === undefined) continue
         const sources = contextSourcesByMessage.get(messageId) ?? new Map<string, FleetChatReceiptSource>()
-        sources.set(member.id, { memberId: member.id, sessionId: agentId, contextMessageId })
+        sources.set(member.id, {
+          memberId: member.id,
+          sessionId: string(data.sessionId) ?? agentId,
+          contextMessageId,
+        })
         contextSourcesByMessage.set(messageId, sources)
       } else if (data.action === 'read' || data.action === 'acknowledged') {
         const through = data.action === 'acknowledged'
@@ -742,7 +770,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
             : undefined
         if (through === undefined) continue
         const readers = readThroughByMessage.get(messageId) ?? new Map<string, number>()
-        readers.set(member.id, Math.max(readers.get(member.id) ?? 0, through))
+        readers.set(participantId, Math.max(readers.get(participantId) ?? 0, through))
         readThroughByMessage.set(messageId, readers)
       }
       continue
@@ -791,25 +819,20 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
 
   const directParticipants = new Map<string, readonly string[]>()
   for (const member of members) {
-    const runMember = cache.run.members.find(candidate => candidate.name === member.id)
-    if (runMember === undefined) continue
-    const id = `@${runMember.sessionId}`
-    directParticipants.set(id, [runMember.sessionId])
+    const id = `@${member.id}`
+    directParticipants.set(id, [member.id])
     channels.set(id, { id, kind: 'direct', name: member.name, topic: member.role, peerId: member.id })
   }
   for (const assistant of assistants) {
-    if (assistant.sessionId === undefined) continue
-    const id = `@${assistant.sessionId}`
-    directParticipants.set(id, [assistant.sessionId])
+    const id = `@${assistant.id}`
+    directParticipants.set(id, [assistant.id])
     channels.set(id, { id, kind: 'direct', name: assistant.name, topic: assistant.role, peerId: assistant.id })
   }
 
-  const senderFace = (sessionId: string, fromName?: string): FleetChatMember => {
-    const member = membersBySession.get(sessionId)
-    if (member !== undefined) return member
-    const assistant = assistantsBySession.get(sessionId)
-    if (assistant !== undefined) return assistant
-    if (isFleetUser(sessionId)) return {
+  const senderFace = (reference: string, fromName?: string): FleetChatMember => {
+    const participant = participantByReference(reference)
+    if (participant !== undefined) return participant
+    if (isFleetUser(reference)) return {
       id: 'operator',
       name: fromName ?? 'You',
       role: '外部观察者',
@@ -818,10 +841,10 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       operator: true,
     }
     return {
-      id: sessionId || 'fleet',
-      name: fromName ?? (sessionId === 'fleet' ? 'Fleet' : sessionId.slice(0, 8)),
-      role: sessionId === 'fleet' ? '系统' : '团队接入者',
-      color: color(sessionId || 'fleet'),
+      id: reference || 'fleet',
+      name: fromName ?? (reference === 'fleet' ? 'Fleet' : reference.slice(0, 8)),
+      role: reference === 'fleet' ? '系统' : '团队接入者',
+      color: color(reference || 'fleet'),
       presence: 'active',
     }
   }
@@ -833,34 +856,44 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     const from = string(message.from)
     const text = string(message.text)
     if (id === undefined || target === undefined || from === undefined || text === undefined) return []
-    let conversationId = target
+    let conversationId = string(message.conversationId) ?? target
     if (target.startsWith('@')) {
       const recipient = target.slice(1)
       const participants = [...new Set([from, recipient])]
       const formal = [...new Map(participants.flatMap(participant => {
-        const member = membersBySession.get(participant)
-        return member === undefined ? [] : [[member.id, member] as const]
+        const member = participantByReference(participant)
+        return member === undefined || !members.some(candidate => candidate.id === member.id)
+          ? []
+          : [[member.id, member] as const]
       })).values()]
       const attachedAssistants = participants.flatMap(participant => {
-        const assistant = assistantsBySession.get(participant)
-        return assistant === undefined ? [] : [assistant]
+        const assistant = participantByReference(participant)
+        return assistant === undefined || !assistants.some(candidate => candidate.id === assistant.id)
+          ? []
+          : [assistant]
       })
       const fleetUsers = participants.filter(isFleetUser)
-      if (participants.length === 2 && formal.length === 1 && fleetUsers.length === 1) {
-        const currentSession = cache.run.members.find(member => member.name === formal[0]?.id)?.sessionId
-        conversationId = `@${currentSession ?? recipient}`
-      } else if (participants.length === 2 && attachedAssistants.length === 1 && fleetUsers.length === 1) {
-        conversationId = `@${attachedAssistants[0]?.sessionId ?? recipient}`
-      } else {
+      if (string(message.conversationId) === undefined) {
+        if (participants.length === 2 && formal.length === 1 && fleetUsers.length === 1) {
+          conversationId = `@${formal[0]?.id ?? recipient}`
+        } else if (participants.length === 2 && attachedAssistants.length === 1 && fleetUsers.length === 1) {
+          conversationId = `@${attachedAssistants[0]?.id ?? recipient}`
+        } else {
         const stableParticipants = participants.map(participant => {
-          const member = membersBySession.get(participant)
-          return member === undefined ? participant : `member:${member.id}`
+          const member = participantByReference(participant)
+          if (member === undefined) return participant
+          return members.some(candidate => candidate.id === member.id)
+            ? `member:${member.id}`
+            : `assistant:${member.id}`
         })
         conversationId = `dm:${stableParticipants.toSorted().join(':')}`
+        }
+      }
+      if (conversationId.startsWith('dm:')) {
         if (!channels.has(conversationId)) {
           const labels = participants.map(participant => senderFace(participant).name)
           const participantIds = participants.flatMap(participant => {
-            const member = membersBySession.get(participant)
+            const member = participantByReference(participant)
             return member === undefined ? [] : [member.id]
           })
           channels.set(conversationId, {
@@ -873,10 +906,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         }
       }
       directParticipants.set(conversationId, participants.map(participant => {
-        const member = membersBySession.get(participant)
-        return member === undefined
-          ? participant
-          : cache.run.members.find(candidate => candidate.name === member.id)?.sessionId ?? participant
+        return participantByReference(participant)?.id ?? participant
       }))
       if (conversationId.startsWith('dm:')) privateMessageSequences.add(event.sequence)
     } else if (target.startsWith('#') && !channels.has(target)) {
@@ -889,7 +919,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       ? message.mentions.filter((item): item is string => typeof item === 'string')
       : []
     for (const mention of mentions) {
-      const mentioned = membersBySession.get(mention)
+      const mentioned = participantByReference(mention)
       if (mentioned !== undefined && textContainsMention(text, [mentioned.id, mentioned.name, mention])) continue
       blocks.push({ type: 'mention', memberId: mentioned?.id ?? mention, label: mentioned?.name ?? mention })
     }
@@ -906,42 +936,38 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       })
     }
     const sender = senderFace(from, string(message.fromName))
-    const senderMember = membersBySession.get(from)
-    const directRecipientMember = target.startsWith('@') ? membersBySession.get(target.slice(1)) : undefined
-    const directRecipientAssistant = target.startsWith('@') ? assistantsBySession.get(target.slice(1)) : undefined
-    const visibleSessions = cache.run.members.flatMap(runMember => {
-      if (runMember.sessionId === from || senderMember?.id === runMember.name) return []
+    const senderParticipant = participantByReference(from)
+    const directRecipient = target.startsWith('@') ? participantByReference(target.slice(1)) : undefined
+    const visibleSessions = participants.flatMap(participant => {
+      if (senderParticipant?.id === participant.id) return []
       if (target.startsWith('@')) {
-        return target.slice(1) === runMember.sessionId || directRecipientMember?.id === runMember.name
-          ? [runMember.sessionId]
+        return target.slice(1) === participant.id
+          || target.slice(1) === participant.sessionId
+          || directRecipient?.id === participant.id
+          ? [participant.id]
           : []
       }
       if (target.startsWith('meeting:')) {
-        return meetingParticipants.get(target)?.includes(runMember.sessionId) === true ? [runMember.sessionId] : []
+        return meetingParticipants.get(target)?.includes(participant.id) === true ? [participant.id] : []
       }
       if (!target.startsWith('#')) return []
       const projected = channelVisibleSessions.get(target)
-      if (projected !== undefined) return projected.includes(runMember.sessionId) ? [runMember.sessionId] : []
+      if (projected !== undefined) return projected.includes(participant.id) ? [participant.id] : []
       const channel = target.slice(1)
-      const contacts = views.get(runMember.name)?.contacts?.channels
-      return contacts === '*' || contacts?.includes(channel) === true ? [runMember.sessionId] : []
+      const contacts = views.get(participant.id)?.contacts?.channels
+      return contacts === '*' || contacts?.includes(channel) === true ? [participant.id] : []
     })
-    if (directRecipientAssistant?.sessionId !== undefined && directRecipientAssistant.sessionId !== from) {
-      visibleSessions.push(directRecipientAssistant.sessionId)
-    }
     const readThrough = readThroughByMessage.get(id) ?? new Map<string, number>()
-    const visibleMemberIds = visibleSessions.flatMap(sessionId => {
-      const member = participantsBySession.get(sessionId)
-      return member === undefined ? [] : [member.id]
-    })
-    const readMemberIds = visibleSessions.flatMap(sessionId => {
-      const member = participantsBySession.get(sessionId)
-      return member !== undefined && (readThrough.get(member.id) ?? 0) >= text.length ? [member.id] : []
-    })
+    const fallbackParticipantIds = visibleSessions
+    const deliveredParticipantIds = receiptParticipantsByMessage.get(id)
+    const visibleMemberIds = deliveredParticipantIds === undefined
+      ? fallbackParticipantIds
+      : [...deliveredParticipantIds]
+    const readMemberIds = visibleMemberIds.filter(participantId =>
+      (readThrough.get(participantId) ?? 0) >= text.length)
     const readMemberIdSet = new Set(readMemberIds)
-    const sources = visibleSessions.flatMap(sessionId => {
-      const member = participantsBySession.get(sessionId)
-      const source = member === undefined ? undefined : contextSourcesByMessage.get(id)?.get(member.id)
+    const sources = visibleMemberIds.flatMap(participantId => {
+      const source = contextSourcesByMessage.get(id)?.get(participantId)
       return source === undefined ? [] : [source]
     })
     return [{
@@ -976,12 +1002,25 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
           : []
       }
       if (conversation.id.startsWith('meeting:')) {
-        return meetingParticipants.get(conversation.id)?.includes(runMember.sessionId) === true ? [conversation.id] : []
+        return meetingParticipants.get(conversation.id)?.includes(member.id) === true ? [conversation.id] : []
       }
       const participants = directParticipants.get(conversation.id) ?? []
-      return participants.includes(runMember.sessionId) ? [conversation.id] : []
+      return participants.includes(member.id) ? [conversation.id] : []
     })
     return { ...member, visibleConversationIds }
+  })
+  const projectedAssistants = assistants.map(assistant => {
+    const sessionId = assistant.sessionId
+    if (sessionId === undefined) return assistant
+    const visibleConversationIds = conversations.flatMap(conversation => {
+      if (conversation.id.startsWith('#')) return [conversation.id]
+      if (conversation.id.startsWith('meeting:')) {
+        return meetingParticipants.get(conversation.id)?.includes(assistant.id) === true ? [conversation.id] : []
+      }
+      const participants = directParticipants.get(conversation.id) ?? []
+      return participants.includes(assistant.id) ? [conversation.id] : []
+    })
+    return { ...assistant, visibleConversationIds }
   })
 
   const activity: FleetPanelActivity[] = cache.events.flatMap((event): FleetPanelActivity[] => {
@@ -1003,7 +1042,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     ...(cache.run.runtimeState === undefined ? {} : { runtimeState: cache.run.runtimeState }),
     conversations,
     members: projectedMembers,
-    assistants,
+    assistants: projectedAssistants,
     messages,
     resources: [...resources.values()],
     workspaces: [...workspacesByPath.values()],

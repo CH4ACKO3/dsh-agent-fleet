@@ -67,8 +67,8 @@ export interface FleetCollaborationTeam {
   readonly memberViews: ReadonlyMap<string, FleetMemberView>
   readonly memberIdsByName: Map<string, string>
   readonly memberNamesById: Map<string, string>
-  attachMember(agentId: string, view: FleetMemberView): void
-  rebindMember(previousAgentId: string, agentId: string, view: FleetMemberView): void
+  attachMember(agentId: string, view: FleetMemberView, kind?: 'member' | 'assistant'): void
+  rebindMember(previousAgentId: string, agentId: string, view: FleetMemberView, kind?: 'member' | 'assistant'): void
   detachMember(agentId: string): void
   updateMemberView(view: FleetMemberView, refreshTools?: boolean): void
   removeMemberView(member: string): void
@@ -99,6 +99,7 @@ export interface FleetCollaborationTeam {
 export interface OpenFleetCollaborationTeamInput {
   readonly id: string
   readonly memberViews: readonly FleetMemberView[]
+  readonly assistantIds?: readonly string[]
   readonly defaultVoters: readonly string[]
   readonly projectRoot: string
   readonly sharedDirectory: string
@@ -246,6 +247,7 @@ export class FleetCollaborationService {
     const memberIdsByName = new Map<string, string>()
     const memberNamesById = new Map<string, string>()
     const memberViews = new Map(input.memberViews.map(view => [view.id, structuredClone(view)]))
+    const assistantNames = new Set(input.assistantIds ?? [])
     const defaultVoterNames = new Set(input.defaultVoters)
     for (const member of defaultVoterNames) {
       if (!memberViews.has(member)) throw new Error(`unknown default Fleet voter ${member}`)
@@ -264,8 +266,12 @@ export class FleetCollaborationService {
       steer: () => {},
       cancel: () => {},
     }
+    const participantName = (reference: string): string | undefined => {
+      if (memberViews.has(reference)) return reference
+      return memberNamesById.get(reference)
+    }
     const viewForAgent = (agentId: string): FleetMemberView | undefined => {
-      const name = memberNamesById.get(agentId)
+      const name = participantName(agentId)
       return name === undefined ? undefined : memberViews.get(name)
     }
     const memberIdForDisplayName = (displayName: string): string | undefined => {
@@ -278,29 +284,47 @@ export class FleetCollaborationService {
       const view = viewForAgent(agentId)
       return view !== undefined && this.authorization.has(input.id, view, permission)
     }
+    const participantAgent = (reference: string): MessageAgent | undefined => {
+      const name = participantName(reference)
+      const sessionId = name === undefined ? undefined : memberIdsByName.get(name)
+      const agent = sessionId === undefined ? undefined : this.ctx.agents.get(SessionId(sessionId))
+      if (name === undefined || sessionId === undefined || agent === undefined) return undefined
+      return {
+        id: name,
+        sessionId,
+        inbox: agent.inbox,
+        inject: message => { agent.inject(message) },
+        followup: message => { agent.followup(message) },
+        steer: message => { agent.steer(message) },
+        cancel: (cause, options) => { agent.cancel(cause, options) },
+      }
+    }
     const agentDirectory: AgentDirectory = {
       get: id => {
         if (id === user.id) return user
         if (id === productivity.id) return productivity
-        return memberNamesById.has(id) ? this.ctx.agents.get(SessionId(id)) : undefined
+        return participantAgent(id)
       },
-      list: () => [...memberNamesById.keys()].flatMap(id => {
-        const agent = this.ctx.agents.get(SessionId(id))
+      list: () => [...memberIdsByName.keys()].flatMap(id => {
+        const agent = participantAgent(id)
         return agent === undefined ? [] : [agent]
       }),
       resolve: reference => {
         if (reference === 'User') return user.id
-        const memberId = memberIdsByName.has(reference) ? reference : memberIdForDisplayName(reference)
-        return memberId === undefined ? reference : memberIdsByName.get(memberId) ?? reference
+        const memberId = memberViews.has(reference)
+          ? reference
+          : memberNamesById.get(reference) ?? memberIdForDisplayName(reference)
+        return memberId ?? reference
       },
+      conversationKey: id => assistantNames.has(id) ? `assistant:${id}` : `member:${id}`,
       displayName: id => id === user.id ? 'User' : id === productivity.id ? 'Fleet' : viewForAgent(id)?.name,
       canContact: (senderId, recipientId) => {
-        if (senderId === productivity.id) return memberNamesById.has(recipientId)
-        if (recipientId === productivity.id) return memberNamesById.has(senderId)
-        if (senderId === user.id) return memberNamesById.has(recipientId)
-        if (recipientId === user.id) return memberNamesById.has(senderId)
+        if (senderId === productivity.id) return memberViews.has(recipientId)
+        if (recipientId === productivity.id) return memberViews.has(senderId)
+        if (senderId === user.id) return memberViews.has(recipientId)
+        if (recipientId === user.id) return memberViews.has(senderId)
         const sender = viewForAgent(senderId)
-        const recipient = memberNamesById.get(recipientId)
+        const recipient = participantName(recipientId)
         return sender !== undefined && recipient !== undefined && fleetMemberCanContact(sender, recipient)
       },
       canAccessChannel: (agentId, channelId) => {
@@ -313,12 +337,12 @@ export class FleetCollaborationService {
         : agentId !== user.id && hasPermission(agentId, permission),
       defaultVoter: agentId => {
         if (agentId === user.id || agentId === productivity.id) return false
-        const name = memberNamesById.get(agentId)
+        const name = participantName(agentId)
         return name !== undefined && defaultVoterNames.has(name)
       },
       canVote: agentId => {
         if (agentId === user.id || agentId === productivity.id) return false
-        const name = memberNamesById.get(agentId)
+        const name = participantName(agentId)
         return name !== undefined && defaultVoterNames.has(name)
       },
     }
@@ -352,10 +376,9 @@ export class FleetCollaborationService {
     ): string[] => {
       const delivered: string[] = []
       for (const member of new Set(members)) {
-        const agentId = memberIdsByName.get(member)
-        if (agentId === undefined || agentDirectory.get(agentId) === undefined) continue
+        if (agentDirectory.get(member) === undefined) continue
         try {
-          messages.sendSystemNotification(agentId, { kind, text, delivery, coalesceKey })
+          messages.sendSystemNotification(member, { kind, text, delivery, coalesceKey })
           delivered.push(member)
         } catch {}
       }
@@ -381,8 +404,7 @@ export class FleetCollaborationService {
       const participants = [event.organizer, ...event.attendees]
         .filter(member => event.rsvps[member] !== 'declined')
         .flatMap(member => {
-          const agentId = memberIdsByName.get(member)
-          return agentId === undefined || agentDirectory.get(agentId) === undefined ? [] : [`@${agentId}`]
+          return agentDirectory.get(member) === undefined ? [] : [`@${member}`]
         })
       if (participants.length === 0) return undefined
       const meetingId = `calendar-${event.id.slice(-12)}-${event.occurrence}`.replace(/[^a-z0-9]+/gu, '-')
@@ -605,20 +627,25 @@ export class FleetCollaborationService {
       memberViews,
       memberIdsByName,
       memberNamesById,
-      attachMember: (agentId, view) => {
+      attachMember: (agentId, view, kind = 'member') => {
         memberViews.set(view.id, structuredClone(view))
+        if (kind === 'assistant') assistantNames.add(view.id)
+        else assistantNames.delete(view.id)
         memberIdsByName.set(view.id, agentId)
         memberNamesById.set(agentId, view.id)
+        messages.refreshAgent(view.id)
         tasks.replayPending(view.id)
         scheduler.replayPending(view.id)
       },
-      rebindMember: (previousAgentId, agentId, view) => {
+      rebindMember: (previousAgentId, agentId, view, kind = 'member') => {
         disposeMemberBindings(view.id)
         memberViews.set(view.id, structuredClone(view))
+        if (kind === 'assistant') assistantNames.add(view.id)
+        else assistantNames.delete(view.id)
         memberNamesById.delete(previousAgentId)
         memberIdsByName.set(view.id, agentId)
         memberNamesById.set(agentId, view.id)
-        messages.rebindAgent(previousAgentId, agentId)
+        messages.refreshAgent(view.id)
         tasks.replayPending(view.id)
         scheduler.replayPending(view.id)
       },
@@ -637,7 +664,7 @@ export class FleetCollaborationService {
         }
       },
       retireMember: ({ agentId, member, successorAgentId, successor }) => {
-        messages.retireAgent(agentId, successorAgentId)
+        messages.retireAgent(member, successor)
         memberStatuses.retireMember(member)
         resources.release(agentId)
         tasks.retireMember(member, successor)
@@ -652,6 +679,7 @@ export class FleetCollaborationService {
           memberNamesById.delete(agentId)
         }
         memberViews.delete(member)
+        assistantNames.delete(member)
         defaultVoterNames.delete(member)
       },
       sendUserMessage: message => {

@@ -492,6 +492,42 @@ export interface AgentFleetMailbox {
   readonly state: 'loading' | 'open' | 'error'
 }
 
+/**
+ * Fleet receipts track explicit message-tool reads, while assistant DMs also enter the
+ * assistant's native Session directly. Reconcile those native reads through the
+ * delivered context-message id so an already-consumed DM is not shown as unread.
+ */
+export function reconcileAgentFleetMailboxReadState(
+  mailbox: AgentFleetMailbox,
+  nativeMessages: readonly AgentFleetPrivateMessage[],
+): readonly AgentFleetMailboxMessage[] {
+  const readContextMessageIds = new Set(nativeMessages.flatMap(message =>
+    message.sender === 'operator' && message.read === true ? [message.id] : [],
+  ))
+  if (readContextMessageIds.size === 0) return mailbox.messages
+
+  let changed = false
+  const messages = mailbox.messages.map(message => {
+    const receipt = message.receipt
+    if (message.sender.operator !== true || receipt === undefined
+      || receipt.readMembers.some(member => member.id === mailbox.assistant.id)
+      || receipt.sources?.some(source => source.memberId === mailbox.assistant.id
+        && readContextMessageIds.has(source.contextMessageId)) !== true) {
+      return message
+    }
+    changed = true
+    return {
+      ...message,
+      receipt: {
+        ...receipt,
+        readMembers: [...receipt.readMembers, mailbox.assistant],
+        unreadMembers: receipt.unreadMembers.filter(member => member.id !== mailbox.assistant.id),
+      },
+    }
+  })
+  return changed ? messages : mailbox.messages
+}
+
 interface RecordLike {
   readonly [key: string]: unknown
 }
@@ -569,19 +605,11 @@ function visibleAssistantContent(value: unknown): {
   return { content, attachments }
 }
 
-function assistantStepCompletesOutput(data: RecordLike): boolean {
-  if (!Array.isArray(data.blocks) || data.blocks.length === 0) return false
-  if (data.status !== 'running') return true
-  if (data.blocks.length > 1) return true
-  return record(data.blocks[0])?.kind === 'tool-call'
-}
-
 /** Human-facing DM projection. Internal reasoning, tools, commands and injected context never enter it. */
 export function projectAgentFleetPrivateMessages(
   snapshot: AgentFleetPrivateChatSnapshot,
 ): readonly AgentFleetPrivateMessage[] {
   const messages: AgentFleetPrivateMessage[] = []
-  const unreadOperatorMessages: number[] = []
   for (const key of snapshot.order) {
     const node = record(snapshot.nodes.get(key))
     if (node === undefined || node.visibility === 'hidden') continue
@@ -606,26 +634,22 @@ export function projectAgentFleetPrivateMessages(
       const visible = visibleUserContent(data.content)
       if (visible.content.length === 0) continue
       messages.push({
-        id: key,
+        // Projection keys identify rendered nodes; Fleet delivery receipts carry the
+        // durable native UserMessage id exposed on the node itself.
+        id: typeof node.id === 'string' ? node.id : key,
         sender: 'operator',
         sentAt: sentAt(data.time),
         content: visible.content,
         imageAttachments: visible.attachments,
         streaming: false,
-        read: false,
+        // Native user/steering nodes are durable only after the Agent loop claims
+        // the inbox item. Messages still waiting for a turn remain in the queue.
+        read: true,
       })
-      unreadOperatorMessages.push(messages.length - 1)
       continue
     }
 
     if (node.kind === 'assistant-step') {
-      if (assistantStepCompletesOutput(data)) {
-        for (const index of unreadOperatorMessages) {
-          const message = messages[index]
-          if (message !== undefined) messages[index] = { ...message, read: true }
-        }
-        unreadOperatorMessages.length = 0
-      }
       const visible = visibleAssistantContent(data.blocks)
       const streaming = data.status === 'running'
       if (visible.content.length === 0 && !streaming) continue
@@ -931,7 +955,10 @@ export function AgentFleetPrivateChat({
   const nativeLoadingOlder = useSession(source => source.loadingOlder) as boolean
   const [surface, setSurface] = useState<'chat' | 'details' | 'context'>('chat')
   const nativeMessages = useMemo(() => projectAgentFleetPrivateMessages({ order, nodes }), [nodes, order])
-  const messages = mailbox?.messages ?? nativeMessages
+  const messages = useMemo(
+    () => mailbox === undefined ? nativeMessages : reconcileAgentFleetMailboxReadState(mailbox, nativeMessages),
+    [mailbox, nativeMessages],
+  )
   const pendingTimes = useRef(new Map<string, string>())
   const nativePending = useMemo<readonly PendingPrivateMessage[]>(() => queue.flatMap(candidate => {
     const item = record(candidate)

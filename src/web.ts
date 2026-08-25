@@ -18,6 +18,7 @@ import {
 } from '@dsh-agent-fleet/core/web'
 
 import type { FleetMemberView } from './member-view.js'
+import type { FleetAssistantRuntime } from './assistant.js'
 import type { FleetPermissionService } from './authorization/permissions.js'
 import type { FleetMemberRequestPatch, FleetRunService, FleetWorkStatus } from './run.js'
 import type { FleetSetupService } from './setup.js'
@@ -53,7 +54,7 @@ export interface FleetWebSendInput {
 export interface FleetWebMemberInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'add' | 'update' | 'configure' | 'pause' | 'resume' | 'remove' | 'permissions' | 'reset_permissions'
+  readonly action: 'add' | 'update' | 'configure' | 'configure_assistant' | 'configure_all' | 'pause' | 'resume' | 'remove' | 'permissions' | 'reset_permissions'
   readonly member?: string
   readonly view?: FleetMemberView
   readonly request?: FleetMemberRequestPatch
@@ -125,6 +126,7 @@ export class FleetWebRemote extends TypertRemoteService {
     private readonly runs: FleetRunService,
     private readonly setups: FleetSetupService,
     private readonly permissions?: FleetPermissionService,
+    private readonly assistant?: FleetAssistantRuntime,
   ) {
     super(host, 'fleetWeb', { namespace: 'fleet' })
     host.effect(() => () => {
@@ -200,14 +202,34 @@ export class FleetWebRemote extends TypertRemoteService {
         text: input.text,
       })
     }
-    if (input.mode === 'conversation') return this.runs.sendUserConversationMessage({
-      runId: teamId,
-      to: required(input.to, 'to') as `@${string}` | `#${string}` | `meeting:${string}`,
-      text: input.text,
-      delivery: input.delivery ?? 'quiet',
-      ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
-      ...(input.resources === undefined ? {} : { resources: input.resources }),
-    })
+    if (input.mode === 'conversation') {
+      const to = required(input.to, 'to') as `@${string}` | `#${string}` | `meeting:${string}`
+      const send = (target: typeof to) => this.runs.sendUserConversationMessage({
+        runId: teamId,
+        to: target,
+        text: input.text,
+        delivery: input.delivery ?? 'quiet',
+        ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
+        ...(input.resources === undefined ? {} : { resources: input.resources }),
+      })
+      if (!to.startsWith('@') || this.assistant === undefined) return send(to)
+      const team = this.runs.status(teamId)
+      const target = to.slice(1)
+      const offlineAssistant = team.assistants.find(candidate =>
+        (candidate.sessionId === target || candidate.view.id === target) && candidate.status === 'offline')
+      if (offlineAssistant === undefined) return send(to)
+      const caller = this.caller(input.sessionId)
+      if (team.members.some(member => member.sessionId === String(caller.id))) return send(to)
+      const connectedAssistant = team.assistants.find(candidate => candidate.sessionId === String(caller.id))
+      if (connectedAssistant !== undefined && connectedAssistant.view.id !== offlineAssistant.view.id) return send(to)
+      return this.runs.attachAssistant(caller, {
+        runId: teamId,
+        assistantId: offlineAssistant.view.id,
+      }).then(attached => {
+        this.assistant?.activate(caller, attached.run.id, attached.assistant.view)
+        return send(`@${attached.assistant.sessionId}`)
+      })
+    }
     throw new Error(`unknown Fleet send mode ${String(input.mode)}`)
   }
 
@@ -215,10 +237,13 @@ export class FleetWebRemote extends TypertRemoteService {
     signal.throwIfAborted()
     const caller = this.caller(input.sessionId)
     const teamId = required(input.teamId, 'teamId')
-    const assistant = this.runs.requireAssistantConnection(caller, teamId)
     if (input.action === 'resume' && this.runs.status(teamId).status === 'paused') {
       throw new Error('resume the Fleet Team before resuming an individual member')
     }
+    if (input.action === 'resume') {
+      return this.runs.resumeMemberAsExternal(caller, teamId, required(input.member, 'member'))
+    }
+    const assistant = this.runs.requireAssistantConnection(caller, teamId)
     switch (input.action) {
       case 'add':
         if (input.view === undefined) throw new Error('member add requires view')
@@ -233,8 +258,13 @@ export class FleetWebRemote extends TypertRemoteService {
         return this.runs.configureMember(caller, {
           runId: teamId, member: required(input.member, 'member'), request: input.request,
         })
+      case 'configure_assistant':
+        if (input.request === undefined) throw new Error('assistant configure requires request')
+        return this.runs.configureAssistant(caller, { runId: teamId, request: input.request })
+      case 'configure_all':
+        if (input.request === undefined) throw new Error('Team configure requires request')
+        return this.runs.configureTeam(caller, { runId: teamId, request: input.request })
       case 'pause': return this.runs.pauseMember(caller, teamId, required(input.member, 'member'))
-      case 'resume': return this.runs.resumeMember(caller, teamId, required(input.member, 'member'))
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))
       case 'permissions': {
         if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
@@ -260,13 +290,13 @@ export class FleetWebRemote extends TypertRemoteService {
     signal.throwIfAborted()
     const caller = this.caller(input.sessionId)
     const team = this.runs.status(required(input.teamId, 'teamId'))
+    if (input.action === 'wake') return this.runs.wakeTeamAsExternal(team.id)
     this.runs.requireAssistantConnection(caller, team.id, input.action === 'resume')
     switch (input.action) {
       case 'pause': return this.runs.pauseTeam(caller, team.id)
       case 'resume': return team.status === 'paused' && team.runtimeState === 'active'
         ? this.runs.resumeTeam(caller, team.id)
         : this.runs.resume(caller, { runId: team.id, projectRoot: team.projectRoot })
-      case 'wake': return this.runs.wakeTeam(caller, team.id)
       case 'start': return Promise.resolve(this.runs.start(caller, {
         runId: team.id, projectRoot: team.projectRoot, taskPath: required(input.taskPath, 'taskPath'),
       }))

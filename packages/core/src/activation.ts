@@ -2,7 +2,7 @@
 export type FleetActivationRequest =
   | { readonly mode: 'interactive' }
   | { readonly mode: 'meta' }
-  | { readonly mode: 'connection'; readonly teamId: string }
+  | { readonly mode: 'connection'; readonly teamId: string; readonly assistantId?: string }
   | {
       readonly mode: 'configuration'
       readonly configuration: Record<string, unknown>
@@ -24,7 +24,13 @@ function activationRequest(value: unknown): FleetActivationRequest | undefined {
   if (candidate.mode === 'connection'
     && typeof candidate.teamId === 'string'
     && candidate.teamId.trim().length > 0) {
-    return { mode: 'connection', teamId: candidate.teamId.trim() }
+    return {
+      mode: 'connection',
+      teamId: candidate.teamId.trim(),
+      ...(typeof candidate.assistantId === 'string' && candidate.assistantId.trim().length > 0
+        ? { assistantId: candidate.assistantId.trim() }
+        : {}),
+    }
   }
   if (candidate.mode !== 'configuration'
     || typeof candidate.configuration !== 'object'

@@ -83,7 +83,10 @@ export async function activateFleetFromMessages(
     connection.meta.activate(agent)
   } else if (activation.request.mode === 'connection') {
     if (connection === undefined) throw new Error('Fleet connection services are unavailable')
-    const attached = await connection.runs.attachAssistant(agent, { runId: activation.request.teamId })
+    const attached = await connection.runs.attachAssistant(agent, {
+      runId: activation.request.teamId,
+      ...(activation.request.assistantId === undefined ? {} : { assistantId: activation.request.assistantId }),
+    })
     connection.assistant.activate(agent, attached.run.id, attached.assistant.view)
   } else {
     const setup = setups.begin(agent, {

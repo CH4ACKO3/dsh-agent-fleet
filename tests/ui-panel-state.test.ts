@@ -13,7 +13,10 @@ import {
   splitFleetMemberMentions,
   type FleetPanelTeamSnapshot,
 } from '../packages/ui/src/team-panel.js'
-import { projectAgentFleetPrivateMessages } from '../packages/ui/src/assistant-private-chat.js'
+import {
+  projectAgentFleetPrivateMessages,
+  reconcileAgentFleetMailboxReadState,
+} from '../packages/ui/src/assistant-private-chat.js'
 
 describe('Agent Fleet welcome message', () => {
   it('prepends one chat row without replacing existing conversation nodes', () => {
@@ -118,9 +121,10 @@ describe('Agent Fleet private-chat projection', () => {
     expect(JSON.stringify(projected)).not.toContain('system context')
   })
 
-  it('marks an operator message read only after a complete assistant output', () => {
+  it('marks a native operator message read as soon as the Agent loop has projected its claim', () => {
     const user = {
       key: 'user:1',
+      id: 'context:1',
       kind: 'user',
       visibility: 'visible',
       data: { time: 100, content: [{ type: 'text', text: 'Hello' }] },
@@ -142,12 +146,52 @@ describe('Agent Fleet private-chat projection', () => {
     expect(projectAgentFleetPrivateMessages({
       order: [user.key, streamingReasoning.key],
       nodes: { get: key => nodes.get(key) },
-    })[0]).toMatchObject({ sender: 'operator', read: false })
+    })[0]).toMatchObject({ id: 'context:1', sender: 'operator', read: true })
 
     expect(projectAgentFleetPrivateMessages({
       order: [user.key, streamingReasoning.key, toolCall.key],
       nodes: { get: key => nodes.get(key) },
     })[0]).toMatchObject({ sender: 'operator', read: true })
+  })
+
+  it('reconciles an assistant mailbox receipt with its consumed native context message', () => {
+    const assistant = { id: 'assistant', name: 'Hailey', role: 'Assistant' }
+    const operator = { id: 'operator', name: 'You', role: 'Operator', operator: true }
+    const unreadReceipt = {
+      readMembers: [],
+      unreadMembers: [assistant],
+      sources: [{ memberId: assistant.id, sessionId: 'assistant-session', contextMessageId: 'context-read' }],
+    }
+    const mailbox = {
+      assistant,
+      operator,
+      running: true,
+      state: 'open' as const,
+      messages: [
+        { id: 'fleet-read', sender: operator, sentAt: '', content: [], receipt: unreadReceipt },
+        {
+          id: 'fleet-queued', sender: operator, sentAt: '', content: [],
+          receipt: {
+            ...unreadReceipt,
+            sources: [{ memberId: assistant.id, sessionId: 'assistant-session', contextMessageId: 'context-queued' }],
+          },
+        },
+      ],
+    }
+
+    const reconciled = reconcileAgentFleetMailboxReadState(mailbox, [{
+      id: 'context-read', sender: 'operator', sentAt: '', content: [], imageAttachments: new Map(),
+      streaming: false, read: true,
+    }])
+
+    expect(reconciled[0]?.receipt).toMatchObject({
+      readMembers: [assistant],
+      unreadMembers: [],
+    })
+    expect(reconciled[1]?.receipt).toMatchObject({
+      readMembers: [],
+      unreadMembers: [assistant],
+    })
   })
 
   it('preserves a streaming assistant row without requiring an iterable node store', () => {

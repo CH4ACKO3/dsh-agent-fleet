@@ -14,6 +14,7 @@ import type {
   FleetMessage,
   FleetMessageKind,
   FleetMessagePin,
+  FleetMessageReceipt,
   FleetMessageReaction,
   FleetMeeting,
   FleetMessagePermission,
@@ -47,6 +48,14 @@ interface Waiter {
 interface PendingSystemNotification {
   readonly message: UserMessage
   readonly queue: 'nextStep' | 'nextTurn'
+}
+
+interface DeliveryAttempt {
+  readonly participantId: string
+  readonly sessionId: string
+  readonly messageId: string
+  readonly content: 'full' | 'notice'
+  state: 'pending' | 'claimed' | 'superseded'
 }
 
 function snapshot<T>(value: T): T {
@@ -102,7 +111,9 @@ export class MessageHub {
   private readonly votes = new Map<string, FleetVote>()
   private readonly reactions = new Map<string, FleetMessageReaction>()
   private readonly pins = new Map<string, FleetMessagePin>()
-  private readonly readThroughByAgent = new Map<string, Map<string, number>>()
+  private readonly readThroughByParticipant = new Map<string, Map<string, number>>()
+  private readonly deliveredParticipantsByMessage = new Map<string, Set<string>>()
+  private readonly contextDeliveries = new Map<string, DeliveryAttempt>()
   private readonly history: FleetMessage[] = []
   private readonly pendingWakeupsByAgent = new Map<string, Map<string, FleetMessage>>()
   private readonly observers = new Set<(event: FleetCoordinationEvent) => void>()
@@ -129,7 +140,9 @@ export class MessageHub {
     this.votes.clear()
     this.reactions.clear()
     this.pins.clear()
-    this.readThroughByAgent.clear()
+    this.readThroughByParticipant.clear()
+    this.deliveredParticipantsByMessage.clear()
+    this.contextDeliveries.clear()
     this.history.length = 0
     this.pendingWakeupsByAgent.clear()
     this.agentRevisions.clear()
@@ -144,7 +157,7 @@ export class MessageHub {
     this.reset()
     for (const event of events) {
       if (event.type === 'message') {
-        this.rememberMessage(snapshot(event.message))
+        this.rememberMessage(this.normalizeMessage(snapshot(event.message)))
         this.sequence = Math.max(this.sequence, event.message.sequence)
       } else if (event.type === 'channel') {
         this.channels.set(event.channel.id, snapshot(event.channel))
@@ -170,9 +183,23 @@ export class MessageHub {
         if (event.action === 'unpinned') this.pins.delete(event.pin.messageId)
         else this.pins.set(event.pin.messageId, snapshot(event.pin))
       } else if (event.type === 'inbox') {
-        if (event.action === 'read') this.rememberReadThrough(event.agentId, event.messageId, event.through)
+        if (event.action === 'delivered') {
+          const participantId = this.resolveAgent(event.agentId)
+          this.rememberDelivery(
+            participantId,
+            event.messageId,
+            event.contextMessageId,
+            event.sessionId ?? event.agentId,
+            event.content ?? this.inferDeliveryContent(participantId, event.messageId),
+          )
+        } else if (event.action === 'superseded') {
+          const attempt = this.contextDeliveries.get(event.contextMessageId)
+          if (attempt !== undefined) attempt.state = 'superseded'
+        } else if (event.action === 'read') {
+          this.rememberReadThrough(this.resolveAgent(event.agentId), event.messageId, event.through)
+        }
         else if (event.action === 'acknowledged') {
-          this.rememberReadThrough(event.agentId, event.messageId, Number.MAX_SAFE_INTEGER)
+          this.rememberReadThrough(this.resolveAgent(event.agentId), event.messageId, Number.MAX_SAFE_INTEGER)
         }
       }
     }
@@ -207,6 +234,7 @@ export class MessageHub {
 
   connectAgent(agentId: string, channelIds: readonly string[] = []): void {
     this.assertOpen()
+    agentId = this.resolveAgent(agentId)
     this.requireAgent(agentId)
     let connected = false
     for (const id of new Set(channelIds)) {
@@ -221,6 +249,7 @@ export class MessageHub {
 
   disconnectAgent(agentId: string): void {
     this.assertOpen()
+    agentId = this.resolveAgent(agentId)
     const affected = new Set([agentId])
     const removedVotes = new Set<string>()
     for (const [id, vote] of this.votes) {
@@ -272,86 +301,10 @@ export class MessageHub {
     this.changed([...affected])
   }
 
-  rebindAgent(previousId: string, nextId: string, options: { readonly silent?: boolean } = {}): void {
-    this.assertOpen()
-    if (previousId === nextId) return
-    if (options.silent !== true) this.requireAgent(nextId)
-    const replace = (values: readonly string[]): string[] => [...new Set(values.map(value => value === previousId ? nextId : value))]
-    for (const [id, channel] of this.channels) {
-      if (channel.createdBy !== previousId && !channel.members.includes(previousId)) continue
-      this.channels.set(id, {
-        ...channel,
-        createdBy: channel.createdBy === previousId ? nextId : channel.createdBy,
-        members: replace(channel.members),
-      })
-    }
-    for (const [id, meeting] of this.meetings) {
-      if (meeting.initiator !== previousId && !meeting.participants.includes(previousId)) continue
-      const attendance = { ...meeting.attendance }
-      if (attendance[previousId] !== undefined) {
-        attendance[nextId] = attendance[nextId] ?? attendance[previousId]
-        delete attendance[previousId]
-      }
-      this.meetings.set(id, {
-        ...meeting,
-        initiator: meeting.initiator === previousId ? nextId : meeting.initiator,
-        participants: replace(meeting.participants),
-        attendance,
-      })
-    }
-    for (const [id, vote] of this.votes) {
-      if (vote.initiator !== previousId && !vote.voters.includes(previousId)
-        && !vote.approvals.includes(previousId) && vote.rejection?.voter !== previousId) continue
-      this.votes.set(id, {
-        ...vote,
-        initiator: vote.initiator === previousId ? nextId : vote.initiator,
-        voters: replace(vote.voters),
-        approvals: replace(vote.approvals),
-        ...(vote.rejection?.voter === previousId
-          ? { rejection: { ...vote.rejection, voter: nextId } }
-          : {}),
-      })
-    }
-    for (let index = 0; index < this.history.length; index += 1) {
-      const message = this.history[index] as FleetMessage
-      if (message.from !== previousId && message.conversation !== `@${previousId}`
-        && !message.mentions.includes(previousId)) continue
-      this.history[index] = {
-        ...message,
-        from: message.from === previousId ? nextId : message.from,
-        conversation: message.conversation === `@${previousId}` ? `@${nextId}` : message.conversation,
-        mentions: replace(message.mentions),
-      }
-    }
-    for (const [key, reaction] of this.reactions) {
-      if (reaction.members.includes(previousId)) this.reactions.set(key, { ...reaction, members: replace(reaction.members) })
-    }
-    for (const [id, pin] of this.pins) {
-      if (pin.pinnedBy === previousId) this.pins.set(id, { ...pin, pinnedBy: nextId })
-    }
-    const readThrough = this.readThroughByAgent.get(previousId)
-    if (readThrough !== undefined) {
-      const next = this.readThroughByAgent.get(nextId) ?? new Map<string, number>()
-      for (const [messageId, through] of readThrough) {
-        next.set(messageId, Math.max(next.get(messageId) ?? 0, through))
-      }
-      this.readThroughByAgent.set(nextId, next)
-      this.readThroughByAgent.delete(previousId)
-    }
-    const previousRevision = this.agentRevisions.get(previousId)
-    if (previousRevision !== undefined) {
-      this.agentRevisions.set(nextId, Math.max(previousRevision, this.agentRevisions.get(nextId) ?? 0))
-      this.agentRevisions.delete(previousId)
-    }
-    this.rebuildPendingWakeups()
-    for (const waiter of [...this.waiters]) {
-      if (waiter.agentId === previousId) waiter.fail(new Error(`Agent ${previousId} rebound to ${nextId}`))
-    }
-    if (options.silent !== true) this.changed([nextId])
-  }
-
   retireAgent(agentId: string, successorId: string): void {
     this.assertOpen()
+    agentId = this.resolveAgent(agentId)
+    successorId = this.resolveAgent(successorId)
     if (agentId === successorId) throw new Error('retired Agent and successor must be different')
     this.requireAgent(successorId)
 
@@ -438,7 +391,11 @@ export class MessageHub {
     }
 
     this.pendingWakeupsByAgent.delete(agentId)
-    this.readThroughByAgent.delete(agentId)
+    this.readThroughByParticipant.delete(agentId)
+    for (const participants of this.deliveredParticipantsByMessage.values()) participants.delete(agentId)
+    for (const [contextMessageId, delivered] of this.contextDeliveries) {
+      if (delivered.participantId === agentId) this.contextDeliveries.delete(contextMessageId)
+    }
     for (const [key, reaction] of this.reactions) {
       if (!reaction.members.includes(agentId)) continue
       const members = reaction.members.filter(member => member !== agentId)
@@ -488,7 +445,7 @@ export class MessageHub {
 
   send(sender: MessageAgent, input: SendMessageInput): SendMessageResult {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const text = input.text.trim()
     if (text.length === 0) throw new Error('message text cannot be empty')
     if (text.length > MAX_MESSAGE_LENGTH) {
@@ -513,6 +470,7 @@ export class MessageHub {
   }
 
   pendingWakeups(agentId: string): FleetMessage[] {
+    agentId = this.resolveAgent(agentId)
     return snapshot([...(this.pendingWakeupsByAgent.get(agentId)?.values() ?? [])])
   }
 
@@ -521,6 +479,7 @@ export class MessageHub {
     notification: FleetSystemNotificationInput,
   ): FleetSystemNotificationResult {
     this.assertOpen()
+    agentId = this.resolveAgent(agentId)
     const target = this.requireAgent(agentId)
     const text = notification.text.trim()
     if (text.length === 0) throw new Error('Fleet system notification cannot be empty')
@@ -586,12 +545,12 @@ export class MessageHub {
 
   read(sender: MessageAgent, input: ReadMessagesInput): ReadMessagesResult {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const limit = input.limit ?? 10
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
       throw new Error('limit must be an integer from 1 through 50')
     }
-    const maxChars = input.maxChars ?? 4_000
+    const maxChars = input.maxChars ?? 12_000
     if (!Number.isSafeInteger(maxChars) || maxChars < 1 || maxChars > 12_000) {
       throw new Error('maxChars must be an integer from 1 through 12000')
     }
@@ -660,9 +619,9 @@ export class MessageHub {
     }
   }
 
-  readMessageText(sender: MessageAgent, messageId: string, offset?: number, limit = 4_000): import('./types.js').FleetMessageTextChunk {
+  readMessageText(sender: MessageAgent, messageId: string, offset?: number, limit = 12_000): import('./types.js').FleetMessageTextChunk {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 12_000) {
       throw new Error('limit must be an integer from 1 through 12000')
     }
@@ -692,9 +651,82 @@ export class MessageHub {
     }
   }
 
+  /** Mark a delivered Fleet message read when its native context item is consumed. */
+  markDeliveredContextRead(participantId: string, contextMessageId: string): boolean {
+    this.assertOpen()
+    participantId = this.resolveAgent(participantId)
+    const delivered = this.contextDeliveries.get(contextMessageId)
+    if (delivered?.participantId !== participantId || delivered.state !== 'pending') return false
+    delivered.state = 'claimed'
+    if (delivered.content !== 'full') return false
+    const message = this.history.find(candidate => candidate.id === delivered.messageId)
+    if (message === undefined) return false
+    const changed = this.markReadThrough(participantId, message, message.text.length)
+    return changed
+  }
+
+  /** Recreate pending native deliveries after a stable participant binds to another Session. */
+  refreshAgent(reference: string): number {
+    this.assertOpen()
+    const participantId = this.resolveAgent(reference)
+    const target = this.requireAgent(participantId)
+    const sessionId = target.sessionId ?? target.id
+    const stale = [...this.contextDeliveries.entries()].filter(([, attempt]) =>
+      attempt.participantId === participantId
+      && attempt.sessionId !== sessionId
+      && attempt.state === 'pending'
+      && this.history.some(message => message.id === attempt.messageId && !this.isFullyRead(participantId, message)),
+    )
+    const redeliver = new Map<string, 'full' | 'notice'>()
+    for (const [contextMessageId, attempt] of stale) {
+      attempt.state = 'superseded'
+      if (attempt.content === 'full' || redeliver.get(attempt.messageId) === undefined) {
+        redeliver.set(attempt.messageId, attempt.content)
+      }
+      this.emit({
+        type: 'inbox',
+        action: 'superseded',
+        agentId: participantId,
+        sessionId: attempt.sessionId,
+        messageId: attempt.messageId,
+        contextMessageId,
+        content: attempt.content,
+      })
+    }
+    for (const [messageId, content] of redeliver) {
+      const message = this.history.find(candidate => candidate.id === messageId)
+      if (message === undefined) continue
+      if (content === 'full') this.deliver(target, message, message.delivery !== 'quiet')
+      else this.deliverChannelNotice(target, message)
+    }
+    if (redeliver.size > 0) this.changed([participantId])
+    return redeliver.size
+  }
+
+  receipt(messageId: string): FleetMessageReceipt {
+    this.assertOpen()
+    const message = this.history.find(candidate => candidate.id === messageId)
+    if (message === undefined) throw new Error(`unknown Fleet message ${messageId}`)
+    const participantIds = [...(this.deliveredParticipantsByMessage.get(messageId) ?? [])]
+    const readThrough = Object.fromEntries(participantIds.map(participantId => [
+      participantId,
+      this.readThrough(participantId, messageId),
+    ]))
+    const readParticipantIds = participantIds.filter(participantId => readThrough[participantId]! >= message.text.length)
+    const read = new Set(readParticipantIds)
+    return snapshot({
+      messageId,
+      inbox: message.conversation,
+      participantIds,
+      readParticipantIds,
+      unreadParticipantIds: participantIds.filter(participantId => !read.has(participantId)),
+      readThrough,
+    })
+  }
+
   search(sender: MessageAgent, input: SearchMessagesInput = {}): FleetMessage[] {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const limit = input.limit ?? 50
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new Error('limit must be an integer from 1 through 100')
@@ -712,7 +744,7 @@ export class MessageHub {
 
   inbox(sender: MessageAgent, input: { readonly unreadOnly?: boolean; readonly limit?: number } = {}): FleetInboxItem[] {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const limit = input.limit ?? 50
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new Error('limit must be an integer from 1 through 100')
@@ -733,7 +765,7 @@ export class MessageHub {
 
   react(sender: MessageAgent, input: { readonly messageId: string; readonly reaction: string; readonly remove?: boolean }): FleetMessageReaction {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requireVisibleMessage(sender.id, input.messageId)
     const reactionName = input.reaction.trim()
     if (reactionName.length === 0 || reactionName.length > 32) throw new Error('reaction must be 1 through 32 characters')
@@ -758,14 +790,14 @@ export class MessageHub {
 
   listReactions(sender: MessageAgent, messageId: string): FleetMessageReaction[] {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requireVisibleMessage(sender.id, messageId)
     return snapshot([...this.reactions.values()].filter(reaction => reaction.messageId === messageId))
   }
 
   pin(sender: MessageAgent, messageId: string, remove = false): FleetMessagePin {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const message = this.requireVisibleMessage(sender.id, messageId)
     const current = this.pins.get(messageId)
     const pin: FleetMessagePin = current ?? {
@@ -783,7 +815,7 @@ export class MessageHub {
 
   listPins(sender: MessageAgent, conversation?: FleetTarget): FleetMessagePin[] {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     return snapshot([...this.pins.values()].filter(pin => {
       const message = this.history.find(candidate => candidate.id === pin.messageId)
       return message !== undefined
@@ -794,13 +826,13 @@ export class MessageHub {
 
   listChannels(sender: MessageAgent): FleetChannel[] {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     return snapshot([...this.channels.values()].filter(channel => this.canRead(channel, sender.id)))
   }
 
   createChannel(sender: MessageAgent, input: CreateChannelInput): FleetChannel {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requirePermission(sender.id, 'channel.manage')
     const name = input.name.trim()
     if (!CHANNEL_NAME.test(name)) {
@@ -839,7 +871,7 @@ export class MessageHub {
 
   updateChannel(sender: MessageAgent, name: string, input: UpdateChannelInput): FleetChannel {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requirePermission(sender.id, 'channel.manage')
     const channel = this.requireReadableChannel(sender.id, name)
     if (channel.archived) throw new Error(`channel #${name} is archived`)
@@ -879,7 +911,7 @@ export class MessageHub {
 
   archiveChannel(sender: MessageAgent, name: string): FleetChannel {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requirePermission(sender.id, 'channel.manage')
     if (name === 'general') throw new Error('the general channel cannot be archived')
     const channel = this.channels.get(name)
@@ -902,7 +934,7 @@ export class MessageHub {
 
   listMeetings(sender: MessageAgent): FleetMeeting[] {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     return snapshot([...this.meetings.values()].filter(meeting =>
       meeting.participants.includes(sender.id),
     ))
@@ -910,7 +942,7 @@ export class MessageHub {
 
   openMeeting(sender: MessageAgent, input: OpenMeetingInput): FleetMeeting {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requirePermission(sender.id, 'meeting.manage')
     const id = input.id.trim()
     if (!CHANNEL_NAME.test(id)) throw new Error('meeting id must use lower-kebab-case')
@@ -960,7 +992,7 @@ export class MessageHub {
 
   joinMeeting(sender: MessageAgent, id: string): FleetMeeting {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const meeting = this.requireMeeting(sender.id, id)
     if (meeting.status !== 'open') throw new Error(`meeting ${id} is already closed`)
     const current = meeting.attendance[sender.id]
@@ -977,7 +1009,7 @@ export class MessageHub {
 
   leaveMeeting(sender: MessageAgent, id: string): FleetMeeting {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const meeting = this.requireMeeting(sender.id, id)
     if (meeting.status !== 'open') throw new Error(`meeting ${id} is already closed`)
     const current = meeting.attendance[sender.id]
@@ -997,7 +1029,7 @@ export class MessageHub {
 
   closeMeeting(sender: MessageAgent, id: string, input: CloseMeetingInput = {}): FleetMeeting {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requirePermission(sender.id, 'meeting.manage')
     const meeting = this.requireMeeting(sender.id, id)
     if (meeting.initiator !== sender.id) {
@@ -1057,7 +1089,7 @@ export class MessageHub {
 
   listVotes(sender: MessageAgent, channel?: string): FleetVote[] {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     if (channel !== undefined) this.requireReadableChannel(sender.id, channelId(channel))
     return snapshot([...this.votes.values()].filter(vote => {
       if (channel !== undefined && vote.channel !== channel) return false
@@ -1068,7 +1100,7 @@ export class MessageHub {
 
   getVote(sender: MessageAgent, id: string): FleetVote {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const vote = this.requireVote(id)
     this.requireReadableChannel(sender.id, channelId(vote.channel))
     return snapshot(vote)
@@ -1076,7 +1108,7 @@ export class MessageHub {
 
   createVote(sender: MessageAgent, input: CreateVoteInput): FleetVote {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     this.requirePermission(sender.id, 'vote.create')
     const channel = this.requireReadableChannel(sender.id, channelId(input.channel))
     if (channel.archived) throw new Error(`channel #${channel.id} is archived`)
@@ -1130,7 +1162,7 @@ export class MessageHub {
 
   castVote(sender: MessageAgent, input: CastVoteInput): FleetVote {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     const current = input.id === undefined
       ? this.requireOnlyPendingVote(sender.id)
       : this.requireVote(input.id)
@@ -1196,7 +1228,7 @@ export class MessageHub {
     signal?: AbortSignal,
   ): Promise<WaitResult> {
     this.assertOpen()
-    this.requireAgent(sender.id)
+    sender = this.requireParticipant(sender)
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
       throw new Error('timeout must be a positive integer')
     }
@@ -1347,6 +1379,7 @@ export class MessageHub {
       sequence,
       kind,
       conversation: input.to,
+      conversationId: this.conversationId(sender, input.to),
       from: sender,
       ...(fromName === undefined ? {} : { fromName }),
       text,
@@ -1378,13 +1411,17 @@ export class MessageHub {
     for (const [key, reaction] of this.reactions) {
       if (reaction.messageId === messageId) this.reactions.delete(key)
     }
-    for (const [agentId, readThrough] of this.readThroughByAgent) {
+    for (const [agentId, readThrough] of this.readThroughByParticipant) {
       readThrough.delete(messageId)
-      if (readThrough.size === 0) this.readThroughByAgent.delete(agentId)
+      if (readThrough.size === 0) this.readThroughByParticipant.delete(agentId)
     }
     for (const [agentId, pending] of this.pendingWakeupsByAgent) {
       pending.delete(messageId)
       if (pending.size === 0) this.pendingWakeupsByAgent.delete(agentId)
+    }
+    this.deliveredParticipantsByMessage.delete(messageId)
+    for (const [contextMessageId, delivered] of this.contextDeliveries) {
+      if (delivered.messageId === messageId) this.contextDeliveries.delete(contextMessageId)
     }
   }
 
@@ -1396,11 +1433,17 @@ export class MessageHub {
     for (const [key, reaction] of this.reactions) {
       if (!retained.has(reaction.messageId)) this.reactions.delete(key)
     }
-    for (const [agentId, readThrough] of this.readThroughByAgent) {
+    for (const [agentId, readThrough] of this.readThroughByParticipant) {
       for (const messageId of readThrough.keys()) {
         if (!retained.has(messageId)) readThrough.delete(messageId)
       }
-      if (readThrough.size === 0) this.readThroughByAgent.delete(agentId)
+      if (readThrough.size === 0) this.readThroughByParticipant.delete(agentId)
+    }
+    for (const messageId of this.deliveredParticipantsByMessage.keys()) {
+      if (!retained.has(messageId)) this.deliveredParticipantsByMessage.delete(messageId)
+    }
+    for (const [contextMessageId, delivered] of this.contextDeliveries) {
+      if (!retained.has(delivered.messageId)) this.contextDeliveries.delete(contextMessageId)
     }
   }
 
@@ -1435,12 +1478,16 @@ export class MessageHub {
       source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'relay' },
     })
     this.dispatchContext(target, input, wake ? message.delivery : 'quiet')
+    const sessionId = target.sessionId ?? target.id
+    this.rememberDelivery(target.id, message.id, String(input.id), sessionId, 'full')
     this.emit({
       type: 'inbox',
       action: 'delivered',
       agentId: target.id,
+      sessionId,
       messageId: message.id,
       contextMessageId: input.id,
+      content: 'full',
     })
   }
 
@@ -1476,12 +1523,16 @@ export class MessageHub {
       notification,
     })
     if (notification.relatedMessageId !== undefined) {
+      const sessionId = target.sessionId ?? target.id
+      this.rememberDelivery(target.id, notification.relatedMessageId, String(input.id), sessionId, 'notice')
       this.emit({
         type: 'inbox',
         action: 'delivered',
         agentId: target.id,
+        sessionId,
         messageId: notification.relatedMessageId,
         contextMessageId: input.id,
+        content: 'notice',
       })
     }
     return { contextMessageId: String(input.id), disposition }
@@ -1605,7 +1656,7 @@ export class MessageHub {
   }
 
   private readThrough(agentId: string, messageId: string): number {
-    return this.readThroughByAgent.get(agentId)?.get(messageId) ?? 0
+    return this.readThroughByParticipant.get(agentId)?.get(messageId) ?? 0
   }
 
   private isFullyRead(agentId: string, message: FleetMessage): boolean {
@@ -1616,12 +1667,31 @@ export class MessageHub {
     if (!Number.isSafeInteger(through) || through < 0) {
       throw new Error(`invalid read offset ${String(through)} for message ${messageId}`)
     }
-    const messages = this.readThroughByAgent.get(agentId) ?? new Map<string, number>()
+    const messages = this.readThroughByParticipant.get(agentId) ?? new Map<string, number>()
     const current = messages.get(messageId) ?? 0
     if (through <= current) return false
     messages.set(messageId, through)
-    this.readThroughByAgent.set(agentId, messages)
+    this.readThroughByParticipant.set(agentId, messages)
     return true
+  }
+
+  private rememberDelivery(
+    participantId: string,
+    messageId: string,
+    contextMessageId: string,
+    sessionId: string,
+    content: 'full' | 'notice',
+  ): void {
+    const participants = this.deliveredParticipantsByMessage.get(messageId) ?? new Set<string>()
+    participants.add(participantId)
+    this.deliveredParticipantsByMessage.set(messageId, participants)
+    this.contextDeliveries.set(contextMessageId, {
+      participantId,
+      sessionId,
+      messageId,
+      content,
+      state: 'pending',
+    })
   }
 
   private markReadThrough(agentId: string, message: FleetMessage, through: number): boolean {
@@ -1657,10 +1727,45 @@ export class MessageHub {
     return agent
   }
 
+  private requireParticipant(agent: MessageAgent): MessageAgent {
+    return this.requireAgent(this.resolveAgent(agent.id))
+  }
+
   private requireContact(senderId: string, recipientId: string): void {
     if (this.agents.canContact?.(senderId, recipientId) === false) {
       throw new Error(`Agent ${senderId} cannot contact Agent ${recipientId}`)
     }
+  }
+
+  private conversationId(senderId: string, conversation: FleetTarget): string {
+    if (!conversation.startsWith('@')) return conversation
+    const recipientId = agentTarget(conversation)
+    if (senderId.startsWith('fleet-user:')) return `@${recipientId}`
+    if (recipientId.startsWith('fleet-user:')) return `@${senderId}`
+    const key = (participantId: string): string =>
+      this.agents.conversationKey?.(participantId) ?? participantId
+    return `dm:${[key(senderId), key(recipientId)].sort().join(':')}`
+  }
+
+  private normalizeMessage(message: FleetMessage): FleetMessage {
+    const from = this.resolveAgent(message.from)
+    const conversation = message.conversation.startsWith('@')
+      ? `@${this.resolveAgent(message.conversation)}` as FleetTarget
+      : message.conversation
+    const mentions = [...new Set(message.mentions.map(mention => this.resolveAgent(mention)))]
+    return {
+      ...message,
+      from,
+      conversation,
+      conversationId: this.conversationId(from, conversation),
+      mentions,
+    }
+  }
+
+  private inferDeliveryContent(participantId: string, messageId: string): 'full' | 'notice' {
+    const message = this.history.find(candidate => candidate.id === messageId)
+    if (message === undefined || !message.conversation.startsWith('#')) return 'full'
+    return message.delivery !== 'quiet' && message.mentions.includes(participantId) ? 'full' : 'notice'
   }
 
   private requirePermission(agentId: string, permission: FleetMessagePermission): void {
@@ -1670,7 +1775,7 @@ export class MessageHub {
   }
 
   private resolveAgent(reference: string): string {
-    const id = agentTarget(reference)
+    const id = reference.startsWith('@') ? agentTarget(reference) : reference
     return this.agents.resolve?.(id) ?? id
   }
 

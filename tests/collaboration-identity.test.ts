@@ -58,7 +58,7 @@ describe('Fleet collaboration identities', () => {
     const vote = team.messages.createVote(agents.get('agent-lead') as never, {
       channel: '#general', kind: 'message', statement: 'Proceed.',
     })
-    expect(vote.voters).toEqual(['agent-reviewer'])
+    expect(vote.voters).toEqual(['reviewer'])
     expect(() => team.messages.createVote(agents.get('agent-lead') as never, {
       channel: '#general', kind: 'message', statement: 'Ask the assistant to decide.', voters: ['@assistant'],
     })).toThrow('is not eligible to vote')

@@ -31,6 +31,7 @@ const MESSAGE_SCHEMA = {
       enum: ['text', 'meeting_opened', 'meeting_closed', 'vote_opened', 'vote_cast', 'vote_closed', 'task_notification', 'calendar_notification'],
     },
     conversation: { type: 'string', required: true },
+    conversationId: { type: 'string' },
     from: { type: 'string', required: true },
     fromName: { type: 'string' },
     text: { type: 'string', required: true },
@@ -187,6 +188,7 @@ function messageOutput(): {
         sequence: message.sequence,
         ...(message.kind === 'text' ? {} : { kind: message.kind }),
         conversation: message.conversation,
+        ...(message.conversationId === undefined ? {} : { conversation_id: message.conversationId }),
         from: message.fromName ?? message.from,
         text: preview.text,
         ...(preview.shown < message.text.length
@@ -205,6 +207,7 @@ function messageOutput(): {
     sequence: message.sequence,
     ...(message.kind === 'text' ? {} : { kind: message.kind }),
     conversation: message.conversation,
+    ...(message.conversationId === undefined ? {} : { conversation_id: message.conversationId }),
     from: message.fromName ?? message.from,
     text: message.text,
     read_range: {
@@ -494,8 +497,8 @@ export function installMessageTools(
       action: { type: 'string', enum: ['read', 'search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'], description: 'Defaults to read. Use text with message_id and the returned offset to continue a partially read message.' },
       conversation: { type: 'string', description: 'Conversation in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
-      limit: { type: 'integer', description: 'For read, 1-50 messages (default 10). For other list actions, up to 100. For text continuation, 1-12000 characters (default 4000).' },
-      max_chars: { type: 'integer', description: 'For read, total returned message text budget from 1 through 12000 characters (default 4000).' },
+      limit: { type: 'integer', description: 'For read, 1-50 messages (default 10). For other list actions, up to 100. For text continuation, 1-12000 characters (default 12000).' },
+      max_chars: { type: 'integer', description: 'For read, total returned message text budget from 1 through 12000 characters (default 12000).' },
       query: { type: 'string', description: 'Case-insensitive text query for search.' },
       from: { type: 'string', description: 'Optional sender filter for search.' },
       resource: { type: 'string', description: 'Optional resource id filter for search.' },
@@ -546,7 +549,7 @@ export function installMessageTools(
       if (action === 'text') {
         return Promise.resolve({
           action,
-          chunk: hub.readMessageText(caller, args.message_id, args.offset, args.limit ?? 4_000),
+          chunk: hub.readMessageText(caller, args.message_id, args.offset, args.limit ?? 12_000),
         })
       }
       if (action === 'reactions') return Promise.resolve({ action, reactions: hub.listReactions(caller, args.message_id) })

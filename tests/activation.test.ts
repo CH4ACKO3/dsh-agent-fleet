@@ -92,7 +92,11 @@ describe('Fleet UI activation bridge', () => {
       source: { kind: 'user' },
       content: [{
         type: 'text',
-        text: encodeFleetActivation({ mode: 'connection', teamId: 'team-existing-42' }, '继续发布前检查'),
+        text: encodeFleetActivation({
+          mode: 'connection',
+          teamId: 'team-existing-42',
+          assistantId: 'assistant-river',
+        }, '继续发布前检查'),
       }],
     })
 
@@ -109,7 +113,10 @@ describe('Fleet UI activation bridge', () => {
     )
 
     expect(setups.begin).not.toHaveBeenCalled()
-    expect(attachAssistant).toHaveBeenCalledWith(agent, { runId: 'team-existing-42' })
+    expect(attachAssistant).toHaveBeenCalledWith(agent, {
+      runId: 'team-existing-42',
+      assistantId: 'assistant-river',
+    })
     expect(activate).toHaveBeenCalledWith(agent, 'team-existing-42', view)
     expect(decision).toMatchObject({
       kind: 'enter',

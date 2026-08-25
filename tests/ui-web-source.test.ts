@@ -284,7 +284,7 @@ describe('Fleet Web panel source', () => {
     })
     expect(snapshot.team?.conversations).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: '#general', name: 'general', memberCount: 2, activeCount: 2 }),
-      expect.objectContaining({ id: '@member-session', name: 'Avery Stone' }),
+      expect.objectContaining({ id: '@builder', name: 'Avery Stone' }),
     ]))
     expect(snapshot.team?.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -295,20 +295,20 @@ describe('Fleet Web panel source', () => {
         ],
       }),
       expect.objectContaining({
-        id: 'message-user', conversationId: '@member-session', sender: expect.objectContaining({ operator: true }),
+        id: 'message-user', conversationId: '@builder', sender: expect.objectContaining({ operator: true }),
         receipt: {
           visibleMemberIds: ['builder'], readMemberIds: ['builder'], unreadMemberIds: [],
           sources: [{ memberId: 'builder', sessionId: 'member-session', contextMessageId: 'context-message-user' }],
         },
       }),
       expect.objectContaining({
-        id: 'message-unread', conversationId: '@member-session',
+        id: 'message-unread', conversationId: '@builder',
         receipt: {
           visibleMemberIds: ['builder'], readMemberIds: [], unreadMemberIds: ['builder'],
           sources: [{ memberId: 'builder', sessionId: 'member-session', contextMessageId: 'context-message-unread' }],
         },
       }),
-      expect.objectContaining({ id: 'message-reply', conversationId: '@member-session', senderId: 'builder' }),
+      expect.objectContaining({ id: 'message-reply', conversationId: '@builder', senderId: 'builder' }),
     ]))
     expect(snapshot.team?.activity.filter(item => item.kind === 'decision')).toHaveLength(3)
     expect(snapshot.team?.activity.some(item => item.kind === 'resource')).toBe(true)
@@ -372,14 +372,14 @@ describe('Fleet Web panel source', () => {
     await source.sendMessage({
       sessionId: 'observer-session',
       teamId: 'team-1',
-      conversationId: '@member-session',
+      conversationId: '@builder',
       content: [{ type: 'text', text: 'Please respond directly.' }],
     })
     expect(sent.at(-1)).toEqual({
       sessionId: 'observer-session',
       teamId: 'team-1',
       mode: 'conversation',
-      to: '@member-session',
+      to: '@builder',
       text: 'Please respond directly.',
       delivery: 'wakeup',
     })
@@ -607,21 +607,21 @@ describe('Fleet Web panel source', () => {
 
     const team = source.getSnapshot().team
     const memberDirectId = 'dm:member:builder:member:reviewer'
-    const assistantDirectId = 'dm:assistant-session:member:builder'
+    const assistantDirectId = 'dm:assistant:assistant:member:builder'
     expect(team?.conversations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: '@builder-session', peerId: 'builder' }),
-      expect.objectContaining({ id: '@reviewer-session', peerId: 'reviewer' }),
-      expect.objectContaining({ id: '@assistant-session', peerId: 'assistant' }),
+      expect.objectContaining({ id: '@builder', peerId: 'builder' }),
+      expect.objectContaining({ id: '@reviewer', peerId: 'reviewer' }),
+      expect.objectContaining({ id: '@assistant', peerId: 'assistant' }),
       expect.objectContaining({ id: memberDirectId, participantIds: ['builder', 'reviewer'] }),
       expect.objectContaining({ id: assistantDirectId }),
     ]))
     expect(team?.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'builder-to-reviewer', conversationId: memberDirectId }),
       expect.objectContaining({ id: 'reviewer-to-builder', conversationId: memberDirectId }),
-      expect.objectContaining({ id: 'user-to-builder', conversationId: '@builder-session' }),
+      expect.objectContaining({ id: 'user-to-builder', conversationId: '@builder' }),
       expect.objectContaining({ id: 'assistant-to-builder', conversationId: assistantDirectId }),
       expect.objectContaining({
-        id: 'user-to-assistant', conversationId: '@assistant-session',
+        id: 'user-to-assistant', conversationId: '@assistant',
         sender: expect.objectContaining({ id: 'operator', operator: true }),
         receipt: {
           visibleMemberIds: ['assistant'], readMemberIds: ['assistant'], unreadMemberIds: [],
@@ -629,25 +629,25 @@ describe('Fleet Web panel source', () => {
         },
       }),
       expect.objectContaining({
-        id: 'assistant-to-user', conversationId: '@assistant-session',
+        id: 'assistant-to-user', conversationId: '@assistant',
         sender: expect.objectContaining({ id: 'assistant' }),
       }),
     ]))
     expect(team?.messages.find(item => item.id === 'assistant-to-user')?.sender)
       .not.toEqual(expect.objectContaining({ operator: true }))
     expect(team?.members.find(member => member.id === 'builder')?.visibleConversationIds)
-      .toEqual(expect.arrayContaining(['@builder-session', memberDirectId, assistantDirectId]))
+      .toEqual(expect.arrayContaining(['@builder', memberDirectId, assistantDirectId]))
     expect(team?.members.find(member => member.id === 'reviewer')?.visibleConversationIds)
-      .toEqual(expect.arrayContaining(['@reviewer-session', memberDirectId]))
+      .toEqual(expect.arrayContaining(['@reviewer', memberDirectId]))
     expect(team?.activity.map(item => item.id)).toEqual(['team-1:3', 'team-1:5', 'team-1:8'])
     await source.sendMessage({
       sessionId: 'assistant-session',
       teamId: 'team-1',
-      conversationId: '@assistant-session',
+      conversationId: '@assistant',
       content: [{ type: 'text', text: 'mailbox input' }],
     })
     expect(sent).toContainEqual(expect.objectContaining({
-      teamId: 'team-1', mode: 'conversation', to: '@assistant-session', text: 'mailbox input', delivery: 'wakeup',
+      teamId: 'team-1', mode: 'conversation', to: '@assistant', text: 'mailbox input', delivery: 'wakeup',
     }))
     source.dispose()
   })
@@ -862,6 +862,70 @@ describe('Fleet Web panel source', () => {
       }),
     ])
     expect(source.getSnapshot().team?.messages.map(item => item.id)).toEqual(['recent-message'])
+    source.dispose()
+  })
+
+  it('collapses rebound assistant sessions into one private conversation and scopes the assistant view', async () => {
+    const run = {
+      id: 'team-1', name: 'Assistant Team', projectRoot: '/workspace/fleet', status: 'running',
+      startedAt: '2026-08-21T10:00:00.000Z',
+      members: [
+        { name: 'builder', displayName: 'Avery', role: 'Engineer', sessionId: 'member-builder', status: 'idle' },
+        { name: 'reviewer', displayName: 'Robin', role: 'Reviewer', sessionId: 'member-reviewer', status: 'idle' },
+      ],
+      assistants: [{
+        sessionId: 'assistant-current', status: 'idle',
+        view: { id: 'team-assistant', name: 'Hailey', role: 'Assistant' },
+      }],
+    }
+    const message = (sequence: number, id: string, from: string, recipient: string) => ({
+      sequence,
+      createdAt: `2026-08-21T10:00:${String(sequence).padStart(2, '0')}.000Z`,
+      type: 'coordination.message',
+      data: {
+        type: 'message',
+        message: { id, conversation: `@${recipient}`, from, text: id, mentions: [], resources: [] },
+      },
+    })
+    const remote = {
+      list: async () => ok([run]),
+      project: async () => ok({
+        run,
+        memberViews: [
+          { id: 'builder', name: 'Avery', role: 'Engineer', contacts: { members: '*', channels: '*' } },
+          { id: 'reviewer', name: 'Robin', role: 'Reviewer', contacts: { members: '*', channels: '*' } },
+        ],
+        events: [
+          {
+            sequence: 1,
+            createdAt: '2026-08-21T10:00:01.000Z',
+            type: 'assistant_rebound',
+            data: {
+              previousSessionId: 'assistant-old', sessionId: 'assistant-current',
+              view: { id: 'team-assistant', name: 'Hailey', role: 'Assistant' },
+            },
+          },
+          message(2, 'hailey-old', 'assistant-old', 'member-builder'),
+          message(3, 'hailey-current', 'member-builder', 'assistant-current'),
+          message(4, 'member-private', 'member-builder', 'member-reviewer'),
+        ],
+        hasMore: false,
+      }),
+      send: async () => ok({}), member: async () => ok({}), control: async () => ok({}),
+      upload: async () => ok({}), uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const source = createFleetWebPanelSource(() => Promise.resolve(remote))
+
+    await source.refresh()
+    const team = source.getSnapshot().team
+    const haileyMessages = team?.messages.filter(item => item.id.startsWith('hailey-')) ?? []
+    expect(new Set(haileyMessages.map(item => item.conversationId)).size).toBe(1)
+    expect(haileyMessages[0]?.conversationId).toBe('dm:assistant:team-assistant:member:builder')
+    expect(team?.conversations.filter(item => item.id === haileyMessages[0]?.conversationId)).toHaveLength(1)
+    const hailey = team?.assistants?.find(item => item.id === 'team-assistant')
+    expect(hailey?.visibleConversationIds).toContain(haileyMessages[0]?.conversationId)
+    expect(hailey?.visibleConversationIds).not.toContain('dm:member:builder:member:reviewer')
     source.dispose()
   })
 
