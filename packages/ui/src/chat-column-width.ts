@@ -47,12 +47,12 @@ export function useFleetChatColumnWidth(
   readonly width: number
   readonly resizing: boolean
   readonly handle: {
-    readonly onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
-    readonly onPointerDown: (event: PointerEvent<HTMLButtonElement>) => void
-    readonly onPointerMove: (event: PointerEvent<HTMLButtonElement>) => void
-    readonly onPointerUp: (event: PointerEvent<HTMLButtonElement>) => void
-    readonly onPointerCancel: (event: PointerEvent<HTMLButtonElement>) => void
-    readonly onLostPointerCapture: (event: PointerEvent<HTMLButtonElement>) => void
+    readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void
+    readonly onPointerDown: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onPointerMove: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onPointerUp: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onPointerCancel: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onLostPointerCapture: (event: PointerEvent<HTMLDivElement>) => void
   }
 } {
   const [width, setWidth] = useState(initialWidth)
@@ -76,7 +76,7 @@ export function useFleetChatColumnWidth(
     setWidth(bounded)
     return bounded
   }
-  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>): void => {
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     const { minWidth, maxWidth } = limits()
     let next: number | undefined
     if (event.key === 'ArrowLeft') next = width - 32
@@ -87,7 +87,7 @@ export function useFleetChatColumnWidth(
     event.preventDefault()
     commit(update(next, minWidth, maxWidth))
   }
-  const onPointerDown = (event: PointerEvent<HTMLButtonElement>): void => {
+  const onPointerDown = (event: PointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0) return
     event.preventDefault()
     const { minWidth, maxWidth } = limits()
@@ -103,7 +103,7 @@ export function useFleetChatColumnWidth(
     event.currentTarget.setPointerCapture(event.pointerId)
     setResizing(true)
   }
-  const onPointerMove = (event: PointerEvent<HTMLButtonElement>): void => {
+  const onPointerMove = (event: PointerEvent<HTMLDivElement>): void => {
     const current = drag.current
     if (current === null || current.pointerId !== event.pointerId) return
     current.width = update(
@@ -112,7 +112,7 @@ export function useFleetChatColumnWidth(
       current.maxWidth,
     )
   }
-  const finish = (event: PointerEvent<HTMLButtonElement>): void => {
+  const finish = (event: PointerEvent<HTMLDivElement>): void => {
     const current = drag.current
     if (current === null || current.pointerId !== event.pointerId) return
     drag.current = null

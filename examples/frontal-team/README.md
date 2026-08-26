@@ -26,6 +26,9 @@ first store, but merely keeping the file in the repository does not modify brows
 - `tasks/realpde.md` is the RealPDE development task.
 - `tasks/riemann-h0.md` and `tasks/riemann-h1.md` pair with `teams/research.json`.
   They use `tools/arxiv-filter.mjs`; set `FLEET_LITERATURE_CUTOFF=YYYY-MM-DD` before launching DSH.
+- `teams/research-livestream.local.json` is the removable browser-local “直播科研团队”
+  template. Import it through the Team template picker; it is intentionally not included in the
+  built-in template catalog.
 
 The root `dsh-agent-fleet` plugin loads these files through `fleet_run create`. Fleet adds the default
 access and current communication model without inserting a coordinator Agent. Work Markdown is submitted later through

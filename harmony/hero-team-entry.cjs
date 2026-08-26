@@ -89,6 +89,35 @@ module.exports = [
       },
     ],
   },
+  {
+    id: 'fleet-native-budget-meter-seat',
+    description: 'Lets Fleet conversations replace the native context meter without changing the native composer layout.',
+    target: {
+      package: '@deepseek-ai/dsh-client-ui-conversation',
+      version: DSH_CLIENT_VERSION,
+      file: 'lib/client.js',
+    },
+    select: 'SourceFile',
+    expect: 1,
+    apply(context) {
+      replaceExactly(
+        context,
+        'function InputBar({ useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages, resolveSubmitMode, toggleCommandMenu, stop, command, t, renderSlot, useNotices, useLexicon, useMenuLauncher, useProjection, sessionId, variant, disabled: inert = false, blocked, workspacePickerOpen = false, onRequestWorkspace, placeholder, accessory, overlay, leftItems, rightItems, footer }) {',
+        'function InputBar({ useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages, resolveSubmitMode, toggleCommandMenu, stop, command, t, renderSlot, useNotices, useLexicon, useMenuLauncher, useProjection, sessionId, variant, disabled: inert = false, blocked, workspacePickerOpen = false, onRequestWorkspace, placeholder, accessory, overlay, leftItems, rightItems, usageMeter, footer }) {',
+      )
+      replaceExactly(
+        context,
+        `(0, react_jsx_runtime.jsx)(ContextMeter, {
+\t\t\t\t\t\t\t\t\t\t\tuseProjection,
+\t\t\t\t\t\t\t\t\t\t\tt
+\t\t\t\t\t\t\t\t\t\t})`,
+        `usageMeter === void 0 ? (0, react_jsx_runtime.jsx)(ContextMeter, {
+\t\t\t\t\t\t\t\t\t\t\tuseProjection,
+\t\t\t\t\t\t\t\t\t\t\tt
+\t\t\t\t\t\t\t\t\t\t}) : (0, react.cloneElement)(usageMeter, { Tooltip: _deepseek_ai_dsh_client_ui_primitives.Tooltip })`,
+      )
+    },
+  },
   component({
     id: 'fleet-composer-activation',
     description: 'Carries a staged Fleet mode through the native first composer submission.',

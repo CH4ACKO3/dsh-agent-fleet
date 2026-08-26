@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { parseFleetActivation } from '@dsh-agent-fleet/core/activation'
 import {
+  classifyFleetExistingAssistants,
   clearFleetActivation,
   consumeFleetActivation,
   getFleetActivationSnapshot,
@@ -48,5 +49,32 @@ describe('Fleet composer activation state', () => {
 
     expect(consumeFleetActivation(secondSession, '另一个会话的消息')).toBeUndefined()
     expect(getFleetActivationSnapshot(firstSession)?.request).toEqual({ mode: 'interactive' })
+  })
+})
+
+describe('existing Team assistant routing', () => {
+  const assistants = [
+    { assistantId: 'assistant-one', assistantName: 'Hailey', sessionId: 'session-live' },
+    { assistantId: 'assistant-two', assistantName: 'Robin', sessionId: 'session-archived' },
+  ] as const
+
+  it('keeps the current creation path when the Team has no assistant', () => {
+    expect(classifyFleetExistingAssistants([], [], [])).toEqual({ kind: 'create' })
+  })
+
+  it('offers only live, unarchived assistant Sessions for direct opening', () => {
+    expect(classifyFleetExistingAssistants(
+      assistants,
+      ['session-live', 'session-archived'],
+      ['session-archived'],
+    )).toEqual({ kind: 'open', assistants: [assistants[0]] })
+  })
+
+  it('reconnects a stable assistant identity when no usable Session remains', () => {
+    expect(classifyFleetExistingAssistants(
+      assistants,
+      ['session-archived'],
+      ['session-archived'],
+    )).toEqual({ kind: 'reconnect', assistants })
   })
 })

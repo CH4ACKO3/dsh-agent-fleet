@@ -144,6 +144,8 @@ describe('FleetPermissionService', () => {
     expect(permissions.inspectMember('team-1', 'alice')).toMatchObject({
       configured: false,
       assignment: { groups: [], grants: ['resource.write'], toolGroups: ['messages', 'resources'] },
+      availableActions: expect.arrayContaining(['message.read', 'resource.write', 'team.manage']),
+      availableToolGroups: expect.arrayContaining(['messages', 'resources', 'coordination']),
     })
 
     const updated = permissions.setMemberGroups('team-1', 'alice', ['observer'])

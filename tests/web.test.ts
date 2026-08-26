@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { FleetRunService } from '../src/run.js'
 import type { FleetSetupService } from '../src/setup.js'
 import type { FleetAssistantRuntime } from '../src/assistant.js'
+import type { FleetAccessService } from '../src/authorization/access.js'
 import type { FleetPermissionService } from '../src/authorization/permissions.js'
 import { FLEET_WEB_INVOCATIONS, FleetWebRemote } from '../src/web.js'
 
@@ -21,6 +22,7 @@ describe('FleetWebRemote', () => {
       readMemberTracePage: vi.fn(() => ({ run: { id: 'team-one' }, member: 'lead', events: [], hasMore: false })),
       readConversationProjection: vi.fn(() => ({ run: { id: 'team-one' }, memberViews: [], events: [], hasMore: false })),
       exportConfiguration: vi.fn(() => ({ core: { name: 'Team One', members: [] }, modules: {} })),
+      teamSettings: vi.fn(() => ({ name: 'Team One', projectRoot: '/workspace', request: { mixed: {} } })),
       readResourcePreview: vi.fn(() => Promise.resolve({
         id: 'plan', kind: 'markdown', body: '# Plan', mediaType: 'text/markdown', history: [], historyTruncated: false,
       })),
@@ -42,6 +44,8 @@ describe('FleetWebRemote', () => {
       .toMatchObject({ run: { id: 'team-one' }, events: [] })
     expect(remote.project({ teamId: 'team-one', view: 'configuration' }, signal))
       .toMatchObject({ core: { name: 'Team One' } })
+    expect(remote.project({ teamId: 'team-one', view: 'settings' }, signal))
+      .toMatchObject({ name: 'Team One', projectRoot: '/workspace' })
     await expect(remote.project({ teamId: 'team-one', view: 'resource', resource: 'plan' }, signal))
       .resolves.toMatchObject({ id: 'plan', kind: 'markdown', body: '# Plan' })
     await remote.project({ teamId: 'team-one', view: 'resource', resource: 'plan', revision: 'rev-one' }, signal)
@@ -51,10 +55,11 @@ describe('FleetWebRemote', () => {
     expect(runs.readMemberTracePage).toHaveBeenCalledWith('team-one', 'lead', 80, undefined, signal)
     expect(runs.readConversationProjection).toHaveBeenCalledWith('team-one', '#general', 40, 200)
     expect(runs.exportConfiguration).toHaveBeenCalledWith('team-one')
+    expect(runs.teamSettings).toHaveBeenCalledWith('team-one')
     expect(runs.readResourcePreview).toHaveBeenNthCalledWith(1, 'team-one', 'plan', signal, undefined)
     expect(runs.readResourcePreview).toHaveBeenNthCalledWith(2, 'team-one', 'plan', signal, 'rev-one')
     expect(FLEET_WEB_INVOCATIONS.map(invocation => invocation.method))
-      .toEqual(['list', 'project', 'send', 'member', 'control', 'upload', 'uploadSetup', 'archive'])
+      .toEqual(['list', 'project', 'send', 'member', 'control', 'upload', 'removeResource', 'uploadSetup', 'archive'])
     expect(FLEET_WEB_INVOCATIONS.every(invocation =>
       invocation.result.mode === 'strict'
       && invocation.parameters.every(parameter => parameter.codec.mode === 'strict'),
@@ -91,10 +96,11 @@ describe('FleetWebRemote', () => {
         assignment: { groups: [], grants: [], denies: [], toolGroups: [], denyToolGroups: [] },
         effective: { actions: ['message.read'], toolGroups: ['messages'], op: false },
         groups: [{ id: 'observer', name: 'Observer', parents: [], preset: true, toolGroups: [], actions: [] }],
+        availableActions: ['message.read', 'message.wakeup'],
+        availableToolGroups: ['messages'],
       })),
-      setMemberGroups: vi.fn(() => ({ configured: true, assignment: { groups: ['observer'] } })),
+      setMember: vi.fn(),
       resetMember: vi.fn(),
-      canManage: vi.fn(() => true),
     } as unknown as FleetPermissionService
     const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService, authorization)
     const signal = new AbortController().signal
@@ -102,21 +108,102 @@ describe('FleetWebRemote', () => {
     expect(remote.project({ teamId: 'team-one', view: 'member', member: 'lead' }, signal))
       .toMatchObject({ authorization: { effective: { actions: ['message.read'] } } })
     expect(remote.member({
-      sessionId: 'ui-session', teamId: 'team-one', action: 'permissions', member: 'lead', groups: ['observer'],
-    }, signal)).toEqual({ configured: true, assignment: { groups: ['observer'] } })
-    expect(authorization.setMemberGroups).toHaveBeenCalledWith('team-one', 'lead', ['observer'])
+      sessionId: 'ui-session', teamId: 'team-one', action: 'permissions', member: 'lead',
+      assignment: {
+        groups: ['observer'], grants: ['message.wakeup'], denies: [],
+        toolGroups: [], denyToolGroups: [], op: false,
+      },
+    }, signal)).toMatchObject({ assignment: { groups: [] } })
+    expect(authorization.setMember).toHaveBeenCalledWith('team-one', 'lead', {
+      groups: ['observer'], grants: ['message.wakeup'], denies: [],
+      toolGroups: [], denyToolGroups: [], op: false,
+    })
     remote.member({
       sessionId: 'ui-session', teamId: 'team-one', action: 'reset_permissions', member: 'lead',
     }, signal)
     expect(authorization.resetMember).toHaveBeenCalledWith('team-one', 'lead')
-    expect(runs.requireAssistantConnection).toHaveBeenCalledTimes(2)
-    expect(authorization.canManage).toHaveBeenCalledTimes(2)
+    expect(runs.requireAssistantConnection).not.toHaveBeenCalled()
+    expect(authorization.setMember).toHaveBeenCalledTimes(1)
+  })
 
-    authorization.canManage.mockReturnValue(false)
-    expect(() => remote.member({
-      sessionId: 'ui-session', teamId: 'team-one', action: 'permissions', member: 'lead', groups: ['observer'],
-    }, signal)).toThrow('cannot manage permissions')
-    expect(authorization.setMemberGroups).toHaveBeenCalledTimes(1)
+  it('reads and updates a member private Access keycard through the member endpoint', () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const runs = {
+      requireAssistantConnection: vi.fn(() => ({
+        sessionId: 'ui-session',
+        view: { id: 'assistant', toolGroups: [], permissions: [] },
+      })),
+      memberViews: vi.fn(() => [{ id: 'builder' }]),
+    } as unknown as FleetRunService
+    const rule = {
+      id: 'source',
+      principal: { kind: 'group' as const, id: 'member:builder' },
+      resource: { kind: 'file', id: 'workspace:src' },
+      scope: 'tree' as const,
+      effect: 'allow' as const,
+      levels: ['write'] as const,
+    }
+    const access = {
+      adapterKinds: vi.fn(() => ['file', 'workspace']),
+      mode: vi.fn((_teamId: string, _principal: unknown, kind: string) =>
+        kind === 'file' ? 'restricted' : 'inherit'),
+      rules: vi.fn(() => [rule]),
+      setMode: vi.fn(),
+      putRule: vi.fn(),
+      removeRule: vi.fn(),
+    } as unknown as FleetAccessService
+    const remote = new FleetWebRemote(
+      ctx,
+      runs,
+      {} as FleetSetupService,
+      undefined,
+      undefined,
+      access,
+    )
+    const signal = new AbortController().signal
+
+    expect(remote.member({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'get_access', member: 'builder',
+    }, signal)).toEqual({
+      resourceKinds: ['file', 'workspace'],
+      modes: [
+        { resourceKind: 'file', mode: 'restricted' },
+        { resourceKind: 'workspace', mode: 'inherit' },
+      ],
+      rules: [{
+        id: 'source', resourceKind: 'file', resourceId: 'workspace:src',
+        scope: 'tree', effect: 'allow', levels: ['write'],
+      }],
+    })
+
+    remote.member({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'set_access_mode', member: 'builder',
+      resourceKind: 'file', accessMode: 'restricted',
+    }, signal)
+    expect(access.setMode).toHaveBeenCalledWith(
+      'team-one', { kind: 'group', id: 'member:builder' }, 'file', 'restricted',
+    )
+
+    remote.member({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'add_access_rule', member: 'builder',
+      accessRule: {
+        resourceKind: 'file', resourceId: 'src', scope: 'tree', effect: 'deny', levels: ['read'],
+      },
+    }, signal)
+    expect(access.putRule).toHaveBeenCalledWith('team-one', {
+      principal: { kind: 'group', id: 'member:builder' },
+      resource: { kind: 'file', id: 'src' },
+      scope: 'tree', effect: 'deny', levels: ['read'],
+    })
+
+    remote.member({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'remove_access_rule', member: 'builder',
+      accessRuleId: 'source',
+    }, signal)
+    expect(access.removeRule).toHaveBeenCalledWith('team-one', 'source')
+    expect(runs.requireAssistantConnection).not.toHaveBeenCalled()
   })
 
   it('sends direct UI conversations as the external user without attaching the current Session', () => {
@@ -252,10 +339,11 @@ describe('FleetWebRemote', () => {
 
     await expect(remote.member({
       sessionId: 'ui-session', teamId: 'team-one', action: 'configure_assistant',
+      member: 'assistant',
       request: { provider: 'provider-new', model: 'model-new' },
     }, signal)).resolves.toEqual(assistantConfigured)
     expect(runs.configureAssistant).toHaveBeenCalledWith(caller, {
-      runId: 'team-one', request: { provider: 'provider-new', model: 'model-new' },
+      runId: 'team-one', assistant: 'assistant', request: { provider: 'provider-new', model: 'model-new' },
     })
 
     await expect(remote.member({
@@ -265,6 +353,34 @@ describe('FleetWebRemote', () => {
     expect(runs.configureTeam).toHaveBeenCalledWith(caller, {
       runId: 'team-one',
       request: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'high' },
+    })
+  })
+
+  it('routes runtime Team settings through Team control', () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const settings = {
+      name: 'Runtime Team', positioning: '', rules: '', collaborationMethod: '',
+      updateDensity: 'balanced' as const, notificationPolicy: 'milestones' as const, contentPreference: '',
+    }
+    const runs = {
+      status: vi.fn(() => ({ id: 'team-one' })),
+      configureTeamSettings: vi.fn(() => ({ ...settings, projectRoot: '/workspace', request: { mixed: {} } })),
+      configureBudget: vi.fn(() => ({ mode: 'tokens', rates: [], configuredModels: [], team: { used: 0, limit: 100 }, members: [] })),
+    } as unknown as FleetRunService
+    const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
+
+    expect(remote.control({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'configure', settings,
+    }, new AbortController().signal)).toMatchObject({ name: 'Runtime Team' })
+    expect(runs.configureTeamSettings).toHaveBeenCalledWith(caller, { runId: 'team-one', settings })
+    expect(remote.control({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'budget',
+      budget: { scope: 'member', member: 'lead', limit: 25 },
+    }, new AbortController().signal)).toMatchObject({ team: { limit: 100 } })
+    expect(runs.configureBudget).toHaveBeenCalledWith(caller, {
+      runId: 'team-one', scope: 'member', member: 'lead', limit: 25,
     })
   })
 
@@ -293,22 +409,85 @@ describe('FleetWebRemote', () => {
     })
   })
 
-  it('routes an explicit Team wake through the existing control endpoint', () => {
+  it('routes an explicit Team wake through the existing control endpoint', async () => {
     const caller = { id: 'ui-session' } as Agent
     const ctx = new Context()
     Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
     const runs = {
       status: vi.fn(() => ({ id: 'team-one', status: 'running', runtimeState: 'active' })),
       requireAssistantConnection: vi.fn(),
-      wakeTeamAsExternal: vi.fn(() => ({ id: 'team-one', status: 'running' })),
+      wakeTeamAsExternal: vi.fn(() => Promise.resolve({ id: 'team-one', status: 'running' })),
     } as unknown as FleetRunService
     const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
 
-    expect(remote.control({
+    await expect(remote.control({
       sessionId: 'ui-session', teamId: 'team-one', action: 'wake',
-    }, new AbortController().signal)).toEqual({ id: 'team-one', status: 'running' })
+    }, new AbortController().signal)).resolves.toEqual({ id: 'team-one', status: 'running' })
     expect(runs.requireAssistantConnection).not.toHaveBeenCalled()
-    expect(runs.wakeTeamAsExternal).toHaveBeenCalledWith('team-one')
+    expect(runs.wakeTeamAsExternal).toHaveBeenCalledWith(caller, 'team-one')
+  })
+
+  it('keeps Team loading separate from resuming a loaded paused Team', async () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const runs = {
+      status: vi.fn()
+        .mockReturnValueOnce({ id: 'team-one', projectRoot: '/workspace', status: 'running', runtimeState: 'dormant' })
+        .mockReturnValueOnce({ id: 'team-one', projectRoot: '/workspace', status: 'paused', runtimeState: 'active' }),
+      requireAssistantConnection: vi.fn(),
+      loadTeamMembersAsExternal: vi.fn(() => Promise.resolve({ id: 'team-one', status: 'running', runtimeState: 'active' })),
+      resumeTeam: vi.fn(() => Promise.resolve({ id: 'team-one', status: 'running', runtimeState: 'active' })),
+    } as unknown as FleetRunService
+    const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
+    const signal = new AbortController().signal
+
+    await expect(remote.control({ sessionId: 'ui-session', teamId: 'team-one', action: 'load' }, signal))
+      .resolves.toMatchObject({ runtimeState: 'active' })
+    expect(runs.requireAssistantConnection).not.toHaveBeenCalled()
+    expect(runs.loadTeamMembersAsExternal).toHaveBeenCalledWith(caller, 'team-one')
+
+    await expect(remote.control({ sessionId: 'ui-session', teamId: 'team-one', action: 'resume' }, signal))
+      .resolves.toMatchObject({ status: 'running' })
+    expect(runs.requireAssistantConnection).toHaveBeenCalledWith(caller, 'team-one')
+    expect(runs.resumeTeam).toHaveBeenCalledWith(caller, 'team-one')
+  })
+
+  it('routes an individual member wake without requiring an assistant connection', async () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const runs = {
+      requireAssistantConnection: vi.fn(),
+      wakeMemberAsExternal: vi.fn(() => Promise.resolve({ name: 'lead', status: 'idle' })),
+    } as unknown as FleetRunService
+    const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
+
+    await expect(remote.member({
+      sessionId: 'ui-session', teamId: 'team-one', member: 'lead', action: 'wake',
+    }, new AbortController().signal)).resolves.toMatchObject({ name: 'lead' })
+    expect(runs.wakeMemberAsExternal).toHaveBeenCalledWith(caller, 'team-one', 'lead')
+    expect(runs.requireAssistantConnection).not.toHaveBeenCalled()
+  })
+
+  it('routes Team file removal through the connected assistant', () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const removed = { id: 'shared:notes.md', path: '/workspace/.fleet/team-one/notes.md' }
+    const runs = {
+      requireAssistantConnection: vi.fn(),
+      removeResource: vi.fn(() => removed),
+    } as unknown as FleetRunService
+    const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
+
+    expect(remote.removeResource({
+      sessionId: 'ui-session', teamId: 'team-one', resourceId: 'shared:notes.md',
+    }, new AbortController().signal)).toEqual(removed)
+    expect(runs.requireAssistantConnection).toHaveBeenCalledWith(caller, 'team-one')
+    expect(runs.removeResource).toHaveBeenCalledWith(caller, {
+      runId: 'team-one', resourceId: 'shared:notes.md',
+    })
   })
 
   it('streams complete Team archives in bounded Web chunks', async () => {

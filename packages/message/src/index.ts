@@ -36,6 +36,7 @@ const MESSAGE_SCHEMA = {
     fromName: { type: 'string' },
     text: { type: 'string', required: true },
     replyTo: { type: 'string' },
+    mustReply: { type: 'boolean' },
     resources: { type: 'array', required: true, items: { type: 'string' } },
     mentions: { type: 'array', required: true, items: { type: 'string' } },
     delivery: { type: 'string', required: true, enum: ['quiet', 'wakeup', 'interrupt'] },
@@ -77,6 +78,7 @@ const SEND_SCHEMA = {
   properties: {
     messageId: { type: 'string', required: true },
     recipients: { type: 'integer', required: true },
+    delivered: { type: 'integer', required: true },
     woken: { type: 'integer', required: true },
   },
 } as const
@@ -195,6 +197,7 @@ function messageOutput(): {
           ? { text_more: { action: 'text', message_id: message.id, total_length: message.text.length } }
           : {}),
         ...(message.replyTo === undefined ? {} : { reply_to: message.replyTo }),
+        ...(message.mustReply === true ? { must_reply: true } : {}),
         ...(message.resources.length === 0 ? {} : { resources: message.resources }),
         ...(message.mentions.length === 0 ? {} : { mentions: message.mentions }),
         ...(message.delivery === 'quiet' ? {} : { delivery: message.delivery }),
@@ -226,6 +229,7 @@ function messageOutput(): {
         }
       : {}),
     ...(message.replyTo === undefined ? {} : { reply_to: message.replyTo }),
+    ...(message.mustReply === true ? { must_reply: true } : {}),
     ...(message.resources.length === 0 ? {} : { resources: message.resources }),
     ...(message.mentions.length === 0 ? {} : { mentions: message.mentions }),
     ...(message.delivery === 'quiet' ? {} : { delivery: message.delivery }),
@@ -387,6 +391,9 @@ export function apply(ctx: Context): void {
       if (core !== undefined && core.nameForAgent(id) === undefined) return undefined
       return ctx.agents.get(SessionId(id))
     },
+    participantIds(): string[] {
+      return this.list().map(agent => String(agent.id))
+    },
     list(): MessageAgent[] {
       const agents = ctx.agents.list()
       const core = fleetDirectory(ctx)
@@ -443,6 +450,7 @@ export function installMessageTools(
       to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
+      must_reply: { type: 'boolean', description: 'Require each recipient to send a later message in this direct conversation or Channel before remaining idle.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(SEND_SCHEMA),
@@ -454,6 +462,7 @@ export function installMessageTools(
         text: args.message,
         delivery: 'quiet',
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
+        ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }))
     },
@@ -467,6 +476,7 @@ export function installMessageTools(
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
       mentions: { type: 'array', items: { type: 'string' }, description: 'Required explicit @agent-id targets for a Channel follow-up.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
+      must_reply: { type: 'boolean', description: 'Require each recipient to send a later message in this direct conversation or Channel before remaining idle.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
       interrupt: { type: 'boolean', description: 'Cancel the recipients current Agent step, preserve pending inbox work, and steer this message immediately.' },
     },
@@ -485,6 +495,7 @@ export function installMessageTools(
         delivery: args.interrupt === true ? 'interrupt' : 'wakeup',
         ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
+        ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }))
     },

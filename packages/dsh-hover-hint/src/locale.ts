@@ -23,3 +23,14 @@ export function currentHoverHintLocale(): string {
   }
   return typeof navigator === 'undefined' ? 'en' : navigator.language
 }
+
+export function subscribeHoverHintLocale(listener: () => void): () => void {
+  if (typeof document === 'undefined') return () => {}
+  const observer = new MutationObserver(listener)
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] })
+  window.addEventListener('languagechange', listener)
+  return () => {
+    observer.disconnect()
+    window.removeEventListener('languagechange', listener)
+  }
+}

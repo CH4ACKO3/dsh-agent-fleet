@@ -19,7 +19,9 @@ import {
   statSync,
   realpathSync,
   unlinkSync,
+  watch,
   writeFileSync,
+  type FSWatcher,
 } from 'node:fs'
 import { readFile as readFileAsync } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
@@ -28,7 +30,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-compaction'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -124,7 +128,90 @@ export interface FleetRunMember {
 export interface FleetRunAssistant {
   readonly sessionId: string
   readonly view: FleetAssistantView
-  readonly status?: 'idle' | 'running' | 'offline'
+  readonly status?: 'idle' | 'running' | 'offline' | 'paused'
+}
+
+export type FleetBudgetMode = 'tokens' | 'cost'
+
+export interface FleetBudgetModelRate {
+  readonly provider: string
+  readonly model: string
+  /** Token mode only. An omitted multiplier is exactly 1x. */
+  readonly multiplier?: number
+  /** Cost mode prices in USD per one million tokens. */
+  readonly inputUsdPerMillion?: number
+  readonly outputUsdPerMillion?: number
+  readonly cacheReadUsdPerMillion?: number
+  readonly cacheWriteUsdPerMillion?: number
+}
+
+export interface FleetBudgetModelUsage {
+  readonly provider: string
+  readonly model: string
+  /** Weighted tokens in token mode, micro-USD in cost mode. */
+  readonly charged: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+  readonly reasoningTokens: number
+  readonly calls: number
+  readonly unmeteredCalls: number
+}
+
+export interface FleetBudgetAccount {
+  /** Weighted tokens in token mode, micro-USD in cost mode. */
+  readonly limit?: number
+  readonly startedAt: string
+  /** Weighted tokens in token mode, micro-USD in cost mode. */
+  readonly used: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+  readonly reasoningTokens: number
+  readonly calls: number
+  readonly unmeteredCalls: number
+  readonly models: FleetBudgetModelUsage[]
+}
+
+export interface FleetTeamBudgetState {
+  readonly mode: FleetBudgetMode
+  readonly rates: FleetBudgetModelRate[]
+  readonly team: FleetBudgetAccount
+  readonly members: FleetBudgetMemberAccount[]
+}
+
+export interface FleetBudgetMemberAccount extends FleetBudgetAccount {
+  readonly memberId: string
+  readonly name?: string
+  readonly role?: string
+  readonly color?: string
+  readonly assistant?: boolean
+}
+
+export type FleetBudgetAccountState = 'unlimited' | 'normal' | 'warning' | 'danger' | 'exhausted'
+
+export interface FleetBudgetAccountSnapshot extends FleetBudgetAccount {
+  readonly remaining?: number
+  readonly state: FleetBudgetAccountState
+}
+
+export interface FleetParticipantBudgetSnapshot extends FleetBudgetAccountSnapshot {
+  readonly memberId: string
+  readonly name: string
+  readonly role: string
+  readonly color?: string
+  readonly assistant: boolean
+  readonly active: boolean
+}
+
+export interface FleetTeamBudgetSnapshot {
+  readonly mode: FleetBudgetMode
+  readonly rates: FleetBudgetModelRate[]
+  readonly configuredModels: readonly { readonly provider: string; readonly model: string }[]
+  readonly team: FleetBudgetAccountSnapshot
+  readonly members: readonly FleetParticipantBudgetSnapshot[]
 }
 
 export interface FleetRunRecord {
@@ -145,6 +232,8 @@ export interface FleetRunRecord {
   }
   readonly members: FleetRunMember[]
   readonly assistants: FleetRunAssistant[]
+  /** Shared Team and participant model-token budgets. Missing means tracking starts with the next model call. */
+  readonly budget?: FleetTeamBudgetState
   /** Runtime projection of historical assistant Sessions onto their current Session. */
   readonly assistantSessionAliases?: {
     readonly sessionId: string
@@ -477,6 +566,9 @@ function stableCoordinationEvent(
         conversation,
         conversationId: stableConversationId(identities, from, conversation),
         mentions: [...new Set(coordination.message.mentions.map(stable))],
+        ...(coordination.message.recipientIds === undefined ? {} : {
+          recipientIds: [...new Set(coordination.message.recipientIds.map(stable))],
+        }),
       },
     }
   } else if (coordination.type === 'channel') {
@@ -629,6 +721,7 @@ function isProjectionActivity(event: StoredFleetEvent): boolean {
     || event.type.startsWith('calendar.')
     || event.type === 'coordination.vote'
     || event.type.startsWith('work_')
+    || event.type.startsWith('budget_')
     || event.type === 'team_status'
     || event.type.startsWith('member_')
     || event.type.startsWith('assistant_')
@@ -638,7 +731,8 @@ function projectionReceiptMessageId(event: StoredFleetEvent): string | undefined
   if (event.type !== 'coordination.inbox' || typeof event.data !== 'object' || event.data === null) return undefined
   const data = event.data as Record<string, unknown>
   return data.type === 'inbox'
-    && (data.action === 'delivered' || data.action === 'read' || data.action === 'acknowledged')
+    && (data.action === 'delivered' || data.action === 'blocked' || data.action === 'read'
+      || data.action === 'acknowledged')
     && typeof data.messageId === 'string'
     ? data.messageId
     : undefined
@@ -834,6 +928,11 @@ export interface FleetRunServiceOptions {
   readonly configuration?: FleetConfigurationRegistry
 }
 
+export interface FleetResidentAssistantController {
+  release(sessionId: string): Promise<boolean>
+  restore(sessionId: string): Promise<void>
+}
+
 export interface ExportFleetArchiveInput {
   readonly runId: string
   readonly destination: string
@@ -892,6 +991,7 @@ export interface SendFleetConversationMessageInput {
   readonly to: FleetTarget
   readonly text: string
   readonly replyTo?: string
+  readonly mustReply?: boolean
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
   readonly delivery: 'quiet' | 'wakeup' | 'interrupt'
@@ -903,6 +1003,11 @@ export interface UploadFleetResourceInput {
   readonly base64: string
   readonly label?: string
   readonly mediaType?: string
+}
+
+export interface RemoveFleetResourceInput {
+  readonly runId: string
+  readonly resourceId: string
 }
 
 export interface AttachAssistantInput {
@@ -940,6 +1045,52 @@ export interface FleetMemberRequestPatch {
   readonly maxTokens?: number | null
 }
 
+export interface FleetTeamSettings {
+  readonly name: string
+  readonly positioning: string
+  readonly rules: string
+  readonly collaborationMethod: string
+  readonly updateDensity: 'concise' | 'balanced' | 'detailed'
+  readonly notificationPolicy: 'decisions' | 'milestones' | 'continuous'
+  readonly contentPreference: string
+}
+
+export interface FleetTeamSettingsSnapshot extends FleetTeamSettings {
+  readonly projectRoot: string
+  readonly budget: FleetTeamBudgetSnapshot
+  readonly request: {
+    readonly provider?: string
+    readonly model?: string
+    readonly reasoningEffort?: string
+    readonly maxTokens?: number
+    readonly mixed: {
+      readonly model: boolean
+      readonly reasoningEffort: boolean
+      readonly maxTokens: boolean
+    }
+  }
+}
+
+export interface ConfigureFleetTeamSettingsInput {
+  readonly runId: string
+  readonly settings: FleetTeamSettings
+}
+
+export interface ConfigureFleetBudgetInput {
+  readonly runId: string
+  readonly scope: 'team' | 'member'
+  readonly member?: string
+  /** Active accounting unit: weighted tokens in token mode, micro-USD in cost mode. */
+  readonly limit?: number | null
+  /** Reset this scope's usage cycle while preserving its current limit. */
+  readonly reset?: true
+  /** Team-wide accounting mode and provider+model rates. */
+  readonly accounting?: {
+    readonly mode: FleetBudgetMode
+    readonly rates: readonly FleetBudgetModelRate[]
+  }
+}
+
 export interface ConfigureFleetMemberInput {
   readonly runId: string
   readonly member: string
@@ -954,6 +1105,7 @@ export interface FleetMemberRequestConfiguration {
 
 export interface ConfigureFleetAssistantInput {
   readonly runId: string
+  readonly assistant?: string
   readonly request: FleetMemberRequestPatch
 }
 
@@ -981,11 +1133,202 @@ interface AssistantRequestConfigRef extends ModelSelectionRef {
 
 const TERMINAL = new Set<FleetRunStatus>(['closed', 'failed'])
 const MAX_ASSISTANT_MESSAGE_LENGTH = 16_000
-const TEAM_PROJECTION_MESSAGE_LIMIT = 500
+const TEAM_PROJECTION_MESSAGE_LIMIT = 100
 const TEAM_PROJECTION_ACTIVITY_LIMIT = 250
 const TEAM_PROJECTION_CACHE_LIMIT = 16
 const FLEET_ARCHIVE_FORMAT = 'dsh-agent-fleet-archive'
 const FLEET_ARCHIVE_VERSION = 1
+
+function emptyBudgetAccount(startedAt: string, limit?: number): FleetBudgetAccount {
+  return {
+    ...(limit === undefined ? {} : { limit }),
+    startedAt,
+    used: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    calls: 0,
+    unmeteredCalls: 0,
+    models: [],
+  }
+}
+
+function budgetAccountSnapshot(account: FleetBudgetAccount): FleetBudgetAccountSnapshot {
+  if (account.limit === undefined) return { ...account, state: 'unlimited' }
+  const remaining = Math.max(0, account.limit - account.used)
+  return {
+    ...account,
+    remaining,
+    state: remaining === 0
+      ? 'exhausted'
+      : account.used >= account.limit * 0.9
+        ? 'danger'
+        : account.used >= account.limit * 0.7
+          ? 'warning'
+          : 'normal',
+  }
+}
+
+function budgetMemberAccount(state: FleetTeamBudgetState | undefined, memberId: string): FleetBudgetMemberAccount | undefined {
+  return state?.members.find(account => account.memberId === memberId)
+}
+
+function replaceBudgetMember(
+  members: readonly FleetBudgetMemberAccount[],
+  memberId: string,
+  account: FleetBudgetAccount,
+  identity?: Pick<FleetBudgetMemberAccount, 'name' | 'role' | 'color' | 'assistant'>,
+): FleetBudgetMemberAccount[] {
+  const current = members.find(candidate => candidate.memberId === memberId)
+  const next = { ...current, ...account, memberId, ...identity }
+  return current !== undefined
+    ? members.map(candidate => candidate.memberId === memberId ? next : candidate)
+    : [...members, next]
+}
+
+function budgetMemberIdentity(
+  record: FleetRunRecord,
+  memberId: string,
+): Pick<FleetBudgetMemberAccount, 'name' | 'role' | 'color' | 'assistant'> | undefined {
+  const member = record.members.find(candidate => candidate.name === memberId)
+  if (member !== undefined) return {
+    name: member.displayName ?? member.name,
+    role: member.role,
+    ...(member.color === undefined ? {} : { color: member.color }),
+    assistant: false,
+  }
+  const assistant = record.assistants.find(candidate => candidate.view.id === memberId)?.view
+  return assistant === undefined ? undefined : {
+    name: assistant.name,
+    role: assistant.role,
+    ...(assistant.color === undefined ? {} : { color: assistant.color }),
+    assistant: true,
+  }
+}
+
+function resetBudgetMemberAccount(
+  account: FleetBudgetMemberAccount,
+  startedAt: string,
+  preserveLimit: boolean,
+): FleetBudgetMemberAccount {
+  return {
+    ...emptyBudgetAccount(startedAt, preserveLimit ? account.limit : undefined),
+    memberId: account.memberId,
+    ...(account.name === undefined ? {} : { name: account.name }),
+    ...(account.role === undefined ? {} : { role: account.role }),
+    ...(account.color === undefined ? {} : { color: account.color }),
+    ...(account.assistant === undefined ? {} : { assistant: account.assistant }),
+  }
+}
+
+interface FleetBudgetCharge {
+  readonly provider: string
+  readonly model: string
+  readonly usage: TokenUsage | null
+}
+
+function budgetUsage(event: SessionEvent): FleetBudgetCharge | undefined {
+  if (event.type === 'assistant/message') {
+    const source = event.data.message.source
+    if (source === undefined) return undefined
+    return {
+      provider: source.provider,
+      model: source.model,
+      usage: event.data.usage ?? null,
+    }
+  }
+  if (event.type === 'compaction/summary') {
+    return { provider: event.data.provider, model: event.data.model, usage: event.data.usage ?? null }
+  }
+  return undefined
+}
+
+function budgetRate(
+  rates: readonly FleetBudgetModelRate[],
+  provider: string,
+  model: string,
+): FleetBudgetModelRate | undefined {
+  return rates.find(rate => rate.provider === provider && rate.model === model)
+}
+
+function rawBudgetTokens(usage: TokenUsage): number {
+  return usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+}
+
+function chargedBudgetUsage(state: FleetTeamBudgetState, charge: FleetBudgetCharge): number {
+  if (charge.usage === null) return 0
+  const rate = budgetRate(state.rates, charge.provider, charge.model)
+  if (state.mode === 'tokens') return Math.ceil(rawBudgetTokens(charge.usage) * (rate?.multiplier ?? 1))
+  if (rate?.inputUsdPerMillion === undefined || rate.outputUsdPerMillion === undefined
+    || rate.cacheReadUsdPerMillion === undefined || rate.cacheWriteUsdPerMillion === undefined) {
+    throw new Error(`Fleet cost budget requires prices for ${charge.provider} / ${charge.model}`)
+  }
+  return Math.round(
+    charge.usage.inputTokens * rate.inputUsdPerMillion
+    + charge.usage.outputTokens * rate.outputUsdPerMillion
+    + (charge.usage.cacheReadTokens ?? 0) * rate.cacheReadUsdPerMillion
+    + (charge.usage.cacheWriteTokens ?? 0) * rate.cacheWriteUsdPerMillion,
+  )
+}
+
+function addModelBudgetUsage(
+  models: readonly FleetBudgetModelUsage[],
+  charge: FleetBudgetCharge,
+  charged: number,
+): FleetBudgetModelUsage[] {
+  const current = models.find(item => item.provider === charge.provider && item.model === charge.model)
+  const usage = charge.usage
+  const next: FleetBudgetModelUsage = {
+    provider: charge.provider,
+    model: charge.model,
+    charged: (current?.charged ?? 0) + charged,
+    inputTokens: (current?.inputTokens ?? 0) + (usage?.inputTokens ?? 0),
+    outputTokens: (current?.outputTokens ?? 0) + (usage?.outputTokens ?? 0),
+    cacheReadTokens: (current?.cacheReadTokens ?? 0) + (usage?.cacheReadTokens ?? 0),
+    cacheWriteTokens: (current?.cacheWriteTokens ?? 0) + (usage?.cacheWriteTokens ?? 0),
+    reasoningTokens: (current?.reasoningTokens ?? 0) + (usage?.reasoningTokens ?? 0),
+    calls: (current?.calls ?? 0) + 1,
+    unmeteredCalls: (current?.unmeteredCalls ?? 0) + (usage === null ? 1 : 0),
+  }
+  return current === undefined
+    ? [...models, next]
+    : models.map(item => item.provider === charge.provider && item.model === charge.model ? next : item)
+}
+
+function addBudgetUsage(
+  state: FleetTeamBudgetState,
+  account: FleetBudgetAccount,
+  charge: FleetBudgetCharge,
+): FleetBudgetAccount {
+  const charged = chargedBudgetUsage(state, charge)
+  if (charge.usage === null) {
+    return {
+      ...account,
+      calls: account.calls + 1,
+      unmeteredCalls: account.unmeteredCalls + 1,
+      models: addModelBudgetUsage(account.models, charge, charged),
+    }
+  }
+  const usage = charge.usage
+  const inputTokens = usage.inputTokens
+  const outputTokens = usage.outputTokens
+  const cacheReadTokens = usage.cacheReadTokens ?? 0
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0
+  const reasoningTokens = usage.reasoningTokens ?? 0
+  return {
+    ...account,
+    used: account.used + charged,
+    inputTokens: account.inputTokens + inputTokens,
+    outputTokens: account.outputTokens + outputTokens,
+    cacheReadTokens: account.cacheReadTokens + cacheReadTokens,
+    cacheWriteTokens: account.cacheWriteTokens + cacheWriteTokens,
+    reasoningTokens: account.reasoningTokens + reasoningTokens,
+    calls: account.calls + 1,
+    models: addModelBudgetUsage(account.models, charge, charged),
+  }
+}
 
 interface FleetArchiveManifest {
   readonly format: typeof FLEET_ARCHIVE_FORMAT
@@ -1003,7 +1346,35 @@ interface FleetArchiveSession {
 }
 
 function parseStoredRecord(value: unknown): FleetRunRecord {
-  return object(value, 'Fleet run record') as unknown as FleetRunRecord
+  const record = object(value, 'Fleet run record') as unknown as FleetRunRecord & {
+    readonly budget?: FleetTeamBudgetState & {
+      readonly team: FleetBudgetAccount & { readonly limitTokens?: number; readonly usedTokens?: number }
+      readonly members: readonly (FleetBudgetMemberAccount & { readonly limitTokens?: number; readonly usedTokens?: number })[]
+    }
+  }
+  if (record.budget === undefined || record.budget.mode !== undefined) return record
+  const migrate = (account: FleetBudgetAccount & { readonly limitTokens?: number; readonly usedTokens?: number }): FleetBudgetAccount => ({
+    ...(account.limitTokens === undefined ? {} : { limit: account.limitTokens }),
+    startedAt: account.startedAt,
+    used: account.usedTokens ?? 0,
+    inputTokens: account.inputTokens,
+    outputTokens: account.outputTokens,
+    cacheReadTokens: account.cacheReadTokens,
+    cacheWriteTokens: account.cacheWriteTokens,
+    reasoningTokens: account.reasoningTokens,
+    calls: account.calls,
+    unmeteredCalls: account.unmeteredCalls,
+    models: [],
+  })
+  return {
+    ...record,
+    budget: {
+      mode: 'tokens',
+      rates: [],
+      team: migrate(record.budget.team),
+      members: record.budget.members.map(account => ({ ...migrate(account), memberId: account.memberId })),
+    },
+  }
 }
 
 function recordSnapshot(record: FleetRunRecord): FleetRunRecord {
@@ -1638,7 +2009,7 @@ const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
 const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_HISTORY_LIMIT = 500
-const SHARED_FILE_SCAN_INTERVAL_MS = 5_000
+const SHARED_FILE_WATCH_DEBOUNCE_MS = 150
 
 function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kind'] | undefined {
   const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
@@ -1681,6 +2052,7 @@ export class FleetRunService {
   private readonly records = new Map<string, FleetRunRecord>()
   private readonly voteWorkIds = new Map<string, Map<string, string>>()
   private readonly dormantRunIds = new Set<string>()
+  private readonly manualWakeRequiredRunIds = new Set<string>()
   private readonly eventSequences = new Map<string, number>()
   private readonly teamProjectionEvents = new Map<string, StoredFleetEvent[]>()
   private readonly teamProjectionIdentities = new Map<string, FleetParticipantIdentities>()
@@ -1695,12 +2067,17 @@ export class FleetRunService {
   private readonly abnormalSessionIds = new Set<string>()
   private readonly sharedFileVersions = new Map<string, Map<string, string>>()
   private readonly sharedFileScanErrors = new Map<string, string>()
+  private readonly sharedFileWatchers = new Map<string, FSWatcher>()
+  private readonly sharedFileSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly assistantRequestConfigs = new WeakMap<Agent, AssistantRequestConfigRef>()
+  private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
+  private readonly budgetGuardAgents = new WeakSet<Agent>()
   private readonly pausingTeams = new Map<string, Promise<FleetRunRecord>>()
   private readonly pausingMembers = new Map<string, Promise<FleetRunMember>>()
-  private readonly sharedFileScanTimer: ReturnType<typeof setInterval>
+  private residentAssistants: FleetResidentAssistantController | undefined
   private readonly changeListeners = new Set<() => void>()
+  private readonly traceChangeListeners = new Set<(teamId: string, memberId: string) => void>()
   private readonly registryDirectory: string
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
@@ -1718,16 +2095,29 @@ export class FleetRunService {
     this.authorization = options.authorization
     this.configuration = options.configuration ?? new FleetConfigurationRegistry()
     const liveAgents = (this.ctx.agents as typeof this.ctx.agents & { list?: () => Agent[] }).list?.() ?? []
-    for (const agent of liveAgents) this.bindParticipantInbox(agent)
-    this.ctx.on('agent/created', ({ agent }) => { this.bindParticipantInbox(agent) })
+    for (const agent of liveAgents) {
+      this.bindParticipantInbox(agent)
+      this.bindBudgetGuard(agent)
+    }
+    this.ctx.on('agent/created', ({ agent }) => {
+      this.bindParticipantInbox(agent)
+      this.bindBudgetGuard(agent)
+    })
     this.loadPersistedTeams()
-    this.sharedFileScanTimer = setInterval(() => { this.scanSharedFiles() }, SHARED_FILE_SCAN_INTERVAL_MS)
-    this.sharedFileScanTimer.unref?.()
   }
 
   subscribeChanges(listener: () => void): () => void {
     this.changeListeners.add(listener)
     return () => { this.changeListeners.delete(listener) }
+  }
+
+  subscribeTraceChanges(listener: (teamId: string, memberId: string) => void): () => void {
+    this.traceChangeListeners.add(listener)
+    return () => { this.traceChangeListeners.delete(listener) }
+  }
+
+  setResidentAssistantController(controller: FleetResidentAssistantController | undefined): void {
+    this.residentAssistants = controller
   }
 
   authorizationBaseline(): FleetAuthorizationBaseline {
@@ -2050,6 +2440,7 @@ export class FleetRunService {
       startedAt: new Date().toISOString(),
     }
     const running = this.replaceRecord(record.id, { status: 'running', work })
+    this.manualWakeRequiredRunIds.delete(record.id)
     this.appendEvent(record.id, 'work_started', { workId: work.id, taskPath, acceptedTaskPath })
 
     const roster = record.members
@@ -2166,10 +2557,8 @@ export class FleetRunService {
       readonly sessionId: string
       readonly view: FleetMemberView
     }> = []
-    const resumePausedMembers = new Set(record.status === 'paused' ? record.teamPausedMembers ?? [] : [])
-    const shouldResumeMember = (member: FleetRunMember): boolean => record.status === 'paused'
-      ? resumePausedMembers.has(member.name)
-      : member.status !== 'paused'
+    const shouldResumeMember = (member: FleetRunMember): boolean => record.status !== 'paused'
+      && member.status !== 'paused'
     this.resumingRunIds.add(record.id)
     try {
       for (const member of members.filter(shouldResumeMember)) {
@@ -2282,50 +2671,7 @@ export class FleetRunService {
       }
       runtime.messages.connectAgent(String(launcher.id), template.channels.map(channel => channel.id))
 
-      if (
-        approvedWorkVote === undefined
-        && (record.status === 'running' || record.status === 'starting')
-        && record.work?.status === 'running'
-      ) {
-        const task = this.readWorkTask(record)
-        const roster = members
-          .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
-          .join('\n')
-        for (const member of members.filter(shouldResumeMember)) {
-          const resumedAgent = this.ctx.agents.get(SessionId(member.sessionId))
-          if (resumedAgent === undefined) throw new Error(`Fleet member ${member.name} did not resume`)
-          const inbox = (resumedAgent as Agent & {
-            readonly inbox?: { readonly nextTurn: readonly unknown[]; readonly nextStep: readonly unknown[] }
-          }).inbox
-          if (inbox !== undefined && inbox.nextTurn.length > 0) continue
-          if (inbox !== undefined && inbox.nextStep.length > 0) {
-            runtime.messages.sendSystemNotification(member.sessionId, {
-              kind: 'work_resume',
-              text: `[Fleet work ${record.work.id} resumed.] Continue the pending Fleet work already in your inbox and re-establish peer coordination.`,
-              delivery: 'wakeup',
-              coalesceKey: `work-resume:${record.work.id}`,
-            })
-            continue
-          }
-          runtime.messages.sendSystemNotification(member.sessionId, {
-            kind: 'work_resume',
-            text: [
-              `[Fleet work ${record.work.id} resumed after a process restart.]`,
-              `Your Fleet identity: @${member.displayName ?? member.name}`,
-              `Members:\n${roster}`,
-              'Your persisted Session context is available. Inspect current Fleet Channels, Meetings, Votes, Team resource files, and resource references before continuing.',
-              'Previous advisory work claims were released by the restart; declare your current paths again before editing.',
-              'The previous turn may have been interrupted; verify external side effects before retrying any tool action.',
-              `Work:\n${task}`,
-            ].join('\n\n'),
-            delivery: 'wakeup',
-            coalesceKey: `work-resume:${record.work.id}`,
-          })
-        }
-      }
-
-
-      this.appendEvent(record.id, 'team_resumed', {
+      this.appendEvent(record.id, wasDormant ? 'team_loaded' : 'team_resumed', {
         launcherSessionId: String(launcher.id),
         previousLauncherSessionId,
         members: members.map(member => member.name),
@@ -2333,9 +2679,8 @@ export class FleetRunService {
       const restoredStatus: FleetRunStatus = record.status === 'starting'
         ? (record.work?.status === 'running' ? 'running' : 'idle')
         : record.status === 'finishing' ? 'idle'
-          : record.status === 'paused' ? (record.work?.status === 'running' ? 'running' : 'idle')
-            : record.status
-      if (record.status === 'starting' || record.status === 'finishing' || record.status === 'paused') {
+          : record.status
+      if (record.status === 'starting' || record.status === 'finishing') {
         this.appendEvent(record.id, 'team_status', { status: restoredStatus })
       }
       const restored = this.replaceRecord(record.id, {
@@ -2343,9 +2688,11 @@ export class FleetRunService {
         agentOptions,
         members: [...members],
         status: restoredStatus,
-        teamPausedMembers: [],
+        teamPausedMembers: record.teamPausedMembers ?? [],
       })
-      runtime.activateProductivity()
+      if (restored.status === 'paused') runtime.pauseProductivity()
+      else runtime.activateProductivity()
+      if (restored.work?.status === 'running') this.manualWakeRequiredRunIds.add(record.id)
       runtime.events.emit('fleet/team/session-start', { source: 'resume' })
       if (approvedWorkVote !== undefined && approvedWorkVote.type === 'vote') {
         const initiatorSessionId = this.restoredSessionId(events, approvedWorkVote.vote.initiator)
@@ -2473,6 +2820,284 @@ export class FleetRunService {
     const record = this.requireRecord(runId)
     const configured = object(JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown, 'Team template')
     return this.configuration.parse(configured.modules)[moduleId]
+  }
+
+  teamSettings(runId: string): FleetTeamSettingsSnapshot {
+    const record = this.requireRecord(runId)
+    const configured = object(JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown, 'Team template')
+    const core = object(configured.core, 'core')
+    const modules = this.configuration.parse(configured.modules)
+    const message = parseFleetMessageConfiguration(modules[FLEET_MESSAGE_MODULE])
+    const ui = parseFleetUiConfiguration(modules[FLEET_UI_MODULE])
+    const projected = this.describeRecord(record)
+    const actors = [...projected.members, ...projected.assistants.map(assistant => assistant.view)]
+    const common = <T,>(values: readonly (T | undefined)[]): { readonly value?: T; readonly mixed: boolean } => {
+      const first = values[0]
+      const mixed = values.some(value => value !== first)
+      return { ...(first === undefined ? {} : { value: first }), mixed }
+    }
+    const providers = common(actors.map(actor => actor.provider))
+    const models = common(actors.map(actor => actor.model))
+    const efforts = common(actors.map(actor => actor.reasoningEffort))
+    const tokenLimits = common(actors.map(actor => actor.maxTokens))
+    return {
+      name: record.name,
+      positioning: optionalText(core.positioning, 'core.positioning'),
+      rules: message.rules,
+      collaborationMethod: message.collaborationMethod,
+      updateDensity: ui.userAccess.updateDensity,
+      notificationPolicy: ui.userAccess.notificationPolicy,
+      contentPreference: ui.userAccess.contentPreference,
+      projectRoot: record.projectRoot,
+      request: {
+        ...(providers.mixed || providers.value === undefined ? {} : { provider: providers.value }),
+        ...(models.mixed || models.value === undefined ? {} : { model: models.value }),
+        ...(efforts.mixed || efforts.value === undefined ? {} : { reasoningEffort: efforts.value }),
+        ...(tokenLimits.mixed || tokenLimits.value === undefined ? {} : { maxTokens: tokenLimits.value }),
+        mixed: {
+          model: providers.mixed || models.mixed,
+          reasoningEffort: efforts.mixed,
+          maxTokens: tokenLimits.mixed,
+        },
+      },
+      budget: this.teamBudget(record.id),
+    }
+  }
+
+  teamBudget(runId: string): FleetTeamBudgetSnapshot {
+    const record = this.requireRecord(runId)
+    const state = record.budget
+    const mode = state?.mode ?? 'tokens'
+    const rates = state?.rates ?? []
+    const team = budgetAccountSnapshot(state?.team ?? emptyBudgetAccount(record.startedAt))
+    const memberViews = new Map(this.memberViews(record.id).map(view => [view.id, view]))
+    const participants = [
+      ...record.members.map(member => {
+        const view = memberViews.get(member.name)
+        const memberColor = member.color ?? view?.color
+        return {
+          memberId: member.name,
+          name: member.displayName ?? view?.name ?? member.name,
+          role: view?.role ?? member.role,
+          ...(memberColor === undefined ? {} : { color: memberColor }),
+          assistant: false,
+          active: true,
+        }
+      }),
+      ...record.assistants.map(assistant => ({
+        memberId: assistant.view.id,
+        name: assistant.view.name,
+        role: assistant.view.role,
+        ...(assistant.view.color === undefined ? {} : { color: assistant.view.color }),
+        assistant: true,
+        active: true,
+      })),
+    ]
+    const participantIds = new Set(participants.map(participant => participant.memberId))
+    const historicalParticipants = (state?.members ?? [])
+      .filter(account => !participantIds.has(account.memberId) && (account.used > 0 || account.calls > 0))
+      .map(account => ({
+        memberId: account.memberId,
+        name: account.name ?? account.memberId,
+        role: account.role ?? '',
+        ...(account.color === undefined ? {} : { color: account.color }),
+        assistant: account.assistant ?? false,
+        active: false,
+      }))
+    const configuredModels = [...new Map(
+      [...this.describeRecord(record).members, ...this.describeRecord(record).assistants.map(assistant => assistant.view)]
+        .flatMap(actor => actor.provider === undefined || actor.model === undefined
+          ? []
+          : [[`${actor.provider}\u0000${actor.model}`, { provider: actor.provider, model: actor.model }] as const]),
+    ).values()]
+    return {
+      mode,
+      rates,
+      configuredModels,
+      team,
+      members: [...participants, ...historicalParticipants].map(participant => ({
+        ...budgetAccountSnapshot(
+          budgetMemberAccount(state, participant.memberId) ?? emptyBudgetAccount(team.startedAt),
+        ),
+        ...participant,
+      })),
+    }
+  }
+
+  configureBudget(caller: Agent, input: ConfigureFleetBudgetInput): FleetTeamBudgetSnapshot {
+    let record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const changingLimit = input.limit !== undefined
+    const resetting = input.reset === true
+    const changingAccounting = input.accounting !== undefined
+    if (Number(changingLimit) + Number(resetting) + Number(changingAccounting) !== 1) {
+      throw new Error('Fleet budget update must change exactly one of its limit, cycle, or accounting mode')
+    }
+    if (input.limit !== undefined && input.limit !== null
+      && (!Number.isSafeInteger(input.limit) || input.limit <= 0)) {
+      throw new Error('Fleet budget limit must be a positive safe integer or null')
+    }
+    const now = new Date().toISOString()
+    const current = record.budget ?? { mode: 'tokens', rates: [], team: emptyBudgetAccount(now), members: [] }
+    if (input.accounting !== undefined) {
+      if (input.scope !== 'team' || input.member !== undefined) {
+        throw new Error('Fleet budget accounting is configured for the whole Team')
+      }
+      const rates: FleetBudgetModelRate[] = input.accounting.rates.map((rate, index): FleetBudgetModelRate => {
+        const provider = rate.provider.trim()
+        const model = rate.model.trim()
+        if (provider === '' || model === '') throw new Error(`Fleet budget rate ${String(index + 1)} requires provider and model`)
+        if (input.accounting?.mode === 'tokens') {
+          if (rate.multiplier !== undefined && (!Number.isFinite(rate.multiplier) || rate.multiplier <= 0)) {
+            throw new Error(`Fleet token multiplier for ${provider} / ${model} must be positive`)
+          }
+          return { provider, model, ...(rate.multiplier === undefined || rate.multiplier === 1 ? {} : { multiplier: rate.multiplier }) }
+        }
+        const prices = [rate.inputUsdPerMillion, rate.outputUsdPerMillion, rate.cacheReadUsdPerMillion, rate.cacheWriteUsdPerMillion]
+        if (prices.some(price => price === undefined || !Number.isFinite(price) || price < 0)) {
+          throw new Error(`Fleet cost budget requires four non-negative prices for ${provider} / ${model}`)
+        }
+        return {
+          provider,
+          model,
+          inputUsdPerMillion: rate.inputUsdPerMillion!,
+          outputUsdPerMillion: rate.outputUsdPerMillion!,
+          cacheReadUsdPerMillion: rate.cacheReadUsdPerMillion!,
+          cacheWriteUsdPerMillion: rate.cacheWriteUsdPerMillion!,
+        }
+      })
+      const keys = rates.map(rate => `${rate.provider}\u0000${rate.model}`)
+      if (new Set(keys).size !== keys.length) throw new Error('Fleet budget rates must use unique provider and model pairs')
+      if (input.accounting.mode === 'cost') {
+        const configured = this.describeRecord(record)
+        const missing = [...configured.members, ...configured.assistants.map(assistant => assistant.view)]
+          .filter(actor => actor.provider !== undefined && actor.model !== undefined)
+          .filter(actor => !keys.includes(`${actor.provider}\u0000${actor.model}`))
+          .map(actor => `${actor.provider} / ${actor.model}`)
+        if (missing.length > 0) throw new Error(`Fleet cost budget is missing prices for ${[...new Set(missing)].join(', ')}`)
+      }
+      const modeChanged = current.mode !== input.accounting.mode
+      const budget: FleetTeamBudgetState = modeChanged
+        ? {
+            mode: input.accounting.mode,
+            rates,
+            team: emptyBudgetAccount(now),
+            members: current.members.map(account => resetBudgetMemberAccount(account, now, false)),
+          }
+        : { ...current, rates }
+      record = this.replaceRecord(record.id, { budget })
+      this.appendEvent(record.id, 'budget_accounting_configured', {
+        mode: budget.mode,
+        models: rates.map(rate => ({ provider: rate.provider, model: rate.model })),
+        ...(modeChanged ? { reset: true } : {}),
+      })
+      return this.teamBudget(record.id)
+    }
+    let budget: FleetTeamBudgetState
+    let member: string | undefined
+    if (input.scope === 'team') {
+      if (input.member !== undefined) throw new Error('Team budget update cannot name a member')
+      if (resetting) {
+        budget = {
+          ...current,
+          team: emptyBudgetAccount(now, current.team.limit),
+          members: current.members.map(account => resetBudgetMemberAccount(account, now, true)),
+        }
+      } else {
+        const { limit: _currentLimit, ...account } = current.team
+        budget = {
+          ...current,
+          team: {
+            ...account,
+            ...(input.limit === null ? {} : { limit: input.limit }),
+          },
+        }
+      }
+    } else {
+      member = input.member?.trim()
+      if (member === undefined || member === '') throw new Error('Member budget update requires a member')
+      if (!this.participants(record).some(participant => participant.name === member)) {
+        throw new Error(`unknown Fleet member ${member}`)
+      }
+      const currentAccount = budgetMemberAccount(current, member) ?? emptyBudgetAccount(now)
+      let account: FleetBudgetAccount
+      if (resetting) account = emptyBudgetAccount(now, currentAccount.limit)
+      else {
+        const { limit: _currentLimit, ...withoutLimit } = currentAccount
+        account = {
+          ...withoutLimit,
+          ...(input.limit === null ? {} : { limit: input.limit }),
+        }
+      }
+      budget = { ...current, members: replaceBudgetMember(current.members, member, account, budgetMemberIdentity(record, member)) }
+    }
+    record = this.replaceRecord(record.id, { budget })
+    this.appendEvent(record.id, resetting ? 'budget_reset' : 'budget_configured', {
+      scope: input.scope,
+      ...(member === undefined ? {} : { member }),
+      ...(resetting || input.limit === null ? {} : { limit: input.limit }),
+      ...(input.limit === null ? { unlimited: true } : {}),
+    })
+    return this.teamBudget(record.id)
+  }
+
+  configureTeamSettings(caller: Agent, input: ConfigureFleetTeamSettingsInput): FleetTeamSettingsSnapshot {
+    let record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    const name = text(input.settings.name, 'Fleet Team name')
+    const positioning = optionalText(input.settings.positioning, 'Fleet Team positioning')
+    const rules = optionalText(input.settings.rules, 'Fleet Team rules')
+    const collaborationMethod = optionalText(input.settings.collaborationMethod, 'Fleet Team collaboration method')
+    const contentPreference = optionalText(input.settings.contentPreference, 'Fleet Team content preference')
+    const updateDensity = choice(input.settings.updateDensity, 'Fleet Team update density', ['concise', 'balanced', 'detailed'] as const)
+    const notificationPolicy = choice(input.settings.notificationPolicy, 'Fleet Team notification policy', ['decisions', 'milestones', 'continuous'] as const)
+    const configured = object(JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown, 'Team template')
+    const core = object(configured.core, 'core')
+    const modules = object(configured.modules, 'modules')
+    const message = object(modules[FLEET_MESSAGE_MODULE], FLEET_MESSAGE_MODULE)
+    const ui = object(modules[FLEET_UI_MODULE], FLEET_UI_MODULE)
+    const userAccess = object(ui.userAccess, `${FLEET_UI_MODULE}.userAccess`)
+    const next = {
+      ...configured,
+      core: { ...core, name, positioning },
+      modules: {
+        ...modules,
+        [FLEET_MESSAGE_MODULE]: { ...message, rules, collaborationMethod },
+        [FLEET_UI_MODULE]: {
+          ...ui,
+          userAccess: { ...userAccess, updateDensity, notificationPolicy, contentPreference },
+        },
+      },
+    }
+    const template = parseTeamTemplate(next, this.configuration)
+    const temporary = join(dirname(record.configPath), `.team.${process.pid}.${randomUUID()}.tmp`)
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+    try {
+      record = this.replaceRecord(record.id, { team: template.team, name: template.name })
+      renameSync(temporary, record.configPath)
+    } catch (error) {
+      if (existsSync(temporary)) rmSync(temporary, { force: true })
+      throw error
+    }
+    this.appendEvent(record.id, 'team_settings_configured', { settings: input.settings })
+    const runtime = this.collaboration.get(record.id)
+    if (runtime !== undefined) {
+      const notice = [
+        '[Fleet Team settings updated]',
+        'Replace earlier Team-wide guidance with the following current settings:',
+        template.operatingPrompt,
+      ].join('\n\n')
+      for (const participant of this.participants(record)) {
+        if (runtime.memberNamesById.get(participant.sessionId) !== participant.name) continue
+        runtime.messages.sendSystemNotification(participant.sessionId, {
+          kind: 'team_settings',
+          text: notice,
+          delivery: 'quiet',
+          coalesceKey: `team-settings:${record.id}`,
+        })
+      }
+    }
+    return this.teamSettings(record.id)
   }
 
   exportConfiguration(runId: string): Record<string, unknown> {
@@ -3100,17 +3725,26 @@ export class FleetRunService {
   ): Promise<FleetAssistantRequestConfiguration> {
     const record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
-    const assistant = this.requireAssistantConnection(caller, record.id)
-    const current = this.assistantRequestConfig(assistant, caller)
+    const assistant = input.assistant === undefined
+      ? this.requireAssistantConnection(caller, record.id)
+      : record.assistants.find(candidate => candidate.view.id === input.assistant)
+    if (assistant === undefined) throw new Error(`unknown Fleet assistant ${String(input.assistant)}`)
+    const runtime = this.collaboration.get(record.id)
+    const connected = runtime?.memberNamesById.get(assistant.sessionId) === assistant.view.id
+    const live = connected ? this.ctx.agents.get(SessionId(assistant.sessionId)) : undefined
+    const current = live === undefined
+      ? this.requestConfigFromView(assistant.view)
+      : this.assistantRequestConfig(assistant, live)
     const request = await this.resolveRequestConfiguration(current, input.request, 'Fleet assistant')
     const view = this.requestConfiguredView(assistant.view, request)
-    const ref = this.bindAssistantRequestConfig(caller, current, true)
-    if (ref === undefined) throw new Error(`Fleet assistant ${assistant.view.id} does not support live request configuration`)
-    const runtime = this.requireRuntime(record.id)
+    const ref = live === undefined ? undefined : this.bindAssistantRequestConfig(live, current, true)
+    if (live !== undefined && ref === undefined) {
+      throw new Error(`Fleet assistant ${assistant.view.id} does not support live request configuration`)
+    }
     const previousAssistants = record.assistants
-    ref.current = structuredClone(request)
+    if (ref !== undefined) ref.current = structuredClone(request)
     try {
-      runtime.updateMemberView(view, false)
+      runtime?.updateMemberView(view, false)
       this.replaceRecord(record.id, {
         assistants: record.assistants.map(candidate => candidate.view.id === assistant.view.id
           ? { ...candidate, view }
@@ -3118,8 +3752,8 @@ export class FleetRunService {
       })
       this.appendEvent(record.id, 'assistant_view_updated', { view, reason: 'request_configured' })
     } catch (error) {
-      ref.current = current === undefined ? undefined : structuredClone(current)
-      runtime.updateMemberView(assistant.view, false)
+      if (ref !== undefined) ref.current = current === undefined ? undefined : structuredClone(current)
+      runtime?.updateMemberView(assistant.view, false)
       this.replaceRecord(record.id, { assistants: previousAssistants })
       throw error
     }
@@ -3244,15 +3878,54 @@ export class FleetRunService {
       successor: successor.name,
     })
     runtime.removeMemberView(member.name)
-    this.replaceRecord(record.id, { members: record.members.filter(candidate => candidate.name !== member.name) })
+    const budgetAccount = budgetMemberAccount(record.budget, member.name)
+    const budget = record.budget === undefined || budgetAccount === undefined
+      ? record.budget
+      : {
+          ...record.budget,
+          members: replaceBudgetMember(
+            record.budget.members,
+            member.name,
+            budgetAccount,
+            budgetMemberIdentity(record, member.name),
+          ),
+        }
+    this.replaceRecord(record.id, {
+      members: record.members.filter(candidate => candidate.name !== member.name),
+      ...(budget === undefined ? {} : { budget }),
+    })
     this.appendEvent(record.id, 'member_view_removed', { member: member.name })
     this.appendEvent(record.id, 'member_detached', member)
     return { ...structuredClone(member), status: 'offline' }
   }
 
+  async loadTeamMembersAsExternal(caller: Agent, runId: string): Promise<FleetRunRecord> {
+    let record = this.requireMutableRecord(runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    const unloaded = record.members
+      .filter(member => member.status !== 'paused' && !this.memberCanReply(member))
+      .map(member => member.name)
+    for (const memberName of unloaded) {
+      await this.resumeMemberNow(caller, record, memberName)
+      record = this.requireRecord(record.id)
+    }
+    return this.describeRecord(record)
+  }
+
   async pauseTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
     const record = this.requireMutableRecord(runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    return this.pauseTeamOperation(caller, record.id)
+  }
+
+  async pauseTeamAsExternal(caller: Agent, runId: string): Promise<FleetRunRecord> {
+    const record = this.requireMutableRecord(runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    return this.pauseTeamOperation(caller, record.id)
+  }
+
+  private async pauseTeamOperation(caller: Agent, runId: string): Promise<FleetRunRecord> {
+    const record = this.requireRecord(runId)
     const pending = this.pausingTeams.get(record.id)
     if (pending !== undefined) return pending
     const operation = Promise.resolve().then(() => this.pauseTeamNow(caller, record.id))
@@ -3265,26 +3938,31 @@ export class FleetRunService {
   }
 
   private async pauseTeamNow(caller: Agent, runId: string): Promise<FleetRunRecord> {
-    let record = this.requireMutableRecord(runId, caller.session.header.cwd)
-    this.requireFleetPermission(record, caller, 'team.manage')
+    let record = this.requireMutableRecord(runId)
     if (record.status !== 'paused' && record.status !== 'idle' && record.status !== 'running') {
       throw new Error(`Fleet team ${record.id} cannot pause from ${record.status}`)
     }
     if (record.members.some(member => member.sessionId === String(caller.id))) {
       throw new Error('a Fleet member cannot pause its own Team; use the external Fleet assistant')
     }
-    const teamPausedMembers = record.status === 'paused'
-      ? record.teamPausedMembers ?? []
-      : record.members.filter(member => this.memberCanReply(member)).map(member => member.name)
-    if (record.status !== 'paused') {
+    const alreadyPaused = new Set(record.teamPausedMembers ?? [])
+    const newlyPausedMembers = record.members
+      .filter(member => member.status !== 'paused' && this.memberCanReply(member))
+      .map(member => member.name)
+    if (newlyPausedMembers.length === 0) {
+      throw new Error(`Fleet team ${record.id} has no loaded, unpaused members to pause`)
+    }
+    const teamPausedMembers = [...alreadyPaused, ...newlyPausedMembers.filter(name => !alreadyPaused.has(name))]
+    if (record.status !== 'paused' || teamPausedMembers.length !== alreadyPaused.size) {
       record = this.replaceRecord(record.id, { status: 'paused', teamPausedMembers })
       this.appendEvent(record.id, 'team_status', { status: 'paused', members: teamPausedMembers, phase: 'pausing' })
       this.notify(record)
     }
-    this.requireRuntime(record.id).pauseProductivity()
-    for (const memberName of teamPausedMembers) {
+    this.collaboration.get(record.id)?.pauseProductivity()
+    for (const assistant of record.assistants) this.interruptAssistant(record, assistant)
+    for (const memberName of newlyPausedMembers) {
       const member = this.requireRecord(record.id).members.find(candidate => candidate.name === memberName)
-      if (member !== undefined && this.memberCanReply(member)) await this.pauseMember(caller, record.id, memberName)
+      if (member !== undefined) await this.pauseMemberNow(caller, record.id, memberName)
     }
     const paused = this.requireRecord(record.id)
     this.appendEvent(record.id, 'team_status', { status: 'paused', members: teamPausedMembers, phase: 'paused' })
@@ -3303,58 +3981,195 @@ export class FleetRunService {
     const status: FleetRunStatus = record.work?.status === 'running' ? 'running' : 'idle'
     const resumed = this.replaceRecord(record.id, { status, teamPausedMembers: [] })
     this.requireRuntime(record.id).activateProductivity()
+    if (status === 'running') this.manualWakeRequiredRunIds.add(record.id)
     this.appendEvent(record.id, 'team_status', { status, resumedFrom: 'paused' })
-    if (status === 'running') this.wakeTeamMembers(resumed, 'team_resumed')
     this.notify(resumed)
     return this.describeRecord(resumed)
   }
 
-  wakeTeam(caller: Agent, runId?: string): FleetRunRecord {
+  async wakeTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
     const record = this.requireMutableRecord(runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
-    return this.wakeTeamNow(record)
+    return this.wakeTeamNow(caller, record)
   }
 
-  wakeTeamAsExternal(runId: string): FleetRunRecord {
+  async wakeTeamAsExternal(caller: Agent, runId: string): Promise<FleetRunRecord> {
     const record = this.requireMutableRecord(runId)
     this.requireExternalFleetPermission(record, 'team.manage')
-    return this.wakeTeamNow(record)
+    return this.wakeTeamNow(caller, record)
   }
 
-  private wakeTeamNow(record: FleetRunRecord): FleetRunRecord {
-    if (record.status !== 'running' || record.work?.status !== 'running') {
-      throw new Error(`Fleet team ${record.id} has no active work to wake`)
+  private async wakeTeamNow(caller: Agent, initial: FleetRunRecord): Promise<FleetRunRecord> {
+    let record = initial
+    const participants = this.participants(record)
+    const available = participants.filter(participant =>
+      this.budgetRemaining(record, participant.name).exhaustedScope === undefined)
+    if (available.length === 0 && participants.length > 0) {
+      const budget = this.budgetRemaining(record, participants[0]?.name ?? '')
+      if (budget.exhaustedScope === 'team') throw this.budgetError(record, '', 'team')
+      throw new Error(`Every member budget in Fleet Team ${record.name} is exhausted; increase or reset a member budget before waking the Team`)
     }
-    this.wakeTeamMembers(record, 'manual')
+    for (const memberName of record.members
+      .filter(member => !this.memberCanReply(member))
+      .map(member => member.name)) {
+      await this.resumeMemberNow(caller, record, memberName)
+      record = this.requireRecord(record.id)
+    }
+    for (const assistant of record.assistants) {
+      const runtime = this.collaboration.require(record.id)
+      const online = assistant.status !== 'paused'
+        && runtime.memberNamesById.get(assistant.sessionId) === assistant.view.id
+        && this.ctx.agents.get(SessionId(assistant.sessionId)) !== undefined
+      if (!online) await this.resumeAssistant(record, assistant)
+      record = this.requireRecord(record.id)
+    }
+    if (record.status === 'paused') {
+      const status: FleetRunStatus = record.work?.status === 'running' ? 'running' : 'idle'
+      record = this.replaceRecord(record.id, { status, teamPausedMembers: [] })
+      this.collaboration.require(record.id).activateProductivity()
+      this.appendEvent(record.id, 'team_status', { status, resumedFrom: 'wake' })
+      this.notify(record)
+    }
+    this.manualWakeRequiredRunIds.delete(record.id)
+    this.wakeTeamMembers(record)
     return this.describeRecord(record)
   }
 
-  private wakeTeamMembers(record: FleetRunRecord, reason: 'manual' | 'team_resumed'): void {
-    if (record.status !== 'running' || record.work?.status !== 'running') return
+  async wakeMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
+    let record = this.requireMutableRecord(runId, caller.session.header.cwd)
+    this.requireFleetPermission(record, caller, 'team.manage')
+    return this.wakeMemberNow(caller, record, memberName)
+  }
+
+  async wakeMemberAsExternal(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
+    let record = this.requireMutableRecord(runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    return this.wakeMemberNow(caller, record, memberName)
+  }
+
+  private async wakeMemberNow(caller: Agent, initial: FleetRunRecord, memberName: string): Promise<FleetRunMember> {
+    let record = initial
+    const budget = this.budgetRemaining(record, memberName)
+    if (budget.exhaustedScope !== undefined) throw this.budgetError(record, memberName, budget.exhaustedScope)
+    const member = record.members.find(candidate => candidate.name === memberName)
+    if (member !== undefined) {
+      if (!this.memberCanReply(member)) {
+        await this.resumeMemberNow(caller, record, memberName)
+        record = this.requireRecord(record.id)
+      }
+      const active = record.members.find(candidate => candidate.name === memberName)
+      if (active === undefined || !this.memberCanReply(active)) throw new Error(`Could not wake Fleet member ${memberName}`)
+      const runtime = this.collaboration.require(record.id)
+      this.clearNetworkRecovery(active.sessionId)
+      runtime.messages.sendSystemNotification(active.sessionId, {
+        kind: 'team_wake',
+        text: this.memberWakeInstruction(record, false),
+        delivery: 'wakeup',
+        coalesceKey: `member-wake:${record.work?.id ?? record.id}:${active.name}`,
+      })
+      this.manualWakeRequiredRunIds.delete(record.id)
+      this.appendEvent(record.id, 'member_woken', { member: active.name })
+      return structuredClone(active)
+    }
+    let assistant = record.assistants.find(candidate => candidate.view.id === memberName)
+    if (assistant === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+    let runtime = this.collaboration.require(record.id)
+    const online = assistant.status !== 'paused'
+      && runtime.memberNamesById.get(assistant.sessionId) === assistant.view.id
+      && this.ctx.agents.get(SessionId(assistant.sessionId)) !== undefined
+    if (!online) {
+      await this.resumeAssistant(record, assistant)
+      record = this.requireRecord(record.id)
+      assistant = record.assistants.find(candidate => candidate.view.id === memberName)
+      if (assistant === undefined) throw new Error(`Could not wake Fleet assistant ${memberName}`)
+      runtime = this.collaboration.require(record.id)
+    }
+    runtime.messages.sendSystemNotification(assistant.sessionId, {
+      kind: 'team_wake',
+      text: this.memberWakeInstruction(record, true),
+      delivery: 'wakeup',
+      coalesceKey: `member-wake:${record.work?.id ?? record.id}:${assistant.view.id}`,
+    })
+    this.manualWakeRequiredRunIds.delete(record.id)
+    this.appendEvent(record.id, 'member_woken', { member: assistant.view.id })
+    return this.assistantAsMember(this.status(record.id).assistants.find(candidate =>
+      candidate.view.id === assistant.view.id) ?? assistant)
+  }
+
+  private wakeTeamMembers(record: FleetRunRecord): void {
     const runtime = this.requireRuntime(record.id)
     const members: string[] = []
-    for (const member of record.members.filter(candidate => this.memberCanReply(candidate))) {
+    for (const member of record.members.filter(candidate => this.memberCanReply(candidate)
+      && this.budgetRemaining(record, candidate.name).exhaustedScope === undefined)) {
       this.clearNetworkRecovery(member.sessionId)
       runtime.messages.sendSystemNotification(member.sessionId, {
         kind: 'team_wake',
-        text: [
-          `[Fleet work ${record.work.id} team wake-up]`,
-          reason === 'team_resumed'
-            ? 'The Team resumed after a pause. Continue the active work from the latest persisted Team state.'
-            : 'The Team was explicitly woken. Continue the active work from the latest Team state.',
-          'Inspect relevant Channels, Meetings, Votes, shared files, and member status before acting. Verify external side effects before retrying interrupted work.',
-        ].join('\n\n'),
+        text: this.teamWakeInstruction(record, false),
         delivery: 'wakeup',
-        coalesceKey: `team-wake:${record.work.id}`,
+        coalesceKey: `team-wake:${record.work?.id ?? record.id}`,
       })
       members.push(member.name)
     }
-    this.appendEvent(record.id, 'team_woken', { reason, members })
+    for (const assistant of record.assistants) {
+      if (this.budgetRemaining(record, assistant.view.id).exhaustedScope !== undefined) continue
+      if (assistant.status === 'paused') continue
+      if (runtime.memberNamesById.get(assistant.sessionId) !== assistant.view.id) continue
+      if (this.ctx.agents.get(SessionId(assistant.sessionId)) === undefined) continue
+      runtime.messages.sendSystemNotification(assistant.sessionId, {
+        kind: 'team_wake',
+        text: this.teamWakeInstruction(record, true),
+        delivery: 'wakeup',
+        coalesceKey: `team-wake:${record.work?.id ?? record.id}`,
+      })
+      members.push(assistant.view.id)
+    }
+    this.appendEvent(record.id, 'team_woken', { reason: 'manual', members })
+  }
+
+  private memberWakeInstruction(record: FleetRunRecord, assistant: boolean): string {
+    const activeWork = record.work?.status === 'running' ? record.work : undefined
+    return [
+      activeWork === undefined
+        ? `[Fleet Team ${record.name} member wake-up]`
+        : `[Fleet work ${activeWork.id} member wake-up]`,
+      assistant
+        ? 'You were explicitly woken. Continue assisting from the latest Team state and current instructions.'
+        : 'You were explicitly woken. Continue from the latest Team state and current instructions.',
+      assistant
+        ? 'Inspect relevant Channels, Meetings, Votes, shared files, and member status before acting.'
+        : 'Inspect relevant Channels, Meetings, Votes, shared files, and member status before acting. Verify external side effects before retrying interrupted work.',
+    ].join('\n\n')
+  }
+
+  private teamWakeInstruction(record: FleetRunRecord, assistant: boolean): string {
+    const activeWork = record.work?.status === 'running' ? record.work : undefined
+    return [
+      activeWork === undefined
+        ? `[Fleet Team ${record.name} wake-up]`
+        : `[Fleet work ${activeWork.id} team wake-up]`,
+      assistant
+        ? 'The Team was explicitly woken. Continue assisting from the latest Team state and current instructions.'
+        : 'The Team was explicitly woken. Continue from the latest Team state and current instructions.',
+      assistant
+        ? 'Inspect relevant Channels, Meetings, Votes, shared files, and member status before acting.'
+        : 'Inspect relevant Channels, Meetings, Votes, shared files, and member status before acting. Verify external side effects before retrying interrupted work.',
+    ].join('\n\n')
   }
 
   async pauseMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
     const record = this.requireMutableRecord(runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    return this.pauseMemberOperation(caller, record.id, memberName)
+  }
+
+  async pauseMemberAsExternal(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
+    const record = this.requireMutableRecord(runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    return this.pauseMemberOperation(caller, record.id, memberName)
+  }
+
+  private async pauseMemberOperation(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
+    const record = this.requireRecord(runId)
     const key = `${record.id}:${memberName}`
     const pending = this.pausingMembers.get(key)
     if (pending !== undefined) return pending
@@ -3368,16 +4183,20 @@ export class FleetRunService {
   }
 
   private async pauseMemberNow(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
-    const record = this.requireMutableRecord(runId, caller.session.header.cwd)
-    this.requireFleetPermission(record, caller, 'team.manage')
+    const record = this.requireMutableRecord(runId)
     const member = record.members.find(candidate => candidate.name === memberName)
-    if (member === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+    if (member === undefined) {
+      const assistant = record.assistants.find(candidate => candidate.view.id === memberName)
+      if (assistant === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+      return this.interruptAssistant(record, assistant)
+    }
     this.clearNetworkRecovery(member.sessionId)
     if (member.status === 'paused' && !this.memberCanReply(member)) return structuredClone(member)
     if (member.sessionId === String(caller.id)) throw new Error('a Fleet member cannot pause itself')
     const runtimeName = this.runtimeMemberName(record.id, member.name)
     const managed = this.core.list().some(candidate => candidate.name === runtimeName)
     const live = this.liveMember(member)
+    if (live === undefined) throw new Error(`Fleet member ${memberName} is not loaded`)
     if (live?.status === 'running' && managed) {
       // A running Session may hold persistence work until its turn ends. Cancel first so
       // pause cannot deadlock while waiting for a flush that only the same turn can release.
@@ -3432,7 +4251,11 @@ export class FleetRunService {
 
   private async resumeMemberNow(caller: Agent, record: FleetRunRecord, memberName: string): Promise<FleetRunMember> {
     const member = record.members.find(candidate => candidate.name === memberName)
-    if (member === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+    if (member === undefined) {
+      const assistant = record.assistants.find(candidate => candidate.view.id === memberName)
+      if (assistant === undefined) throw new Error(`unknown Fleet member ${memberName}`)
+      return this.resumeAssistant(record, assistant)
+    }
     if (this.memberCanReply(member)) throw new Error(`Fleet member ${memberName} is already online and can reply`)
     const view = this.effectiveMemberViews(record).find(candidate => candidate.id === member.name)
     if (view === undefined) throw new Error(`missing Fleet member view ${member.name}`)
@@ -3440,40 +4263,135 @@ export class FleetRunService {
       JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
       this.configuration,
     )
-    const runtime = this.requireRuntime(record.id)
-    runtime.updateMemberView(view)
+    const wasDormant = this.dormantRunIds.delete(record.id)
     const runtimeName = this.runtimeMemberName(record.id, member.name)
-    if (this.core.list().some(candidate => candidate.name === runtimeName)) {
-      await this.core.stopManaged(runtimeName)
-      runtime.detachMember(member.sessionId)
+    try {
+      const runtime = this.collaboration.require(record.id)
+      runtime.updateMemberView(view)
+      if (this.core.list().some(candidate => candidate.name === runtimeName)) {
+        await this.core.stopManaged(runtimeName)
+        runtime.detachMember(member.sessionId)
+      }
+      const resumed = await this.core.resume(caller, {
+        id: member.sessionId,
+        name: runtimeName,
+        archiveId: this.memberArchiveId(record.id, member.name),
+        displayName: view.name,
+        color: view.color ?? member.color ?? generateFleetMemberColor(),
+        role: view.role,
+        persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
+        ...this.memberRuntimeOptions(record, view),
+        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
+      })
+      if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
+      else runtime.rebindMember(member.sessionId, resumed.id, view)
+      const active: FleetRunMember = {
+        ...member,
+        sessionId: resumed.id,
+        displayName: resumed.displayName,
+        color: resumed.color,
+        role: view.role,
+        status: 'idle',
+      }
+      if (wasDormant) {
+        runtime.activateProductivity()
+        runtime.events.emit('fleet/team/session-start', { source: 'resume' })
+        this.appendEvent(record.id, 'team_loaded', {
+          launcherSessionId: String(caller.id),
+          previousLauncherSessionId: record.launcherSessionId,
+          members: [member.name],
+          scope: 'member',
+        })
+      }
+      const teamWasPaused = record.status === 'paused'
+      const remainingTeamPausedMembers = (record.teamPausedMembers ?? []).filter(name => name !== member.name)
+      const resumedRecord = this.replaceRecord(record.id, {
+        members: record.members.map(candidate => candidate.name === member.name ? active : candidate),
+        teamPausedMembers: remainingTeamPausedMembers,
+        ...(teamWasPaused ? {
+          status: record.work?.status === 'running' ? 'running' : 'idle',
+        } : {}),
+      })
+      if (teamWasPaused) {
+        runtime.activateProductivity()
+        this.appendEvent(record.id, 'team_status', {
+          status: resumedRecord.status,
+          resumedFrom: 'member',
+          member: member.name,
+        })
+        this.notify(resumedRecord)
+      }
+      this.appendEvent(record.id, 'member_resumed', active)
+      runtime.calendar.retryPendingStarts()
+      return structuredClone(active)
+    } catch (error) {
+      if (wasDormant) this.dormantRunIds.add(record.id)
+      throw error
     }
-    const resumed = await this.core.resume(caller, {
-      id: member.sessionId,
-      name: runtimeName,
-      archiveId: this.memberArchiveId(record.id, member.name),
-      displayName: view.name,
-      color: view.color ?? member.color ?? generateFleetMemberColor(),
-      role: view.role,
-      persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
-      ...this.memberRuntimeOptions(record, view),
-      setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
+  }
+
+  private interruptAssistant(record: FleetRunRecord, assistant: FleetRunAssistant): FleetRunMember {
+    const live = this.ctx.agents.get(SessionId(assistant.sessionId))
+    if (live?.status === 'running') live.cancel({ kind: 'parent' })
+    this.appendEvent(record.id, 'assistant_interrupted', {
+      assistantId: assistant.view.id,
+      sessionId: assistant.sessionId,
     })
-    if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
-    else runtime.rebindMember(member.sessionId, resumed.id, view)
-    const active: FleetRunMember = {
-      ...member,
-      sessionId: resumed.id,
-      displayName: resumed.displayName,
-      color: resumed.color,
-      role: view.role,
-      status: 'idle',
+    return this.assistantAsMember(this.status(record.id).assistants.find(candidate =>
+      candidate.view.id === assistant.view.id) ?? assistant)
+  }
+
+  private async resumeAssistant(record: FleetRunRecord, assistant: FleetRunAssistant): Promise<FleetRunMember> {
+    const runtime = this.collaboration.require(record.id)
+    const connected = runtime.memberNamesById.get(assistant.sessionId) === assistant.view.id
+    const live = this.ctx.agents.get(SessionId(assistant.sessionId))
+    if (assistant.status !== 'paused' && connected && live !== undefined) {
+      throw new Error(`Fleet member ${assistant.view.id} is already online and can reply`)
     }
+    const active: FleetRunAssistant = { sessionId: assistant.sessionId, view: assistant.view }
     this.replaceRecord(record.id, {
-      members: record.members.map(candidate => candidate.name === member.name ? active : candidate),
+      assistants: record.assistants.map(candidate => candidate.view.id === assistant.view.id ? active : candidate),
     })
-    this.appendEvent(record.id, 'member_resumed', active)
-    runtime.calendar.retryPendingStarts()
-    return structuredClone(active)
+    try {
+      if (this.residentAssistants !== undefined) await this.residentAssistants.restore(assistant.sessionId)
+      else {
+        if (live !== undefined) await this.attachAssistant(live, { runId: record.id, assistantId: assistant.view.id })
+      }
+    } catch (error) {
+      this.replaceRecord(record.id, {
+        assistants: this.requireRecord(record.id).assistants.map(candidate =>
+          candidate.view.id === assistant.view.id ? { ...candidate, status: 'paused' } : candidate),
+      })
+      throw error
+    }
+    const resumed = this.status(record.id).assistants.find(candidate => candidate.view.id === assistant.view.id)
+    if (resumed === undefined || resumed.status === 'offline' || resumed.status === 'paused') {
+      this.replaceRecord(record.id, {
+        assistants: this.requireRecord(record.id).assistants.map(candidate =>
+          candidate.view.id === assistant.view.id ? { ...candidate, status: 'paused' } : candidate),
+      })
+      throw new Error(`Could not resume Fleet assistant ${assistant.view.id}`)
+    }
+    this.appendEvent(record.id, 'assistant_resumed', {
+      assistantId: assistant.view.id,
+      sessionId: assistant.sessionId,
+    })
+    return this.assistantAsMember(resumed)
+  }
+
+  private assistantAsMember(assistant: FleetRunAssistant): FleetRunMember {
+    return {
+      name: assistant.view.id,
+      displayName: assistant.view.name,
+      ...(assistant.view.color === undefined ? {} : { color: assistant.view.color }),
+      role: assistant.view.role,
+      sessionId: assistant.sessionId,
+      ...(assistant.view.provider === undefined ? {} : { provider: assistant.view.provider }),
+      ...(assistant.view.model === undefined ? {} : { model: assistant.view.model }),
+      ...(assistant.view.reasoningEffort === undefined ? {} : { reasoningEffort: assistant.view.reasoningEffort }),
+      ...(assistant.view.maxTokens === undefined ? {} : { maxTokens: assistant.view.maxTokens }),
+      status: assistant.status ?? 'offline',
+    }
   }
 
   private requireExternalFleetPermission(record: FleetRunRecord, permission: FleetMemberPermission): void {
@@ -3524,6 +4442,7 @@ export class FleetRunService {
       ? this.collaboration.require(record.id)
       : this.requireRuntime(record.id)
     if (isTerminal(record.status)) throw new Error(`Fleet team ${record.id} is ${record.status}`)
+    this.bindBudgetGuard(caller)
 
     const callerId = String(caller.id)
     const autoJoinChannels = parseTeamTemplate(
@@ -3536,23 +4455,40 @@ export class FleetRunService {
       throw new Error(`Session ${callerId} is already the foreground assistant for Fleet team ${otherTeam.id}; use a separate native Session for team ${record.id}`)
     }
     const current = record.assistants.find(assistant => assistant.sessionId === callerId)
+    if (current?.status === 'paused') {
+      throw new Error(`Fleet assistant ${current.view.id} is paused; resume it before reconnecting`)
+    }
     if (current !== undefined && runtime.memberNamesById.get(callerId) === current.view.id) {
       runtime.attachMember(callerId, current.view, 'assistant')
+      await this.installAssistantTools(caller, runtime, current.view.id)
       runtime.messages.connectAgent(callerId, autoJoinChannels)
       this.bindAssistantRequestConfig(caller, this.assistantRequestConfig(current, caller))
       return { run: this.describeRecord(record), assistant: structuredClone(current) }
     }
-    const rebound = current ?? (input.assistantId === undefined
+    if (current !== undefined) {
+      runtime.attachMember(callerId, current.view, 'assistant')
+      await this.installAssistantTools(caller, runtime, current.view.id)
+      runtime.messages.connectAgent(callerId, autoJoinChannels)
+      this.bindAssistantRequestConfig(caller, this.assistantRequestConfig(current, caller))
+      return { run: this.describeRecord(record), assistant: structuredClone(current) }
+    }
+    const rebound = input.assistantId === undefined
       ? undefined
-      : record.assistants.find(assistant => assistant.view.id === input.assistantId))
+      : record.assistants.find(assistant => assistant.view.id === input.assistantId)
     if (input.assistantId !== undefined && rebound === undefined) {
       throw new Error(`unknown Fleet assistant ${input.assistantId}`)
     }
+    if (rebound?.status === 'paused') {
+      throw new Error(`Fleet assistant ${rebound.view.id} is paused; resume it before reconnecting`)
+    }
+    let releasedResidentSessionId: string | undefined
     if (rebound !== undefined
       && rebound.sessionId !== callerId
       && runtime.memberNamesById.get(rebound.sessionId) === rebound.view.id
       && this.ctx.agents.get(SessionId(rebound.sessionId)) !== undefined) {
-      throw new Error(`Fleet assistant ${rebound.view.id} is already attached to a live session`)
+      const released = await this.residentAssistants?.release(rebound.sessionId) ?? false
+      if (!released) throw new Error(`Fleet assistant ${rebound.view.id} is already attached to a live session`)
+      releasedResidentSessionId = rebound.sessionId
     }
 
     const configured = this.effectiveMemberViews(record)
@@ -3590,8 +4526,7 @@ export class FleetRunService {
       } else {
         runtime.attachMember(callerId, view, 'assistant')
       }
-      const callerCtx = (caller as Agent & { readonly ctx?: Context }).ctx
-      if (callerCtx !== undefined) await installMemberTools(callerCtx, runtime, view.id, true)
+      await this.installAssistantTools(caller, runtime, view.id)
       runtime.messages.connectAgent(callerId, autoJoinChannels)
       this.bindAssistantRequestConfig(caller, this.requestConfigForAssistantView(view, caller))
     } catch (error) {
@@ -3599,6 +4534,9 @@ export class FleetRunService {
       if (rebound !== undefined && rebound.sessionId !== callerId) {
         runtime.memberIdsByName.set(rebound.view.id, rebound.sessionId)
         runtime.memberNamesById.set(rebound.sessionId, rebound.view.id)
+      }
+      if (releasedResidentSessionId !== undefined) {
+        await this.residentAssistants?.restore(releasedResidentSessionId)
       }
       throw error
     }
@@ -3613,6 +4551,17 @@ export class FleetRunService {
       view,
     })
     return { run: this.describeRecord(updated), assistant: structuredClone(assistant) }
+  }
+
+  private async installAssistantTools(
+    caller: Agent,
+    runtime: FleetCollaborationTeam,
+    assistantId: string,
+  ): Promise<void> {
+    if (this.assistantToolAgents.has(caller)) return
+    const callerCtx = (caller as Agent & { readonly ctx?: Context }).ctx
+    if (callerCtx !== undefined) await installMemberTools(callerCtx, runtime, assistantId, true)
+    this.assistantToolAgents.add(caller)
   }
 
   detachAssistant(caller: Agent, runId?: string): FleetRunRecord {
@@ -3708,6 +4657,7 @@ export class FleetRunService {
       text: input.text,
       delivery: input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
+      ...(input.mustReply === undefined ? {} : { mustReply: input.mustReply }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
     })
@@ -3733,6 +4683,7 @@ export class FleetRunService {
       text: input.text,
       delivery: input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
+      ...(input.mustReply === undefined ? {} : { mustReply: input.mustReply }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
     })
@@ -3764,6 +4715,20 @@ export class FleetRunService {
         : { mediaType: input.mediaType.trim() }),
       size: content.byteLength,
     })
+  }
+
+  removeResource(caller: Agent, input: RemoveFleetResourceInput): FleetResource {
+    const record = this.requireMutableRecord(input.runId)
+    this.requireFleetPermission(record, caller, 'resource.write')
+    const resources = this.requireRuntime(record.id).resources
+    const resource = resources.getResource(input.resourceId)
+    const sharedDirectory = join(record.projectRoot, '.fleet', record.id)
+    const resourcePath = resolve(resource.path)
+    if (pathInside(sharedDirectory, resourcePath)) {
+      if (existsSync(resourcePath)) unlinkSync(resourcePath)
+      this.sharedFileVersions.get(record.id)?.delete(relative(sharedDirectory, resourcePath).split(sep).join('/'))
+    }
+    return resources.removeResource(String(caller.id), resource.id) ?? resource
   }
 
   async wait(
@@ -4065,11 +5030,17 @@ export class FleetRunService {
     if (entry === undefined) return
     const [runId, runtime] = entry
     const member = runtime.memberNamesById.get(sessionId)
-    if (member === undefined || this.records.get(runId) === undefined) return
+    const record = this.records.get(runId)
+    if (member === undefined || record === undefined) return
+    if (event.type === 'turn/start' && record.members.some(candidate => candidate.name === member)) {
+      this.manualWakeRequiredRunIds.delete(runId)
+    }
     const agent = this.ctx.agents.get(SessionId(sessionId))
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
+    this.recordBudgetUsage(record, member, event)
     if (event.type === 'assistant/chunk') return
+    for (const listener of [...this.traceChangeListeners]) listener(runId, member)
     if (event.type !== 'turn/end') return
     const reason = event.data.reason
     if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
@@ -4097,20 +5068,28 @@ export class FleetRunService {
 
     let wokeUnread = false
     for (const member of record.members) {
+      if (this.budgetRemaining(record, member.name).exhaustedScope !== undefined) continue
       if (this.networkRecoveries.has(member.sessionId)) continue
       const live = this.liveMember(member)
       if (live?.status !== 'idle') continue
       const pending = runtime.messages.pendingWakeups(member.sessionId)
       const unread = runtime.messages.followupUnread(live)
-      if (unread === undefined) continue
+      const requiredReply = unread === undefined
+        ? runtime.messages.followupRequiredReply(live)
+        : undefined
+      const waitingMessage = unread ?? requiredReply
+      if (waitingMessage === undefined) continue
       this.appendEvent(runId, 'member_continued', {
         member: member.name,
-        reason: pending.length > 0 ? 'pending_wakeup' : 'unread_message',
-        messages: [unread.id],
+        reason: pending.length > 0
+          ? 'pending_wakeup'
+          : unread === undefined ? 'required_reply' : 'unread_message',
+        messages: [waitingMessage.id],
       })
       wokeUnread = true
     }
     if (wokeUnread) return
+    if (this.manualWakeRequiredRunIds.has(runId)) return
 
     const online = record.members.flatMap(member => {
       const live = this.liveMember(member)
@@ -4119,7 +5098,9 @@ export class FleetRunService {
     const allIdle = online.length > 0 && online.every(member => member.status === 'idle')
     if (!allIdle) return
     for (const member of record.members.filter(candidate =>
-      this.memberCanReply(candidate) && !this.networkRecoveries.has(candidate.sessionId),
+      this.memberCanReply(candidate)
+      && !this.networkRecoveries.has(candidate.sessionId)
+      && this.budgetRemaining(record, candidate.name).exhaustedScope === undefined,
     )) {
       const agent = this.ctx.agents.get(SessionId(member.sessionId))
       if (agent?.status !== 'idle') continue
@@ -5236,6 +6217,7 @@ export class FleetRunService {
     if (event.type === 'schedule.triggered') return 'schedule'
     if (event.type === 'member_view_added' || event.type === 'member_view_updated' || event.type === 'member_view_removed'
       || event.type === 'assistant_view_updated' || event.type === 'team_requests_configured'
+      || event.type.startsWith('budget_')
       || event.type === 'member_paused' || event.type === 'member_resumed') {
       return 'member'
     }
@@ -5356,7 +6338,9 @@ export class FleetRunService {
   }
 
   close(): void {
-    clearInterval(this.sharedFileScanTimer)
+    for (const teamId of [...this.sharedFileWatchers.keys()]) this.stopSharedFileWatcher(teamId)
+    for (const timer of this.sharedFileSyncTimers.values()) clearTimeout(timer)
+    this.sharedFileSyncTimers.clear()
     for (const waiter of [...this.waiters]) waiter.fail(new Error('Fleet Run service stopped'))
     for (const recovery of this.networkRecoveries.values()) {
       if (recovery.timer !== undefined) clearTimeout(recovery.timer)
@@ -5368,27 +6352,71 @@ export class FleetRunService {
     this.collaboration.close()
     this.voteWorkIds.clear()
     this.dormantRunIds.clear()
+    this.manualWakeRequiredRunIds.clear()
     this.teamProjectionEvents.clear()
     this.teamProjectionIdentities.clear()
     this.memberViewSnapshots.clear()
     this.sharedFileVersions.clear()
     this.sharedFileScanErrors.clear()
     this.changeListeners.clear()
+    this.traceChangeListeners.clear()
   }
 
-  private scanSharedFiles(): void {
-    for (const record of this.records.values()) {
-      if (!this.collaboration.has(record.id) || isTerminal(record.status)) continue
-      try {
-        this.synchronizeSharedFiles(record)
-        this.sharedFileScanErrors.delete(record.id)
-      } catch (error) {
-        const message = errorMessage(error)
-        if (this.sharedFileScanErrors.get(record.id) === message) continue
-        this.sharedFileScanErrors.set(record.id, message)
-        this.appendEvent(record.id, 'resource.shared_scan_failed', { error: message })
-      }
+  private watchSharedFiles(record: FleetRunRecord): void {
+    if (this.sharedFileWatchers.has(record.id) || isTerminal(record.status)) return
+    const directory = join(record.projectRoot, '.fleet', record.id)
+    try {
+      mkdirSync(directory, { recursive: true })
+      const watcher = watch(directory, { recursive: true }, () => {
+        this.scheduleSharedFileSync(record.id)
+      })
+      watcher.on('error', error => {
+        this.stopSharedFileWatcher(record.id)
+        this.reportSharedFileSyncError(record.id, error)
+      })
+      watcher.unref()
+      this.sharedFileWatchers.set(record.id, watcher)
+      this.syncSharedFiles(record)
+    } catch (error) {
+      this.reportSharedFileSyncError(record.id, error)
     }
+  }
+
+  private scheduleSharedFileSync(teamId: string): void {
+    const pending = this.sharedFileSyncTimers.get(teamId)
+    if (pending !== undefined) clearTimeout(pending)
+    const timer = setTimeout(() => {
+      this.sharedFileSyncTimers.delete(teamId)
+      const record = this.records.get(teamId)
+      if (record === undefined || isTerminal(record.status) || !this.collaboration.has(teamId)) return
+      this.syncSharedFiles(record)
+    }, SHARED_FILE_WATCH_DEBOUNCE_MS)
+    timer.unref?.()
+    this.sharedFileSyncTimers.set(teamId, timer)
+  }
+
+  private syncSharedFiles(record: FleetRunRecord): void {
+    try {
+      this.synchronizeSharedFiles(record)
+      this.sharedFileScanErrors.delete(record.id)
+    } catch (error) {
+      this.reportSharedFileSyncError(record.id, error)
+    }
+  }
+
+  private reportSharedFileSyncError(teamId: string, error: unknown): void {
+    const message = errorMessage(error)
+    if (this.sharedFileScanErrors.get(teamId) === message) return
+    this.sharedFileScanErrors.set(teamId, message)
+    this.appendEvent(teamId, 'resource.shared_scan_failed', { error: message })
+  }
+
+  private stopSharedFileWatcher(teamId: string): void {
+    const timer = this.sharedFileSyncTimers.get(teamId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.sharedFileSyncTimers.delete(teamId)
+    this.sharedFileWatchers.get(teamId)?.close()
+    this.sharedFileWatchers.delete(teamId)
   }
 
   private synchronizeSharedFiles(record: FleetRunRecord): void {
@@ -5493,6 +6521,7 @@ export class FleetRunService {
       })
     }
     this.appendEvent(runId, 'team_status', { status: 'closed', summary: record.summary, callerId })
+    this.stopSharedFileWatcher(runId)
     this.forgetTeam(runId)
     if (record.members.length === 0) {
       this.voteWorkIds.delete(record.id)
@@ -5643,7 +6672,9 @@ export class FleetRunService {
       }),
       assistants: record.assistants.map(assistant => ({
         ...assistant,
-        status: this.collaboration.get(record.id)?.memberNamesById.get(assistant.sessionId) === assistant.view.id
+        status: assistant.status === 'paused'
+          ? 'paused'
+          : this.collaboration.get(record.id)?.memberNamesById.get(assistant.sessionId) === assistant.view.id
           ? this.ctx.agents.get(SessionId(assistant.sessionId))?.status ?? 'offline'
           : 'offline',
       })),
@@ -5748,6 +6779,7 @@ export class FleetRunService {
       schedules: parseFleetScheduleState(this.readExtensionState(record.id, FLEET_SCHEDULE_STATE_NAMESPACE)),
       calendar: parseFleetCalendarState(this.readExtensionState(record.id, FLEET_CALENDAR_STATE_NAMESPACE)),
     })
+    this.watchSharedFiles(record)
     return team
   }
 
@@ -5848,6 +6880,118 @@ export class FleetRunService {
     const selected = this.assistantRequestConfigs.get(agent)?.current
     if (selected !== undefined) return structuredClone(selected)
     return this.requestConfigForAssistantView(assistant.view, agent)
+  }
+
+  private budgetTargetForSession(sessionId: string): {
+    readonly record: FleetRunRecord
+    readonly member: string
+  } | undefined {
+    for (const record of this.records.values()) {
+      const participant = this.participants(record).find(candidate => candidate.sessionId === sessionId)
+      if (participant !== undefined) return { record, member: participant.name }
+    }
+    return undefined
+  }
+
+  private budgetRemaining(record: FleetRunRecord, member: string): {
+    readonly remaining?: number
+    readonly exhaustedScope?: 'team' | 'member'
+  } {
+    const team = record.budget?.team
+    const participant = budgetMemberAccount(record.budget, member)
+    const teamRemaining = team?.limit === undefined
+      ? undefined
+      : Math.max(0, team.limit - team.used)
+    const memberRemaining = participant?.limit === undefined
+      ? undefined
+      : Math.max(0, participant.limit - participant.used)
+    if (teamRemaining === 0) return { remaining: 0, exhaustedScope: 'team' }
+    if (memberRemaining === 0) return { remaining: 0, exhaustedScope: 'member' }
+    if (teamRemaining === undefined) return memberRemaining === undefined ? {} : { remaining: memberRemaining }
+    if (memberRemaining === undefined) return { remaining: teamRemaining }
+    return { remaining: Math.min(teamRemaining, memberRemaining) }
+  }
+
+  private budgetError(record: FleetRunRecord, member: string, scope: 'team' | 'member'): Error {
+    return new Error(scope === 'team'
+      ? `Fleet Team ${record.name} budget is exhausted; increase its limit or start a new budget cycle before another model call`
+      : `Fleet member ${member} budget is exhausted; increase its limit or reset that member budget before another model call`)
+  }
+
+  private budgetOutputUnit(state: FleetTeamBudgetState, provider: string, model: string): number {
+    const rate = budgetRate(state.rates, provider, model)
+    if (state.mode === 'tokens') return rate?.multiplier ?? 1
+    if (rate?.inputUsdPerMillion === undefined || rate.outputUsdPerMillion === undefined
+      || rate.cacheReadUsdPerMillion === undefined || rate.cacheWriteUsdPerMillion === undefined) {
+      throw new Error(`Fleet cost budget requires prices for ${provider} / ${model}`)
+    }
+    return rate.outputUsdPerMillion
+  }
+
+  private bindBudgetGuard(agent: Agent): void {
+    if (this.budgetGuardAgents.has(agent)) return
+    const agentCtx = (agent as Agent & { readonly ctx?: Context }).ctx
+    if (agentCtx === undefined) return
+    this.budgetGuardAgents.add(agent)
+    agentCtx.on('agent/request', async (_payload, next) => {
+      const target = this.budgetTargetForSession(String(agent.id))
+      if (target === undefined) return next()
+      const before = this.budgetRemaining(target.record, target.member)
+      if (before.exhaustedScope !== undefined) {
+        throw this.budgetError(target.record, target.member, before.exhaustedScope)
+      }
+      const resolved = await next()
+      const latest = this.budgetTargetForSession(String(agent.id))
+      if (latest === undefined) return resolved
+      const budget = this.budgetRemaining(latest.record, latest.member)
+      if (budget.exhaustedScope !== undefined) {
+        throw this.budgetError(latest.record, latest.member, budget.exhaustedScope)
+      }
+      const state = latest.record.budget
+      if (state === undefined) return resolved
+      const outputUnit = this.budgetOutputUnit(state, resolved.provider, resolved.model)
+      if (budget.remaining === undefined) return resolved
+      if (outputUnit === 0) return resolved
+      const affordableOutputTokens = Math.max(1, Math.floor(budget.remaining / outputUnit))
+      return {
+        ...resolved,
+        maxTokens: Math.min(resolved.maxTokens ?? affordableOutputTokens, affordableOutputTokens),
+      }
+    })
+  }
+
+  private recordBudgetUsage(record: FleetRunRecord, member: string, event: SessionEvent): void {
+    const charge = budgetUsage(event)
+    if (charge === undefined) return
+    const startedAt = new Date(event.time).toISOString()
+    const current = record.budget ?? { mode: 'tokens', rates: [], team: emptyBudgetAccount(startedAt), members: [] }
+    const currentMember = budgetMemberAccount(current, member) ?? emptyBudgetAccount(startedAt)
+    const team = addBudgetUsage(current, current.team, charge)
+    const participant = addBudgetUsage(current, currentMember, charge)
+    this.replaceRecord(record.id, {
+      budget: {
+        ...current,
+        team,
+        members: replaceBudgetMember(current.members, member, participant, budgetMemberIdentity(record, member)),
+      },
+    })
+    const transitions = [
+      { scope: 'team' as const, before: budgetAccountSnapshot(current.team), after: budgetAccountSnapshot(team) },
+      { scope: 'member' as const, before: budgetAccountSnapshot(currentMember), after: budgetAccountSnapshot(participant) },
+    ]
+    for (const transition of transitions) {
+      const crossedWarning = (transition.after.state === 'warning' || transition.after.state === 'danger')
+        && transition.before.state !== 'warning' && transition.before.state !== 'danger'
+        && transition.before.state !== 'exhausted'
+      const crossedExhaustion = transition.after.state === 'exhausted' && transition.before.state !== 'exhausted'
+      if (!crossedWarning && !crossedExhaustion) continue
+      this.appendEvent(record.id, crossedExhaustion ? 'budget_exhausted' : 'budget_warning', {
+        scope: transition.scope,
+        ...(transition.scope === 'member' ? { member } : {}),
+        used: transition.after.used,
+        limit: transition.after.limit,
+      })
+    }
   }
 
   private bindParticipantInbox(agent: Agent): void {
@@ -6351,6 +7495,7 @@ export class FleetRunService {
   }
 
   private forgetTeam(runId: string): void {
+    this.manualWakeRequiredRunIds.delete(runId)
     const path = this.teamReferencePath(runId)
     if (existsSync(path)) unlinkSync(path)
   }
@@ -6454,7 +7599,7 @@ const RUN_ASSISTANT_SCHEMA = {
   properties: {
     sessionId: { type: 'string', required: true },
     view: { ...MEMBER_VIEW_SCHEMA, required: true },
-    status: { type: 'string', enum: ['idle', 'running', 'offline'] },
+    status: { type: 'string', enum: ['idle', 'running', 'offline', 'paused'] },
   },
 } as const
 
@@ -6465,6 +7610,85 @@ const RUN_AGENT_OPTIONS_SCHEMA = {
     provider: { type: 'string' },
     model: { type: 'string' },
     maxTokens: { type: 'integer' },
+  },
+} as const
+
+const BUDGET_ACCOUNT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    limit: { type: 'integer' },
+    startedAt: { type: 'string', required: true },
+    used: { type: 'integer', required: true },
+    inputTokens: { type: 'integer', required: true },
+    outputTokens: { type: 'integer', required: true },
+    cacheReadTokens: { type: 'integer', required: true },
+    cacheWriteTokens: { type: 'integer', required: true },
+    reasoningTokens: { type: 'integer', required: true },
+    calls: { type: 'integer', required: true },
+    unmeteredCalls: { type: 'integer', required: true },
+    models: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          provider: { type: 'string', required: true },
+          model: { type: 'string', required: true },
+          charged: { type: 'integer', required: true },
+          inputTokens: { type: 'integer', required: true },
+          outputTokens: { type: 'integer', required: true },
+          cacheReadTokens: { type: 'integer', required: true },
+          cacheWriteTokens: { type: 'integer', required: true },
+          reasoningTokens: { type: 'integer', required: true },
+          calls: { type: 'integer', required: true },
+          unmeteredCalls: { type: 'integer', required: true },
+        },
+      },
+    },
+  },
+} as const
+
+const BUDGET_STATE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    mode: { type: 'string', required: true, enum: ['tokens', 'cost'] },
+    rates: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          provider: { type: 'string', required: true },
+          model: { type: 'string', required: true },
+          multiplier: { type: 'number' },
+          inputUsdPerMillion: { type: 'number' },
+          outputUsdPerMillion: { type: 'number' },
+          cacheReadUsdPerMillion: { type: 'number' },
+          cacheWriteUsdPerMillion: { type: 'number' },
+        },
+      },
+    },
+    team: { ...BUDGET_ACCOUNT_SCHEMA, required: true },
+    members: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          memberId: { type: 'string', required: true },
+          name: { type: 'string' },
+          role: { type: 'string' },
+          color: { type: 'string' },
+          assistant: { type: 'boolean' },
+          ...BUDGET_ACCOUNT_SCHEMA.properties,
+        },
+      },
+    },
   },
 } as const
 
@@ -6497,6 +7721,7 @@ const RUN_SCHEMA = {
     agentOptions: RUN_AGENT_OPTIONS_SCHEMA,
     members: { type: 'array', required: true, items: RUN_MEMBER_SCHEMA },
     assistants: { type: 'array', required: true, items: RUN_ASSISTANT_SCHEMA },
+    budget: BUDGET_STATE_SCHEMA,
     assistantSessionAliases: {
       type: 'array',
       items: {
@@ -6809,7 +8034,7 @@ export function installRunTools(
         return { action: 'pause' as const, run: await service.pauseTeam(caller, args.run_id) }
       }
       if (args.action === 'wake') {
-        return { action: 'wake' as const, run: service.wakeTeam(caller, args.run_id) }
+        return { action: 'wake' as const, run: await service.wakeTeam(caller, args.run_id) }
       }
       if (args.action === 'resume') {
         if (args.run_id === undefined) throw new Error('fleet_run resume requires run_id')

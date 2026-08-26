@@ -67,7 +67,12 @@ export function resolveChineseLocale(documentLanguage: string, navigatorLanguage
 }
 
 export function isChineseLocale(): boolean {
-  const documentLanguage = typeof document === 'undefined' ? '' : document.documentElement.lang
+  if (typeof document === 'undefined') return true
+  const documentLanguage = document.documentElement.lang
   const navigatorLanguage = typeof navigator === 'undefined' ? '' : navigator.language
   return resolveChineseLocale(documentLanguage, navigatorLanguage)
+}
+
+export function fleetText(chinese: string, english: string): string {
+  return isChineseLocale() ? chinese : english
 }

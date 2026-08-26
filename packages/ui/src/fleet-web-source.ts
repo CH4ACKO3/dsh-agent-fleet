@@ -5,22 +5,28 @@ import { encodeFleetFile } from './web-client.js'
 import {
   type FleetPanelActivity,
   type FleetPanelArchiveFile,
+  type FleetPanelBudgetAccount,
+  type FleetPanelBudgetModelUsage,
   type FleetPanelConversation,
   type FleetPanelMember,
+  type FleetPanelMemberAccess,
   type FleetPanelMemberAuthorization,
   type FleetPanelMemberTrace,
   type FleetPanelMessage,
+  type FleetPanelPendingDelivery,
   type FleetPanelResource,
   type FleetPanelResourceContent,
   type FleetPanelSnapshot,
   type FleetPanelSource,
   type FleetPanelTeamDirectory,
+  type FleetPanelTeamBudget,
   type FleetPanelTeamSnapshot,
+  type FleetPanelTeamSettings,
   type FleetPanelWorkspace,
 } from './team-panel.js'
 
 const PAGE_SIZE = 500
-const MAX_TEAM_MESSAGES = 500
+const MAX_TEAM_MESSAGES = 100
 const MAX_TEAM_ACTIVITY = 250
 const MAX_MEMBER_TRACE_EVENTS = 240
 const MAX_TEAM_PROJECTION_CACHES = 16
@@ -61,6 +67,8 @@ interface WireMember {
   readonly sessionId: string
   readonly provider?: string
   readonly model?: string
+  readonly reasoningEffort?: string
+  readonly maxTokens?: number
   readonly status?: 'idle' | 'running' | 'waiting' | 'error' | 'offline' | 'paused' | 'unknown'
 }
 
@@ -74,8 +82,10 @@ interface WireAssistant {
     readonly color?: string
     readonly provider?: string
     readonly model?: string
+    readonly reasoningEffort?: string
+    readonly maxTokens?: number
   }
-  readonly status?: 'idle' | 'running' | 'offline'
+  readonly status?: 'idle' | 'running' | 'offline' | 'paused'
 }
 
 interface WireRun {
@@ -92,6 +102,7 @@ interface WireRun {
   readonly runtimeState?: 'active' | 'dormant'
   readonly startedAt: string
   readonly error?: string
+  readonly budget?: unknown
 }
 
 interface WireMemberView {
@@ -153,6 +164,167 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 
 function string(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
+}
+
+function budgetNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+function budgetDecimal(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function budgetModelUsage(value: unknown): FleetPanelBudgetModelUsage | undefined {
+  if (!isRecord(value)) return undefined
+  const provider = string(value.provider)
+  const model = string(value.model)
+  if (provider === undefined || model === undefined) return undefined
+  return {
+    provider,
+    model,
+    charged: budgetNumber(value.charged),
+    inputTokens: budgetNumber(value.inputTokens),
+    outputTokens: budgetNumber(value.outputTokens),
+    cacheReadTokens: budgetNumber(value.cacheReadTokens),
+    cacheWriteTokens: budgetNumber(value.cacheWriteTokens),
+    reasoningTokens: budgetNumber(value.reasoningTokens),
+    calls: budgetNumber(value.calls),
+    unmeteredCalls: budgetNumber(value.unmeteredCalls),
+  }
+}
+
+function budgetAccount(value: unknown): FleetPanelBudgetAccount {
+  if (!isRecord(value)) {
+    return {
+      startedAt: '', used: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+      cacheWriteTokens: 0, reasoningTokens: 0, calls: 0, unmeteredCalls: 0, models: [], state: 'unlimited',
+    }
+  }
+  const state = string(value.state)
+  const limit = typeof value.limit === 'number' ? budgetNumber(value.limit) : undefined
+  const used = budgetNumber(value.used)
+  const remaining = typeof value.remaining === 'number'
+    ? budgetNumber(value.remaining)
+    : limit === undefined ? undefined : Math.max(0, limit - used)
+  const resolvedState = state === 'normal' || state === 'warning' || state === 'danger' || state === 'exhausted'
+    ? state
+    : limit === undefined
+      ? 'unlimited'
+      : remaining === 0
+        ? 'exhausted'
+        : used >= limit * 0.9 ? 'danger' : used >= limit * 0.7 ? 'warning' : 'normal'
+  return {
+    ...(limit === undefined ? {} : { limit }),
+    startedAt: string(value.startedAt) ?? '',
+    used,
+    inputTokens: budgetNumber(value.inputTokens),
+    outputTokens: budgetNumber(value.outputTokens),
+    cacheReadTokens: budgetNumber(value.cacheReadTokens),
+    cacheWriteTokens: budgetNumber(value.cacheWriteTokens),
+    reasoningTokens: budgetNumber(value.reasoningTokens),
+    calls: budgetNumber(value.calls),
+    unmeteredCalls: budgetNumber(value.unmeteredCalls),
+    models: Array.isArray(value.models) ? value.models.flatMap(candidate => {
+      const usage = budgetModelUsage(candidate)
+      return usage === undefined ? [] : [usage]
+    }) : [],
+    ...(remaining === undefined ? {} : { remaining }),
+    state: resolvedState,
+  }
+}
+
+function teamBudget(value: unknown): FleetPanelTeamBudget {
+  if (!isRecord(value)) return { mode: 'tokens', rates: [], configuredModels: [], team: budgetAccount(undefined), members: [] }
+  const mode = value.mode === 'cost' ? 'cost' : 'tokens'
+  return {
+    mode,
+    configuredModels: Array.isArray(value.configuredModels) ? value.configuredModels.flatMap(candidate => {
+      if (!isRecord(candidate)) return []
+      const provider = string(candidate.provider)
+      const model = string(candidate.model)
+      return provider === undefined || model === undefined ? [] : [{ provider, model }]
+    }) : [],
+    rates: Array.isArray(value.rates) ? value.rates.flatMap(candidate => {
+      if (!isRecord(candidate)) return []
+      const provider = string(candidate.provider)
+      const model = string(candidate.model)
+      if (provider === undefined || model === undefined) return []
+      const multiplier = budgetDecimal(candidate.multiplier)
+      const inputUsdPerMillion = budgetDecimal(candidate.inputUsdPerMillion)
+      const outputUsdPerMillion = budgetDecimal(candidate.outputUsdPerMillion)
+      const cacheReadUsdPerMillion = budgetDecimal(candidate.cacheReadUsdPerMillion)
+      const cacheWriteUsdPerMillion = budgetDecimal(candidate.cacheWriteUsdPerMillion)
+      return [{
+        provider,
+        model,
+        ...(multiplier === undefined ? {} : { multiplier }),
+        ...(inputUsdPerMillion === undefined ? {} : { inputUsdPerMillion }),
+        ...(outputUsdPerMillion === undefined ? {} : { outputUsdPerMillion }),
+        ...(cacheReadUsdPerMillion === undefined ? {} : { cacheReadUsdPerMillion }),
+        ...(cacheWriteUsdPerMillion === undefined ? {} : { cacheWriteUsdPerMillion }),
+      }]
+    }) : [],
+    team: budgetAccount(value.team),
+    members: Array.isArray(value.members) ? value.members.filter(isRecord).flatMap(member => {
+      const memberId = string(member.memberId)
+      if (memberId === undefined) return []
+      const memberColor = string(member.color) ?? color(memberId)
+      return [{
+        ...budgetAccount(member),
+        memberId,
+        name: string(member.name) ?? memberId,
+        role: string(member.role) ?? '',
+        color: memberColor,
+        assistant: member.assistant === true,
+        active: member.active !== false,
+      }]
+    }) : [],
+  }
+}
+
+function teamSettings(value: unknown): FleetPanelTeamSettings {
+  if (!isRecord(value) || !isRecord(value.request) || !isRecord(value.request.mixed)) {
+    throw new Error('Fleet 返回了无效的团队设置')
+  }
+  const name = string(value.name)
+  const positioning = string(value.positioning)
+  const rules = string(value.rules)
+  const collaborationMethod = string(value.collaborationMethod)
+  const updateDensity = string(value.updateDensity)
+  const notificationPolicy = string(value.notificationPolicy)
+  const contentPreference = string(value.contentPreference)
+  const projectRoot = string(value.projectRoot)
+  const provider = string(value.request.provider)
+  const model = string(value.request.model)
+  const reasoningEffort = string(value.request.reasoningEffort)
+  if (name === undefined || positioning === undefined || rules === undefined || collaborationMethod === undefined
+    || contentPreference === undefined || projectRoot === undefined
+    || (updateDensity !== 'concise' && updateDensity !== 'balanced' && updateDensity !== 'detailed')
+    || (notificationPolicy !== 'decisions' && notificationPolicy !== 'milestones' && notificationPolicy !== 'continuous')) {
+    throw new Error('Fleet 返回了不完整的团队设置')
+  }
+  return {
+    name,
+    positioning,
+    rules,
+    collaborationMethod,
+    updateDensity,
+    notificationPolicy,
+    contentPreference,
+    projectRoot,
+    budget: teamBudget(value.budget),
+    request: {
+      ...(provider === undefined ? {} : { provider }),
+      ...(model === undefined ? {} : { model }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      ...(typeof value.request.maxTokens === 'number' ? { maxTokens: value.request.maxTokens } : {}),
+      mixed: {
+        model: value.request.mixed.model === true,
+        reasoningEffort: value.request.mixed.reasoningEffort === true,
+        maxTokens: value.request.mixed.maxTokens === true,
+      },
+    },
+  }
 }
 
 function isFleetUser(sessionId: string): boolean {
@@ -225,17 +397,62 @@ function memberAuthorization(value: unknown): FleetPanelMemberAuthorization {
       name,
       parents: stringList(group?.parents),
       preset: group?.preset === true,
+      toolGroups: stringList(group?.toolGroups),
+      denyToolGroups: stringList(group?.denyToolGroups),
+      actions: stringList(group?.actions),
+      denies: stringList(group?.denies),
       ...(group?.op === true ? { op: true } : {}),
     }]
   })
   return {
     groups,
-    selectedGroups: stringList(assignment.groups),
+    assignment: {
+      groups: stringList(assignment.groups),
+      grants: stringList(assignment.grants),
+      denies: stringList(assignment.denies),
+      toolGroups: stringList(assignment.toolGroups),
+      denyToolGroups: stringList(assignment.denyToolGroups),
+      op: assignment.op === true,
+    },
+    availableActions: stringList(authorization.availableActions),
+    availableToolGroups: stringList(authorization.availableToolGroups),
     effectiveActions: stringList(effective.actions),
     effectiveToolGroups: stringList(effective.toolGroups),
     op: effective.op === true,
     configured: authorization.configured === true,
   }
+}
+
+const ACCESS_LEVELS = new Set(['read', 'write', 'use', 'manage'])
+
+function memberAccess(value: unknown): FleetPanelMemberAccess {
+  const access = asRecord(value)
+  if (access === undefined || !Array.isArray(access.resourceKinds)
+    || !Array.isArray(access.modes) || !Array.isArray(access.rules)) {
+    throw new Error('Fleet 返回了无效的成员资源访问配置')
+  }
+  const modes = access.modes.flatMap((candidate): FleetPanelMemberAccess['modes'] => {
+    const mode = asRecord(candidate)
+    const resourceKind = string(mode?.resourceKind)
+    const value = string(mode?.mode)
+    return resourceKind !== undefined && (value === 'inherit' || value === 'restricted')
+      ? [{ resourceKind, mode: value }]
+      : []
+  })
+  const rules = access.rules.flatMap((candidate): FleetPanelMemberAccess['rules'] => {
+    const rule = asRecord(candidate)
+    const id = string(rule?.id)
+    const resourceKind = string(rule?.resourceKind)
+    const resourceId = string(rule?.resourceId)
+    const scope = string(rule?.scope)
+    const effect = string(rule?.effect)
+    const levels = stringList(rule?.levels).filter(level => ACCESS_LEVELS.has(level)) as FleetPanelMemberAccess['rules'][number]['levels']
+    if (id === undefined || resourceKind === undefined || resourceId === undefined
+      || (scope !== 'self' && scope !== 'tree') || (effect !== 'allow' && effect !== 'deny')
+      || levels.length === 0) return []
+    return [{ id, resourceKind, resourceId, scope, effect, levels }]
+  })
+  return { resourceKinds: stringList(access.resourceKinds), modes, rules }
 }
 
 function hash(value: string): number {
@@ -289,7 +506,7 @@ function activityKind(type: string): FleetPanelActivity['kind'] | undefined {
   if (type.startsWith('resource.') || type.startsWith('workspace.')) return 'resource'
   if (type.startsWith('memory.')) return 'memory'
   if (type === 'coordination.vote' || type.startsWith('work_') || type === 'team_status'
-    || type.startsWith('task.') || type.startsWith('schedule.') || type.startsWith('calendar.')) return 'decision'
+    || type.startsWith('budget_') || type.startsWith('task.') || type.startsWith('schedule.') || type.startsWith('calendar.')) return 'decision'
   if (type.startsWith('member_') || type.startsWith('assistant_')) return 'member'
   return undefined
 }
@@ -333,7 +550,8 @@ function receiptMessageId(event: WireEvent): string | undefined {
   if (event.type !== 'coordination.inbox') return undefined
   const data = asRecord(event.data)
   return data?.type === 'inbox'
-    && (data.action === 'delivered' || data.action === 'read' || data.action === 'acknowledged')
+    && (data.action === 'delivered' || data.action === 'blocked' || data.action === 'read'
+      || data.action === 'acknowledged')
     ? string(data.messageId)
     : undefined
 }
@@ -461,6 +679,27 @@ function resourceContent(value: unknown): FleetPanelResourceContent {
   }
 }
 
+function panelResource(value: unknown): FleetPanelResource {
+  if (!isRecord(value)) throw new Error('Fleet upload returned an invalid resource')
+  const id = string(value.id)
+  const path = string(value.path)
+  if (id === undefined || path === undefined) throw new Error('Fleet upload returned an invalid resource')
+  const name = string(value.label) ?? basename(path)
+  const mediaType = string(value.mediaType)
+  const size = typeof value.size === 'number' ? value.size : undefined
+  const updatedAt = string(value.createdAt)
+  return {
+    id,
+    name,
+    kind: name === 'plan.md' ? 'plan' : name === 'checklist.md' ? 'checklist' : 'file',
+    path,
+    detail: [mediaType ?? '共享文件', formatBytes(size)].filter(Boolean).join(' · '),
+    ...(size === undefined ? {} : { size }),
+    ...(mediaType === undefined ? {} : { mediaType }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+  }
+}
+
 function runDirectorySignature(runs: readonly WireRun[]): string {
   return JSON.stringify(runs.map(run => [
     run.id,
@@ -573,6 +812,15 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
   if (event.type === 'team_status') return `团队状态变为 ${string(data?.status) ?? '未知'}`
   if (event.type === 'work_started') return '团队开始了一项工作'
   if (event.type === 'work_status') return `工作状态变为 ${string(data?.status) ?? '未知'}`
+  if (event.type.startsWith('budget_')) {
+    const scope = string(data?.scope) === 'member'
+      ? string(data?.member) ?? '成员'
+      : '团队'
+    if (event.type === 'budget_warning') return `${scope}预算已使用 70%`
+    if (event.type === 'budget_exhausted') return `${scope}预算已用尽，新的模型调用已停止`
+    if (event.type === 'budget_reset') return `${scope}已开始新的预算周期`
+    return `${scope}预算上限已更新`
+  }
   const member = string(data?.displayName) ?? string(data?.name) ?? string(data?.member) ?? '团队成员'
   if (event.type === 'member_attached' || event.type === 'member_resumed') return `${member} 已加入运行`
   if (event.type === 'member_detached') return `${member} 已离开团队`
@@ -619,6 +867,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       }),
       ...(provider === undefined ? {} : { provider }),
       ...(model === undefined ? {} : { model }),
+      ...(member.reasoningEffort === undefined ? {} : { reasoningEffort: member.reasoningEffort }),
+      ...(member.maxTokens === undefined ? {} : { maxTokens: member.maxTokens }),
       sessionId: member.sessionId,
     }
   })
@@ -635,6 +885,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       runtimeStatus: assistant.status ?? 'offline',
       ...(assistant.view?.provider === undefined ? {} : { provider: assistant.view.provider }),
       ...(assistant.view?.model === undefined ? {} : { model: assistant.view.model }),
+      ...(assistant.view?.reasoningEffort === undefined ? {} : { reasoningEffort: assistant.view.reasoningEffort }),
+      ...(assistant.view?.maxTokens === undefined ? {} : { maxTokens: assistant.view.maxTokens }),
       sessionId: assistant.sessionId,
     }
   })
@@ -685,6 +937,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
   const receiptParticipantsByMessage = new Map<string, Set<string>>()
   const readThroughByMessage = new Map<string, Map<string, number>>()
   const contextSourcesByMessage = new Map<string, Map<string, FleetChatReceiptSource>>()
+  const pendingDeliveriesByMessage = new Map<string, Map<string, FleetPanelPendingDelivery>>()
 
   for (const event of cache.events) {
     if (event.type === 'workspace.assigned') {
@@ -713,6 +966,12 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const channelMembers = Array.isArray(channel?.members) ? channel.members.filter((item): item is string => typeof item === 'string') : []
       const createdBy = string(channel?.createdBy)
       const open = channel?.open === true
+      const channelParticipantIds = [...new Set(channelMembers.length === 0
+        ? participants.map(participant => participant.id)
+        : channelMembers.flatMap(reference => {
+            const participant = participantByReference(reference)
+            return participant === undefined ? [] : [participant.id]
+          }))]
       channelVisibleSessions.set(`#${id}`, participants.flatMap(participant => {
         const contacts = views.get(participant.id)?.contacts?.channels
         const permitted = contacts === '*' || contacts?.includes(id) === true
@@ -729,10 +988,9 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         ...((string(channel?.topic) ?? string(channel?.summary)) === undefined
           ? {}
           : { topic: string(channel?.topic) ?? string(channel?.summary) ?? '' }),
-        memberCount: channelMembers.length === 0 ? participants.length : channelMembers.length,
-        activeCount: channelMembers.length === 0
-          ? participants.filter(isPresent).length
-          : channelMembers.filter(memberId => isPresent(participantsBySession.get(memberId))).length,
+        participantIds: channelParticipantIds,
+        memberCount: channelParticipantIds.length,
+        activeCount: channelParticipantIds.filter(memberId => isPresent(participantsById.get(memberId))).length,
       })
       continue
     }
@@ -750,8 +1008,9 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         kind: 'channel',
         name: string(meeting?.title) ?? id,
         topic: string(meeting?.agenda) ?? '团队会议',
+        participantIds: participants,
         memberCount: participants.length,
-        activeCount: participants.filter(memberId => isPresent(participantsBySession.get(memberId))).length,
+        activeCount: participants.filter(memberId => isPresent(participantsById.get(memberId))).length,
       })
       continue
     }
@@ -772,6 +1031,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         const delivered = receiptParticipantsByMessage.get(messageId) ?? new Set<string>()
         delivered.add(participantId)
         receiptParticipantsByMessage.set(messageId, delivered)
+        pendingDeliveriesByMessage.get(messageId)?.delete(participantId)
         const contextMessageId = string(data.contextMessageId)
         if (contextMessageId === undefined || member === undefined) continue
         const sources = contextSourcesByMessage.get(messageId) ?? new Map<string, FleetChatReceiptSource>()
@@ -781,6 +1041,21 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
           contextMessageId,
         })
         contextSourcesByMessage.set(messageId, sources)
+      } else if (data.action === 'blocked') {
+        if (receiptParticipantsByMessage.get(messageId)?.has(participantId)) continue
+        const reason = string(data.reason)
+        const detail = string(data.detail)
+        const blockedAt = string(data.blockedAt)
+        const pending = pendingDeliveriesByMessage.get(messageId) ?? new Map<string, FleetPanelPendingDelivery>()
+        pending.set(participantId, {
+          memberId: participantId,
+          ...(reason === 'no_active_session' || reason === 'inbox_delivery_failed' || reason === 'participant_retired'
+            ? { reason }
+            : {}),
+          ...(detail === undefined ? {} : { detail }),
+          ...(blockedAt === undefined ? {} : { blockedAt }),
+        })
+        pendingDeliveriesByMessage.set(messageId, pending)
       } else if (data.action === 'read' || data.action === 'acknowledged') {
         const through = data.action === 'acknowledged'
           ? Number.MAX_SAFE_INTEGER
@@ -791,6 +1066,10 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
         const readers = readThroughByMessage.get(messageId) ?? new Map<string, number>()
         readers.set(participantId, Math.max(readers.get(participantId) ?? 0, through))
         readThroughByMessage.set(messageId, readers)
+        const delivered = receiptParticipantsByMessage.get(messageId) ?? new Set<string>()
+        delivered.add(participantId)
+        receiptParticipantsByMessage.set(messageId, delivered)
+        pendingDeliveriesByMessage.get(messageId)?.delete(participantId)
       }
       continue
     }
@@ -957,6 +1236,16 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     const sender = senderFace(from, string(message.fromName))
     const senderParticipant = participantByReference(from)
     const directRecipient = target.startsWith('@') ? participantByReference(target.slice(1)) : undefined
+    const recipientReferences = Array.isArray(message.recipientIds)
+      ? message.recipientIds.filter((reference): reference is string => typeof reference === 'string')
+      : undefined
+    const recipientIds: string[] | undefined = recipientReferences === undefined
+      ? undefined
+      : [...new Set(recipientReferences.flatMap(reference => {
+          const participant = participantByReference(reference)
+          if (participant !== undefined) return [participant.id]
+          return isFleetUser(reference) ? ['operator'] : []
+        }))]
     const visibleSessions = participants.flatMap(participant => {
       if (senderParticipant?.id === participant.id) return []
       if (target.startsWith('@')) {
@@ -978,13 +1267,20 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     })
     const readThrough = readThroughByMessage.get(id) ?? new Map<string, number>()
     const fallbackParticipantIds = visibleSessions
-    const deliveredParticipantIds = receiptParticipantsByMessage.get(id)
-    const visibleMemberIds = deliveredParticipantIds === undefined
+    const recordedDeliveredParticipantIds = receiptParticipantsByMessage.get(id)
+    const visibleMemberIds = recipientIds ?? (recordedDeliveredParticipantIds === undefined
       ? fallbackParticipantIds
-      : [...deliveredParticipantIds]
+      : [...recordedDeliveredParticipantIds])
+    const deliveredParticipantIds = recordedDeliveredParticipantIds ?? new Set<string>()
     const readMemberIds = visibleMemberIds.filter(participantId =>
       (readThrough.get(participantId) ?? 0) >= text.length)
     const readMemberIdSet = new Set(readMemberIds)
+    const deliveredMemberIds = visibleMemberIds.filter(participantId =>
+      deliveredParticipantIds.has(participantId) && !readMemberIdSet.has(participantId))
+    const pendingMemberIds = visibleMemberIds.filter(participantId =>
+      !deliveredParticipantIds.has(participantId) && !readMemberIdSet.has(participantId))
+    const pendingDeliveries = pendingMemberIds.map(memberId =>
+      pendingDeliveriesByMessage.get(id)?.get(memberId) ?? { memberId })
     const sources = visibleMemberIds.flatMap(participantId => {
       const source = contextSourcesByMessage.get(id)?.get(participantId)
       return source === undefined ? [] : [source]
@@ -1002,6 +1298,9 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
           visibleMemberIds,
           readMemberIds,
           unreadMemberIds: visibleMemberIds.filter(memberId => !readMemberIdSet.has(memberId)),
+          deliveredMemberIds,
+          pendingMemberIds,
+          pendingDeliveries,
           ...(sources.length === 0 ? {} : { sources }),
         },
       }),
@@ -1041,6 +1340,36 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     })
     return { ...assistant, visibleConversationIds }
   })
+  const parsedBudget = teamBudget(cache.run.budget)
+  const budgetAccounts = new Map(parsedBudget.members.map(account => [account.memberId, account]))
+  const budgetStartedAt = parsedBudget.team.startedAt || cache.run.startedAt
+  const emptyParticipantBudget = (): FleetPanelBudgetAccount => ({
+    ...budgetAccount(undefined),
+    startedAt: budgetStartedAt,
+  })
+  const activeParticipants = [
+    ...projectedMembers.map(member => ({ member, assistant: false })),
+    ...projectedAssistants.map(member => ({ member, assistant: true })),
+  ]
+  const activeParticipantIds = new Set(activeParticipants.map(({ member }) => member.id))
+  const projectedBudget: FleetPanelTeamBudget = {
+    ...parsedBudget,
+    team: { ...parsedBudget.team, startedAt: budgetStartedAt },
+    members: [
+      ...activeParticipants.map(({ member, assistant }) => ({
+        ...(budgetAccounts.get(member.id) ?? emptyParticipantBudget()),
+        memberId: member.id,
+        name: member.name,
+        role: member.role,
+        color: member.color,
+        assistant,
+        active: true,
+      })),
+      ...parsedBudget.members.filter(account =>
+        !activeParticipantIds.has(account.memberId) && (account.used > 0 || account.calls > 0))
+        .map(account => ({ ...account, active: false })),
+    ],
+  }
 
   const activity: FleetPanelActivity[] = cache.events.flatMap((event): FleetPanelActivity[] => {
     if (privateMessageSequences.has(event.sequence)) return []
@@ -1068,6 +1397,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     resources: [...resources.values()],
     workspaces: [...workspacesByPath.values()],
     activity,
+    budget: projectedBudget,
   }
 }
 
@@ -1089,15 +1419,26 @@ function directory(runs: readonly WireRun[]): FleetPanelTeamDirectory {
         const participantId = participantByCurrentSession.get(currentSessionId)
         return participantId === undefined ? [] : [[sessionId, participantId]]
       }))
+      const assistantConnections = (run.assistants ?? []).flatMap(assistant => {
+        const assistantId = assistant.view?.id
+        if (typeof assistantId !== 'string') return []
+        return [{
+          assistantId,
+          ...(typeof assistant.view?.name === 'string' ? { assistantName: assistant.view.name } : {}),
+          sessionId: assistant.sessionId,
+        }]
+      })
       return {
         teamId: run.id,
         teamName: run.name,
+        assistantConnections,
         assistantSessionIds: [...new Set([...currentSessionIds, ...Object.keys(aliases)])],
         assistantSessionAliases: aliases,
         assistantParticipantIds,
         color: color(run.id),
         status: run.status,
         ...(run.runtimeState === undefined ? {} : { runtimeState: run.runtimeState }),
+        memberStatuses: run.members.map(member => member.status ?? 'unknown'),
         primaryWorkspace: basename(run.projectRoot),
         ...(run.status === 'failed' ? { needsAttention: true } : {}),
       }
@@ -1112,6 +1453,7 @@ function directory(runs: readonly WireRun[]): FleetPanelTeamDirectory {
 export interface FleetWebPanelSource extends FleetPanelSource {
   refresh(): Promise<void>
   invalidate(): Promise<void>
+  invalidateTraces(traces: readonly { readonly teamId: string; readonly memberId: string }[]): void
   dispose(): void
 }
 
@@ -1128,6 +1470,7 @@ export function createFleetWebPanelSource(
   let dataSignature = ''
   const lifetime = new AbortController()
   const listeners = new Set<() => void>()
+  const traceListeners = new Map<string, Set<() => void>>()
   const projections = new Map<string, ProjectionCache>()
 
   const cacheProjection = (teamId: string, projection: ProjectionCache): void => {
@@ -1244,6 +1587,21 @@ export function createFleetWebPanelSource(
       }
     },
     invalidate: () => listeners.size > 0 ? refresh() : Promise.resolve(),
+    invalidateTraces: traces => {
+      for (const trace of traces) {
+        for (const listener of traceListeners.get(`${trace.teamId}\0${trace.memberId}`) ?? []) listener()
+      }
+    },
+    subscribeMemberTrace: (teamId, memberId, listener) => {
+      const key = `${teamId}\0${memberId}`
+      const current = traceListeners.get(key) ?? new Set()
+      current.add(listener)
+      traceListeners.set(key, current)
+      return () => {
+        current.delete(listener)
+        if (current.size === 0) traceListeners.delete(key)
+      }
+    },
     selectTeam: teamId => {
       if (teamId === selectedTeamId) return
       selectedTeamId = teamId
@@ -1334,6 +1692,15 @@ export function createFleetWebPanelSource(
         teamId,
         view: 'member',
         member: memberId,
+      }, signal ?? lifetime.signal)))
+    },
+    loadMemberAccess: async (input, signal) => {
+      const client = await getClient(signal ?? lifetime.signal)
+      return memberAccess(unwrap(await client.member({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        action: 'get_access',
+        member: input.memberId,
       }, signal ?? lifetime.signal)))
     },
     loadResource: async (teamId, resourceId, signal, revisionId) => {
@@ -1460,13 +1827,24 @@ export function createFleetWebPanelSource(
     uploadResource: async input => {
       if (input.file.size > 25 * 1024 * 1024) throw new Error(`${input.file.name} 超过 Fleet 的 25 MiB 上传限制`)
       const client = await getClient(lifetime.signal)
-      unwrap(await client.upload({
+      const resource = panelResource(unwrap(await client.upload({
         sessionId: input.sessionId,
         teamId: input.teamId,
         name: input.file.name,
         base64: encodeFleetFile(await input.file.arrayBuffer()),
         label: input.file.name,
         ...(input.file.type.length === 0 ? {} : { mediaType: input.file.type }),
+      }, lifetime.signal)))
+      await refresh()
+      return resource
+    },
+    removeResource: async input => {
+      const client = await getClient(lifetime.signal)
+      if (client.removeResource === undefined) throw new Error('当前 Fleet 实例不支持移除团队文件')
+      unwrap(await client.removeResource({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        resourceId: input.resourceId,
       }, lifetime.signal))
       await refresh()
     },
@@ -1477,6 +1855,59 @@ export function createFleetWebPanelSource(
         teamId: input.teamId,
         action: input.action,
         ...(input.summary === undefined ? {} : { summary: input.summary }),
+      }, lifetime.signal))
+      await refresh()
+    },
+    loadTeamSettings: async (teamId, signal) => {
+      const client = await getClient(signal ?? lifetime.signal)
+      return teamSettings(unwrap(await client.project({ teamId, view: 'settings' }, signal ?? lifetime.signal)))
+    },
+    updateTeamSettings: async input => {
+      const client = await getClient(lifetime.signal)
+      const updated = teamSettings(unwrap(await client.control({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        action: 'configure',
+        settings: input.settings,
+      }, lifetime.signal)))
+      await refresh()
+      return updated
+    },
+    updateBudget: async input => {
+      const client = await getClient(lifetime.signal)
+      const updated = teamBudget(unwrap(await client.control({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        action: 'budget',
+        budget: {
+          scope: input.scope,
+          ...(input.member === undefined ? {} : { member: input.member }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+          ...(input.reset === undefined ? {} : { reset: input.reset }),
+          ...(input.accounting === undefined ? {} : { accounting: input.accounting }),
+        },
+      }, lifetime.signal)))
+      await refresh()
+      return updated
+    },
+    configureTeamRequest: async input => {
+      const client = await getClient(lifetime.signal)
+      unwrap(await client.member({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        action: 'configure_all',
+        request: input.request,
+      }, lifetime.signal))
+      await refresh()
+    },
+    configureMemberRequest: async input => {
+      const client = await getClient(lifetime.signal)
+      unwrap(await client.member({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        action: input.assistant ? 'configure_assistant' : 'configure',
+        member: input.memberId,
+        request: input.request,
       }, lifetime.signal))
       await refresh()
     },
@@ -1497,10 +1928,38 @@ export function createFleetWebPanelSource(
         teamId: input.teamId,
         action: input.reset === true ? 'reset_permissions' : 'permissions',
         member: input.memberId,
-        ...(input.groups === undefined ? {} : { groups: input.groups }),
+        ...(input.assignment === undefined ? {} : { assignment: input.assignment }),
       }, lifetime.signal))
       await refresh()
       return memberAuthorization(value)
+    },
+    updateMemberAccess: async input => {
+      const client = await getClient(lifetime.signal)
+      const change = input.change
+      const value = unwrap(await client.member({
+        sessionId: input.sessionId,
+        teamId: input.teamId,
+        member: input.memberId,
+        action: change.action === 'set_mode'
+          ? 'set_access_mode'
+          : change.action === 'add_rule'
+            ? 'add_access_rule'
+            : 'remove_access_rule',
+        ...(change.action === 'set_mode' ? {
+          resourceKind: change.resourceKind,
+          accessMode: change.mode,
+        } : change.action === 'add_rule' ? {
+          accessRule: {
+            resourceKind: change.resourceKind,
+            resourceId: change.resourceId,
+            scope: change.scope,
+            effect: change.effect,
+            levels: change.levels,
+          },
+        } : { accessRuleId: change.ruleId }),
+      }, lifetime.signal))
+      await refresh()
+      return memberAccess(value)
     },
     refresh,
     dispose: () => {
@@ -1508,6 +1967,7 @@ export function createFleetWebPanelSource(
       disposed = true
       lifetime.abort(new Error('Fleet panel source disposed'))
       listeners.clear()
+      traceListeners.clear()
     },
   }
 }

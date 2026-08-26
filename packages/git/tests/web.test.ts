@@ -9,8 +9,8 @@ import { FleetAuthorizationService } from 'dsh-agent-fleet'
 import type { FleetRunService } from 'dsh-agent-fleet'
 import { FleetAccessService, FleetGroupService } from 'dsh-agent-fleet'
 
-import { FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
-import { FLEET_GIT_PERMISSIONS, FleetGitAttributionStore, FleetGitRecallService, FleetGitWebRemote, apply } from '../src/index.js'
+import { FLEET_GIT_WEB_PEER_REMOTE, FLEET_GIT_WEB_REMOTE } from '../src/contract.js'
+import { FLEET_GIT_PERMISSIONS, FleetGitAttributionStore, FleetGitRecallService, FleetGitWatcher, FleetGitWebRemote, apply } from '../src/index.js'
 
 const roots: string[] = []
 
@@ -124,6 +124,33 @@ describe('FleetGitWebRemote', () => {
       descriptor.result.mode === 'strict'
       && descriptor.parameters.every(parameter => parameter.codec.mode === 'strict'),
     )).toBe(true)
+    expect(FLEET_GIT_WEB_PEER_REMOTE.descriptors).toHaveLength(1)
+  })
+
+  it('invalidates a Team after repository files change', async () => {
+    const root = repository()
+    let changeListener: (() => void) | undefined
+    let resolveNotification: ((teamIds: readonly string[]) => void) | undefined
+    let rejectNotification: ((error: Error) => void) | undefined
+    const notification = new Promise<readonly string[]>((resolve, reject) => {
+      resolveNotification = resolve
+      rejectNotification = reject
+    })
+    const watcher = new FleetGitWatcher({
+      list: () => [{ id: 'team-1', projectRoot: root, status: 'running' }],
+      subscribeChanges: listener => {
+        changeListener = listener
+        return () => { changeListener = undefined }
+      },
+    }, teamIds => { resolveNotification?.(teamIds) })
+
+    writeFileSync(join(root, 'README.md'), '# Fleet\n\nReactive\n')
+    const timeout = setTimeout(() => { rejectNotification?.(new Error('Git watcher did not invalidate the Team')) }, 2_000)
+    await expect(notification).resolves.toEqual(['team-1'])
+    clearTimeout(timeout)
+
+    watcher.close()
+    expect(changeListener).toBeUndefined()
   })
 
   it('projects only the selected Team commit attributions without changing Git metadata', () => {

@@ -20,6 +20,8 @@ export interface MessageAgent {
 
 export interface AgentDirectory {
   get(id: string): MessageAgent | undefined
+  /** All stable Fleet participant ids, including participants without an active Session. */
+  participantIds(): string[]
   list(): MessageAgent[]
   resolve?(reference: string): string
   conversationKey?(participantId: string): string
@@ -40,6 +42,7 @@ export type FleetSystemNotificationKind =
   | 'work_start'
   | 'work_resume'
   | 'member_joined'
+  | 'team_settings'
   | 'team_wake'
   | 'team_quiescent'
   | 'network_recovery'
@@ -66,8 +69,14 @@ export interface FleetMessage {
   readonly conversationId?: string
   readonly from: string
   readonly fromName?: string
+  /** Trusted host input that should retain native direct-human semantics when delivered. */
+  readonly origin?: 'user'
+  /** Immutable delivery audience selected when the message was created. Absent only on legacy events. */
+  readonly recipientIds?: string[]
   readonly text: string
   readonly replyTo?: string
+  /** The recipient must send a later message in this conversation before remaining idle. */
+  readonly mustReply?: boolean
   readonly resources: string[]
   readonly mentions: string[]
   readonly delivery: FleetDelivery
@@ -78,6 +87,7 @@ export interface SendMessageInput {
   readonly to: FleetTarget
   readonly text: string
   readonly replyTo?: string
+  readonly mustReply?: boolean
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
   readonly delivery: FleetDelivery
@@ -88,6 +98,7 @@ export interface SendMessageInput {
 export interface SendMessageResult {
   readonly messageId: string
   readonly recipients: number
+  readonly delivered: number
   readonly woken: number
 }
 
@@ -151,11 +162,26 @@ export interface FleetMessageReceipt {
   readonly messageId: string
   /** The conversation inbox that owns the message. */
   readonly inbox: FleetTarget
-  /** Participants selected as readers when the message was delivered. */
+  /** Immutable delivery audience selected when the message was created. */
+  readonly recipientIds: string[]
+  readonly deliveredParticipantIds: string[]
+  readonly pendingParticipantIds: string[]
+  readonly pendingDeliveries: FleetPendingDelivery[]
+  /** @deprecated Use deliveredParticipantIds. */
   readonly participantIds: string[]
   readonly readParticipantIds: string[]
+  /** @deprecated Use deliveredParticipantIds minus readParticipantIds. */
   readonly unreadParticipantIds: string[]
   readonly readThrough: Record<string, number>
+}
+
+export type FleetDeliveryBlockReason = 'no_active_session' | 'inbox_delivery_failed' | 'participant_retired'
+
+export interface FleetPendingDelivery {
+  readonly participantId: string
+  readonly reason: FleetDeliveryBlockReason
+  readonly detail?: string
+  readonly blockedAt: string
 }
 
 export interface SearchMessagesInput {
@@ -332,6 +358,15 @@ export type FleetCoordinationEvent =
       readonly messageId: string
       readonly contextMessageId: string
       readonly content?: 'full' | 'notice'
+    }
+  | {
+      readonly type: 'inbox'
+      readonly action: 'blocked'
+      readonly agentId: string
+      readonly messageId: string
+      readonly reason: FleetDeliveryBlockReason
+      readonly detail?: string
+      readonly blockedAt: string
     }
   | {
       readonly type: 'inbox'

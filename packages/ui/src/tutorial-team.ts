@@ -134,6 +134,20 @@ function tutorialMemberTrace(memberId: string, request?: FleetPanelMemberTraceRe
 function tutorialTeam(chinese: boolean, now: number): FleetPanelTeamSnapshot {
   const text = (zh: string, en: string): string => chinese ? zh : en
   const sentAt = (minutesAgo: number): string => new Date(now - minutesAgo * 60_000).toISOString()
+  const budgetStartedAt = new Date(now).toISOString()
+  const emptyBudgetAccount = {
+    startedAt: budgetStartedAt,
+    used: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    calls: 0,
+    unmeteredCalls: 0,
+    models: [],
+    state: 'unlimited' as const,
+  }
   const brief = "New members onboard with this checklist: (1) read this project brief and the Team positioning to understand the demo's scope and boundaries; (2) join the main Channel and review recent messages for context; (3) set your member status so teammates can see what you are working on; (4) claim or accept an owned task and message the relevant peer directly rather than waiting for a coordinator; and (5) keep the work small — no votes or meetings, just a short completion update in the main Channel."
   return {
     teamId: FLEET_TUTORIAL_TEAM_ID,
@@ -148,6 +162,7 @@ function tutorialTeam(chinese: boolean, now: number): FleetPanelTeamSnapshot {
         kind: 'channel',
         name: text('项目大厅', 'project-lobby'),
         topic: text('演示团队如何在频道中协作', 'See how a Team collaborates in a channel'),
+        participantIds: ['tutorial:nova', 'tutorial:mina', 'tutorial:rowan'],
         memberCount: 3,
         activeCount: 3,
       },
@@ -305,6 +320,17 @@ function tutorialTeam(chinese: boolean, now: number): FleetPanelTeamSnapshot {
       { id: 'tutorial:activity:2', kind: 'resource', text: text('Mina 更新了 project-brief.md', 'Mina updated project-brief.md'), createdAt: sentAt(5) },
       { id: 'tutorial:activity:3', kind: 'message', text: text('Rowan 完成复核并回到空闲状态', 'Rowan completed the review and returned to idle'), createdAt: sentAt(2) },
     ],
+    budget: {
+      mode: 'tokens',
+      rates: [],
+      configuredModels: [],
+      team: emptyBudgetAccount,
+      members: [
+        { ...emptyBudgetAccount, memberId: 'tutorial:nova', name: 'Nova', role: text('产品负责人', 'Product lead'), color: '#527FCA', assistant: false, active: true },
+        { ...emptyBudgetAccount, memberId: 'tutorial:mina', name: 'Mina', role: text('工程师', 'Engineer'), color: '#4C8A75', assistant: false, active: true },
+        { ...emptyBudgetAccount, memberId: 'tutorial:rowan', name: 'Rowan', role: text('评审者', 'Reviewer'), color: '#846BB3', assistant: false, active: true },
+      ],
+    },
   }
 }
 

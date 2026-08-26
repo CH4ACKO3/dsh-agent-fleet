@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 
 import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
@@ -23,6 +23,7 @@ import type { FleetResourcePreview, FleetRunMember } from '../src/run.js'
 import { FleetArchiveRegistry } from '../src/archive.js'
 import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
+import { activateResidentFleetAssistants } from '../src/resident-assistants.js'
 import { normalizeFleetSetupConfiguration } from '../src/setup.js'
 
 interface FakeEvent {
@@ -417,11 +418,90 @@ function setup(root: string, options?: {
 }
 
 describe('FleetRunService', () => {
+  it('interrupts a Team assistant without pausing or disconnecting it', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistant = run.assistants[0]
+    if (assistant === undefined) throw new Error('expected Team assistant')
+    const release = vi.fn(() => Promise.resolve(false))
+    const restore = vi.fn(() => Promise.resolve())
+    service.setResidentAssistantController({ release, restore })
+    launcher.status = 'running'
+
+    await expect(service.pauseMember(launcher as unknown as Agent, run.id, assistant.view.id))
+      .resolves.toMatchObject({ name: assistant.view.id, status: 'idle' })
+    expect(launcher.cancelCount).toBe(1)
+    expect(service.status(run.id).assistants[0]).toMatchObject({ status: 'idle' })
+    expect(service.requireAssistantConnection(launcher as unknown as Agent, run.id).view.id).toBe(assistant.view.id)
+    expect(release).not.toHaveBeenCalled()
+    expect(restore).not.toHaveBeenCalled()
+    await expect(service.resumeMemberAsExternal(launcher as unknown as Agent, run.id, assistant.view.id))
+      .rejects.toThrow('already online and can reply')
+    disconnect()
+  })
+
+  it('does not persist an assistant interruption as a paused assistant', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistant = run.assistants[0]
+    if (assistant === undefined) throw new Error('expected Team assistant')
+    first.launcher.status = 'running'
+    await first.service.pauseMember(first.launcher as unknown as Agent, run.id, assistant.view.id)
+    first.disconnect()
+    await first.core.close()
+
+    const persisted = JSON.parse(readFileSync(join(dirname(run.configPath), 'run.json'), 'utf8')) as {
+      assistants: Array<{ view: { id: string }; status?: string }>
+    }
+    expect(persisted.assistants.find(candidate => candidate.view.id === assistant.view.id))
+      .not.toMatchObject({ status: 'paused' })
+
+    const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
+    const activate = vi.fn()
+    const resume = vi.fn(async (options: ResumeAgentOptions) => {
+      const agent = second.runtime.add(String(options.resumeSessionId), root)
+      await options.setup?.({ agent } as unknown as Context)
+      return {
+        agent,
+        dispose: async () => { second.runtime.agents.delete(agent.id) },
+      }
+    })
+    const residents = await activateResidentFleetAssistants({
+      agents: {
+        get: (id: string) => second.runtime.get(String(id)),
+        resume,
+      },
+      logger: () => ({ warn: vi.fn() }),
+    } as unknown as Context, second.service, { activate } as never)
+    second.service.setResidentAssistantController(residents)
+
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: assistant.sessionId }))
+    expect(activate).toHaveBeenCalledWith(expect.objectContaining({ id: assistant.sessionId }), run.id, assistant.view)
+    expect(second.service.status(run.id).assistants[0]).toMatchObject({ status: 'idle' })
+
+    await residents.dispose()
+    second.disconnect()
+  })
+
   it('notifies web observers after durable and live member changes', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     let changes = 0
+    const traceChanges: Array<{ readonly teamId: string; readonly memberId: string }> = []
     const unsubscribe = service.subscribeChanges(() => { changes += 1 })
+    const unsubscribeTrace = service.subscribeTraceChanges((teamId, memberId) => {
+      traceChanges.push({ teamId, memberId })
+    })
     const run = await service.create(launcher as unknown as Agent, {
       configPath,
       projectRoot: root,
@@ -436,7 +516,14 @@ describe('FleetRunService', () => {
     service.agentStatusChanged(member as unknown as Agent)
     expect(changes).toBe(afterCreate + 1)
 
+    service.recordMemberSessionEvent(member.id, {
+      type: 'tool/call', seq: 1, time: Date.now(),
+      data: { callId: 'call-1', name: 'fleet_status', arguments: '{}' },
+    })
+    expect(traceChanges).toEqual([{ teamId: run.id, memberId: run.members[0]?.name ?? '' }])
+
     unsubscribe()
+    unsubscribeTrace()
     service.agentStatusChanged(member as unknown as Agent)
     expect(changes).toBe(afterCreate + 1)
     disconnect()
@@ -620,6 +707,305 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('updates durable Team settings and queues the current guidance for loaded participants', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+
+    expect(service.teamSettings(run.id)).toMatchObject({
+      name: 'Small Team',
+      positioning: 'Work as peers and finish through a Vote.',
+      updateDensity: 'balanced',
+      notificationPolicy: 'milestones',
+      projectRoot: root,
+    })
+
+    const updated = service.configureTeamSettings(launcher as unknown as Agent, {
+      runId: run.id,
+      settings: {
+        name: 'Runtime Team',
+        positioning: 'Own the active runtime.',
+        rules: 'Verify user-visible changes.',
+        collaborationMethod: 'Coordinate through the main Channel.',
+        updateDensity: 'detailed',
+        notificationPolicy: 'decisions',
+        contentPreference: 'Lead with outcomes.',
+      },
+    })
+
+    expect(updated).toMatchObject({
+      name: 'Runtime Team',
+      positioning: 'Own the active runtime.',
+      rules: 'Verify user-visible changes.',
+      collaborationMethod: 'Coordinate through the main Channel.',
+      updateDensity: 'detailed',
+      notificationPolicy: 'decisions',
+      contentPreference: 'Lead with outcomes.',
+    })
+    expect(service.status(run.id).name).toBe('Runtime Team')
+    expect(service.exportConfiguration(run.id)).toMatchObject({
+      core: { name: 'Runtime Team', positioning: 'Own the active runtime.' },
+      modules: {
+        'dsh-agent-fleet/message': {
+          rules: 'Verify user-visible changes.',
+          collaborationMethod: 'Coordinate through the main Channel.',
+        },
+        'dsh-agent-fleet/ui': { userAccess: {
+          updateDensity: 'detailed', notificationPolicy: 'decisions', contentPreference: 'Lead with outcomes.',
+        } },
+      },
+    })
+    for (const member of run.members) {
+      expect(runtime.get(member.sessionId)?.messages.at(-1)?.content).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'text', text: expect.stringContaining('Own the active runtime.') }),
+      ]))
+    }
+    expect(service.readTrace(run.id, 0, 100).events).toContainEqual(expect.objectContaining({
+      type: 'team_settings_configured',
+    }))
+
+    service.end(launcher as unknown as Agent, 'Team settings verified.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('tracks and enforces shared Team and independent member token budgets', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root, {
+      launcherOptions: { provider: 'provider-one', model: 'model-one', maxTokens: 512 },
+    })
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      provider: 'provider-one',
+      model: 'model-one',
+    })
+    const scoped = new FakeAgentContext()
+    launcher.ctx = scoped as unknown as Context
+    await service.attachAssistant(launcher as unknown as Agent, { runId: run.id })
+    const assistant = service.status(run.id).assistants.find(candidate => candidate.sessionId === launcher.id)
+    if (assistant === undefined) throw new Error('expected attached Team assistant')
+
+    service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id, scope: 'team', limit: 100,
+    })
+    service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id, scope: 'member', member: assistant.view.id, limit: 60,
+    })
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: { id: 'assistant-message', role: 'assistant', content: [], source: { provider: 'provider-one', model: 'model-one' } },
+        usage: { inputTokens: 20, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 5, reasoningTokens: 7 },
+      },
+    } as unknown as SessionEvent)
+
+    expect(service.teamBudget(run.id)).toMatchObject({
+      mode: 'tokens',
+      team: { limit: 100, used: 50, reasoningTokens: 7, calls: 1, remaining: 50 },
+      members: expect.arrayContaining([expect.objectContaining({
+        memberId: assistant.view.id, limit: 60, used: 50, state: 'warning', remaining: 10,
+      })]),
+    })
+    await expect(scoped.request({ provider: 'provider-one', model: 'model-one', maxTokens: 512 }))
+      .resolves.toMatchObject({ maxTokens: 10 })
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'compaction/summary',
+      data: { provider: 'provider-one', model: 'model-one', usage: { inputTokens: 2, outputTokens: 3 } },
+    } as unknown as SessionEvent)
+    expect(service.teamBudget(run.id).members.find(member => member.memberId === assistant.view.id)).toMatchObject({
+      used: 55, remaining: 5, state: 'danger',
+    })
+    await expect(scoped.request({ provider: 'provider-one', model: 'model-one', maxTokens: 512 }))
+      .resolves.toMatchObject({ maxTokens: 5 })
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 3,
+      time: Date.now() + 1,
+      type: 'compaction/summary',
+      data: { provider: 'provider-one', model: 'model-one', usage: { inputTokens: 2, outputTokens: 3 } },
+    } as unknown as SessionEvent)
+    await expect(scoped.request({ provider: 'provider-one', model: 'model-one', maxTokens: 512 }))
+      .rejects.toThrow('member')
+
+    const memberReset = service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id, scope: 'member', member: assistant.view.id, reset: true,
+    })
+    expect(memberReset.team).toMatchObject({ used: 60, remaining: 40 })
+    expect(memberReset.members.find(member => member.memberId === assistant.view.id)).toMatchObject({
+      used: 0, remaining: 60,
+    })
+    await expect(scoped.request({ provider: 'provider-one', model: 'model-one', maxTokens: 512 }))
+      .resolves.toMatchObject({ maxTokens: 40 })
+
+    const teamReset = service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id, scope: 'team', reset: true,
+    })
+    expect(teamReset.team).toMatchObject({ limit: 100, used: 0, remaining: 100 })
+    expect(teamReset.members.find(member => member.memberId === assistant.view.id)).toMatchObject({
+      limit: 60, used: 0, remaining: 60,
+    })
+    expect(JSON.parse(readFileSync(join(root, '.fleet-registry', run.id, 'run.json'), 'utf8')))
+      .toMatchObject({ budget: { mode: 'tokens', team: { limit: 100 }, members: [expect.objectContaining({ memberId: assistant.view.id, limit: 60 })] } })
+
+    const costMode = service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id,
+      scope: 'team',
+      accounting: {
+        mode: 'cost',
+        rates: [
+          { provider: 'provider-one', model: 'model-one', inputUsdPerMillion: 2, outputUsdPerMillion: 4, cacheReadUsdPerMillion: 1, cacheWriteUsdPerMillion: 3 },
+          { provider: 'provider-two', model: 'model-one', inputUsdPerMillion: 20, outputUsdPerMillion: 40, cacheReadUsdPerMillion: 10, cacheWriteUsdPerMillion: 30 },
+        ],
+      },
+    })
+    expect(costMode).toMatchObject({ mode: 'cost', team: { used: 0, state: 'unlimited' } })
+    service.configureBudget(launcher as unknown as Agent, { runId: run.id, scope: 'team', limit: 1_000_000 })
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 4,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        turn: 2,
+        step: 1,
+        message: { id: 'cost-message', role: 'assistant', content: [], source: { provider: 'provider-one', model: 'model-one' } },
+        usage: { inputTokens: 20, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 5 },
+      },
+    } as unknown as SessionEvent)
+    expect(service.teamBudget(run.id).team).toMatchObject({
+      used: 140,
+      models: [expect.objectContaining({ provider: 'provider-one', model: 'model-one', charged: 140 })],
+    })
+    await expect(scoped.request({ provider: 'provider-two', model: 'model-one', maxTokens: 512 }))
+      .resolves.toMatchObject({ provider: 'provider-two', model: 'model-one', maxTokens: 512 })
+    await expect(scoped.request({ provider: 'provider-three', model: 'model-one', maxTokens: 512 }))
+      .rejects.toThrow('requires prices for provider-three / model-one')
+    disconnect()
+  })
+
+  it('keeps event-time charges and removed member usage in the Team budget', async () => {
+    const { root, configPath } = fixture()
+    const { service, core, launcher, disconnect } = setup(root, {
+      launcherOptions: { provider: 'provider-one', model: 'model-one' },
+    })
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      provider: 'provider-one',
+      model: 'model-one',
+    })
+    launcher.ctx = new FakeAgentContext() as unknown as Context
+    await service.attachAssistant(launcher as unknown as Agent, { runId: run.id })
+    const lead = service.status(run.id).members.find(member => member.name === 'lead')
+    if (lead === undefined) throw new Error('expected lead member')
+
+    service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id,
+      scope: 'team',
+      accounting: {
+        mode: 'tokens',
+        rates: [
+          { provider: 'provider-one', model: 'model-one', multiplier: 2 },
+          { provider: 'provider-two', model: 'model-two', multiplier: 4 },
+        ],
+      },
+    })
+    service.recordMemberSessionEvent(lead.sessionId, {
+      seq: 1,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: { id: 'first-rate', role: 'assistant', content: [], source: { provider: 'provider-one', model: 'model-one' } },
+        usage: { inputTokens: 10, outputTokens: 0 },
+      },
+    } as unknown as SessionEvent)
+
+    expect(service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id,
+      scope: 'team',
+      accounting: {
+        mode: 'tokens',
+        rates: [
+          { provider: 'provider-one', model: 'model-one', multiplier: 3 },
+          { provider: 'provider-two', model: 'model-two', multiplier: 4 },
+        ],
+      },
+    }).team.used).toBe(20)
+    service.recordMemberSessionEvent(lead.sessionId, {
+      seq: 2,
+      time: Date.now() + 1,
+      type: 'assistant/message',
+      data: {
+        turn: 2,
+        step: 1,
+        message: { id: 'changed-rate', role: 'assistant', content: [], source: { provider: 'provider-one', model: 'model-one' } },
+        usage: { inputTokens: 10, outputTokens: 0 },
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.sessionId, {
+      seq: 3,
+      time: Date.now() + 2,
+      type: 'assistant/message',
+      data: {
+        turn: 3,
+        step: 1,
+        message: { id: 'changed-model', role: 'assistant', content: [], source: { provider: 'provider-two', model: 'model-two' } },
+        usage: { inputTokens: 10, outputTokens: 0 },
+      },
+    } as unknown as SessionEvent)
+
+    expect(service.teamBudget(run.id).members.find(member => member.memberId === lead.name)).toMatchObject({
+      used: 90,
+      inputTokens: 30,
+      models: [
+        expect.objectContaining({ provider: 'provider-one', model: 'model-one', charged: 50 }),
+        expect.objectContaining({ provider: 'provider-two', model: 'model-two', charged: 40 }),
+      ],
+    })
+
+    await service.removeMember(launcher as unknown as Agent, run.id, lead.name)
+    expect(service.status(run.id).members.some(member => member.name === lead.name)).toBe(false)
+    expect(service.teamBudget(run.id).members.find(member => member.memberId === lead.name)).toMatchObject({
+      memberId: lead.name,
+      name: lead.displayName,
+      role: lead.role,
+      color: lead.color,
+      assistant: false,
+      active: false,
+      used: 90,
+      inputTokens: 30,
+    })
+    expect(JSON.parse(readFileSync(join(root, '.fleet-registry', run.id, 'run.json'), 'utf8'))).toMatchObject({
+      budget: { members: [expect.objectContaining({ memberId: lead.name, name: lead.displayName, used: 90 })] },
+    })
+    disconnect()
+    await core.close()
+
+    const restarted = setup(root, { launcherId: 'restarted-budget-launcher' })
+    expect(restarted.service.teamBudget(run.id).members.find(member => member.memberId === lead.name)).toMatchObject({
+      name: lead.displayName,
+      used: 90,
+      active: false,
+    })
+    restarted.disconnect()
+    await restarted.core.close()
+  })
+
   it('hot-configures a running member for its next model step and restores that choice', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
@@ -718,11 +1104,14 @@ describe('FleetRunService', () => {
     const scoped = new FakeAgentContext()
     launcher.ctx = scoped as unknown as Context
     await service.attachAssistant(launcher as unknown as Agent, { runId: run.id })
+    const assistantId = service.status(run.id).assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected attached assistant')
     const createCount = runtime.creates.length
     const resumeCount = runtime.resumes.length
 
     await expect(service.configureAssistant(launcher as unknown as Agent, {
       runId: run.id,
+      assistant: assistantId,
       request: {
         provider: 'provider-new',
         model: 'model-new',
@@ -933,19 +1322,23 @@ describe('FleetRunService', () => {
         copied.run.members.find(candidate => candidate.name === member.name)?.sessionId,
       )
     }
-    const copiedResumed = await second.service.resume(second.launcher as unknown as Agent, {
+    const copiedLoaded = await second.service.resume(second.launcher as unknown as Agent, {
       runId: copied.run.id,
       projectRoot: copiedRoot,
     })
+    expect(copiedLoaded).toMatchObject({ status: 'paused', runtimeState: 'active' })
+    const copiedResumed = await second.service.resumeTeam(second.launcher as unknown as Agent, copied.run.id)
     expect(copiedResumed).toMatchObject({ status: 'running', runtimeState: 'active' })
     expect(readFileSync(join(copiedRoot, '.fleet', copied.run.id, 'decision-log.md'), 'utf8'))
       .toBe('Keep this document across archive import.\n')
 
     const restoringAssistant = second.runtime.add('restoring-assistant-2', restoredRoot)
-    const resumed = await second.service.resume(restoringAssistant as unknown as Agent, {
+    const loaded = await second.service.resume(restoringAssistant as unknown as Agent, {
       runId: run.id,
       projectRoot: restoredRoot,
     })
+    expect(loaded).toMatchObject({ status: 'paused', runtimeState: 'active' })
+    const resumed = await second.service.resumeTeam(restoringAssistant as unknown as Agent, run.id)
     expect(resumed).toMatchObject({ status: 'running', runtimeState: 'active' })
     expect(readFileSync(join(restoredRoot, '.fleet', run.id, 'decision-log.md'), 'utf8'))
       .toBe('Keep this document across archive import.\n')
@@ -1434,7 +1827,6 @@ describe('FleetRunService', () => {
   })
 
   it('discovers shared-directory files on the host without mutating during projection reads', async () => {
-    vi.useFakeTimers()
     const { root, configPath } = fixture()
     const { service, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -1450,7 +1842,16 @@ describe('FleetRunService', () => {
     writeFileSync(progressPath, '# Progress\n\nDirect Agent output.\n')
 
     expect(service.readWebTeamProjection(run.id, initialSequence, 1_000).events).toEqual([])
-    vi.advanceTimersByTime(5_000)
+    await vi.waitFor(() => {
+      expect(service.readWebTeamProjection(run.id, initialSequence, 1_000).events).toContainEqual(
+        expect.objectContaining({
+          type: 'resource.resource_added',
+          data: expect.objectContaining({
+            resource: expect.objectContaining({ id: 'shared:notes/progress.md' }),
+          }),
+        }),
+      )
+    }, { timeout: 2_000, interval: 20 })
     const added = service.readWebTeamProjection(run.id, initialSequence, 1_000)
     expect(added.events).toContainEqual(expect.objectContaining({
       type: 'resource.resource_added',
@@ -1472,7 +1873,14 @@ describe('FleetRunService', () => {
     const addedSequence = added.events.at(-1)?.sequence ?? initialSequence
     writeFileSync(progressPath, '# Progress\n\nDirect Agent output updated.\n')
     expect(service.readWebTeamProjection(run.id, addedSequence, 1_000).events).toEqual([])
-    vi.advanceTimersByTime(5_000)
+    await vi.waitFor(() => {
+      expect(service.readWebTeamProjection(run.id, addedSequence, 1_000).events).toContainEqual(
+        expect.objectContaining({
+          type: 'resource.resource_added',
+          data: expect.objectContaining({ resource: expect.objectContaining({ id: 'shared:notes/progress.md' }) }),
+        }),
+      )
+    }, { timeout: 2_000, interval: 20 })
     const updated = service.readWebTeamProjection(run.id, addedSequence, 1_000)
     expect(updated.events).toContainEqual(expect.objectContaining({
       type: 'resource.resource_added',
@@ -1485,7 +1893,18 @@ describe('FleetRunService', () => {
     const updatedSequence = updated.events.at(-1)?.sequence ?? addedSequence
     unlinkSync(progressPath)
     expect(service.readWebTeamProjection(run.id, updatedSequence, 1_000).events).toEqual([])
-    vi.advanceTimersByTime(5_000)
+    await vi.waitFor(() => {
+      expect(service.readWebTeamProjection(run.id, updatedSequence, 1_000).events).toContainEqual(
+        expect.objectContaining({
+          type: 'resource.resource_removed',
+          data: expect.objectContaining({
+            removal: expect.objectContaining({
+              resource: expect.objectContaining({ id: 'shared:notes/progress.md' }),
+            }),
+          }),
+        }),
+      )
+    }, { timeout: 2_000, interval: 20 })
     expect(service.readWebTeamProjection(run.id, updatedSequence, 1_000).events).toContainEqual(
       expect.objectContaining({
         type: 'resource.resource_removed',
@@ -1575,6 +1994,13 @@ describe('FleetRunService', () => {
     expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
       expect.objectContaining({ text: expect.stringContaining('Please check the latest result.') }),
     ])
+    expect(reviewer.inbox.nextStep.at(-1)?.source).toEqual({ kind: 'user' })
+    expect(service.messageHub(run.id).read(reviewer, { conversation: `@fleet-user:${run.id}` }).messages)
+      .toContainEqual(expect.objectContaining({
+        id: userDirectMessage.messageId,
+        origin: 'user',
+        mustReply: true,
+      }))
     expect(service.messageHub(run.id).send(lead, {
       to: '@User',
       text: 'I received the user message.',
@@ -1604,6 +2030,14 @@ describe('FleetRunService', () => {
     })
     expect(uploaded).toMatchObject({ label: 'browser-note.txt', mediaType: 'text/plain', size: 25 })
     expect(readFileSync(uploaded.path, 'utf8')).toBe('uploaded from the browser')
+    expect(service.removeResource(launcher as unknown as Agent, {
+      runId: run.id,
+      resourceId: uploaded.id,
+    })).toEqual(uploaded)
+    expect(existsSync(uploaded.path)).toBe(false)
+    expect(service.resourceStore(run.id).listResources()).not.toContainEqual(
+      expect.objectContaining({ id: uploaded.id }),
+    )
     expect(() => service.uploadResource(launcher as unknown as Agent, {
       runId: run.id,
       name: '../outside.txt',
@@ -1774,6 +2208,29 @@ describe('FleetRunService', () => {
       conversationId: `dm:assistant:${attached.assistant.view.id}:member:lead`,
       from: 'lead',
     }))
+
+    const residentSource = runtime.add('resident-assistant-source', root)
+    const residentAttached = await service.attachAssistant(residentSource as unknown as Agent, {
+      runId: run.id,
+      name: 'Resident',
+    })
+    const releaseResident = vi.fn(async (sessionId: string) => {
+      runtime.agents.delete(sessionId)
+      return true
+    })
+    const restoreResident = vi.fn(async () => {})
+    service.setResidentAssistantController({ release: releaseResident, restore: restoreResident })
+    const residentReplacement = runtime.add('resident-assistant-replacement', root)
+    const residentRebound = await service.attachAssistant(residentReplacement as unknown as Agent, {
+      runId: run.id,
+      assistantId: residentAttached.assistant.view.id,
+    })
+    expect(releaseResident).toHaveBeenCalledWith(residentSource.id)
+    expect(restoreResident).not.toHaveBeenCalled()
+    expect(residentRebound.assistant).toMatchObject({
+      sessionId: residentReplacement.id,
+      view: { id: residentAttached.assistant.view.id, name: 'Resident' },
+    })
 
     const finishVote = hub.createVote(replacementAssistant, {
       channel: '#main',
@@ -2360,8 +2817,8 @@ describe('FleetRunService', () => {
       projectedEvents.push(...projection.events)
     }
     expect(journalReads).toBe(0)
-    expect(projectedEvents.filter(event => event.type === 'coordination.message')).toHaveLength(500)
-    expect(projectedEvents.filter(event => event.type === 'coordination.inbox')).toHaveLength(1_030)
+    expect(projectedEvents.filter(event => event.type === 'coordination.message')).toHaveLength(100)
+    expect(projectedEvents.filter(event => event.type === 'coordination.inbox')).toHaveLength(200)
     expect(projectedEvents).toContainEqual(expect.objectContaining({
       type: 'member_status.updated',
       data: expect.objectContaining({
@@ -2389,6 +2846,37 @@ describe('FleetRunService', () => {
 
     service.end(launcher as unknown as Agent, 'Projection reliability test complete.')
     await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('keeps legacy recipient snapshots absent in the Web Team projection', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = run.members.find(member => member.name === 'lead')
+    if (lead === undefined) throw new Error('expected Fleet lead')
+    const internal = service as unknown as {
+      appendEvent(runId: string, type: string, data: unknown): void
+    }
+    internal.appendEvent(run.id, 'coordination.message', {
+      type: 'message',
+      message: {
+        id: 'legacy-message', sequence: 1, kind: 'text', conversation: `@${lead.sessionId}`,
+        from: 'fleet-user:legacy', text: 'Legacy delivery.', resources: [], mentions: [],
+        delivery: 'quiet', createdAt: '2026-08-26T00:00:00.000Z',
+      },
+    })
+
+    const event = service.readWebTeamProjection(run.id, 0, 1_000).events.find(candidate =>
+      candidate.type === 'coordination.message'
+      && (candidate.data as { readonly message?: { readonly id?: string } }).message?.id === 'legacy-message')
+    expect(event).toBeDefined()
+    expect((event?.data as { readonly message: object }).message).not.toHaveProperty('recipientIds')
+
     disconnect()
   })
 
@@ -2755,6 +3243,122 @@ describe('FleetRunService', () => {
     third.disconnect()
   })
 
+  it('loads only the selected member when resuming from a dormant Team', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
+    expect(second.service.status(run.id)).toMatchObject({
+      runtimeState: 'dormant',
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'unknown' }),
+        expect.objectContaining({ name: 'reviewer', status: 'unknown' }),
+      ],
+    })
+
+    await expect(second.service.resumeMemberAsExternal(second.launcher as unknown as Agent, run.id, 'lead'))
+      .resolves.toMatchObject({ name: 'lead', status: 'idle' })
+    const loaded = second.service.status(run.id)
+    expect(loaded).toMatchObject({
+      runtimeState: 'active',
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'idle' }),
+        expect.objectContaining({ name: 'reviewer', status: 'unknown' }),
+      ],
+    })
+    expect(second.runtime.get(loaded.members.find(member => member.name === 'lead')?.sessionId ?? '')).toBeDefined()
+    expect(second.runtime.get(loaded.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
+    expect(second.service.readTrace(run.id, 0, 300).events).toContainEqual(expect.objectContaining({
+      type: 'team_loaded',
+      data: expect.stringContaining('"members":["lead"],"scope":"member"'),
+    }))
+
+    await expect(second.service.loadTeamMembersAsExternal(second.launcher as unknown as Agent, run.id))
+      .resolves.toMatchObject({
+        runtimeState: 'active',
+        members: [
+          expect.objectContaining({ name: 'lead', status: 'idle' }),
+          expect.objectContaining({ name: 'reviewer', status: 'idle' }),
+        ],
+      })
+
+    second.disconnect()
+    await second.core.close()
+  })
+
+  it('pauses only loaded members and wakes the partially loaded Team', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, { launcherId: 'launcher', persisted: first.persisted })
+    expect(second.service.status(run.id)).toMatchObject({
+      runtimeState: 'dormant',
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'unknown' }),
+        expect.objectContaining({ name: 'reviewer', status: 'unknown' }),
+      ],
+    })
+
+    await expect(second.service.pauseMemberAsExternal(second.launcher as unknown as Agent, run.id, 'reviewer'))
+      .rejects.toThrow('Fleet member reviewer is not loaded')
+    await expect(second.service.pauseTeamAsExternal(second.launcher as unknown as Agent, run.id))
+      .rejects.toThrow('has no loaded, unpaused members to pause')
+    await expect(second.service.resumeMemberAsExternal(second.launcher as unknown as Agent, run.id, 'lead'))
+      .resolves.toMatchObject({ name: 'lead', status: 'idle' })
+
+    await expect(second.service.pauseTeamAsExternal(second.launcher as unknown as Agent, run.id)).resolves.toMatchObject({
+      status: 'paused',
+      runtimeState: 'active',
+      teamPausedMembers: ['lead'],
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'paused' }),
+        expect.objectContaining({ name: 'reviewer', status: 'unknown' }),
+      ],
+    })
+    expect(second.runtime.resumes).toHaveLength(1)
+
+    const woken = await second.service.wakeTeamAsExternal(second.launcher as unknown as Agent, run.id)
+    expect(woken).toMatchObject({
+      status: 'idle',
+      runtimeState: 'active',
+      teamPausedMembers: [],
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'idle' }),
+        expect.objectContaining({ name: 'reviewer', status: 'idle' }),
+      ],
+    })
+    for (const member of woken.members) {
+      expect(second.runtime.get(member.sessionId)?.messages.at(-1)?.content).toEqual([
+        expect.objectContaining({ type: 'text', text: expect.stringContaining('explicitly woken') }),
+      ])
+    }
+
+    second.disconnect()
+    await second.core.close()
+  })
+
   it('resumes the same member Sessions and restores collaboration state after a process restart', async () => {
     const { root, configPath, taskPath } = fixture()
     const first = setup(root)
@@ -2868,16 +3472,35 @@ describe('FleetRunService', () => {
     expect(second.service.messageHub(run.id).read(resumedReviewer, { conversation: '#main' }).messages)
       .toContainEqual(expect.objectContaining({ text: 'Implementation is half complete.' }))
     expect(second.service.resourceStore(run.id).getResource(resource.id)).toEqual(resource)
-    expect(resumedLead.messages).toHaveLength(1)
-    expect(resumedLead.inbox.nextTurn).toHaveLength(1)
+    expect(resumedLead.messages).toHaveLength(0)
+    expect(resumedLead.inbox.nextTurn).toHaveLength(0)
     expect(resumedLead.inbox.nextStep).toEqual([pendingLeadWork])
-    expect(resumedReviewer.messages).toHaveLength(1)
-    expect(resumedReviewer.inbox.nextTurn).toHaveLength(1)
+    expect(resumedReviewer.messages).toHaveLength(0)
+    expect(resumedReviewer.inbox.nextTurn).toHaveLength(0)
     expect(resumedReviewer.inbox.nextStep).toEqual([pendingReviewerWork])
+    second.service.recordMemberSessionEvent(second.launcher.id, {
+      type: 'turn/start', seq: 1, time: Date.now(), data: { turn: 1 },
+    })
+    second.service.agentIdle(resumedLead as unknown as Agent)
+    expect(resumedLead.messages).toHaveLength(0)
+    expect(resumedReviewer.messages).toHaveLength(0)
+    const afterLoadMessage = second.service.messageHub(run.id).send(resumedLead, {
+      to: '@reviewer',
+      text: 'A new message should still wake you while the loaded Team awaits a manual wake.',
+      delivery: 'quiet',
+    })
+    second.service.agentIdle(resumedReviewer as unknown as Agent)
+    expect(resumedReviewer.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining(afterLoadMessage.messageId) }),
+    ])
+    const reviewerMessagesAfterUnreadWake = resumedReviewer.messages.length
+    await second.service.wakeTeam(second.launcher as unknown as Agent, run.id)
+    expect(resumedLead.messages).toHaveLength(1)
+    expect(resumedReviewer.messages).toHaveLength(reviewerMessagesAfterUnreadWake + 1)
     expect(second.service.readTrace(run.id, 0, 100).events
-      .filter(event => event.type === 'coordination.message')).toHaveLength(coordinationMessagesBefore)
+      .filter(event => event.type === 'coordination.message')).toHaveLength(coordinationMessagesBefore + 1)
     expect(second.service.readTrace(run.id, 0, 100).events)
-      .toContainEqual(expect.objectContaining({ type: 'team_resumed' }))
+      .toContainEqual(expect.objectContaining({ type: 'team_loaded' }))
 
     second.service.finish(second.launcher as unknown as Agent, 'cancelled', 'Resume test complete.')
     await expect(second.service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle', settled: false })
@@ -3026,7 +3649,7 @@ describe('FleetRunService', () => {
     if (resumedLead === undefined) throw new Error('expected resumed lead')
     expect(second.service.messageHub(run.id).listChannels(resumedLead).map(channel => channel.id)).toContain('main')
     expect(second.service.readTrace(run.id, 0, 100).events.map(event => event.type)).toEqual(expect.arrayContaining([
-      'team_resumed',
+      'team_loaded',
       'team_status',
     ]))
     second.disconnect()
@@ -3177,6 +3800,64 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('keeps a member active after reading a must-reply message until it replies in that conversation', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    lead.status = 'running'
+    reviewer.status = 'running'
+
+    const messages = service.messageHub(run.id)
+    const sent = service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${reviewer.id}`,
+      text: 'Confirm the result before going idle.',
+      delivery: 'quiet',
+    })
+    expect(messages.read(reviewer, { conversation: `@fleet-user:${run.id}` }).messages)
+      .toContainEqual(expect.objectContaining({ id: sent.messageId, mustReply: true }))
+    expect(messages.inbox(reviewer, { unreadOnly: true })).toEqual([])
+    expect(messages.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
+
+    const messagesBeforeRequiredReplyWake = reviewer.messages.length
+    reviewer.completeTurn()
+    service.agentStatusChanged(reviewer as unknown as Agent)
+    expect(reviewer.messages).toHaveLength(messagesBeforeRequiredReplyWake + 1)
+    expect(reviewer.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining(`Message ${sent.messageId}`),
+      }),
+    ])
+
+    messages.send(reviewer, {
+      to: '@User',
+      text: 'The result is confirmed.',
+      delivery: 'quiet',
+    })
+    expect(messages.pendingRequiredReply(reviewer.id)).toBeUndefined()
+    const messagesAfterReply = reviewer.messages.length
+    service.agentIdle(reviewer as unknown as Agent)
+    expect(reviewer.messages).toHaveLength(messagesAfterReply)
+    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
+    ]))
+
+    service.finish(launcher as unknown as Agent, 'cancelled', 'Required reply behavior verified.', run.id)
+    await service.wait(run.id, 1_000)
+    service.end(launcher as unknown as Agent, 'Required reply Team closed.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
   it('pauses and resumes a Team without resuming members that were already paused individually', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
@@ -3191,6 +3872,7 @@ describe('FleetRunService', () => {
     const runningLead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     if (runningLead === undefined) throw new Error('expected live lead')
     runningLead.status = 'running'
+    launcher.status = 'running'
     const [paused, duplicatePause] = await Promise.all([
       service.pauseTeam(launcher as unknown as Agent, run.id),
       service.pauseTeam(launcher as unknown as Agent, run.id),
@@ -3207,6 +3889,8 @@ describe('FleetRunService', () => {
     expect(runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')).toBeUndefined()
     expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
     expect(runningLead.cancelCount).toBe(1)
+    expect(launcher.cancelCount).toBe(1)
+    expect(paused.assistants[0]).toMatchObject({ status: 'idle' })
     expect(duplicatePause).toEqual(paused)
 
     const resumed = await service.resumeTeam(launcher as unknown as Agent, run.id)
@@ -3219,10 +3903,12 @@ describe('FleetRunService', () => {
       ],
     })
     const resumedLead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    expect(resumedLead?.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('Team resumed after a pause') }),
-    ])
+    expect(resumedLead?.messages).toHaveLength(0)
     expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
+    await service.wakeTeam(launcher as unknown as Agent, run.id)
+    expect(resumedLead?.messages).toHaveLength(1)
+    expect(service.status(run.id).members).toContainEqual(expect.objectContaining({ name: 'reviewer', status: 'idle' }))
+    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')?.messages).toHaveLength(1)
 
     service.end(launcher as unknown as Agent, 'Team pause controls verified.', run.id)
     await service.wait(run.id, 1_000)
@@ -3243,10 +3929,12 @@ describe('FleetRunService', () => {
     if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
     const leadMessages = lead.messages.length
     const reviewerMessages = reviewer.messages.length
+    const assistantMessages = launcher.messages.length
 
-    expect(service.wakeTeam(launcher as unknown as Agent, run.id)).toMatchObject({ status: 'running' })
+    expect(await service.wakeTeam(launcher as unknown as Agent, run.id)).toMatchObject({ status: 'running' })
     expect(lead.messages).toHaveLength(leadMessages + 1)
     expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
+    expect(launcher.messages).toHaveLength(assistantMessages + 1)
     expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
       type: 'team_woken',
       data: expect.stringContaining('"reason":"manual"'),
@@ -3255,6 +3943,43 @@ describe('FleetRunService', () => {
     service.finish(launcher as unknown as Agent, 'cancelled', 'Team wake verified.', run.id)
     await service.wait(run.id, 1_000)
     service.end(launcher as unknown as Agent, 'Wake test Team closed.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('wakes one unpaused member without interrupting another member', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    const leadMessages = lead.messages.length
+    const reviewerMessages = reviewer.messages.length
+
+    expect(await service.wakeMember(launcher as unknown as Agent, run.id, 'lead'))
+      .toMatchObject({ name: 'lead' })
+    expect(lead.messages).toHaveLength(leadMessages + 1)
+    expect(reviewer.messages).toHaveLength(reviewerMessages)
+    expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
+      type: 'member_woken',
+      data: expect.stringContaining('"member":"lead"'),
+    }))
+
+    await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
+    expect(await service.wakeMember(launcher as unknown as Agent, run.id, 'reviewer'))
+      .toMatchObject({ name: 'reviewer', status: 'idle' })
+    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')?.messages.at(-1)?.content)
+      .toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('explicitly woken') })])
+
+    service.finish(launcher as unknown as Agent, 'cancelled', 'Member wake verified.', run.id)
+    await service.wait(run.id, 1_000)
+    service.end(launcher as unknown as Agent, 'Member wake Team closed.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })
@@ -3291,13 +4016,24 @@ describe('FleetRunService', () => {
       ],
     })
 
-    const resumed = await second.service.resume(second.launcher as unknown as Agent, {
+    const loaded = await second.service.resume(second.launcher as unknown as Agent, {
       runId: run.id,
       projectRoot: root,
     })
+    expect(loaded).toMatchObject({
+      status: 'paused',
+      runtimeState: 'active',
+      teamPausedMembers: ['lead'],
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'paused' }),
+        expect.objectContaining({ name: 'reviewer', status: 'paused' }),
+      ],
+    })
+    expect(second.runtime.resumes).toHaveLength(0)
+
+    const resumed = await second.service.resumeTeam(second.launcher as unknown as Agent, run.id)
     expect(resumed).toMatchObject({
       status: 'idle',
-      runtimeState: 'active',
       teamPausedMembers: [],
       members: [
         expect.objectContaining({ name: 'lead', status: 'idle' }),

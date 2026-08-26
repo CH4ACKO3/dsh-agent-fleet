@@ -1,110 +1,81 @@
-import type { CSSProperties, ReactElement, ReactNode } from 'react'
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties, MouseEvent, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { HoverHintStack } from './hint-stack.js'
-import { currentHoverHintLocale, resolveHoverHintLocaleCopy } from './locale.js'
+import { currentHoverHintLocale, resolveHoverHintLocaleCopy, subscribeHoverHintLocale } from './locale.js'
 import { hasSeenHint, markHintSeen, subscribeSeenHints } from './seen-marker.js'
 
 const STYLE_ID = 'dsh-hover-hint-style'
 const HOVER_DELAY_MS = 300
-const SEEN_HOVER_DELAY_MS = 2_000
 const CHARGE_DURATION_MS = 500
+const SEEN_CHARGE_DURATION_MS = 2_200
 const openHints = new HoverHintStack()
 
 const styles = `
+@property --dsh-hover-hint-progress {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
 .dsh-hover-hint {
   min-width: 0;
   display: inline-flex;
   position: relative;
 }
 
-.dsh-hover-hint-trigger {
-  box-sizing: border-box;
-  min-width: 0;
-  color: inherit;
-  cursor: help;
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  padding: 0 18px 0 0;
-  font: inherit;
-  line-height: inherit;
-  text-align: left;
-  display: inline-flex;
-  position: relative;
-}
-
-.dsh-hover-hint[data-seen="true"] .dsh-hover-hint-trigger {
-  cursor: default;
-}
-
-.dsh-hover-hint-trigger:hover,
-.dsh-hover-hint[data-pinned="true"] .dsh-hover-hint-trigger {
-  color: var(--dsw-alias-state-business-primary);
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
-  text-decoration-style: dotted;
-  text-underline-offset: 3px;
-}
-
-.dsh-hover-hint[data-phase="charging"] .dsh-hover-hint-trigger {
-  cursor: progress;
-}
-
-.dsh-hover-hint-trigger:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: 2px;
-}
-
 .dsh-hover-hint-ring {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
   pointer-events: none;
   position: absolute;
   inset: 0;
   overflow: visible;
 }
 
-.dsh-hover-hint-ring-track,
 .dsh-hover-hint-ring-progress {
-  fill: none;
-  vector-effect: non-scaling-stroke;
-}
-
-.dsh-hover-hint-ring-track {
-  stroke: color-mix(in srgb, var(--dsw-alias-label-secondary) 24%, transparent);
-  stroke-width: 1.2;
-}
-
-.dsh-hover-hint-ring-progress {
-  stroke: var(--dsw-alias-state-business-primary);
-  stroke-width: 1.45;
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  stroke-linecap: round;
-  transform: rotate(-90deg);
-  transform-origin: center;
-  transition: stroke-dashoffset ${String(CHARGE_DURATION_MS)}ms linear;
+  --dsh-hover-hint-progress: 0;
+  width: 100%;
+  height: 100%;
+  background: conic-gradient(
+    from -90deg,
+    var(--dsw-alias-state-business-primary) 0turn,
+    var(--dsw-alias-state-business-primary) calc(var(--dsh-hover-hint-progress) * 1turn),
+    transparent calc(var(--dsh-hover-hint-progress) * 1turn),
+    transparent 1turn
+  );
+  border-radius: 50%;
+  position: absolute;
+  inset: 0;
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  transition: --dsh-hover-hint-progress var(--dsh-hover-hint-charge-duration, ${String(CHARGE_DURATION_MS)}ms) linear;
 }
 
 .dsh-hover-hint[data-phase="charging"] .dsh-hover-hint-ring-progress,
 .dsh-hover-hint[data-phase="holding"] .dsh-hover-hint-ring-progress {
-  stroke-dashoffset: 0;
+  --dsh-hover-hint-progress: 1;
 }
 
 .dsh-hover-hint[data-phase="draining"] .dsh-hover-hint-ring-progress {
-  stroke-dashoffset: 1;
+  --dsh-hover-hint-progress: 0;
   transition-duration: 220ms;
   transition-timing-function: cubic-bezier(.16, 1, .3, 1);
 }
 
 .dsh-hover-hint-trigger-ring {
-  right: 1px;
-  left: auto;
-  top: 50%;
+  right: auto;
+  bottom: auto;
+  left: var(--dsh-hover-hint-pointer-x, 0);
+  top: var(--dsh-hover-hint-pointer-y, 0);
   opacity: 0;
   background: transparent;
-  transform: translateY(-50%);
+  border: 0;
+  margin: 0;
+  padding: 0;
+  position: fixed;
+  transform: translate(10px, 10px);
   transition: opacity 100ms ease-out;
 }
 
@@ -116,8 +87,9 @@ const styles = `
 .dsh-hover-hint-bubble {
   box-sizing: border-box;
   z-index: 1500;
-  width: min(368px, calc(100vw - 24px));
-  height: min(286px, calc(100dvh - 24px));
+  width: min(288px, calc(100vw - 24px));
+  height: auto;
+  max-height: min(320px, calc(100dvh - 24px));
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-bg-layer-2);
   border: 1px solid var(--dsw-alias-border-l3);
@@ -168,21 +140,12 @@ const styles = `
 
 .dsh-hover-hint-header {
   min-width: 0;
-  min-height: 48px;
+  min-height: 0;
   border-bottom: 1px solid var(--dsw-alias-border-l3);
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px 10px 14px;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
   display: flex;
-}
-
-.dsh-hover-hint-status {
-  box-sizing: border-box;
-  width: 9px;
-  height: 9px;
-  border: 1.4px solid var(--dsw-alias-state-business-primary);
-  border-radius: 50%;
-  flex: none;
 }
 
 .dsh-hover-hint-title {
@@ -196,8 +159,8 @@ const styles = `
 }
 
 .dsh-hover-hint-close {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
   background: transparent;
@@ -221,7 +184,7 @@ const styles = `
 
 .dsh-hover-hint-body {
   min-height: 0;
-  padding: 14px 16px 16px;
+  padding: 12px 14px 14px;
   overflow: auto;
   scrollbar-color: var(--dsw-alias-border-l2) transparent;
   scrollbar-width: thin;
@@ -236,7 +199,7 @@ const styles = `
 }
 
 .dsh-hover-hint-lead {
-  margin: 0 0 14px;
+  margin: 0 0 12px;
   color: var(--dsw-alias-label-primary);
   font-size: 13px;
   line-height: 20px;
@@ -269,11 +232,11 @@ const styles = `
 }
 
 .dsh-hover-hint-footer {
-  min-height: 38px;
+  min-height: 0;
   color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
   border-top: 1px solid var(--dsw-alias-border-l3);
   align-items: center;
-  padding: 8px 14px;
+  padding: 7px 12px;
   font-size: 11px;
   line-height: 16px;
   display: flex;
@@ -287,10 +250,6 @@ const styles = `
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dsh-hover-hint-ring-progress {
-    transition-duration: 100ms;
-  }
-
   .dsh-hover-hint-bubble {
     animation-duration: 100ms;
     transform: none;
@@ -320,51 +279,55 @@ interface HoverHintPosition extends CSSProperties {
 export interface HoverHintProps {
   readonly label: string
   readonly title: string
-  readonly triggerContent: ReactNode
+  readonly className?: string
+  /** Render the host-owned trigger. Spread every supplied prop onto its focusable root element. */
+  readonly trigger: (props: HoverHintTriggerProps) => ReactElement
   readonly children: ReactNode
   readonly footer?: ReactNode
   readonly closeLabel?: string
   readonly locale?: string
   /** Persistently marks this hint as seen after the pointer enters its open panel. */
   readonly seenMarker?: string
+  /** Delay before the loading ring starts when the hint has not been seen. */
+  readonly firstHoverDelayMs?: number
+  /** Loading-ring duration when the hint has not been seen. */
+  readonly firstChargeDurationMs?: number
+  /** Delay before the loading ring starts for a previously seen hint. */
+  readonly seenHoverDelayMs?: number
+  /** Loading-ring duration for a previously seen hint. */
+  readonly seenChargeDurationMs?: number
+  /** Disable click-to-pin when the host control already owns its click interaction. */
+  readonly pinOnClick?: boolean
 }
 
-function HoverHintRing({ className }: { readonly className: string }): ReactElement {
-  return jsxs('svg', {
-    className: `dsh-hover-hint-ring ${className}`,
-    viewBox: '0 0 16 16',
-    'aria-hidden': 'true',
-    children: [
-      jsx('circle', {
-        className: 'dsh-hover-hint-ring-track',
-        cx: 8,
-        cy: 8,
-        r: 6.25,
-        pathLength: 1,
-      }),
-      jsx('circle', {
-        className: 'dsh-hover-hint-ring-progress',
-        cx: 8,
-        cy: 8,
-        r: 6.25,
-        pathLength: 1,
-      }),
-    ],
-  })
+export interface HoverHintTriggerProps {
+  readonly ref: (element: HTMLElement | null) => void
+  readonly 'aria-label'?: string
+  readonly 'aria-haspopup'?: 'dialog'
+  readonly 'aria-expanded'?: 'true' | 'false'
+  readonly 'aria-controls'?: string
+  readonly onClick?: (event: MouseEvent<HTMLElement>) => void
 }
 
 export function HoverHint({
   label,
   title,
-  triggerContent,
+  className,
+  trigger,
   children,
   footer,
   closeLabel,
   locale,
   seenMarker,
+  firstHoverDelayMs = HOVER_DELAY_MS,
+  firstChargeDurationMs = CHARGE_DURATION_MS,
+  seenHoverDelayMs = HOVER_DELAY_MS,
+  seenChargeDurationMs = SEEN_CHARGE_DURATION_MS,
+  pinOnClick = true,
 }: HoverHintProps): ReactElement {
   const root = useRef<HTMLSpanElement>(null)
-  const trigger = useRef<HTMLButtonElement>(null)
+  const triggerElement = useRef<HTMLElement | null>(null)
+  const triggerRing = useRef<HTMLSpanElement>(null)
   const bubble = useRef<HTMLSpanElement>(null)
   const delayTimer = useRef<number>()
   const phaseTimer = useRef<number>()
@@ -381,7 +344,8 @@ export function HoverHint({
   const bubbleId = useId()
   const titleId = useId()
   const hintId = useId()
-  const localeCopy = resolveHoverHintLocaleCopy(locale ?? currentHoverHintLocale())
+  const detectedLocale = useSyncExternalStore(subscribeHoverHintLocale, currentHoverHintLocale, () => 'en')
+  const localeCopy = resolveHoverHintLocaleCopy(locale ?? detectedLocale)
 
   const reducedMotion = (): boolean => window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const clearDelay = (): void => {
@@ -425,15 +389,25 @@ export function HoverHint({
     setPinned(pin)
     setPhase('holding')
   }
-  const charge = (): void => {
+  const prepareTriggerRing = (): void => {
+    const node = triggerRing.current
+    if (node === null || node.matches(':popover-open')) return
+    node.showPopover()
+    // Commit the empty ring before charging. A closed popover is display:none,
+    // so opening it only after the phase change would skip the 0% frame.
+    void node.offsetWidth
+  }
+  const charge = (duration = CHARGE_DURATION_MS): void => {
     clearDelay()
     clearPhaseTimer()
+    root.current?.style.setProperty('--dsh-hover-hint-charge-duration', `${String(duration)}ms`)
+    prepareTriggerRing()
     setPhase('charging')
     phaseTimer.current = window.setTimeout(() => {
       phaseTimer.current = undefined
       if (inside.current || pinnedValue.current) reveal(pinnedValue.current)
       else hide()
-    }, CHARGE_DURATION_MS)
+    }, duration)
   }
   const drain = (): void => {
     clearDelay()
@@ -445,8 +419,25 @@ export function HoverHint({
       if (!inside.current && !pinnedValue.current) hide()
     }, reducedMotion() ? 110 : 240)
   }
+  const trackPointer = (event: ReactPointerEvent<HTMLSpanElement>): void => {
+    root.current?.style.setProperty('--dsh-hover-hint-pointer-x', `${String(event.clientX)}px`)
+    root.current?.style.setProperty('--dsh-hover-hint-pointer-y', `${String(event.clientY)}px`)
+  }
+  const currentHoverDelay = (): number => seenValue.current ? seenHoverDelayMs : firstHoverDelayMs
+  const currentChargeDuration = (): number => seenValue.current ? seenChargeDurationMs : firstChargeDurationMs
 
   useLayoutEffect(() => { installHoverHintStyles() }, [])
+
+  const triggerRingVisible = phase !== 'idle' && !revealed
+  useLayoutEffect(() => {
+    const node = triggerRing.current
+    if (node === null) return
+    if (triggerRingVisible) {
+      if (!node.matches(':popover-open')) node.showPopover()
+      return
+    }
+    if (node.matches(':popover-open')) node.hidePopover()
+  }, [triggerRingVisible])
 
   useEffect(() => {
     const syncSeen = (): void => { setSeen(hasSeenHint(seenMarker)) }
@@ -475,7 +466,7 @@ export function HoverHint({
       event.preventDefault()
       event.stopImmediatePropagation()
       hide()
-      trigger.current?.focus()
+      triggerElement.current?.focus()
     }
     document.addEventListener('pointerdown', onPointerDown, true)
     document.addEventListener('keydown', onKeyDown)
@@ -486,7 +477,7 @@ export function HoverHint({
   }, [revealed])
 
   const placeBubble = (): void => {
-    const anchor = trigger.current?.getBoundingClientRect()
+    const anchor = triggerElement.current?.getBoundingClientRect()
     const panel = bubble.current?.getBoundingClientRect()
     if (anchor === undefined || panel === undefined) return
     const viewportGutter = 12
@@ -534,54 +525,61 @@ export function HoverHint({
 
   return jsxs('span', {
     ref: root,
-    className: 'dsh-hover-hint',
+    className: className === undefined ? 'dsh-hover-hint' : `dsh-hover-hint ${className}`,
     'data-phase': phase,
     'data-revealed': revealed ? 'true' : undefined,
     'data-pinned': pinned ? 'true' : undefined,
     'data-seen': seen ? 'true' : undefined,
-    onPointerEnter: () => {
+    onPointerEnter: (event: ReactPointerEvent<HTMLSpanElement>) => {
+      trackPointer(event)
       inside.current = true
       clearPhaseTimer()
       if (pinnedValue.current || phaseValue.current === 'holding') return
       if (revealedValue.current || phaseValue.current === 'draining') {
         if (revealedValue.current) setPhase('holding')
-        else charge()
+        else charge(currentChargeDuration())
         return
       }
       if (phaseValue.current !== 'idle' || delayTimer.current !== undefined) return
       delayTimer.current = window.setTimeout(() => {
         delayTimer.current = undefined
-        if (inside.current) charge()
-      }, seenValue.current ? SEEN_HOVER_DELAY_MS : HOVER_DELAY_MS)
+        if (inside.current) charge(currentChargeDuration())
+      }, currentHoverDelay())
     },
+    onPointerMove: trackPointer,
     onPointerLeave: () => {
       inside.current = false
       if (pinnedValue.current) return
       if (phaseValue.current === 'idle') clearDelay()
       else drain()
     },
+    onClickCapture: pinOnClick ? undefined : hide,
     children: [
-      jsxs('button', {
-        ref: trigger,
-        type: 'button',
-        className: 'dsh-hover-hint-trigger',
-        'aria-label': label,
-        'aria-haspopup': 'dialog',
-        'aria-expanded': revealed ? 'true' : 'false',
-        'aria-controls': bubbleId,
-        onClick: () => {
-          if (pinnedValue.current) {
-            setPinned(false)
-            if (inside.current) setPhase('holding')
-            else drain()
-          } else {
-            reveal(true)
+      trigger(pinOnClick
+        ? {
+            ref: element => { triggerElement.current = element },
+            'aria-label': label,
+            'aria-haspopup': 'dialog',
+            'aria-expanded': revealed ? 'true' : 'false',
+            'aria-controls': bubbleId,
+            onClick: (event: MouseEvent<HTMLElement>) => {
+              event.stopPropagation()
+              if (pinnedValue.current) {
+                setPinned(false)
+                if (inside.current) setPhase('holding')
+                else drain()
+              } else {
+                reveal(true)
+              }
+            },
           }
-        },
-        children: [
-          jsx('span', { children: triggerContent }),
-          jsx(HoverHintRing, { className: 'dsh-hover-hint-trigger-ring' }),
-        ],
+        : { ref: element => { triggerElement.current = element } }),
+      jsx('span', {
+        ref: triggerRing,
+        popover: 'manual',
+        className: 'dsh-hover-hint-ring dsh-hover-hint-trigger-ring',
+        'aria-hidden': 'true',
+        children: jsx('span', { className: 'dsh-hover-hint-ring-progress' }),
       }),
       revealed && jsxs('span', {
         ref: bubble,
@@ -604,14 +602,13 @@ export function HoverHint({
             className: 'dsh-hover-hint-header',
             children: [
               jsx('strong', { id: titleId, className: 'dsh-hover-hint-title', children: title }),
-              jsx('span', { className: 'dsh-hover-hint-status', 'aria-hidden': 'true' }),
               jsx('button', {
                 type: 'button',
                 className: 'dsh-hover-hint-close',
                 'aria-label': closeLabel ?? localeCopy.closeLabel,
                 onClick: () => {
                   hide()
-                  trigger.current?.focus()
+                  triggerElement.current?.focus()
                 },
                 children: jsx('svg', {
                   width: 14,
@@ -630,7 +627,7 @@ export function HoverHint({
             ],
           }),
           jsx('span', { className: 'dsh-hover-hint-body', children }),
-          jsx('span', {
+          footer !== null && jsx('span', {
             className: 'dsh-hover-hint-footer',
             children: footer ?? localeCopy.footer,
           }),

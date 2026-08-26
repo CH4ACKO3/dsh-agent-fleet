@@ -27,8 +27,10 @@ describe('dsh-agent-fleet', () => {
     const browser = { id: 'browser-1', kind: 'browser' as const }
     const node = { id: 'node-1', kind: 'node' as const }
     let changeListener: (() => void) | undefined
+    let traceChangeListener: ((teamId: string, memberId: string) => void) | undefined
     let peerListener: ((change: { type: 'added'; peer: typeof browser }) => void) | undefined
     const invalidate = vi.fn(async () => ({ ok: true, value: true }))
+    const invalidateTraces = vi.fn(async () => ({ ok: true, value: true }))
     const disposeRemote = vi.fn(async () => undefined)
     const cleanup = await binding.callback({
       fleetRuns: {
@@ -36,10 +38,14 @@ describe('dsh-agent-fleet', () => {
           changeListener = listener
           return () => { changeListener = undefined }
         },
+        subscribeTraceChanges(listener: (teamId: string, memberId: string) => void) {
+          traceChangeListener = listener
+          return () => { traceChangeListener = undefined }
+        },
       },
       remote: {
         $mount: async () => disposeRemote,
-        for: () => ({ fleetWebPeer: { invalidate } }),
+        for: () => ({ fleetWebPeer: { invalidate, invalidateTraces } }),
       },
       connection: {
         peers: {
@@ -56,6 +62,17 @@ describe('dsh-agent-fleet', () => {
     changeListener?.()
     await vi.advanceTimersByTimeAsync(500)
     expect(invalidate).toHaveBeenCalledTimes(1)
+
+    traceChangeListener?.('team-1', 'builder')
+    traceChangeListener?.('team-1', 'builder')
+    traceChangeListener?.('team-1', 'reviewer')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(invalidateTraces).toHaveBeenCalledWith({
+      traces: [
+        { teamId: 'team-1', memberId: 'builder' },
+        { teamId: 'team-1', memberId: 'reviewer' },
+      ],
+    })
 
     peerListener?.({ type: 'added', peer: browser })
     expect(invalidate).toHaveBeenCalledTimes(2)

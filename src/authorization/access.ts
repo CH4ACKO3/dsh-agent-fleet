@@ -15,6 +15,7 @@ import type { FleetRunService } from '../run.js'
 import { fleetPrivateGroupId, isFleetPrivateGroupId, type FleetGroupService } from './groups.js'
 
 export const FLEET_ACCESS_STATE_NAMESPACE = 'authorization-access'
+export const FLEET_ACCESS_CONFIGURATION_MODULE = 'dsh-agent-fleet/authorization/access'
 
 export const FLEET_ACCESS_LEVELS = ['read', 'write', 'use', 'manage'] as const
 export type FleetAccessLevel = typeof FLEET_ACCESS_LEVELS[number]
@@ -135,6 +136,10 @@ function parseState(value: JsonValue | undefined): FleetAccessState {
   return { version: 1, modes, rules }
 }
 
+export function parseFleetAccessConfiguration(value: unknown): FleetAccessState {
+  return parseState(value as JsonValue)
+}
+
 function asJson(state: FleetAccessState): JsonValue {
   return state as unknown as JsonValue
 }
@@ -236,7 +241,8 @@ export class FleetAccessService implements FleetResourcePolicy {
   state(teamId: string): FleetAccessState {
     let state = this.states.get(teamId)
     if (state === undefined) {
-      state = parseState(this.runs.readExtensionState(teamId, FLEET_ACCESS_STATE_NAMESPACE))
+      const persisted = this.runs.readExtensionState(teamId, FLEET_ACCESS_STATE_NAMESPACE)
+      state = persisted === undefined ? this.configurationState(teamId) : parseState(persisted)
       this.states.set(teamId, state)
     }
     return cloneState(state)
@@ -366,6 +372,24 @@ export class FleetAccessService implements FleetResourcePolicy {
     return this.runs.status(teamId).projectRoot
   }
 
+  private configurationState(teamId: string): FleetAccessState {
+    const configuration = this.runs.exportConfiguration(teamId)
+    const modules = configuration.modules as Readonly<Record<string, unknown>>
+    const configured = modules[FLEET_ACCESS_CONFIGURATION_MODULE]
+    if (configured === undefined) return cloneState(EMPTY_STATE)
+    const state = parseFleetAccessConfiguration(configured)
+    return {
+      ...state,
+      rules: state.rules.map(rule => {
+        const adapter = this.adapters.get(rule.resource.kind)
+        return adapter === undefined ? rule : {
+          ...rule,
+          resource: { ...rule.resource, id: adapter.normalize(teamId, rule.resource.id) },
+        }
+      }),
+    }
+  }
+
   private save(teamId: string, state: FleetAccessState): void {
     const stored = cloneState(state)
     this.states.set(teamId, stored)
@@ -482,9 +506,13 @@ function installAccessTool(
 }
 
 export function applyAccess(ctx: Context): void {
-  ctx.inject(['fleetAuthorization', 'fleetRuns', 'fleetGroups'], scope => {
+  ctx.inject(['fleetAuthorization', 'fleetRuns', 'fleetConfiguration', 'fleetGroups'], scope => {
     const service = new FleetAccessService(scope.fleetRuns, scope.fleetGroups)
     scope.provide('fleetAccess', service)
+    const stopConfiguration = scope.fleetConfiguration.register({
+      id: FLEET_ACCESS_CONFIGURATION_MODULE,
+      parse: parseFleetAccessConfiguration,
+    })
     const stopGroups = scope.fleetGroups.onChange(change => {
       if (change.removedGroups !== undefined) service.removeGroups(change.teamId, change.removedGroups)
     })
@@ -508,6 +536,7 @@ export function applyAccess(ctx: Context): void {
       stopNamespace()
       stopPolicy()
       stopGroups()
+      stopConfiguration()
     }
   })
 }

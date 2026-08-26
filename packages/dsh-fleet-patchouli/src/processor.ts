@@ -5,6 +5,7 @@ import { createFleetGitContextAlgorithm } from './git-context.js'
 import { createFleetHistorySearchAlgorithm } from './history-search.js'
 import {
   fleetMemoryEffortAtLeast,
+  fleetMemoryAgentForRequest,
   fleetMemoryEffortForCall,
   fleetMemoryEffortForRequest,
   FLEET_MEMORY_PROCESSOR_ID,
@@ -24,11 +25,13 @@ import type {
   MemoryRouteCall,
   PatchouliCore,
 } from './patchouli.js'
+import type { FleetPatchouliSettings } from './settings.js'
 
 export const name = 'dsh-fleet-patchouli/processor'
 
 export interface FleetMemoryProcessorOptions {
   readonly recordRecallAudit?: (audit: FleetMemoryCommittedRecallAudit) => void
+  readonly settings?: () => FleetPatchouliSettings
 }
 
 const RETRIEVAL_TOKEN_BUDGET: Record<FleetMemoryEffort, number> = {
@@ -101,6 +104,7 @@ function selectAlgorithms(
   algorithms: readonly FleetMemoryAlgorithm[],
   call: MemoryRouteCall,
   effort = fleetMemoryEffortForCall(call),
+  agent = true,
 ): {
   readonly selected: FleetMemoryAlgorithm[]
   readonly failures: { readonly algorithm: string; readonly ok: false; readonly error: string }[]
@@ -109,6 +113,7 @@ function selectAlgorithms(
   const failures: { algorithm: string; ok: false; error: string }[] = []
   for (const algorithm of algorithms) {
     if (!fleetMemoryEffortAtLeast(effort, algorithm.minimumEffort ?? 'low')) continue
+    if (algorithm.requiresAgent === true && !agent) continue
     try {
       if (algorithm.filter(call)) selected.push(algorithm)
     } catch (error) {
@@ -129,8 +134,10 @@ async function dispatch(
   options: FleetMemoryProcessorOptions,
   signal?: AbortSignal,
 ): Promise<MemoryData> {
-  const effort = fleetMemoryEffortForRequest(operation, request)
-  const selection = selectAlgorithms(algorithms, { operation, meta: request.meta }, effort)
+  const defaults = options.settings?.()
+  const effort = fleetMemoryEffortForRequest(operation, request, defaults?.effort)
+  const agent = fleetMemoryAgentForRequest(operation, request, defaults?.agent)
+  const selection = selectAlgorithms(algorithms, { operation, meta: request.meta }, effort, agent)
   const executed = await Promise.all(selection.selected.flatMap(algorithm => {
     const handler = operation === 'update' ? algorithm.update : algorithm.retrieve
     return handler === undefined ? [] : [(async () => {
@@ -141,6 +148,7 @@ async function dispatch(
           request,
           {
             effort,
+            agent,
             ...(signal === undefined ? {} : { signal }),
             deferRecallAudit: audit => { audits.push(audit) },
           },
@@ -195,6 +203,7 @@ async function dispatch(
             resultCount: audit.resultCount,
             algorithm: result.algorithm,
             effort,
+            agent,
             ...(audit.conversation?.startsWith('#') === true
               || audit.conversation?.startsWith('meeting:') === true
               ? { conversation: audit.conversation }
@@ -214,6 +223,7 @@ async function dispatch(
     sourceType: request.meta.source.type,
     scope: request.meta.scope,
     effort,
+    agent,
     algorithms: algorithmResults,
     ...(stored === undefined ? {} : { stored }),
     ...(auditFailures === 0 ? {} : { auditFailures }),
@@ -241,14 +251,22 @@ export function createFleetMemoryProcessor(
       const effort = routedEffort === 'low' || routedEffort === 'medium' || routedEffort === 'high'
         ? routedEffort
         : 'high'
-      return selectAlgorithms(algorithms, call, effort).selected.length > 0
+      const routedAgent = call.meta.attributes?.fleetAgent
+      const agent = typeof routedAgent === 'boolean'
+        ? routedAgent
+        : options.settings?.().agent ?? true
+      return selectAlgorithms(algorithms, call, effort, agent).selected.length > 0
     },
     update: (request, context) => dispatch(algorithms, 'update', request, options, context.signal),
     retrieve: (request, context) => dispatch(algorithms, 'retrieve', request, options, context.signal),
   }
 }
 
-export function apply(ctx: Context): void {
+export interface Config {
+  readonly settings?: () => FleetPatchouliSettings
+}
+
+export function apply(ctx: Context, config: Config = {}): void {
   const host = ctx as unknown as {
     inject(
       services: readonly string[],
@@ -267,11 +285,13 @@ export function apply(ctx: Context): void {
       createFleetSharedResourcesAlgorithm(scope, scope.fleetRuns),
       createFleetGitContextAlgorithm(scope, scope.fleetRuns),
     ], {
+      ...(config.settings === undefined ? {} : { settings: config.settings }),
       recordRecallAudit: audit => scope.fleetRuns.recordDataEvent(audit.teamId, 'memory.recalled', {
         member: audit.member,
         providers: [FLEET_MEMORY_PROCESSOR_ID],
         algorithm: audit.algorithm,
         effort: audit.effort,
+        agent: audit.agent,
         resultCount: audit.resultCount,
         ...(audit.conversation === undefined ? {} : { conversation: audit.conversation }),
       }),

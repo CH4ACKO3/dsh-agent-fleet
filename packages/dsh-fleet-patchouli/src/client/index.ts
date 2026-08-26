@@ -5,6 +5,13 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const TOOL_ID = 'memory'
 const STYLE_ID = 'dsh-fleet-patchouli-panel-style'
 
+function fleetText(chinese: string, english: string): string {
+  const locale = typeof document !== 'undefined'
+    ? document.documentElement.lang || navigator.language
+    : typeof navigator !== 'undefined' ? navigator.language : 'en'
+  return /^zh(?:-|$)/iu.test(locale) ? chinese : english
+}
+
 type MemoryFilter = 'all' | 'stored' | 'recalled'
 
 interface FleetActivity {
@@ -25,6 +32,14 @@ interface FleetToolOwner {
   readonly activeTool: string
   readonly disabled?: boolean
   readonly selectTool: (tool: string) => void
+  readonly ui: {
+    readonly ToolButton: ComponentType<{
+      readonly owner: FleetToolOwner
+      readonly tool: string
+      readonly label: string
+      readonly children: ReactNode
+    }>
+  }
 }
 
 interface FleetPaneOwner {
@@ -37,6 +52,22 @@ interface FleetPaneOwner {
   readonly activeItem: string
   readonly selectItem: (item: string) => void
   readonly selectTeam: (teamId: string) => void
+  readonly ui: {
+    readonly TeamSwitcher: ComponentType<{
+      readonly teams: readonly FleetTeamSummary[]
+      readonly selectedTeamId?: string
+      readonly label: string
+      readonly selectTeam: (teamId: string) => void
+    }>
+    readonly ListRow: ComponentType<{
+      readonly selected: boolean
+      readonly title: string
+      readonly caption?: string
+      readonly leading?: ReactNode
+      readonly onClick: () => void
+    }>
+    readonly SectionTitle: ComponentType<{ readonly children: ReactNode }>
+  }
 }
 
 interface ClientContext {
@@ -58,6 +89,7 @@ interface MemoryEntry {
   readonly member?: string
   readonly conversation?: string
   readonly effort?: string
+  readonly agent?: boolean
   readonly algorithm?: string
   readonly providers: readonly string[]
 }
@@ -99,6 +131,7 @@ export function fleetMemoryEntry(activity: FleetActivity): MemoryEntry | undefin
     const member = text(data?.member)
     const conversation = text(data?.conversation)
     const effort = text(data?.effort)
+    const agent = typeof data?.agent === 'boolean' ? data.agent : undefined
     const algorithm = text(data?.algorithm)
     return {
       activity,
@@ -107,6 +140,7 @@ export function fleetMemoryEntry(activity: FleetActivity): MemoryEntry | undefin
       ...(member === undefined ? {} : { member }),
       ...(conversation === undefined ? {} : { conversation }),
       ...(effort === undefined ? {} : { effort }),
+      ...(agent === undefined ? {} : { agent }),
       ...(algorithm === undefined ? {} : { algorithm }),
       providers: stringList(data?.providers),
     }
@@ -114,7 +148,7 @@ export function fleetMemoryEntry(activity: FleetActivity): MemoryEntry | undefin
   return undefined
 }
 
-function Icon({ name, size = 18 }: { readonly name: 'memory' | 'write' | 'recall' | 'chevron' | 'search'; readonly size?: number }): ReactElement {
+function Icon({ name, size = 18 }: { readonly name: 'memory' | 'write' | 'recall' | 'search'; readonly size?: number }): ReactElement {
   const common = {
     width: size,
     height: size,
@@ -128,10 +162,11 @@ function Icon({ name, size = 18 }: { readonly name: 'memory' | 'write' | 'recall
   }
   if (name === 'memory') return jsxs('svg', {
     ...common,
+    viewBox: '0 0 20 20',
     children: [
-      jsx('path', { d: 'M10.2 16.8V8.5c0-2.7 1.8-4.7 4.8-5.5.4 3.5-1.1 6-4.8 6.8' }),
-      jsx('path', { d: 'M9.8 13.3c0-2.7-1.6-4.5-4.8-5.3-.2 3.4 1.4 5.4 4.8 5.9' }),
-      jsx('path', { d: 'M6 17h8' }),
+      jsx('path', { d: 'm2.2 6.7 7.8-4.3 7.8 4.3-7.8 4.4-7.8-4.4Z' }),
+      jsx('path', { d: 'M2.2 7v7.1l7.8 4.1 7.8-4.1V7M10 11.1v7.1' }),
+      jsx('path', { d: 'M2.2 9.1c3.7-.3 5.4-2.2 6-5.7 3.1 1.2 4.5 3.5 4 6.2-.5 2.7-2.7 4.5-5.5 4.3-2.2-.1-3.9-1.3-4.5-3.1' }),
     ],
   })
   if (name === 'write') return jsxs('svg', {
@@ -148,58 +183,30 @@ function Icon({ name, size = 18 }: { readonly name: 'memory' | 'write' | 'recall
       jsx('path', { d: 'm13 13 3.3 3.3M6.7 9h4.6M9 6.7v4.6' }),
     ],
   })
-  if (name === 'search') return jsxs('svg', {
+  return jsxs('svg', {
     ...common,
     children: [jsx('circle', { cx: 8.7, cy: 8.7, r: 5 }), jsx('path', { d: 'm12.4 12.4 4 4' })],
   })
-  return jsx('svg', { ...common, children: jsx('path', { d: 'm7 8 3 3 3-3' }) })
 }
 
 function MemoryTool(owner: FleetToolOwner): ReactElement {
-  return jsx('button', {
-    type: 'button',
-    className: 'dsh-fleet-panel-tool',
-    disabled: owner.disabled === true,
-    'aria-label': '团队记忆',
-    'aria-current': owner.activeTool === TOOL_ID ? 'page' : undefined,
-    title: '团队记忆',
-    onClick: () => { owner.selectTool(TOOL_ID) },
+  return jsx(owner.ui.ToolButton, {
+    owner,
+    tool: TOOL_ID,
+    label: fleetText('团队记忆', 'Team memory'),
     children: jsx(Icon, { name: 'memory' }),
   })
 }
 
 function TeamSelector({ owner }: { readonly owner: FleetPaneOwner }): ReactElement {
-  const [open, setOpen] = useState(false)
-  return jsxs('div', {
-    className: 'dsh-fleet-panel-sidebar-team-block dsh-fleet-memory-team-block',
-    children: [
-      jsxs('button', {
-        type: 'button',
-        className: 'dsh-fleet-memory-team-trigger',
-        'aria-haspopup': 'menu',
-        'aria-expanded': open ? 'true' : 'false',
-        onClick: () => { setOpen(value => !value) },
-        children: [
-          jsx('span', { children: owner.snapshot.teamName }),
-          jsx(Icon, { name: 'chevron', size: 14 }),
-        ],
-      }),
-      open && jsx('div', {
-        className: 'dsh-fleet-panel-team-menu dsh-fleet-memory-team-menu',
-        role: 'menu',
-        children: owner.fleet.directory.teams.map(team => jsx('button', {
-          type: 'button',
-          className: 'dsh-fleet-panel-team-option',
-          role: 'menuitemradio',
-          'aria-checked': team.teamId === owner.snapshot.teamId ? 'true' : 'false',
-          onClick: () => {
-            owner.selectTeam(team.teamId)
-            setOpen(false)
-          },
-          children: team.teamName,
-        }, team.teamId)),
-      }),
-    ],
+  return jsx('div', {
+    className: 'dsh-fleet-panel-sidebar-team-block',
+    children: jsx(owner.ui.TeamSwitcher, {
+      teams: owner.fleet.directory.teams,
+      selectedTeamId: owner.snapshot.teamId,
+      label: owner.snapshot.teamName,
+      selectTeam: owner.selectTeam,
+    }),
   })
 }
 
@@ -209,7 +216,7 @@ function activeFilter(item: string): MemoryFilter {
 
 function filterCaption(filter: MemoryFilter, entries: readonly MemoryEntry[]): string {
   const count = filter === 'all' ? entries.length : entries.filter(entry => entry.operation === filter).length
-  return `${String(count)} 条记录`
+  return fleetText(`${String(count)} 条记录`, `${String(count)} records`)
 }
 
 function MemorySidebar(owner: FleetPaneOwner): ReactElement {
@@ -219,9 +226,9 @@ function MemorySidebar(owner: FleetPaneOwner): ReactElement {
   })
   const filter = activeFilter(owner.activeItem)
   const filters: readonly [MemoryFilter, string, string, 'memory' | 'write' | 'recall'][] = [
-    ['all', '全部记忆', '有效写入与召回', 'memory'],
-    ['stored', '记忆写入', '进入团队记忆库', 'write'],
-    ['recalled', '记忆召回', '返回有效结果', 'recall'],
+    ['all', fleetText('全部记忆', 'All memory'), fleetText('有效写入与召回', 'Effective stores and recalls'), 'memory'],
+    ['stored', fleetText('记忆写入', 'Memory stores'), fleetText('进入团队记忆库', 'Added to Team memory'), 'write'],
+    ['recalled', fleetText('记忆召回', 'Memory recalls'), fleetText('返回有效结果', 'Returned useful results'), 'recall'],
   ]
   return jsxs('div', {
     className: 'dsh-fleet-panel-sidebar-layout',
@@ -232,25 +239,13 @@ function MemorySidebar(owner: FleetPaneOwner): ReactElement {
         children: jsxs('div', {
           className: 'dsh-fleet-panel-sidebar-scroll dsh-fleet-memory-sidebar-scroll',
           children: [
-            jsx('div', { className: 'dsh-fleet-panel-section-title', children: '团队记忆' }),
-            ...filters.map(([id, title, caption, icon]) => jsxs('button', {
-              type: 'button',
-              className: 'dsh-fleet-panel-list-row',
-              'aria-current': filter === id ? 'true' : undefined,
+            jsx(owner.ui.SectionTitle, { children: fleetText('团队记忆', 'Team memory') }),
+            ...filters.map(([id, title, caption, icon]) => jsx(owner.ui.ListRow, {
+              selected: filter === id,
+              title,
+              caption: `${caption} · ${filterCaption(id, entries)}`,
+              leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(Icon, { name: icon, size: 15 }) }),
               onClick: () => { owner.selectItem(id) },
-              children: [
-                jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(Icon, { name: icon, size: 15 }) }),
-                jsxs('span', {
-                  className: 'dsh-fleet-panel-list-copy',
-                  children: [
-                    jsx('span', { className: 'dsh-fleet-panel-list-title', children: title }),
-                    jsx('span', {
-                      className: 'dsh-fleet-panel-list-caption',
-                      children: `${caption} · ${filterCaption(id, entries)}`,
-                    }),
-                  ],
-                }),
-              ],
             }, id)),
           ],
         }),
@@ -264,6 +259,7 @@ function detailTags(entry: MemoryEntry): readonly ReactNode[] {
   if (entry.member !== undefined) tags.push(jsx('span', { children: entry.member }, 'member'))
   if (entry.conversation !== undefined) tags.push(jsx('span', { children: entry.conversation }, 'conversation'))
   if (entry.effort !== undefined) tags.push(jsx('span', { children: `effort · ${entry.effort}` }, 'effort'))
+  if (entry.agent !== undefined) tags.push(jsx('span', { children: entry.agent ? 'Agent' : 'Local', }, 'agent'))
   if (entry.algorithm !== undefined) tags.push(jsx('span', { children: entry.algorithm }, 'algorithm'))
   for (const provider of entry.providers) tags.push(jsx('span', { children: provider }, `provider:${provider}`))
   return tags
@@ -286,8 +282,8 @@ function MemoryEntryRow({ entry }: { readonly entry: MemoryEntry }): ReactElemen
           jsxs('div', {
             className: 'dsh-fleet-memory-entry-title',
             children: [
-              jsx('strong', { children: entry.operation === 'stored' ? '写入' : '召回' }),
-              entry.count !== undefined && jsx('span', { children: `${String(entry.count)} 条` }),
+              jsx('strong', { children: entry.operation === 'stored' ? fleetText('写入', 'Stored') : fleetText('召回', 'Recalled') }),
+              entry.count !== undefined && jsx('span', { children: fleetText(`${String(entry.count)} 条`, `${String(entry.count)} items`) }),
             ],
           }),
           jsx('p', { children: entry.activity.text }),
@@ -331,8 +327,8 @@ function MemoryMain(owner: FleetPaneOwner): ReactElement {
           jsxs('div', {
             className: 'dsh-fleet-memory-main-title',
             children: [
-              jsx('h2', { children: '团队记忆' }),
-              jsx('span', { children: `写入 ${String(stored)} · 召回 ${String(recalled)}` }),
+              jsx('h2', { children: fleetText('团队记忆', 'Team memory') }),
+              jsx('span', { children: fleetText(`写入 ${String(stored)} · 召回 ${String(recalled)}`, `Stored ${String(stored)} · Recalled ${String(recalled)}`) }),
             ],
           }),
           jsxs('label', {
@@ -342,8 +338,8 @@ function MemoryMain(owner: FleetPaneOwner): ReactElement {
               jsx('input', {
                 type: 'search',
                 value: query,
-                'aria-label': '搜索团队记忆记录',
-                placeholder: '搜索记忆记录',
+                'aria-label': fleetText('搜索团队记忆记录', 'Search Team memory records'),
+                placeholder: fleetText('搜索记忆记录', 'Search memory records'),
                 onChange: (event: ChangeEvent<HTMLInputElement>) => { setQuery(event.target.value) },
               }),
             ],
@@ -356,8 +352,8 @@ function MemoryMain(owner: FleetPaneOwner): ReactElement {
           ? jsx('div', {
               className: 'dsh-fleet-memory-empty',
               children: entries.length === 0
-                ? '尚无有效团队记忆交互。实际写入或返回有效结果后会显示在这里。'
-                : '当前筛选下没有记忆记录。',
+                ? fleetText('尚无有效团队记忆交互。实际写入或返回有效结果后会显示在这里。', 'No effective Team memory activity yet. Successful stores and useful recalls will appear here.')
+                : fleetText('当前筛选下没有记忆记录。', 'No memory records match this filter.'),
             })
           : visible.map(entry => jsx(MemoryEntryRow, { entry }, entry.activity.id)),
       }),
@@ -366,13 +362,6 @@ function MemoryMain(owner: FleetPaneOwner): ReactElement {
 }
 
 const styles = `
-.dsh-fleet-memory-team-block{position:relative}
-.dsh-fleet-memory-team-trigger{appearance:none;box-sizing:border-box;width:100%;min-width:0;height:100%;color:var(--dsw-alias-label-primary);background:transparent;border:0;border-radius:10px;padding:0 10px;display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;font:inherit;font-size:13px;font-weight:600;text-align:left}
-.dsh-fleet-memory-team-trigger:hover,.dsh-fleet-memory-team-trigger[aria-expanded="true"]{background:var(--dsw-alias-interactive-bg-hover)}
-.dsh-fleet-memory-team-trigger:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
-.dsh-fleet-memory-team-trigger>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsh-fleet-memory-team-trigger[aria-expanded="true"]>svg{transform:rotate(180deg)}
-.dsh-fleet-memory-team-menu{top:calc(100% + 6px);right:0;left:0;width:auto}
 .dsh-fleet-memory-sidebar{min-height:0;flex:1}
 .dsh-fleet-memory-sidebar-scroll{padding-top:12px}
 .dsh-fleet-memory-main{width:100%;height:100%;min-width:0;min-height:0;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column}

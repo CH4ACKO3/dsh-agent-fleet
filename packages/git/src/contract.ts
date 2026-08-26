@@ -31,6 +31,14 @@ export interface FleetGitWebClient {
   fetch(input: FleetGitFetchInput, signal?: AbortSignal): Promise<RemoteResult<FleetGitSnapshot>>
 }
 
+export interface FleetGitWebPeerClient {
+  invalidate(input: FleetGitInvalidation, signal?: AbortSignal): Promise<RemoteResult<unknown>>
+}
+
+export interface FleetGitInvalidation {
+  readonly teamIds: readonly string[]
+}
+
 const JSON_CODEC = {
   mode: 'strict',
   typeSymbol: '@ch4acko3/dsh-agent-fleet-git#JsonValue',
@@ -56,3 +64,27 @@ export const FLEET_GIT_WEB_REMOTE: TypertRemoteContribution = {
   package: '@ch4acko3/dsh-agent-fleet-git/web',
   descriptors: FLEET_GIT_WEB_INVOCATIONS,
 }
+
+const FLEET_GIT_WEB_PEER_INVOCATIONS = [{
+  id: '@ch4acko3/dsh-agent-fleet-git#web-client/invalidate',
+  service: 'fleetGitWebPeer',
+  namespace: 'fleetGitWebPeer',
+  method: 'invalidate',
+  invocation: { kind: 'direct' },
+  parameters: [{ name: 'input', wire: 'input', source: 'json', codec: JSON_CODEC }],
+  cancellation: { parameter: 'signal' },
+  result: JSON_CODEC,
+}] as const satisfies readonly InvocationDescriptor[]
+
+export const FLEET_GIT_WEB_PEER_REMOTE: TypertRemoteContribution = {
+  package: '@ch4acko3/dsh-agent-fleet-git/web-client',
+  descriptors: FLEET_GIT_WEB_PEER_INVOCATIONS,
+}
+
+export const FLEET_GIT_WEB_PEER_LOCAL = {
+  package: '@ch4acko3/dsh-agent-fleet-git/web-client',
+  face: 'client',
+  schemas: [],
+  model: { services: [], events: [], objects: [] },
+  invocations: FLEET_GIT_WEB_PEER_INVOCATIONS,
+} as const

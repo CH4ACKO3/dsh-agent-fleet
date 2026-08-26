@@ -2,21 +2,136 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   activeFleetMentionQuery,
+  clampFleetTimelineTime,
   decorateFleetMetaWelcomeSnapshot,
   expandFleetTargetFold,
+  fleetActivityGroups,
+  fleetActivityWindow,
+  fleetPanelSelectedMemberId,
+  fleetTimelineTicks,
+  fleetPanelMemberRunControls,
   fleetNativeContextNodeKey,
-  fleetPanelTeamRunControl,
+  fleetPanelTeamRunControls,
+  fleetPermissionGroupCapabilities,
   fleetResourcePreviewKind,
+  groupFleetActivity,
   insertFleetMemberMention,
+  nearestFleetActivityGroupIndex,
   releaseFleetNativeSessionWindow,
   resolveFleetPanelItem,
+  sameFleetPermissionAssignment,
   splitFleetMemberMentions,
+  updateFleetPermissionAssignmentValues,
   type FleetPanelTeamSnapshot,
 } from '../packages/ui/src/team-panel.js'
 import {
   projectAgentFleetPrivateMessages,
   reconcileAgentFleetMailboxReadState,
 } from '../packages/ui/src/assistant-private-chat.js'
+import {
+  fleetMemberPresence,
+  fleetMemberPresenceLabel,
+} from '../packages/ui/src/runtime-chat.js'
+
+describe('Fleet activity grouping', () => {
+  it('groups only adjacent records with the same exact event type', () => {
+    const activity = [
+      { id: '1', kind: 'memory' as const, type: 'memory.recalled', text: 'first recall', createdAt: '2026-08-26T04:00:00.000Z' },
+      { id: '2', kind: 'memory' as const, type: 'memory.recalled', text: 'second recall', createdAt: '2026-08-26T04:01:00.000Z' },
+      { id: '3', kind: 'memory' as const, type: 'memory.stored', text: 'stored', createdAt: '2026-08-26T04:02:00.000Z' },
+      { id: '4', kind: 'message' as const, type: 'coordination.message', text: 'message', createdAt: '2026-08-26T04:03:00.000Z' },
+      { id: '5', kind: 'memory' as const, type: 'memory.recalled', text: 'later recall', createdAt: '2026-08-26T04:04:00.000Z' },
+    ]
+
+    expect(groupFleetActivity(activity).map(group => ({
+      type: group.type,
+      ids: group.items.map(item => item.id),
+    }))).toEqual([
+      { type: 'memory.recalled', ids: ['1', '2'] },
+      { type: 'memory.stored', ids: ['3'] },
+      { type: 'coordination.message', ids: ['4'] },
+      { type: 'memory.recalled', ids: ['5'] },
+    ])
+  })
+
+  it('keeps filtered activity views as individual rows', () => {
+    const activity = [
+      { id: '1', kind: 'message' as const, type: 'coordination.message', text: 'first', createdAt: '2026-08-26T04:00:00.000Z' },
+      { id: '2', kind: 'message' as const, type: 'coordination.message', text: 'second', createdAt: '2026-08-26T04:01:00.000Z' },
+    ]
+
+    expect(fleetActivityGroups(activity, true)).toHaveLength(1)
+    expect(fleetActivityGroups(activity, false).map(group => group.items.map(item => item.id))).toEqual([['1'], ['2']])
+  })
+
+  it('keeps only a bounded render window around the current activity', () => {
+    expect(fleetActivityWindow(20, 19)).toEqual({ start: 0, end: 20 })
+    expect(fleetActivityWindow(1_000, 999)).toEqual({ start: 880, end: 1_000 })
+    expect(fleetActivityWindow(1_000, 500)).toEqual({ start: 440, end: 560 })
+    expect(fleetActivityWindow(1_000, -1)).toEqual({ start: 0, end: 120 })
+  })
+
+  it('keeps semantic timeline anchors fixed while positions move continuously', () => {
+    const step = 60 * 60 * 1_000
+    const anchor = new Date(2026, 7, 26, 10).getTime()
+    const initial = fleetTimelineTicks(anchor, step)
+    const shifted = fleetTimelineTicks(anchor + step / 4, step)
+    const initialByTimestamp = new Map(initial.map(tick => [tick.timestamp, tick]))
+    const common = shifted.filter(tick => initialByTimestamp.has(tick.timestamp))
+    expect(common.length).toBeGreaterThan(20)
+    for (const tick of common) {
+      expect(tick.position).toBeCloseTo(initialByTimestamp.get(tick.timestamp)!.position - 5)
+    }
+    for (const tick of initial.filter(tick => tick.strength === 1)) {
+      const date = new Date(tick.timestamp)
+      expect(date.getHours() % 6).toBe(0)
+      expect([date.getMinutes(), date.getSeconds(), date.getMilliseconds()]).toEqual([0, 0, 0])
+    }
+
+    const year = 365.25 * 24 * 60 * 60 * 1_000
+    const yearly = fleetTimelineTicks(anchor, year).filter(tick => tick.strength === 1)
+    expect(yearly.length).toBeGreaterThan(2)
+    for (const tick of yearly) {
+      const date = new Date(tick.timestamp)
+      expect(date.getFullYear() % 5).toBe(0)
+      expect([date.getMonth(), date.getDate(), date.getHours()]).toEqual([0, 1, 0])
+    }
+  })
+
+  it('smoothly hands long ticks to the next semantic scale', () => {
+    const anchor = new Date(2026, 7, 26).getTime()
+    const ticks = fleetTimelineTicks(anchor, 45 * 60 * 1_000)
+    const atThreeHours = ticks.find(tick => tick.timestamp === new Date(2026, 7, 26, 3).getTime())
+    const atSixHours = ticks.find(tick => tick.timestamp === new Date(2026, 7, 26, 6).getTime())
+    expect(atThreeHours?.strength).toBeCloseTo(.5)
+    expect(atSixHours?.strength).toBe(1)
+  })
+
+  it('clamps clicked timeline targets to the activity range', () => {
+    expect(clampFleetTimelineTime(50, 100, 200)).toBe(100)
+    expect(clampFleetTimelineTime(150, 100, 200)).toBe(150)
+    expect(clampFleetTimelineTime(250, 100, 200)).toBe(200)
+  })
+
+  it('treats a folded activity group as its full time interval', () => {
+    const groups = groupFleetActivity([
+      { id: '1', kind: 'message' as const, type: 'coordination.message', text: 'start', createdAt: '2026-08-26T00:00:00.000Z' },
+      { id: '2', kind: 'message' as const, type: 'coordination.message', text: 'end', createdAt: '2026-08-26T10:00:00.000Z' },
+      { id: '3', kind: 'resource' as const, type: 'resource.resource_added', text: 'next', createdAt: '2026-08-26T11:00:00.000Z' },
+    ])
+
+    expect(nearestFleetActivityGroupIndex(groups, Date.parse('2026-08-26T09:00:00.000Z'))).toBe(0)
+  })
+})
+
+describe('Fleet member presence', () => {
+  it('uses one runtime-to-display mapping across every Fleet surface', () => {
+    expect(fleetMemberPresence({ id: 'a', name: 'A', role: 'Agent', color: '#000000', runtimeStatus: 'running' })).toBe('busy')
+    expect(fleetMemberPresence({ id: 'a', name: 'A', role: 'Agent', color: '#000000', runtimeStatus: 'paused', presence: 'active' })).toBe('offline')
+    expect(fleetMemberPresenceLabel({ id: 'a', name: 'A', role: 'Agent', color: '#000000', runtimeStatus: 'paused' })).toBe('已暂停')
+    expect(fleetMemberPresenceLabel({ id: 'a', name: 'A', role: 'Agent', color: '#000000', presence: 'unknown' })).toBe('未加载')
+  })
+})
 
 describe('Agent Fleet welcome message', () => {
   it('prepends one chat row without replacing existing conversation nodes', () => {
@@ -52,6 +167,53 @@ describe('Agent Fleet welcome message', () => {
       },
     })
     expect(source.chat.order).toEqual([existing.key])
+  })
+})
+
+describe('Fleet member permission groups', () => {
+  it('previews inherited grants and keeps deny-only restrictions visible', () => {
+    const observer = {
+      id: 'observer', name: 'Observer', parents: [], preset: true,
+      toolGroups: ['messages'], denyToolGroups: [], actions: ['task.read'], denies: [],
+    }
+    const restricted = {
+      id: 'restricted', name: 'Restricted', parents: ['observer'], preset: false,
+      toolGroups: [], denyToolGroups: ['messages'], actions: [], denies: ['task.read'],
+    }
+
+    expect(fleetPermissionGroupCapabilities(restricted, [observer, restricted])).toEqual({
+      granted: [],
+      restricted: [
+        { type: 'tool', value: 'messages' },
+        { type: 'action', value: 'task.read' },
+      ],
+    })
+  })
+
+  it('tracks direct grants and restrictions independently from group selection', () => {
+    const baseline = {
+      groups: ['observer'], grants: ['message.wakeup'], denies: [],
+      toolGroups: ['messages'], denyToolGroups: [], op: false,
+    }
+    expect(sameFleetPermissionAssignment(baseline, {
+      ...baseline,
+      groups: ['observer'],
+    })).toBe(true)
+    expect(sameFleetPermissionAssignment(baseline, {
+      ...baseline,
+      denies: ['message.wakeup'],
+    })).toBe(false)
+    expect(sameFleetPermissionAssignment(baseline, {
+      ...baseline,
+      op: true,
+    })).toBe(false)
+
+    expect(updateFleetPermissionAssignmentValues(
+      { ...baseline, grants: [], denies: ['message.wakeup'] },
+      'grants',
+      'denies',
+      ['message.wakeup'],
+    )).toMatchObject({ grants: ['message.wakeup'], denies: [] })
   })
 })
 
@@ -276,6 +438,18 @@ describe('Fleet panel live selection repair', () => {
     expect(resolveFleetPanelItem(team, 'extension.memory', 'memory-page')).toBe('memory-page')
   })
 
+  it('carries a selected member from member, direct-message, and Git views into Agent navigation', () => {
+    expect(fleetPanelSelectedMemberId(team, 'team', 'sam')).toBe('sam')
+    expect(fleetPanelSelectedMemberId(team, 'chat', '@alex-session')).toBe('alex')
+    expect(fleetPanelSelectedMemberId(team, 'git', 'team-assistant')).toBe('team-assistant')
+  })
+
+  it('does not infer a member from a channel or unrelated plugin state', () => {
+    expect(fleetPanelSelectedMemberId(team, 'chat', 'general')).toBeUndefined()
+    expect(fleetPanelSelectedMemberId(team, 'git', 'unknown-member')).toBeUndefined()
+    expect(fleetPanelSelectedMemberId(team, 'resources', 'plan')).toBeUndefined()
+  })
+
   it('treats a Team assistant as a first-class profile and context navigation target', () => {
     expect(resolveFleetPanelItem(team, 'team', 'team-assistant')).toBe('team-assistant')
     expect(resolveFleetPanelItem(team, 'agent', 'team-assistant::@context'))
@@ -295,18 +469,51 @@ describe('Fleet panel live selection repair', () => {
 })
 
 describe('Fleet Team run control', () => {
-  it('switches between a complete pause and resume action from the projected Team state', () => {
-    expect(fleetPanelTeamRunControl({ status: 'running', runtimeState: 'active' })?.action).toBe('pause')
-    expect(fleetPanelTeamRunControl({ status: 'idle', runtimeState: 'active' })?.action).toBe('pause')
-    expect(fleetPanelTeamRunControl({ status: 'paused', runtimeState: 'active' })?.action).toBe('resume')
-    expect(fleetPanelTeamRunControl({ status: 'running', runtimeState: 'dormant' })?.action).toBe('resume')
+  it('derives independent Team actions from ordinary member states', () => {
+    expect(fleetPanelTeamRunControls({
+      status: 'running', runtimeState: 'active', memberStatuses: ['idle', 'unknown', 'paused'],
+    }).map(control => control.action)).toEqual(['load', 'pause', 'wake'])
+    expect(fleetPanelTeamRunControls({
+      status: 'paused', runtimeState: 'active', memberStatuses: ['paused', 'paused'],
+    }).map(control => control.action)).toEqual(['resume', 'wake'])
+    expect(fleetPanelTeamRunControls({
+      status: 'paused', runtimeState: 'active', memberStatuses: ['paused', 'idle'],
+    }).map(control => control.action)).toEqual(['resume', 'pause', 'wake'])
+    expect(fleetPanelTeamRunControls({
+      status: 'idle', runtimeState: 'dormant', memberStatuses: ['unknown', 'unknown'],
+    }).map(control => control.action)).toEqual(['load', 'wake'])
   })
 
-  it('does not offer an invalid resume for terminal or disconnected Teams', () => {
-    expect(fleetPanelTeamRunControl({ status: 'closed', runtimeState: 'dormant' })).toBeUndefined()
-    expect(fleetPanelTeamRunControl({ status: 'failed', runtimeState: 'dormant' })).toBeUndefined()
-    expect(fleetPanelTeamRunControl({ status: 'disconnected', runtimeState: 'dormant' })).toBeUndefined()
-    expect(fleetPanelTeamRunControl({ status: 'finishing', runtimeState: 'active' })).toBeUndefined()
+  it('keeps wake available through nonterminal transitions and hides controls after termination', () => {
+    expect(fleetPanelTeamRunControls({
+      status: 'finishing', runtimeState: 'active', memberStatuses: ['idle'],
+    }).map(control => control.action)).toEqual(['wake'])
+    expect(fleetPanelTeamRunControls({ status: 'closed', runtimeState: 'dormant', memberStatuses: ['offline'] })).toEqual([])
+    expect(fleetPanelTeamRunControls({ status: 'failed', runtimeState: 'dormant', memberStatuses: ['offline'] })).toEqual([])
+    expect(fleetPanelTeamRunControls({ status: 'disconnected', runtimeState: 'dormant', memberStatuses: ['offline'] })).toEqual([])
+  })
+})
+
+describe('Fleet member run control', () => {
+  it('offers load and wake without pause for an unloaded ordinary member', () => {
+    expect(fleetPanelMemberRunControls({ runtimeStatus: 'unknown' }, false, 'idle')
+      .map(control => control.action)).toEqual(['resume', 'wake'])
+  })
+
+  it('offers resume plus wake for a paused member and pause plus wake for a loaded member', () => {
+    expect(fleetPanelMemberRunControls({ runtimeStatus: 'paused' }, false, 'paused')
+      .map(control => control.action)).toEqual(['resume', 'wake'])
+    expect(fleetPanelMemberRunControls({ runtimeStatus: 'idle' }, false, 'idle')
+      .map(control => control.action)).toEqual(['pause', 'wake'])
+  })
+
+  it('keeps assistants out of pause state while retaining interrupt and wake', () => {
+    expect(fleetPanelMemberRunControls({ runtimeStatus: 'running' }, true, 'running')
+      .map(control => control.action)).toEqual(['pause', 'wake'])
+    expect(fleetPanelMemberRunControls({ runtimeStatus: 'idle' }, true, 'idle')
+      .map(control => control.action)).toEqual(['wake'])
+    expect(fleetPanelMemberRunControls({ runtimeStatus: 'offline' }, true, 'idle')
+      .map(control => control.action)).toEqual(['resume', 'wake'])
   })
 })
 

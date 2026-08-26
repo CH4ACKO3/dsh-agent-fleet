@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { watch, type FSWatcher } from 'node:fs'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry/types'
 import type {} from '@deepseek-ai/dsh-typert-registry'
@@ -11,11 +12,13 @@ import { terminalGitCommands, terminalGitPolicy, type FleetTerminalGitCommand } 
 import { FleetGitRecallService } from './recall.js'
 
 import {
+  FLEET_GIT_WEB_PEER_REMOTE,
   FLEET_GIT_WEB_INVOCATIONS,
   type FleetGitCommitInput,
   type FleetGitDiffInput,
   type FleetGitFetchInput,
   type FleetGitSnapshotInput,
+  type FleetGitWebPeerClient,
 } from './contract.js'
 
 export * from './contract.js'
@@ -40,6 +43,112 @@ const ATTRIBUTION_NAMESPACE = 'git-attribution'
 const COMMIT_PRODUCING_GIT_COMMANDS = new Set([
   'am', 'cherry-pick', 'commit', 'merge', 'pull', 'rebase', 'revert',
 ])
+const GIT_WATCH_DEBOUNCE_MS = 250
+
+interface FleetGitWatchRun {
+  readonly id: string
+  readonly projectRoot: string
+  readonly status: string
+}
+
+interface FleetGitWatchRuns {
+  list(): readonly FleetGitWatchRun[]
+  subscribeChanges(listener: () => void): () => void
+}
+
+export class FleetGitWatcher {
+  private readonly watchers = new Map<string, { readonly root: string; readonly watcher: FSWatcher }>()
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly unsubscribe: () => void
+
+  constructor(
+    private readonly runs: FleetGitWatchRuns,
+    private readonly notify: (teamIds: readonly string[]) => void,
+  ) {
+    this.sync()
+    this.unsubscribe = runs.subscribeChanges(() => { this.sync() })
+  }
+
+  private sync(): void {
+    const active = new Map(this.runs.list()
+      .filter(run => run.status !== 'closed' && run.status !== 'failed')
+      .map(run => [run.id, run]))
+    for (const [teamId, current] of this.watchers) {
+      const run = active.get(teamId)
+      if (run !== undefined && resolve(run.projectRoot) === current.root) continue
+      this.stop(teamId)
+    }
+    for (const run of active.values()) {
+      if (this.watchers.has(run.id)) continue
+      const root = resolve(run.projectRoot)
+      try {
+        const watcher = watch(root, { recursive: true }, () => { this.schedule(run.id) })
+        watcher.on('error', () => {
+          this.stop(run.id)
+          this.notify([run.id])
+        })
+        watcher.unref()
+        this.watchers.set(run.id, { root, watcher })
+      } catch {
+        this.notify([run.id])
+      }
+    }
+  }
+
+  private schedule(teamId: string): void {
+    const current = this.timers.get(teamId)
+    if (current !== undefined) clearTimeout(current)
+    const timer = setTimeout(() => {
+      this.timers.delete(teamId)
+      if (this.watchers.has(teamId)) this.notify([teamId])
+    }, GIT_WATCH_DEBOUNCE_MS)
+    timer.unref?.()
+    this.timers.set(teamId, timer)
+  }
+
+  private stop(teamId: string): void {
+    this.watchers.get(teamId)?.watcher.close()
+    this.watchers.delete(teamId)
+    const timer = this.timers.get(teamId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.timers.delete(teamId)
+  }
+
+  close(): void {
+    this.unsubscribe()
+    for (const teamId of [...this.watchers.keys()]) this.stop(teamId)
+  }
+}
+
+interface FleetGitNotificationContext extends Context {
+  readonly connection: {
+    readonly peers: {
+      list(): readonly { readonly kind: string }[]
+    }
+  }
+  readonly remote: {
+    $mount(contribution: typeof FLEET_GIT_WEB_PEER_REMOTE): Promise<() => Promise<void>>
+    for(peer: { readonly kind: string }): unknown
+  }
+}
+
+async function installGitNotifications(
+  ctx: FleetGitNotificationContext,
+  runs: FleetGitWatchRuns,
+): Promise<() => Promise<void>> {
+  const disposeRemote = await ctx.remote.$mount(FLEET_GIT_WEB_PEER_REMOTE)
+  const watcher = new FleetGitWatcher(runs, teamIds => {
+    for (const peer of ctx.connection.peers.list()) {
+      if (peer.kind !== 'browser') continue
+      const client = (ctx.remote.for(peer) as { readonly fleetGitWebPeer: FleetGitWebPeerClient }).fleetGitWebPeer
+      void client.invalidate({ teamIds }).catch(() => undefined)
+    }
+  })
+  return async () => {
+    watcher.close()
+    await disposeRemote()
+  }
+}
 
 export class FleetGitAttributionStore {
   private readonly teams = new Map<string, Map<string, string>>()
@@ -339,6 +448,10 @@ export function apply(ctx: Context): void {
     new FleetGitWebRemote(scope, scope.fleetGitAttributions)
     return scope.typert.register(FLEET_GIT_WEB_LOCAL)
   })
+  ctx.inject(['fleetRuns', 'remote', 'connection'], scope => installGitNotifications(
+    scope as unknown as FleetGitNotificationContext,
+    scope.fleetRuns,
+  ))
 }
 
 declare module '@deepseek-ai/cordis' {

@@ -2,6 +2,11 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import * as Adapter from './adapter.js'
 import * as Processor from './processor.js'
+import {
+  DEFAULT_FLEET_PATCHOULI_SETTINGS,
+  installFleetPatchouliSettings,
+  type FleetPatchouliSettings,
+} from './settings.js'
 
 export { Adapter, Processor }
 export {
@@ -14,6 +19,7 @@ export {
 } from './history-search.js'
 export type { FleetHistorySearchItem } from './history-search.js'
 export * from './patchouli.js'
+export * from './settings.js'
 export {
   createFleetSelfHistoryAlgorithm,
   FLEET_SELF_HISTORY_ALGORITHM_ID,
@@ -33,7 +39,11 @@ export {
 
 export const name = 'dsh-fleet-patchouli'
 
-export function apply(ctx: Context): void {
-  ctx.plugin(Processor)
+export type Config = Partial<FleetPatchouliSettings>
+
+export function apply(ctx: Context, config: Config = {}): void {
+  let settings = { ...DEFAULT_FLEET_PATCHOULI_SETTINGS, ...config }
+  installFleetPatchouliSettings(ctx, config, next => { settings = next })
+  ctx.plugin(Processor, { settings: () => settings })
   ctx.plugin(Adapter)
 }

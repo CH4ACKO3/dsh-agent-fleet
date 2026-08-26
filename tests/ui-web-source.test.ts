@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { FleetWebClient } from '@dsh-agent-fleet/core/web'
 import { createFleetWebPanelSource } from '../packages/ui/src/fleet-web-source.js'
@@ -23,6 +23,7 @@ describe('Fleet Web panel source', () => {
   it('projects a live Team and routes operator actions through FleetWebRemote', async () => {
     const sent: unknown[] = []
     const uploaded: unknown[] = []
+    const removed: unknown[] = []
     const controlled: unknown[] = []
     const membersControlled: unknown[] = []
     const archiveCalls: unknown[] = []
@@ -33,13 +34,36 @@ describe('Fleet Web panel source', () => {
       status: 'running',
       startedAt: '2026-08-21T10:00:00.000Z',
       members: [{
-        name: 'builder', displayName: 'Avery Stone', role: '实现工程师',
+        name: 'builder', displayName: 'Avery Stone', color: '#527FCA', role: '实现工程师',
         sessionId: 'member-session', status: 'error', provider: 'deepseek', model: 'deepseek-chat',
+        reasoningEffort: 'high', maxTokens: 4_096,
       }],
       assistants: [{
         sessionId: 'observer-session', status: 'idle',
         view: { id: 'assistant', name: 'You', role: '外部观察者' },
       }],
+      budget: {
+        mode: 'tokens',
+        rates: [{ provider: 'deepseek', model: 'deepseek-chat', multiplier: 2 }],
+        team: {
+          limit: 1_000, startedAt: '2026-08-21T10:00:00.000Z', used: 600,
+          inputTokens: 200, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+          reasoningTokens: 40, calls: 3, unmeteredCalls: 0, models: [],
+        },
+        members: [
+          {
+            memberId: 'builder', limit: 500, startedAt: '2026-08-21T10:00:00.000Z', used: 500,
+            inputTokens: 150, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+            reasoningTokens: 40, calls: 2, unmeteredCalls: 0, models: [],
+          },
+          {
+            memberId: 'former-reviewer', name: 'Morgan', role: '前评审者', color: '#846BB3', assistant: false,
+            startedAt: '2026-08-21T10:00:00.000Z', used: 100,
+            inputTokens: 50, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+            reasoningTokens: 0, calls: 1, unmeteredCalls: 0, models: [],
+          },
+        ],
+      },
     }
     const remote = {
       list: async () => ok([run]),
@@ -47,6 +71,30 @@ describe('Fleet Web panel source', () => {
         const request = input as { readonly view?: string; readonly resource?: string; readonly revision?: string }
         if (request.view === 'configuration') {
           return ok({ core: { name: 'Runtime Team', members: [] }, modules: {} })
+        }
+        if (request.view === 'settings') {
+          return ok({
+            name: 'Runtime Team', positioning: 'Runtime operations', rules: '', collaborationMethod: '',
+            updateDensity: 'balanced', notificationPolicy: 'milestones', contentPreference: '',
+            projectRoot: '/workspace/fleet',
+            budget: {
+              mode: 'tokens', rates: [], configuredModels: [{ provider: 'deepseek', model: 'deepseek-chat' }],
+              team: {
+                limit: 1000, startedAt: '2026-08-21T10:00:00.000Z', used: 250,
+                inputTokens: 150, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+                reasoningTokens: 40, calls: 2, unmeteredCalls: 0, models: [], remaining: 750, state: 'normal',
+              },
+              members: [{
+                memberId: 'builder', name: 'Avery Stone', role: '实现工程师', assistant: false,
+                limit: 500, startedAt: '2026-08-21T10:00:00.000Z', used: 250,
+                inputTokens: 150, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+                reasoningTokens: 40, calls: 2, unmeteredCalls: 0, models: [], remaining: 250, state: 'normal',
+              }],
+            },
+            request: { provider: 'deepseek', model: 'deepseek-chat', mixed: {
+              model: false, reasoningEffort: false, maxTokens: false,
+            } },
+          })
         }
         if (request.view === 'resource') {
           return ok({
@@ -218,6 +266,29 @@ describe('Fleet Web panel source', () => {
             type: 'resource.document_updated',
             data: { action: 'updated', document: { id: 'doc-1', name: 'plan', title: '执行计划' }, actor: 'builder' },
           },
+          {
+            sequence: 14,
+            createdAt: '2026-08-21T10:10:30.000Z',
+            type: 'coordination.message',
+            data: {
+              type: 'message',
+              message: {
+                id: 'message-blocked', conversation: '@member-session', from: 'fleet-user:team-1', fromName: 'User',
+                recipientIds: ['builder'], text: 'This delivery is blocked.', mentions: [], resources: [],
+                createdAt: '2026-08-21T10:10:30.000Z',
+              },
+            },
+          },
+          {
+            sequence: 15,
+            createdAt: '2026-08-21T10:10:31.000Z',
+            type: 'coordination.inbox',
+            data: {
+              type: 'inbox', action: 'blocked', agentId: 'builder', messageId: 'message-blocked',
+              reason: 'inbox_delivery_failed', detail: 'native inbox is closed',
+              blockedAt: '2026-08-21T10:10:31.000Z',
+            },
+          },
         ],
           hasMore: false,
         })
@@ -232,10 +303,42 @@ describe('Fleet Web panel source', () => {
       },
       control: async input => {
         controlled.push(input)
+        if ((input as { readonly action?: string }).action === 'configure') {
+          return ok({
+            ...(input as { readonly settings: object }).settings,
+            projectRoot: '/workspace/fleet',
+            request: { provider: 'deepseek', model: 'deepseek-chat', mixed: {
+              model: false, reasoningEffort: false, maxTokens: false,
+            } },
+          })
+        }
+        if ((input as { readonly action?: string }).action === 'budget') {
+          return ok({
+            mode: 'tokens', rates: [], configuredModels: [{ provider: 'deepseek', model: 'deepseek-chat' }],
+            team: {
+              limit: 1000, startedAt: '2026-08-21T10:00:00.000Z', used: 250,
+              inputTokens: 150, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+              reasoningTokens: 40, calls: 2, unmeteredCalls: 0, models: [], remaining: 750, state: 'normal',
+            },
+            members: [],
+          })
+        }
         return ok({})
       },
       upload: async input => {
         uploaded.push(input)
+        return ok({
+          id: 'resource-note',
+          path: '/project/.fleet/team-1/note.txt',
+          label: 'note.txt',
+          mediaType: 'text/plain',
+          size: 5,
+          createdBy: 'fleet-user:observer-session',
+          createdAt: '2026-08-21T10:11:00.000Z',
+        })
+      },
+      removeResource: async input => {
+        removed.push(input)
         return ok({})
       },
       uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
@@ -262,7 +365,9 @@ describe('Fleet Web panel source', () => {
       selectedTeamId: 'team-1',
       directory: { teams: [{
         teamId: 'team-1', teamName: 'Runtime Team', primaryWorkspace: 'fleet',
+        memberStatuses: ['error'],
         assistantSessionIds: ['observer-session'],
+        assistantConnections: [{ assistantId: 'assistant', assistantName: 'You', sessionId: 'observer-session' }],
       }] },
       team: {
         teamId: 'team-1',
@@ -270,6 +375,7 @@ describe('Fleet Web panel source', () => {
           id: 'builder', name: 'Avery Stone', responsibility: '实现并验证运行时功能',
           presence: 'error', statusText: '正在验证团队运行时状态投影',
           statusUpdatedAt: '2026-08-21T10:06:00.000Z', provider: 'deepseek', model: 'deepseek-chat',
+          reasoningEffort: 'high', maxTokens: 4_096,
         }],
         assistants: [{
           id: 'assistant', name: 'You', role: '外部观察者', responsibility: '外部观察者',
@@ -280,10 +386,23 @@ describe('Fleet Web panel source', () => {
         messages: expect.arrayContaining([
           expect.objectContaining({ id: 'message-1', conversationId: '#general', senderId: 'builder' }),
         ]),
+        budget: {
+          mode: 'tokens',
+          team: { limit: 1_000, used: 600, remaining: 400, state: 'normal' },
+          members: expect.arrayContaining([expect.objectContaining({
+            memberId: 'builder', name: 'Avery Stone', role: '实现工程师', color: '#527FCA',
+            limit: 500, used: 500, remaining: 0, state: 'exhausted',
+          }), expect.objectContaining({
+            memberId: 'former-reviewer', name: 'Morgan', role: '前评审者', color: '#846BB3',
+            used: 100, state: 'unlimited', active: false,
+          })]),
+        },
       },
     })
     expect(snapshot.team?.conversations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: '#general', name: 'general', memberCount: 2, activeCount: 2 }),
+      expect.objectContaining({
+        id: '#general', name: 'general', participantIds: ['builder', 'assistant'], memberCount: 2, activeCount: 2,
+      }),
       expect.objectContaining({ id: '@builder', name: 'Avery Stone' }),
     ]))
     expect(snapshot.team?.messages).toEqual(expect.arrayContaining([
@@ -298,6 +417,7 @@ describe('Fleet Web panel source', () => {
         id: 'message-user', conversationId: '@builder', sender: expect.objectContaining({ operator: true }),
         receipt: {
           visibleMemberIds: ['builder'], readMemberIds: ['builder'], unreadMemberIds: [],
+          deliveredMemberIds: [], pendingMemberIds: [], pendingDeliveries: [],
           sources: [{ memberId: 'builder', sessionId: 'member-session', contextMessageId: 'context-message-user' }],
         },
       }),
@@ -305,7 +425,19 @@ describe('Fleet Web panel source', () => {
         id: 'message-unread', conversationId: '@builder',
         receipt: {
           visibleMemberIds: ['builder'], readMemberIds: [], unreadMemberIds: ['builder'],
+          deliveredMemberIds: ['builder'], pendingMemberIds: [], pendingDeliveries: [],
           sources: [{ memberId: 'builder', sessionId: 'member-session', contextMessageId: 'context-message-unread' }],
+        },
+      }),
+      expect.objectContaining({
+        id: 'message-blocked', conversationId: '@builder',
+        receipt: {
+          visibleMemberIds: ['builder'], readMemberIds: [], unreadMemberIds: ['builder'],
+          deliveredMemberIds: [], pendingMemberIds: ['builder'],
+          pendingDeliveries: [{
+            memberId: 'builder', reason: 'inbox_delivery_failed', detail: 'native inbox is closed',
+            blockedAt: '2026-08-21T10:10:31.000Z',
+          }],
         },
       }),
       expect.objectContaining({ id: 'message-reply', conversationId: '@builder', senderId: 'builder' }),
@@ -402,17 +534,69 @@ describe('Fleet Web panel source', () => {
       mentions: ['@builder'],
     })
 
+    await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'load' })
     await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'pause' })
     await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'wake' })
+    await expect(source.loadTeamSettings?.('team-1')).resolves.toMatchObject({
+      name: 'Runtime Team', updateDensity: 'balanced', projectRoot: '/workspace/fleet',
+      budget: { mode: 'tokens', team: { limit: 1000, used: 250 }, members: [expect.objectContaining({ memberId: 'builder', limit: 500 })] },
+    })
+    await expect(source.updateTeamSettings?.({
+      sessionId: 'observer-session', teamId: 'team-1', settings: {
+        name: 'Runtime Team', positioning: 'Runtime operations', rules: '', collaborationMethod: '',
+        updateDensity: 'detailed', notificationPolicy: 'decisions', contentPreference: 'Lead with outcomes.',
+      },
+    })).resolves.toMatchObject({ updateDensity: 'detailed', notificationPolicy: 'decisions' })
+    await expect(source.updateBudget?.({
+      sessionId: 'observer-session', teamId: 'team-1', scope: 'member', member: 'builder', limit: 500,
+    })).resolves.toMatchObject({ team: { limit: 1000, used: 250 } })
+    await source.configureTeamRequest?.({
+      sessionId: 'observer-session', teamId: 'team-1',
+      request: { provider: 'deepseek', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+    })
+    await source.configureMemberRequest?.({
+      sessionId: 'observer-session', teamId: 'team-1', memberId: 'builder', assistant: false,
+      request: { provider: 'deepseek', model: 'deepseek-reasoner', maxTokens: 8_192 },
+    })
+    await source.configureMemberRequest?.({
+      sessionId: 'observer-session', teamId: 'team-1', memberId: 'assistant', assistant: true,
+      request: { reasoningEffort: 'medium', maxTokens: null },
+    })
     await source.controlMember?.({
       sessionId: 'observer-session', teamId: 'team-1', memberId: 'builder', action: 'resume',
     })
+    await source.controlMember?.({
+      sessionId: 'observer-session', teamId: 'team-1', memberId: 'builder', action: 'wake',
+    })
+    expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'load' })
     expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'pause' })
     expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'wake' })
+    expect(controlled).toContainEqual(expect.objectContaining({
+      sessionId: 'observer-session', teamId: 'team-1', action: 'configure',
+      settings: expect.objectContaining({ updateDensity: 'detailed' }),
+    }))
+    expect(controlled).toContainEqual({
+      sessionId: 'observer-session', teamId: 'team-1', action: 'budget',
+      budget: { scope: 'member', member: 'builder', limit: 500 },
+    })
+    expect(membersControlled).toContainEqual({
+      sessionId: 'observer-session', teamId: 'team-1', action: 'configure_all',
+      request: { provider: 'deepseek', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+    })
+    expect(membersControlled).toContainEqual({
+      sessionId: 'observer-session', teamId: 'team-1', action: 'configure', member: 'builder',
+      request: { provider: 'deepseek', model: 'deepseek-reasoner', maxTokens: 8_192 },
+    })
+    expect(membersControlled).toContainEqual({
+      sessionId: 'observer-session', teamId: 'team-1', action: 'configure_assistant', member: 'assistant',
+      request: { reasoningEffort: 'medium', maxTokens: null },
+    })
     expect(membersControlled).toContainEqual({
       sessionId: 'observer-session', teamId: 'team-1', member: 'builder', action: 'resume',
     })
-
+    expect(membersControlled).toContainEqual({
+      sessionId: 'observer-session', teamId: 'team-1', member: 'builder', action: 'wake',
+    })
     await source.uploadResource?.({
       sessionId: 'observer-session',
       teamId: 'team-1',
@@ -425,6 +609,16 @@ describe('Fleet Web panel source', () => {
       base64: 'aGVsbG8=',
       label: 'note.txt',
       mediaType: 'text/plain',
+    }])
+    await source.removeResource?.({
+      sessionId: 'observer-session',
+      teamId: 'team-1',
+      resourceId: 'plan',
+    })
+    expect(removed).toEqual([{
+      sessionId: 'observer-session',
+      teamId: 'team-1',
+      resourceId: 'plan',
     }])
 
     unsubscribe()
@@ -540,6 +734,32 @@ describe('Fleet Web panel source', () => {
     source.dispose()
   })
 
+  it('notifies only matching live member trace subscribers', () => {
+    const remote = {
+      list: async () => ok([]), project: async () => ok({}), send: async () => ok({}),
+      member: async () => ok({}), control: async () => ok({}), upload: async () => ok({}),
+      uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const source = createFleetWebPanelSource(() => Promise.resolve(remote))
+    const builder = vi.fn()
+    const reviewer = vi.fn()
+    const unsubscribe = source.subscribeMemberTrace('team-1', 'builder', builder)
+    source.subscribeMemberTrace('team-1', 'reviewer', reviewer)
+
+    source.invalidateTraces([
+      { teamId: 'team-1', memberId: 'builder' },
+      { teamId: 'team-2', memberId: 'reviewer' },
+    ])
+    expect(builder).toHaveBeenCalledOnce()
+    expect(reviewer).not.toHaveBeenCalled()
+
+    unsubscribe()
+    source.invalidateTraces([{ teamId: 'team-1', memberId: 'builder' }])
+    expect(builder).toHaveBeenCalledOnce()
+    source.dispose()
+  })
+
   it('separates operator direct chats from each member-to-member conversation', async () => {
     const sent: unknown[] = []
     const run = {
@@ -625,6 +845,7 @@ describe('Fleet Web panel source', () => {
         sender: expect.objectContaining({ id: 'operator', operator: true }),
         receipt: {
           visibleMemberIds: ['assistant'], readMemberIds: ['assistant'], unreadMemberIds: [],
+          deliveredMemberIds: [], pendingMemberIds: [], pendingDeliveries: [],
           sources: [{ memberId: 'assistant', sessionId: 'assistant-session', contextMessageId: 'assistant-context-message' }],
         },
       }),
@@ -780,8 +1001,8 @@ describe('Fleet Web panel source', () => {
     const source = createFleetWebPanelSource(() => Promise.resolve(remote))
 
     await source.refresh()
-    expect(source.getSnapshot().team?.messages).toHaveLength(500)
-    expect(source.getSnapshot().team?.messages[0]?.id).toBe('message-61')
+    expect(source.getSnapshot().team?.messages).toHaveLength(100)
+    expect(source.getSnapshot().team?.messages[0]?.id).toBe('message-461')
 
     const trace = await source.loadMemberTrace('team-1', 'builder')
     expect(trace.truncated).toBe(true)
@@ -924,6 +1145,9 @@ describe('Fleet Web panel source', () => {
     await source.refresh()
     const team = source.getSnapshot().team
     expect(source.getSnapshot().directory.teams[0]).toMatchObject({
+      assistantConnections: [{
+        assistantId: 'team-assistant', assistantName: 'Hailey', sessionId: 'assistant-current',
+      }],
       assistantSessionIds: ['assistant-current', 'assistant-old'],
       assistantSessionAliases: {
         'assistant-old': 'assistant-current',
@@ -1032,6 +1256,8 @@ describe('Fleet Web panel source', () => {
           groups: ['observer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
         },
         effective: { actions: ['message.read'], toolGroups: ['messages'], op: false },
+        availableActions: ['message.read', 'message.wakeup'],
+        availableToolGroups: ['messages', 'resources'],
         groups: [{
           id: 'observer', name: 'Observer', parents: [], preset: true,
           toolGroups: ['messages'], actions: ['message.read'],
@@ -1054,16 +1280,80 @@ describe('Fleet Web panel source', () => {
     const source = createFleetWebPanelSource(() => Promise.resolve(remote))
 
     await expect(source.loadMemberAuthorization?.('team-1', 'builder')).resolves.toMatchObject({
-      selectedGroups: ['observer'],
+      assignment: {
+        groups: ['observer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [], op: false,
+      },
+      availableActions: ['message.read', 'message.wakeup'],
+      availableToolGroups: ['messages', 'resources'],
       effectiveActions: ['message.read'],
-      groups: [{ id: 'observer', name: 'Observer' }],
+      groups: [{
+        id: 'observer', name: 'Observer', toolGroups: ['messages'], actions: ['message.read'],
+      }],
     })
     await expect(source.updateMemberPermissions?.({
-      sessionId: 'ui-session', teamId: 'team-1', memberId: 'builder', groups: ['observer'],
-    })).resolves.toMatchObject({ configured: true, selectedGroups: ['observer'] })
+      sessionId: 'ui-session', teamId: 'team-1', memberId: 'builder',
+      assignment: {
+        groups: ['observer'], grants: ['message.wakeup'], denies: [],
+        toolGroups: ['resources'], denyToolGroups: [], op: false,
+      },
+    })).resolves.toMatchObject({ configured: true, assignment: { groups: ['observer'] } })
     expect(memberCalls).toEqual([{
-      sessionId: 'ui-session', teamId: 'team-1', action: 'permissions', member: 'builder', groups: ['observer'],
+      sessionId: 'ui-session', teamId: 'team-1', action: 'permissions', member: 'builder',
+      assignment: {
+        groups: ['observer'], grants: ['message.wakeup'], denies: [],
+        toolGroups: ['resources'], denyToolGroups: [], op: false,
+      },
     }])
+    source.dispose()
+  })
+
+  it('loads and updates member resource Access through Fleet Web', async () => {
+    const memberCalls: unknown[] = []
+    const access = {
+      resourceKinds: ['file', 'workspace'],
+      modes: [
+        { resourceKind: 'file', mode: 'restricted' },
+        { resourceKind: 'workspace', mode: 'inherit' },
+      ],
+      rules: [{
+        id: 'source', resourceKind: 'file', resourceId: 'workspace:src',
+        scope: 'tree', effect: 'allow', levels: ['write'],
+      }],
+    }
+    const remote = {
+      list: async () => ok([]),
+      project: async () => ok({}),
+      send: async () => ok({}),
+      member: async input => {
+        memberCalls.push(input)
+        return ok(access)
+      },
+      control: async () => ok({}),
+      upload: async () => ok({}),
+      uploadSetup: async () => ok({ path: '/tmp/file', label: 'file', size: 0 }),
+      archive: async () => ok({}),
+    } satisfies FleetWebClient
+    const source = createFleetWebPanelSource(() => Promise.resolve(remote))
+
+    await expect(source.loadMemberAccess?.({
+      sessionId: 'ui-session', teamId: 'team-1', memberId: 'builder',
+    })).resolves.toEqual(access)
+    await expect(source.updateMemberAccess?.({
+      sessionId: 'ui-session', teamId: 'team-1', memberId: 'builder',
+      change: {
+        action: 'add_rule', resourceKind: 'file', resourceId: 'src',
+        scope: 'tree', effect: 'deny', levels: ['read'],
+      },
+    })).resolves.toEqual(access)
+    expect(memberCalls).toEqual([
+      { sessionId: 'ui-session', teamId: 'team-1', action: 'get_access', member: 'builder' },
+      {
+        sessionId: 'ui-session', teamId: 'team-1', member: 'builder', action: 'add_access_rule',
+        accessRule: {
+          resourceKind: 'file', resourceId: 'src', scope: 'tree', effect: 'deny', levels: ['read'],
+        },
+      },
+    ])
     source.dispose()
   })
 })

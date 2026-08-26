@@ -1,5 +1,5 @@
 import type { ReactElement, ReactNode } from 'react'
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 import { useFleetMetaText } from './meta-assistant.js'
@@ -12,6 +12,13 @@ import {
   type FleetChatMember,
   type FleetChatReadReceiptData,
 } from './runtime-chat.js'
+import { FleetMemberPopover, type FleetMemberPopoverTriggerProps } from './member-popover.js'
+import { fleetText } from './locale.js'
+import {
+  updateFleetOperatorProfile,
+  useFleetOperatorProfile,
+  type FleetOperatorProfile,
+} from './operator-profile.js'
 
 const STYLE_ID = 'dsh-agent-fleet-assistant-private-chat'
 
@@ -493,9 +500,8 @@ export interface AgentFleetMailbox {
 }
 
 /**
- * Fleet receipts track explicit message-tool reads, while assistant DMs also enter the
- * assistant's native Session directly. Reconcile those native reads through the
- * delivered context-message id so an already-consumed DM is not shown as unread.
+ * Reconcile native assistant-DM reads through the delivered context-message id so the
+ * Fleet projection updates immediately while the durable read event reaches the panel.
  */
 export function reconcileAgentFleetMailboxReadState(
   mailbox: AgentFleetMailbox,
@@ -521,7 +527,15 @@ export function reconcileAgentFleetMailboxReadState(
       receipt: {
         ...receipt,
         readMembers: [...receipt.readMembers, mailbox.assistant],
-        unreadMembers: receipt.unreadMembers.filter(member => member.id !== mailbox.assistant.id),
+        ...(receipt.unreadMembers === undefined ? {} : {
+          unreadMembers: receipt.unreadMembers.filter(member => member.id !== mailbox.assistant.id),
+        }),
+        ...(receipt.deliveredMembers === undefined ? {} : {
+          deliveredMembers: receipt.deliveredMembers.filter(member => member.id !== mailbox.assistant.id),
+        }),
+        ...(receipt.pendingDeliveries === undefined ? {} : {
+          pendingDeliveries: receipt.pendingDeliveries.filter(delivery => delivery.member.id !== mailbox.assistant.id),
+        }),
       },
     }
   })
@@ -675,6 +689,7 @@ interface AgentFleetPrivateChatProps {
   readonly useSession: FleetSnapshotSelectorHook
   readonly loadOlder: () => void
   readonly loadImage: (attachment: unknown) => Promise<string>
+  readonly renderText?: (text: string) => ReactNode
   readonly renderContext: () => ReactNode
   /** Real Fleet mailbox projection. Native Session output remains available only through renderContext. */
   readonly mailbox?: AgentFleetMailbox
@@ -717,7 +732,9 @@ function FleetPrivateImage({ image, attachment, loadImage }: {
   return jsx('span', {
     className: 'dsh-fleet-assistant-private-image-state',
     role: state.error === true ? 'alert' : 'status',
-    children: state.error === true ? (image.name ?? '图片无法载入') : (image.name ?? '正在载入图片…'),
+    children: state.error === true
+      ? (image.name ?? fleetText('图片无法载入', 'Image could not be loaded'))
+      : (image.name ?? fleetText('正在载入图片…', 'Loading image…')),
   })
 }
 
@@ -759,120 +776,51 @@ function BackChevron(): ReactElement {
   })
 }
 
-function useAgentFleetProfilePopover() {
-  const popover = useRef<HTMLElement>(null)
-  const nameId = useId()
-  const popoverId = useId()
-  const [open, setOpen] = useState(false)
-
-  useEffect(() => {
-    const node = popover.current
-    if (node === null) return
-    const syncOpen = (): void => { setOpen(node.matches(':popover-open')) }
-    node.addEventListener('toggle', syncOpen)
-    return () => { node.removeEventListener('toggle', syncOpen) }
-  }, [])
-
-  const close = (): void => {
-    if (popover.current?.matches(':popover-open') === true) popover.current.hidePopover()
-  }
-  const toggleAt = (anchorElement: Element): void => {
-    const node = popover.current
-    if (node === null) return
-    if (node.matches(':popover-open')) {
-      close()
-      return
-    }
-    const anchor = anchorElement.getBoundingClientRect()
-    node.style.visibility = 'hidden'
-    node.showPopover()
-    const bounds = node.getBoundingClientRect()
-    const gutter = 12
-    const gap = 8
-    node.style.left = `${Math.round(Math.max(gutter, Math.min(anchor.left, window.innerWidth - bounds.width - gutter)))}px`
-    node.style.top = `${Math.round(anchor.bottom + gap + bounds.height <= window.innerHeight - gutter
-      ? anchor.bottom + gap
-      : Math.max(gutter, anchor.top - bounds.height - gap))}px`
-    node.style.visibility = ''
-  }
-
-  return { popover, nameId, popoverId, open, close, toggleAt }
-}
-
 function AgentFleetAvatarPopover({ member, running, showDetails, showContext }: {
   readonly member: FleetChatMember
   readonly running: boolean
   readonly showDetails: () => void
   readonly showContext: () => void
 }): ReactElement {
-  const controller = useAgentFleetProfilePopover()
-  const open = (action: () => void): void => {
-    controller.close()
-    action()
+  const profile = {
+    ...member,
+    presence: running ? 'busy' as const : 'active' as const,
+    runtimeStatus: running ? 'running' as const : 'idle' as const,
   }
-  return jsxs('div', {
+  return jsx(FleetMemberPopover, {
+    member: profile,
     className: 'dsh-fleet-panel-member-avatar-anchor',
-    children: [
-      jsx('button', {
+    responsibility: fleetText(
+      '帮助用户观察、了解并接入 Fleet 团队，不承担团队的中心协调。',
+      'Helps the user observe, understand, and connect to Fleet Teams without becoming their central coordinator.',
+    ),
+    statusLabel: running ? fleetText('工作中', 'Working') : fleetText('在线', 'Online'),
+    showDetails: () => { showDetails() },
+    showContext: () => { showContext() },
+    trigger: (interaction: FleetMemberPopoverTriggerProps) => jsx('button', {
         type: 'button',
         className: 'dsh-fleet-panel-member-avatar-trigger',
-        'aria-label': '查看 Agent Fleet 的资料',
-        'aria-haspopup': 'dialog',
-        'aria-expanded': controller.open ? 'true' : 'false',
-        'aria-controls': controller.popoverId,
-        onClick: (event: { readonly currentTarget: Element }) => { controller.toggleAt(event.currentTarget) },
-        children: jsx(FleetChatAvatar, { member }),
+        'aria-label': fleetText('查看 Agent Fleet 的资料', 'View Agent Fleet profile'),
+        ...interaction,
+        children: jsx(FleetChatAvatar, { member: profile }),
       }),
-      jsxs('div', {
-        ref: controller.popover,
-        id: controller.popoverId,
-        popover: 'auto',
-        className: 'dsh-fleet-panel-member-popover',
-        role: 'dialog',
-        'aria-labelledby': controller.nameId,
-        children: [
-          jsxs('header', {
-            className: 'dsh-fleet-panel-member-popover-head',
-            children: [
-              jsx(FleetChatAvatar, { member, size: 42 }),
-              jsxs('div', {
-                className: 'dsh-fleet-panel-member-popover-copy',
-                children: [
-                  jsx('div', { id: controller.nameId, className: 'dsh-fleet-panel-member-popover-name', children: member.name }),
-                  jsx('div', { className: 'dsh-fleet-panel-member-popover-role', children: member.role }),
-                ],
-              }),
-            ],
-          }),
-          jsx('p', {
-            className: 'dsh-fleet-panel-member-popover-responsibility',
-            children: '帮助用户观察、了解并接入 Fleet 团队，不承担团队的中心协调。',
-          }),
-          jsx('div', {
-            className: 'dsh-fleet-panel-member-popover-status',
-            'data-status': running ? 'busy' : 'active',
-            children: running ? '工作中' : '在线',
-          }),
-          jsxs('div', {
-            className: 'dsh-fleet-panel-member-popover-actions',
-            children: [
-              jsx('button', {
-                type: 'button',
-                className: 'dsh-fleet-panel-member-popover-detail',
-                onClick: () => { open(showDetails) },
-                children: '详细信息',
-              }),
-              jsx('button', {
-                type: 'button',
-                className: 'dsh-fleet-panel-member-popover-detail',
-                onClick: () => { open(showContext) },
-                children: '上下文',
-              }),
-            ],
-          }),
-        ],
-      }),
-    ],
+  })
+}
+
+function OperatorAvatarPopover({ member }: { readonly member: FleetOperatorProfile }): ReactElement {
+  return jsx(FleetMemberPopover, {
+    member,
+    className: 'dsh-fleet-panel-member-avatar-anchor',
+    responsibility: member.responsibility,
+    statusLabel: fleetText('在线', 'Online'),
+    editProfile: updateFleetOperatorProfile,
+    trigger: (interaction: FleetMemberPopoverTriggerProps) => jsx('button', {
+      type: 'button',
+      className: 'dsh-fleet-panel-member-avatar-trigger',
+      'aria-label': fleetText('查看或编辑你的资料', 'View or edit your profile'),
+      ...interaction,
+      children: jsx(FleetChatAvatar, { member }),
+    }),
   })
 }
 
@@ -887,7 +835,7 @@ function AgentFleetSubviewHeader({ title, back }: {
         type: 'button',
         className: 'dsh-fleet-assistant-private-back',
         onClick: back,
-        children: [jsx(BackChevron, {}), jsx('span', { children: '返回私聊' })],
+        children: [jsx(BackChevron, {}), jsx('span', { children: fleetText('返回私聊', 'Back to chat') })],
       }),
       jsx('h2', { className: 'dsh-fleet-assistant-private-subview-title', children: title }),
     ],
@@ -900,16 +848,16 @@ function AgentFleetDetails({ member, running, back }: {
   readonly back: () => void
 }): ReactElement {
   const facts = [
-    ['当前状态', running ? '工作中' : '在线'],
-    ['身份', member.role],
-    ['会话', '持久 Agent Fleet 会话'],
-    ['协作边界', '外部观察与接入，不参与团队投票'],
+    [fleetText('当前状态', 'Current status'), running ? fleetText('工作中', 'Working') : fleetText('在线', 'Online')],
+    [fleetText('身份', 'Identity'), member.role],
+    [fleetText('会话', 'Session'), fleetText('持久 Agent Fleet 会话', 'Persistent Agent Fleet Session')],
+    [fleetText('协作边界', 'Collaboration boundary'), fleetText('外部观察与接入，不参与团队投票', 'External observation and access; does not participate in Team votes')],
   ] as const
   return jsxs('section', {
     className: 'dsh-fleet-assistant-private',
     'data-surface': 'details',
     children: [
-      jsx(AgentFleetSubviewHeader, { title: 'Agent Fleet 详细信息', back }),
+      jsx(AgentFleetSubviewHeader, { title: fleetText('Agent Fleet 详细信息', 'Agent Fleet details'), back }),
       jsx('div', {
         className: 'dsh-fleet-assistant-private-subview-body',
         children: jsxs('div', {
@@ -918,7 +866,10 @@ function AgentFleetDetails({ member, running, back }: {
             jsx('h3', { className: 'dsh-fleet-assistant-private-profile-title', children: member.name }),
             jsx('p', {
               className: 'dsh-fleet-assistant-private-profile-copy',
-              children: '帮助用户观察、了解并接入 Fleet 团队。助理不会成为团队的中心协调者，团队在没有用户参与时仍可独立运行。',
+              children: fleetText(
+                '帮助用户观察、了解并接入 Fleet 团队。助理不会成为团队的中心协调者，团队在没有用户参与时仍可独立运行。',
+                'Helps the user observe, understand, and connect to Fleet Teams. The assistant does not become the Team’s central coordinator, and the Team can continue independently without user participation.',
+              ),
             }),
             jsx('div', {
               className: 'dsh-fleet-assistant-private-profile-facts',
@@ -941,6 +892,7 @@ export function AgentFleetPrivateChat({
   useSession,
   loadOlder,
   loadImage,
+  renderText,
   renderContext,
   mailbox,
   openMemberDetails,
@@ -953,6 +905,7 @@ export function AgentFleetPrivateChat({
   const nativeOpenState = useSession(source => source.openState) as string
   const nativeHasMore = useSession(source => source.hasMore) as boolean
   const nativeLoadingOlder = useSession(source => source.loadingOlder) as boolean
+  const operatorProfile = useFleetOperatorProfile()
   const [surface, setSurface] = useState<'chat' | 'details' | 'context'>('chat')
   const nativeMessages = useMemo(() => projectAgentFleetPrivateMessages({ order, nodes }), [nodes, order])
   const messages = useMemo(
@@ -981,16 +934,8 @@ export function AgentFleetPrivateChat({
     color: '#4f76c7',
     presence: nativeRunning ? 'busy' : 'active',
   }
-  const defaultOperator: FleetChatMember = {
-    id: 'operator',
-    name: useFleetMetaText('assistant.operator.name'),
-    role: useFleetMetaText('assistant.operator.role'),
-    color: '#7b8794',
-    presence: 'active',
-    operator: true,
-  }
   const assistant = mailbox?.assistant ?? defaultAssistant
-  const operator = mailbox?.operator ?? defaultOperator
+  const operator = operatorProfile
   const running = mailbox?.running ?? nativeRunning
   const openState = mailbox?.state ?? nativeOpenState
   const hasMore = mailbox === undefined && nativeHasMore
@@ -1061,7 +1006,7 @@ export function AgentFleetPrivateChat({
       'data-surface': 'context',
       children: [
         jsx(AgentFleetSubviewHeader, {
-          title: 'Agent Fleet 上下文',
+          title: fleetText('Agent Fleet 上下文', 'Agent Fleet context'),
           back: () => { setSurface('chat') },
         }),
         jsx('div', {
@@ -1119,9 +1064,10 @@ export function AgentFleetPrivateChat({
               children: empty,
             }),
             ...messages.map(message => {
-              const sender = 'sender' in message && typeof message.sender === 'object'
+              const projectedSender = 'sender' in message && typeof message.sender === 'object'
                 ? message.sender
                 : message.sender === 'assistant' ? assistant : operator
+              const sender = projectedSender.operator === true ? operator : projectedSender
               const self = sender.operator === true
               const streaming = 'streaming' in message && message.streaming
               const receipt = 'receipt' in message
@@ -1141,14 +1087,15 @@ export function AgentFleetPrivateChat({
                 sentAt: message.sentAt,
                 content: message.content,
                 ...(receipt === undefined ? {} : { receipt }),
-                ...(self ? {} : {
-                  avatar: jsx(AgentFleetAvatarPopover, {
+                avatar: self
+                  ? jsx(OperatorAvatarPopover, { member: operator })
+                  : jsx(AgentFleetAvatarPopover, {
                     member: sender,
                     running,
                     showDetails: openMemberDetails ?? (() => { setSurface('details') }),
                     showContext: openMemberContext ?? (() => { setSurface('context') }),
                   }),
-                }),
+                renderText,
                 renderImage: renderImage(message),
               }),
             }, message.id)
@@ -1162,6 +1109,8 @@ export function AgentFleetPrivateChat({
                 sentAt: message.sentAt,
                 content: message.content,
                 deliveryState: 'sending',
+                avatar: jsx(OperatorAvatarPopover, { member: operator }),
+                renderText,
                 renderImage: renderImage(message),
               }),
             }, message.id)),

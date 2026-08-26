@@ -1,7 +1,8 @@
-import type { ChangeEvent, ComponentType, CSSProperties, FocusEvent, KeyboardEvent, PointerEvent, ReactElement, ReactNode } from 'react'
+import type { ChangeEvent, ComponentType, CSSProperties, FocusEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent, ReactElement, ReactNode, WheelEvent as ReactWheelEvent } from 'react'
 import { Component, Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import type { Context } from '@deepseek-ai/cordis'
+import type { HoverHintTriggerProps } from 'dsh-hover-hint'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   FLEET_WEB_PEER_LOCAL,
@@ -13,18 +14,32 @@ import {
   FleetChatAvatar,
   FleetChatMessage,
   FleetConversationHeader,
+  FleetInfoHint,
   FleetPresenceLabel,
+  fleetMemberPresence,
+  fleetMemberPresenceLabel,
   type FleetChatContentBlock,
   type FleetChatMember,
   type FleetChatMentionBlock,
   type FleetChatResourceBlock,
   type FleetChatReceiptSource,
+  type FleetRuntimeMember,
 } from './runtime-chat.js'
 import {
+  FleetMemberPopover,
+  FleetMemberPopoverCard,
+  FleetMemberStatusUpdatedAt,
+  type FleetMemberPopoverProps,
+  type FleetMemberPopoverTriggerProps,
+} from './member-popover.js'
+import { useFleetAnchoredPopover } from './anchored-popover.js'
+import {
   configureFleetActivationSessions,
+  configureFleetActivationWorkspaces,
   getCurrentFleetSessionId,
   subscribeCurrentFleetSession,
   type FleetActivationClientSessions,
+  type FleetActivationClientWorkspaces,
 } from './activation.js'
 import {
   configureFleetMetaAssistantClient,
@@ -39,6 +54,7 @@ import {
 import {
   FLEET_LOCALE_NAMESPACE,
   type FleetLocaleRuntime,
+  fleetText,
   fleetLocaleDictionaries,
   isChineseLocale,
 } from './locale.js'
@@ -63,6 +79,17 @@ import {
   requestFleetPanelNavigation,
   subscribeFleetPanelNavigation,
 } from './panel-navigation.js'
+import {
+  FleetComposerAttachmentButton,
+  FleetComposerAttachmentList,
+  fleetComposerMessageText,
+  useFleetComposerAttachments,
+} from './composer-attachments.js'
+import {
+  getFleetOperatorProfile,
+  updateFleetOperatorProfile,
+  useFleetOperatorProfile,
+} from './operator-profile.js'
 
 const PANEL_STYLE_ID = 'dsh-agent-fleet-team-panel'
 const RENDER_ENGINE_STYLE_ID = 'dsh-agent-fleet-render-engine'
@@ -376,6 +403,123 @@ const panelStyles = `
   outline-offset: 2px;
 }
 
+.dsh-fleet-panel-member-popover-editor-avatar {
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-popover-editor-avatar > div {
+  min-width: 0;
+  align-items: flex-start;
+  gap: 3px;
+  display: flex;
+  flex-direction: column;
+}
+
+.dsh-fleet-panel-member-popover-avatar-button {
+  appearance: none;
+  width: 48px;
+  height: 48px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 14px;
+  padding: 0;
+}
+
+.dsh-fleet-panel-member-popover-avatar-button:hover {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);
+}
+
+.dsh-fleet-panel-member-popover-avatar-action {
+  color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  padding: 2px 4px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-popover-avatar-action:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-member-popover-avatar-input {
+  display: none;
+}
+
+.dsh-fleet-panel-member-popover-field {
+  color: var(--dsw-alias-label-secondary);
+  gap: 5px;
+  margin-top: 10px;
+  font: var(--dsw-font-xs-13);
+  display: grid;
+}
+
+.dsh-fleet-panel-member-popover-field :is(input, textarea) {
+  box-sizing: border-box;
+  width: 100%;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-0);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  padding: 7px 9px;
+  font: inherit;
+  line-height: 18px;
+}
+
+.dsh-fleet-panel-member-popover-field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.dsh-fleet-panel-member-popover-field :is(input, textarea):focus-visible,
+.dsh-fleet-panel-member-popover-avatar-button:focus-visible,
+.dsh-fleet-panel-member-popover-avatar-action:focus-visible,
+.dsh-fleet-panel-member-popover-edit-actions button:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-member-popover-edit-error {
+  color: var(--dsw-alias-state-error-primary);
+  margin-top: 8px;
+  font: var(--dsw-font-xs-13);
+  line-height: 18px;
+}
+
+.dsh-fleet-panel-member-popover-edit-actions {
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 13px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-popover-edit-actions button {
+  min-width: 64px;
+  min-height: 32px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  border: 0;
+  border-radius: 7px;
+  padding: 0 12px;
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-member-popover-edit-actions button[data-primary="true"] {
+  color: var(--dsw-alias-label-on-color);
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.dsh-fleet-panel-member-popover-edit-actions button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
 .dsh-fleet-panel-rail {
   min-width: 0;
   background: transparent;
@@ -482,8 +626,7 @@ const panelStyles = `
 }
 
 .dsh-fleet-panel-tool:focus-visible,
-.dsh-fleet-panel-list-row:focus-visible,
-.dsh-fleet-panel-send:focus-visible {
+.dsh-fleet-panel-list-row:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 2px;
 }
@@ -602,7 +745,14 @@ const panelStyles = `
 }
 
 .dsh-fleet-panel-team-switch-chevron {
+  width: 16px;
+  height: 16px;
   color: var(--dsw-alias-label-secondary);
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  display: inline-flex;
+  line-height: 0;
   transition: transform 120ms ease-out;
 }
 
@@ -637,7 +787,7 @@ const panelStyles = `
   align-items: center;
   gap: 8px;
   padding: 5px 8px;
-  font: inherit;
+  font: var(--dsw-font-xs-13);
   text-align: left;
   display: flex;
 }
@@ -694,8 +844,9 @@ const panelStyles = `
 
 .dsh-fleet-panel-settings-dialog {
   box-sizing: border-box;
-  width: min(480px, calc(100vw - 32px));
-  min-height: 280px;
+  width: min(760px, calc(100vw - 32px));
+  height: min(620px, calc(100vh - 48px));
+  min-height: 420px;
   max-height: calc(100vh - 48px);
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-bg-layer-1);
@@ -945,6 +1096,710 @@ const panelStyles = `
   margin: 12px 0 0;
   color: var(--dsw-alias-state-success-primary, var(--dsw-alias-label-primary));
   font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-settings-workspace {
+  min-height: 0;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  grid-template-columns: 170px minmax(0, 1fr);
+  flex: 1;
+  display: grid;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-settings-nav {
+  background: var(--dsw-alias-bg-layer-2);
+  border-inline-end: 1px solid var(--dsw-alias-border-l3);
+  gap: 2px;
+  padding: 12px 9px;
+  display: flex;
+  flex-direction: column;
+}
+
+.dsh-fleet-panel-settings-nav-item {
+  min-height: 34px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 10px;
+  font: var(--dsw-font-xs-13);
+  text-align: left;
+}
+
+.dsh-fleet-panel-settings-nav-item:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-settings-nav-item[aria-current="page"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-active);
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-settings-nav-item[data-danger="true"] {
+  color: var(--dsw-alias-state-error-primary);
+  margin-top: auto;
+}
+
+.dsh-fleet-panel-settings-nav-item:focus-visible,
+.dsh-fleet-panel-settings-form-field :is(input, textarea, select):focus-visible,
+.dsh-fleet-panel-budget-actions input:focus-visible,
+.dsh-fleet-panel-settings-secondary:focus-visible,
+.dsh-fleet-panel-settings-primary:focus-visible,
+.dsh-fleet-panel-settings-inline-action:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-settings-content {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 22px 24px 28px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.dsh-fleet-panel-settings-content section {
+  box-sizing: border-box;
+  width: min(100%, 520px);
+}
+
+.dsh-fleet-panel-settings-content h3 {
+  margin: 0 0 7px;
+  font: var(--dsw-font-m-strong-16);
+}
+
+.dsh-fleet-panel-settings-content h4 {
+  margin: 22px 0 6px;
+  font: var(--dsw-font-s-strong-14);
+}
+
+.dsh-fleet-panel-settings-content hr {
+  height: 1px;
+  background: var(--dsw-alias-border-l3);
+  border: 0;
+  margin: 24px 0 0;
+}
+
+.dsh-fleet-panel-settings-form-field {
+  color: var(--dsw-alias-label-primary);
+  gap: 7px;
+  margin-top: 18px;
+  font: var(--dsw-font-xs-strong-13);
+  display: grid;
+}
+
+.dsh-fleet-panel-settings-form-field :is(input, textarea, select) {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  color: var(--dsw-alias-label-primary);
+  caret-color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: var(--dsw-font-s-14);
+}
+
+.dsh-fleet-panel-settings-form-field textarea {
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.dsh-fleet-panel-settings-form-field :is(input, textarea)::placeholder {
+  color: var(--dsw-alias-label-caption);
+}
+
+.dsh-fleet-panel-settings-model-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  gap: 12px;
+  display: grid;
+}
+
+.dsh-fleet-panel-settings-field-note {
+  color: var(--dsw-alias-label-secondary);
+  margin: 7px 0 0;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-budget-accounting {
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+.dsh-fleet-panel-budget-mode {
+  width: fit-content;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 9px;
+  padding: 3px;
+  display: flex;
+}
+
+.dsh-fleet-panel-budget-mode button {
+  min-height: 30px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 11px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-budget-mode button[aria-checked="true"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: 0 2px 7px color-mix(in srgb, var(--dsw-alias-label-primary) 10%, transparent);
+}
+
+.dsh-fleet-panel-budget-mode button:focus-visible,
+.dsh-fleet-panel-budget-rate input:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-budget-rate-list {
+  border-block: 1px solid var(--dsw-alias-border-l3);
+  margin-block: 14px;
+}
+
+.dsh-fleet-panel-budget-rate {
+  min-width: 0;
+  grid-template-columns: minmax(130px, 1fr) minmax(0, 3fr);
+  align-items: end;
+  gap: 12px;
+  padding-block: 12px;
+  display: grid;
+}
+
+.dsh-fleet-panel-budget-rate + .dsh-fleet-panel-budget-rate {
+  border-top: 1px solid var(--dsw-alias-border-l3);
+}
+
+.dsh-fleet-panel-budget-rate-name {
+  min-width: 0;
+  display: grid;
+}
+
+.dsh-fleet-panel-budget-rate-name strong,
+.dsh-fleet-panel-budget-rate-name small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-fleet-panel-budget-rate-name strong {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-strong-14);
+}
+
+.dsh-fleet-panel-budget-rate-name small,
+.dsh-fleet-panel-budget-rate label > span {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-budget-rate label {
+  min-width: 0;
+  gap: 4px;
+  display: grid;
+}
+
+.dsh-fleet-panel-budget-rate input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font: var(--dsw-font-s-14);
+}
+
+.dsh-fleet-panel-budget-price-grid {
+  min-width: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  display: grid;
+}
+
+@media (max-width: 760px) {
+  .dsh-fleet-panel-budget-rate {
+    grid-template-columns: 1fr;
+  }
+
+  .dsh-fleet-panel-budget-price-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.dsh-fleet-panel-budget-team {
+  border-block: 1px solid var(--dsw-alias-border-l3);
+  margin-top: 20px;
+  padding-block: 16px;
+}
+
+.dsh-fleet-panel-budget-title,
+.dsh-fleet-panel-budget-usage-head,
+.dsh-fleet-panel-budget-actions {
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  display: flex;
+}
+
+.dsh-fleet-panel-budget-title {
+  justify-content: space-between;
+}
+
+.dsh-fleet-panel-budget-title > span {
+  min-width: 0;
+  display: grid;
+}
+
+.dsh-fleet-panel-budget-title strong {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-strong-14);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-fleet-panel-budget-title small {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-budget-usage {
+  margin-top: 10px;
+}
+
+.dsh-fleet-panel-budget-usage-head {
+  color: var(--dsw-alias-label-secondary);
+  justify-content: space-between;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-budget-usage-head [data-state="warning"] {
+  color: var(--dsw-alias-state-warning-primary);
+}
+
+.dsh-fleet-panel-budget-usage-head [data-state="exhausted"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-fleet-panel-budget-progress {
+  height: 4px;
+  background: var(--dsw-alias-bg-layer-3);
+  border-radius: 2px;
+  margin-top: 7px;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-budget-progress span {
+  height: 100%;
+  background: var(--dsw-alias-state-business-primary);
+  display: block;
+}
+
+.dsh-fleet-panel-budget-progress span[data-state="warning"] {
+  background: var(--dsw-alias-state-warning-primary);
+}
+
+.dsh-fleet-panel-budget-progress span[data-state="exhausted"] {
+  background: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-fleet-panel-budget-actions {
+  margin-top: 12px;
+}
+
+.dsh-fleet-panel-budget-actions input {
+  box-sizing: border-box;
+  width: min(180px, 46%);
+  min-height: 34px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font: var(--dsw-font-s-14);
+}
+
+.dsh-fleet-panel-budget-actions .dsh-fleet-panel-settings-secondary {
+  min-height: 32px;
+  padding-inline: 10px;
+}
+
+.dsh-fleet-panel-budget-members > h4 {
+  margin-top: 22px;
+}
+
+.dsh-fleet-panel-budget-member {
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+  padding-block: 15px;
+}
+
+.dsh-fleet-budget-meter {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.dsh-fleet-budget-meter-button {
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.dsh-fleet-budget-meter-button:hover,
+.dsh-fleet-budget-meter-button[aria-expanded="true"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-budget-meter-button:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-focus, #6d8cff);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-budget-meter-ring {
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+
+.dsh-fleet-budget-meter-track,
+.dsh-fleet-budget-meter-value {
+  fill: none;
+  stroke-width: 2;
+}
+
+.dsh-fleet-budget-meter-track {
+  stroke: color-mix(in srgb, currentColor 22%, transparent);
+}
+
+.dsh-fleet-budget-meter-value {
+  stroke: var(--dsw-alias-brand-primary, #6687e8);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 180ms ease, stroke 180ms ease;
+}
+
+.dsh-fleet-budget-meter-value[data-state="warning"] { stroke: #d4a72c; }
+.dsh-fleet-budget-meter-value[data-state="danger"],
+.dsh-fleet-budget-meter-value[data-state="exhausted"] { stroke: #d35454; }
+.dsh-fleet-budget-meter-value[data-state="unlimited"] { stroke: var(--dsw-alias-label-tertiary); }
+
+.dsh-fleet-budget-popover {
+  z-index: 100000;
+  box-sizing: border-box;
+  width: min(320px, calc(100vw - 24px));
+  max-height: min(420px, calc(100dvh - 24px));
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-inverted);
+  border-radius: 12px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-specific-menu);
+  box-shadow: var(--dsw-shadow-lv3);
+  margin: 0;
+  position: fixed;
+  inset: auto;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.dsh-fleet-budget-popover::backdrop { background: transparent; }
+
+.dsh-fleet-budget-popover-header {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.dsh-fleet-budget-popover-headline {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-fleet-budget-popover-percent,
+.dsh-fleet-budget-popover-figures {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-fleet-budget-popover-figures {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.dsh-fleet-budget-popover-progress {
+  display: flex;
+  gap: 1px;
+  height: 4px;
+  margin: 10px 0 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-budget-popover-progress span {
+  flex: none;
+  min-width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--budget-member-color, var(--dsw-alias-label-tertiary));
+}
+
+.dsh-fleet-budget-popover-members {
+  margin: 0;
+}
+
+.dsh-fleet-budget-popover-member {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.dsh-fleet-budget-popover-member dt,
+.dsh-fleet-budget-popover-member dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.dsh-fleet-budget-popover-member dt {
+  display: flex;
+  align-items: baseline;
+  overflow: hidden;
+}
+
+.dsh-fleet-budget-popover-member-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--budget-member-color, var(--dsw-alias-label-tertiary));
+}
+
+.dsh-fleet-budget-popover-member-name {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-fleet-budget-popover-member-role {
+  flex: 1 1 auto;
+  margin-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.dsh-fleet-budget-popover-member-usage {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-fleet-budget-popover-manage {
+  width: 100%;
+  margin-top: 13px;
+  padding: 7px 10px;
+  border: 1px solid var(--dsw-alias-border-normal);
+  border-radius: 7px;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.dsh-fleet-budget-popover-manage:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+.dsh-fleet-panel-settings-facts {
+  color: var(--dsw-alias-label-secondary);
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 18px;
+  margin: 24px 0 0;
+  padding-top: 16px;
+  font: var(--dsw-font-xs-13);
+  display: grid;
+}
+
+.dsh-fleet-panel-settings-facts :is(dt, dd) {
+  min-width: 0;
+  margin: 0;
+}
+
+.dsh-fleet-panel-settings-facts dd {
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+
+.dsh-fleet-panel-settings-action-row {
+  display: flex;
+}
+
+.dsh-fleet-panel-settings-inline-action {
+  min-height: 32px;
+  color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-settings-danger {
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 32%, var(--dsw-alias-border-l3));
+  border-radius: 10px;
+  padding: 18px;
+}
+
+.dsh-fleet-panel-settings-danger button {
+  min-height: 34px;
+  color: #fff;
+  cursor: pointer;
+  background: var(--dsw-alias-state-error-primary);
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-settings-danger button:disabled {
+  cursor: default;
+  opacity: .52;
+}
+
+.dsh-fleet-panel-settings-footer {
+  min-height: 58px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  display: flex;
+}
+
+.dsh-fleet-panel-settings-feedback {
+  min-width: 0;
+  color: var(--dsw-alias-state-success-primary, var(--dsw-alias-label-secondary));
+  flex: 1;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-settings-feedback [data-error="true"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-fleet-panel-settings-secondary,
+.dsh-fleet-panel-settings-primary {
+  min-height: 34px;
+  cursor: pointer;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 13px;
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-settings-secondary {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-settings-primary {
+  color: var(--dsw-alias-button-primary-label, #fff);
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.dsh-fleet-panel-settings-primary:disabled,
+.dsh-fleet-panel-settings-secondary:disabled {
+  cursor: default;
+  opacity: .52;
+}
+
+.dsh-fleet-panel-import-dialog {
+  width: min(480px, calc(100vw - 32px));
+  height: auto;
+  min-height: 0;
+}
+
+@media (max-width: 640px) {
+  .dsh-fleet-panel-settings-overlay {
+    padding: 12px;
+  }
+
+  .dsh-fleet-panel-settings-dialog {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    max-height: none;
+  }
+
+  .dsh-fleet-panel-settings-workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .dsh-fleet-panel-settings-model-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .dsh-fleet-panel-settings-nav {
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--dsw-alias-border-l3);
+    flex-direction: row;
+    padding: 7px;
+    overflow-x: auto;
+  }
+
+  .dsh-fleet-panel-settings-nav-item {
+    min-width: max-content;
+    min-height: 40px;
+  }
+
+  .dsh-fleet-panel-settings-nav-item[data-danger="true"] {
+    margin-top: 0;
+    margin-inline-start: auto;
+  }
+
+  .dsh-fleet-panel-settings-content {
+    padding: 18px 16px 24px;
+  }
 }
 
 .dsh-fleet-panel-control-dialog-body {
@@ -1284,6 +2139,21 @@ button.dsh-fleet-panel-team-title:focus-visible {
   outline-offset: 1px;
 }
 
+.dsh-fleet-panel-section-actions {
+  align-items: center;
+  gap: 2px;
+  display: flex;
+}
+
+.dsh-fleet-panel-section-action[data-tone="danger"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-fleet-panel-section-action[data-tone="danger"][aria-pressed="true"],
+.dsh-fleet-panel-section-action[data-tone="danger"]:not(:disabled):hover {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 9%, transparent);
+}
+
 .dsh-fleet-panel-resource-upload-error {
   color: var(--dsw-alias-state-error-primary);
   margin: 4px 7px 8px;
@@ -1322,6 +2192,19 @@ button.dsh-fleet-panel-team-title:focus-visible {
   margin-top: 2px;
 }
 
+.dsh-fleet-panel-channel-hint {
+  width: 100%;
+  display: flex;
+}
+
+.dsh-fleet-panel-channel-hint + .dsh-fleet-panel-channel-hint {
+  margin-top: 2px;
+}
+
+.dsh-fleet-panel-member-list-anchor + .dsh-fleet-panel-member-list-anchor {
+  margin-top: 2px;
+}
+
 .dsh-fleet-panel-list-icon {
   width: 18px;
   color: var(--dsw-alias-label-secondary);
@@ -1353,6 +2236,74 @@ button.dsh-fleet-panel-team-title:focus-visible {
   line-height: 14px;
 }
 
+.dsh-fleet-panel-resource-file-item {
+  min-width: 0;
+  position: relative;
+}
+
+.dsh-fleet-panel-resource-file-item + .dsh-fleet-panel-resource-file-item {
+  margin-top: 2px;
+}
+
+.dsh-fleet-panel-resource-file-item[data-removal-mode="true"] .dsh-fleet-panel-list-row {
+  padding-inline-end: 40px;
+}
+
+.dsh-fleet-panel-resource-file-title {
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  display: flex;
+}
+
+.dsh-fleet-panel-resource-file-name {
+  min-width: 0;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-resource-file-size {
+  color: var(--dsw-alias-label-caption);
+  flex: none;
+  white-space: nowrap;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-fleet-panel-resource-file-remove {
+  width: 28px;
+  height: 28px;
+  color: var(--dsw-alias-state-error-primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  place-items: center;
+  padding: 0;
+  display: grid;
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  z-index: 1;
+  transform: translateY(-50%);
+}
+
+.dsh-fleet-panel-resource-file-remove:not(:disabled):hover {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 9%, transparent);
+}
+
+.dsh-fleet-panel-resource-file-remove:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-error-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-resource-file-remove:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
 .dsh-fleet-panel-unread {
   min-width: 17px;
   height: 17px;
@@ -1367,8 +2318,9 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-presence {
-  width: 7px;
-  height: 7px;
+  box-sizing: border-box;
+  width: 9px;
+  height: 9px;
   background: var(--dsw-alias-label-quaternary, #a7a7a7);
   border-radius: 50%;
   flex: none;
@@ -1399,8 +2351,8 @@ button.dsh-fleet-panel-team-title:focus-visible {
   color: var(--dsw-alias-label-secondary);
   align-items: center;
   gap: 6px;
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 12px;
+  line-height: 17px;
   white-space: nowrap;
   display: inline-flex;
 }
@@ -1568,6 +2520,58 @@ button.dsh-fleet-panel-team-title:focus-visible {
   outline-offset: 1px;
 }
 
+.dsh-fleet-panel-resource-compare-resize-track {
+  width: 20px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  box-sizing: border-box;
+  place-items: start center;
+  padding-top: 8px;
+  display: grid;
+  position: absolute;
+  top: 0;
+  left: var(--dsh-fleet-panel-resource-compare-split);
+  z-index: 4;
+  transform: translateX(-50%);
+}
+
+.dsh-fleet-panel-resource-compare-resize-track::before {
+  width: 8px;
+  height: 32px;
+  content: '';
+  pointer-events: none;
+  background: var(--dsw-alias-bg-layer-2);
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.dsh-fleet-panel-resource-compare-resize-track > .dsh-fleet-panel-chat-width-handle {
+  pointer-events: none;
+  position: relative;
+  top: auto;
+  left: auto;
+  z-index: 1;
+}
+
+.dsh-fleet-panel-resource-compare-resize-track:hover > .dsh-fleet-panel-chat-width-handle,
+.dsh-fleet-panel-resource-compare-resize-track:focus-visible > .dsh-fleet-panel-chat-width-handle,
+.dsh-fleet-panel-resource-compare-resize-track[data-dragging="true"] > .dsh-fleet-panel-chat-width-handle {
+  color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
+}
+
+.dsh-fleet-panel-resource-compare-resize-track:focus-visible {
+  outline: 0;
+}
+
+.dsh-fleet-panel-resource-compare-resize-track:focus-visible > .dsh-fleet-panel-chat-width-handle {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
 .dsh-fleet-panel-chat-new-messages {
   min-height: 30px;
   color: var(--dsw-alias-state-business-primary);
@@ -1640,134 +2644,141 @@ button.dsh-fleet-panel-team-title:focus-visible {
   padding: 0 20px 16px;
 }
 
-.dsh-fleet-panel-composer {
-  box-sizing: border-box;
-  width: min(100%, 780px);
-  margin: 0 auto;
-  background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 14px;
-  padding: 9px 10px 8px;
-  box-shadow: var(--dsw-shadow-lv1);
-  position: relative;
+.dsh-fleet-official-composer {
+  --dsh-composer-side-clearance: 0px;
+  --dsh-composer-card-max-width: 780px;
+  padding-bottom: 12px;
 }
 
-.dsh-fleet-panel-mention-menu {
+.dsh-fleet-official-composer > div {
+  padding: 0;
+}
+
+.dsh-fleet-session-goal-dock {
   box-sizing: border-box;
-  width: min(360px, 100%);
-  max-height: 264px;
+  width: calc(100% - 32px);
+  max-width: 748px;
+  min-height: 36px;
   color: var(--dsw-alias-label-primary);
-  background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l3);
+  background: var(--dsw-specific-tip);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 12px;
-  box-shadow: 0 12px 32px rgb(24 39 57 / 16%), 0 2px 8px rgb(24 39 57 / 7%);
-  margin: 0;
-  padding: 6px;
+  align-items: center;
+  gap: 10px;
+  margin: 0 auto 6px;
+  padding: 7px 12px;
+  display: flex;
+}
+
+.dsh-fleet-session-goal-phase {
+  color: var(--dsw-alias-label-secondary);
+  flex: none;
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-session-goal-objective {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary-dimmed);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font: var(--dsw-font-xs-13);
+  overflow: hidden;
+}
+
+.dsh-fleet-official-composer button[aria-haspopup="listbox"]:disabled {
+  display: none;
+}
+
+.dsh-fleet-conversation-command-menu {
+  z-index: 100;
+  width: min(537px, 100%);
+  max-height: 320px;
+  box-sizing: border-box;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-menu);
+  border: 1px solid var(--dsw-alias-border-inverted);
+  border-radius: 12px;
+  box-shadow: var(--dsw-shadow-lv3);
+  flex-direction: column;
+  padding: 4px;
+  display: flex;
   position: absolute;
+  bottom: calc(100% + 4px);
   left: 0;
-  bottom: calc(100% + 8px);
-  z-index: 5;
   overflow-y: auto;
 }
 
-.dsh-fleet-panel-mention-option {
-  appearance: none;
+.dsh-fleet-conversation-command-menu-title {
+  color: var(--dsw-alias-label-tertiary);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.dsh-fleet-conversation-command-menu-back {
   width: 100%;
-  min-height: 44px;
-  color: var(--dsw-alias-label-primary);
+  text-align: left;
   cursor: pointer;
   background: transparent;
   border: 0;
   border-radius: 8px;
-  align-items: center;
-  gap: 9px;
-  padding: 5px 8px;
-  text-align: left;
-  display: flex;
 }
 
-.dsh-fleet-panel-mention-option:hover,
-.dsh-fleet-panel-mention-option[aria-selected="true"] {
+.dsh-fleet-conversation-command-menu-back:hover {
+  color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.dsh-fleet-panel-mention-option:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: -2px;
+.dsh-fleet-conversation-command-menu-item {
+  width: 100%;
+  min-height: 40px;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  line-height: 22px;
+  display: flex;
 }
 
-.dsh-fleet-panel-mention-option-copy {
-  min-width: 0;
-  flex: 1;
+.dsh-fleet-conversation-command-menu-item:hover,
+.dsh-fleet-conversation-command-menu-item[aria-selected="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.dsh-fleet-panel-mention-option-name,
-.dsh-fleet-panel-mention-option-role {
-  min-width: 0;
+.dsh-fleet-conversation-command-menu-name {
+  max-width: 40%;
+  flex: none;
   text-overflow: ellipsis;
   white-space: nowrap;
   overflow: hidden;
 }
 
-.dsh-fleet-panel-mention-option-name {
-  font: var(--dsw-font-s-strong-14);
+.dsh-fleet-conversation-command-menu-description {
+  min-width: 0;
+  color: var(--dsw-alias-label-tertiary);
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
-.dsh-fleet-panel-mention-option-role,
-.dsh-fleet-panel-mention-empty {
+.dsh-fleet-official-composer-loading {
+  min-height: 92px;
   color: var(--dsw-alias-label-secondary);
-  font: var(--dsw-font-xs-13);
-}
-
-.dsh-fleet-panel-mention-empty {
-  min-height: 44px;
   place-items: center;
-  padding: 0 10px;
+  font: var(--dsw-font-xs-13);
   display: grid;
 }
 
-.dsh-fleet-panel-composer:focus-within {
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent);
-}
-
-.dsh-fleet-panel-composer-input {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 42px;
-  max-height: 144px;
-  color: var(--dsw-alias-label-primary);
-  caret-color: var(--dsw-alias-state-business-primary);
-  resize: none;
-  background: transparent;
-  border: 0;
-  outline: 0;
-  padding: 1px 3px;
-  font: inherit;
-  font-size: 13px;
-  line-height: 20px;
-}
-
-.dsh-fleet-panel-composer-input::placeholder {
-  color: var(--dsw-alias-label-secondary);
-}
-
-.dsh-fleet-panel-composer-foot {
-  min-height: 28px;
-  align-items: center;
-  gap: 7px;
-  display: flex;
-}
-
-.dsh-fleet-panel-composer-actions {
-  min-width: 0;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
-  display: flex;
-}
-
 .dsh-fleet-panel-urgent-toggle {
-  min-height: 26px;
+  height: 28px;
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
   background: transparent;
@@ -1804,26 +2815,6 @@ button.dsh-fleet-panel-team-title:focus-visible {
 
 .dsh-fleet-panel-compose-error {
   color: var(--dsw-alias-state-error-primary);
-}
-
-.dsh-fleet-panel-send {
-  width: 28px;
-  height: 28px;
-  color: white;
-  cursor: pointer;
-  background: var(--dsw-alias-state-business-primary);
-  border: 0;
-  border-radius: 8px;
-  flex: none;
-  place-items: center;
-  padding: 0;
-  display: grid;
-}
-
-.dsh-fleet-panel-send:disabled {
-  color: var(--dsw-alias-label-caption);
-  cursor: default;
-  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .dsh-fleet-panel-detail-head {
@@ -2194,6 +3185,22 @@ button.dsh-fleet-panel-team-title:focus-visible {
   letter-spacing: -.02em;
 }
 
+.dsh-fleet-panel-member-heading {
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 2px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-heading-role {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 450;
+  line-height: 21px;
+  letter-spacing: 0;
+}
+
 .dsh-fleet-panel-overview-copy {
   max-width: 68ch;
   margin: 0;
@@ -2226,15 +3233,486 @@ button.dsh-fleet-panel-team-title:focus-visible {
   flex-wrap: wrap;
 }
 
+.dsh-fleet-panel-member-request {
+  max-width: 820px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  margin-top: 24px;
+  padding-top: 20px;
+}
+
+.dsh-fleet-panel-member-request-head h3 {
+  color: var(--dsw-alias-label-primary);
+  margin: 0;
+  font: var(--dsw-font-m-strong-16);
+}
+
+.dsh-fleet-panel-member-request-head p {
+  max-width: 68ch;
+  color: var(--dsw-alias-label-secondary);
+  margin: 5px 0 0;
+  font: var(--dsw-font-xs-13);
+  line-height: 1.55;
+}
+
+.dsh-fleet-panel-member-request-grid {
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.35fr);
+  gap: 14px 18px;
+  margin-top: 16px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-request-field {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  gap: 6px;
+  font: var(--dsw-font-xs-13);
+  display: grid;
+}
+
+.dsh-fleet-panel-member-request-field[data-wide="true"] {
+  grid-column: 1 / -1;
+}
+
+.dsh-fleet-panel-member-request-field :is(input, select) {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  color: var(--dsw-alias-label-primary);
+  caret-color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-request-field :is(input, select):focus-visible,
+.dsh-fleet-panel-member-request-actions button:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.dsh-fleet-panel-member-request-field :is(input, select):disabled {
+  cursor: default;
+  opacity: .6;
+}
+
+.dsh-fleet-panel-member-request-field input::placeholder {
+  color: var(--dsw-alias-label-caption);
+}
+
+.dsh-fleet-panel-member-model-select {
+  width: fit-content;
+  max-width: min(360px, 100%);
+  min-width: 0;
+  position: relative;
+}
+
+.dsh-fleet-panel-member-model-trigger {
+  max-width: 100%;
+  min-width: 0;
+  height: 28px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 24px;
+  outline: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 0 8px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-model-trigger:hover:not(:disabled),
+.dsh-fleet-panel-member-model-trigger[aria-expanded="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-member-model-trigger:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-alias-border-l3);
+}
+
+.dsh-fleet-panel-member-model-trigger:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
+}
+
+.dsh-fleet-panel-member-model-trigger-label {
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-member-model-trigger-effort,
+.dsh-fleet-panel-member-model-chevron {
+  color: var(--dsw-alias-label-caption);
+  flex: none;
+}
+
+.dsh-fleet-panel-member-model-chevron {
+  line-height: 0;
+  transition: transform 120ms ease-out;
+}
+
+.dsh-fleet-panel-member-model-trigger[aria-expanded="true"] .dsh-fleet-panel-member-model-chevron {
+  transform: rotate(180deg);
+}
+
+.dsh-fleet-panel-member-model-menu {
+  box-sizing: border-box;
+  z-index: 20;
+  width: max-content;
+  min-width: min(240px, calc(100vw - 32px));
+  max-width: min(420px, calc(100vw - 32px));
+  max-height: min(360px, calc(100vh - 96px));
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-menu);
+  border: 1px solid var(--dsw-alias-border-inverted);
+  border-radius: 12px;
+  box-shadow: var(--dsw-shadow-lv3);
+  flex-direction: column;
+  padding: 4px;
+  display: flex;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-member-model-status,
+.dsh-fleet-panel-member-model-empty {
+  color: var(--dsw-alias-label-tertiary);
+  padding: 10px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dsh-fleet-panel-member-model-error,
+.dsh-fleet-panel-member-model-warning {
+  color: var(--dsw-alias-state-error-primary);
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  border-radius: 8px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding: 7px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-model-warning {
+  color: var(--dsw-alias-state-warn-label);
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.dsh-fleet-panel-member-model-retry {
+  color: inherit;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  flex: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+}
+
+.dsh-fleet-panel-member-model-groups {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.dsh-fleet-panel-member-model-group + .dsh-fleet-panel-member-model-group {
+  margin-top: 4px;
+}
+
+.dsh-fleet-panel-member-model-group-title {
+  z-index: 1;
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-specific-menu);
+  padding: 5px 8px 3px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  position: sticky;
+  top: 0;
+}
+
+.dsh-fleet-panel-member-model-option {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 100%;
+  min-height: 38px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  outline: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-model-option:hover:not(:disabled),
+.dsh-fleet-panel-member-model-option:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-member-model-option:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
+}
+
+.dsh-fleet-panel-member-model-option-copy {
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-model-option-name {
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-member-model-option-description {
+  color: var(--dsw-alias-label-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-member-model-option-check {
+  width: 18px;
+  color: var(--dsw-alias-label-primary);
+  flex: 0 0 18px;
+  place-items: center;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-request-note {
+  color: var(--dsw-alias-label-secondary);
+  margin: 8px 0 0;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-request-actions {
+  min-height: 36px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 14px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-request-feedback {
+  min-width: 0;
+  color: var(--dsw-alias-state-success-primary, var(--dsw-alias-label-secondary));
+  flex: 1;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-request-feedback[data-error="true"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-fleet-panel-auth {
+  max-width: 820px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  margin-top: 24px;
+  padding-top: 20px;
+}
+
+.dsh-fleet-panel-auth-head {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  display: flex;
+}
+
+.dsh-fleet-panel-auth-head h3,
+.dsh-fleet-panel-auth-simple h4 {
+  color: var(--dsw-alias-label-primary);
+  margin: 0;
+  font: var(--dsw-font-m-strong-16);
+}
+
+.dsh-fleet-panel-auth-head p {
+  max-width: 68ch;
+  color: var(--dsw-alias-label-secondary);
+  margin: 5px 0 0;
+  font: var(--dsw-font-xs-13);
+  line-height: 1.55;
+}
+
+.dsh-fleet-panel-auth-mode {
+  flex: none;
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 8px;
+  padding: 2px;
+  display: flex;
+}
+
+.dsh-fleet-panel-auth-mode button {
+  min-width: 54px;
+  height: 30px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 10px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-auth-mode button[aria-pressed="true"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 10%);
+}
+
+.dsh-fleet-panel-auth-mode button:focus-visible,
+.dsh-fleet-panel-auth-levels button:focus-visible,
+.dsh-fleet-panel-auth-exceptions button:focus-visible,
+.dsh-fleet-panel-auth-access select:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.dsh-fleet-panel-auth-simple h4 {
+  margin-top: 24px;
+  margin-bottom: 8px;
+  font: var(--dsw-font-s-strong-14);
+}
+
+.dsh-fleet-panel-auth-levels {
+  gap: 2px;
+  display: grid;
+}
+
+.dsh-fleet-panel-auth-levels button {
+  width: 100%;
+  color: var(--dsw-alias-label-primary);
+  text-align: start;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 9px 11px;
+  display: grid;
+}
+
+.dsh-fleet-panel-auth-levels button:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-auth-levels button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 34%, transparent);
+}
+
+.dsh-fleet-panel-auth-levels button:disabled {
+  cursor: default;
+  opacity: .55;
+}
+
+.dsh-fleet-panel-auth-levels strong,
+.dsh-fleet-panel-auth-access strong {
+  font: var(--dsw-font-s-strong-14);
+}
+
+.dsh-fleet-panel-auth-levels span,
+.dsh-fleet-panel-auth-access small {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  line-height: 1.5;
+}
+
+.dsh-fleet-panel-auth-access {
+  display: grid;
+}
+
+.dsh-fleet-panel-auth-access > label {
+  min-height: 50px;
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 8px 0;
+  display: flex;
+}
+
+.dsh-fleet-panel-auth-access > label > span {
+  min-width: 0;
+  display: grid;
+}
+
+.dsh-fleet-panel-auth-access select {
+  box-sizing: border-box;
+  min-width: 158px;
+  height: 34px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 0 9px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-auth-exceptions {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  display: flex;
+}
+
+.dsh-fleet-panel-auth-exceptions button,
+.dsh-fleet-panel-member-permissions-error button {
+  color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 5px 7px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-auth-detailed > .dsh-fleet-panel-member-permissions,
+.dsh-fleet-panel-auth-detailed > .dsh-fleet-panel-member-access {
+  max-width: none;
+}
+
+.dsh-fleet-panel-auth-detailed > .dsh-fleet-panel-member-permissions {
+  margin-top: 22px;
+}
+
 .dsh-fleet-panel-member-permissions {
-  max-width: 760px;
+  max-width: 820px;
   border-top: 1px solid var(--dsw-alias-border-l3);
   margin-top: 24px;
   padding-top: 20px;
 }
 
 .dsh-fleet-panel-member-permissions-head {
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   display: flex;
@@ -2246,36 +3724,80 @@ button.dsh-fleet-panel-team-title:focus-visible {
   font: var(--dsw-font-m-strong-16);
 }
 
-.dsh-fleet-panel-member-permissions-copy,
-.dsh-fleet-panel-member-permissions-summary {
+.dsh-fleet-panel-member-permissions-copy {
+  max-width: 68ch;
   margin: 6px 0 0;
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xs-13);
   line-height: 1.55;
 }
 
+.dsh-fleet-panel-member-permissions-source {
+  color: var(--dsw-alias-label-secondary);
+  flex: none;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permissions-source::before {
+  width: 6px;
+  height: 6px;
+  background: var(--dsw-alias-label-caption);
+  border-radius: 50%;
+  margin: 0 7px 1px 0;
+  content: "";
+  display: inline-block;
+}
+
+.dsh-fleet-panel-member-permissions-source[data-configured="true"]::before {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.dsh-fleet-panel-member-permissions-section-head {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 20px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-permissions-section-title {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-strong-14);
+}
+
+.dsh-fleet-panel-member-permissions-section-meta {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
 .dsh-fleet-panel-member-permissions-groups {
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 8px;
-  margin-top: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
   display: grid;
 }
 
 .dsh-fleet-panel-member-permission-group {
   min-width: 0;
   cursor: pointer;
-  background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid transparent;
-  border-radius: 9px;
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 10px;
   align-items: flex-start;
-  gap: 9px;
-  padding: 10px 11px;
+  gap: 10px;
+  padding: 12px;
   display: flex;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+.dsh-fleet-panel-member-permission-group:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .dsh-fleet-panel-member-permission-group:has(input:checked) {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, var(--dsw-alias-bg-layer-2));
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 38%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, transparent);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, var(--dsw-alias-border-l3));
 }
 
 .dsh-fleet-panel-member-permission-group input {
@@ -2283,8 +3805,19 @@ button.dsh-fleet-panel-team-title:focus-visible {
   accent-color: var(--dsw-alias-state-business-primary);
 }
 
+.dsh-fleet-panel-member-permission-group:focus-within {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.dsh-fleet-panel-member-permission-group:has(input:disabled) {
+  cursor: default;
+  opacity: .62;
+}
+
 .dsh-fleet-panel-member-permission-group-copy {
   min-width: 0;
+  flex: 1;
 }
 
 .dsh-fleet-panel-member-permission-group-name {
@@ -2299,22 +3832,449 @@ button.dsh-fleet-panel-team-title:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.dsh-fleet-panel-member-permission-group-scope {
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-permission-value {
+  max-width: 100%;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 5px;
+  padding: 2px 6px;
+  font: var(--dsw-font-xs-13);
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-fleet-panel-member-permission-value[data-restricted="true"] {
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);
+}
+
+.dsh-fleet-panel-member-permission-more {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permissions-empty {
+  grid-column: 1 / -1;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 10px;
+  margin: 0;
+  padding: 14px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permissions-manual {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 24px;
+  row-gap: 18px;
+  margin-top: 10px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-permission-editor {
+  min-width: 0;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  padding-top: 10px;
+}
+
+.dsh-fleet-panel-member-permission-editor-head {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-permission-editor-title {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-member-permission-editor-count {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permission-editor-select {
+  width: 100%;
+  min-height: 34px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 7px;
+  margin-top: 8px;
+  padding: 5px 28px 5px 9px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permission-editor-select:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.dsh-fleet-panel-member-permission-editor-select:disabled {
+  cursor: default;
+  opacity: .62;
+}
+
+.dsh-fleet-panel-member-permission-editor-values {
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-permission-direct-value {
+  max-width: 100%;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 6px;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 3px 2px 7px;
+  font: var(--dsw-font-xs-13);
+  display: inline-flex;
+}
+
+.dsh-fleet-panel-member-permission-direct-value[data-restricted="true"] {
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);
+}
+
+.dsh-fleet-panel-member-permission-direct-value-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-fleet-panel-member-permission-direct-value button {
+  min-width: 42px;
+  min-height: 26px;
+  color: inherit;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  padding: 0 6px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permission-direct-value button:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-member-permission-direct-value button:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-member-permission-direct-value button:disabled {
+  cursor: default;
+  opacity: .55;
+}
+
 .dsh-fleet-panel-member-permissions-effective {
-  margin-top: 14px;
+  border-block: 1px solid var(--dsw-alias-border-l3);
+  margin-top: 20px;
+  padding-block: 12px;
 }
 
 .dsh-fleet-panel-member-permissions-effective summary {
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
+  font: var(--dsw-font-s-strong-14);
+}
+
+.dsh-fleet-panel-member-permissions-effective-summary {
+  margin-left: 6px;
+  color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xs-13);
+  font-weight: 400;
 }
 
 .dsh-fleet-panel-member-permissions-values {
-  margin: 8px 0 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 12px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-permissions-value-group {
+  min-width: 0;
+}
+
+.dsh-fleet-panel-member-permissions-value-title {
+  margin: 0 0 7px;
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xs-13);
-  line-height: 1.6;
+}
+
+.dsh-fleet-panel-member-permissions-value-list {
+  align-items: center;
+  gap: 5px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-permissions-none {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permissions-op {
+  margin: 12px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  line-height: 1.55;
+}
+
+.dsh-fleet-panel-member-permissions-actions {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-permissions-draft {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-permissions-action-buttons {
+  align-items: center;
+  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-permissions-save-error {
+  width: 100%;
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-access {
+  max-width: 820px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  margin-top: 24px;
+  padding-top: 20px;
+}
+
+.dsh-fleet-panel-member-access-modes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 24px;
+  margin-top: 10px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-access-mode {
+  min-width: 0;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-access-mode-copy {
+  min-width: 0;
+}
+
+.dsh-fleet-panel-member-access-mode-name {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-member-access-mode-detail {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-access-select,
+.dsh-fleet-panel-member-access-input {
+  box-sizing: border-box;
+  min-height: 34px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 7px;
+  padding: 5px 9px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-access-select:focus-visible,
+.dsh-fleet-panel-member-access-input:focus-visible,
+.dsh-fleet-panel-member-access-level:focus-within {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.dsh-fleet-panel-member-access-select:disabled,
+.dsh-fleet-panel-member-access-input:disabled {
+  cursor: default;
+  opacity: .62;
+}
+
+.dsh-fleet-panel-member-access-rules {
+  margin-top: 10px;
+}
+
+.dsh-fleet-panel-member-access-rule {
+  min-width: 0;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  align-items: center;
+  gap: 10px;
+  padding: 11px 0;
+  display: flex;
+}
+
+.dsh-fleet-panel-member-access-rule-effect {
+  min-width: 38px;
+  color: var(--dsw-alias-state-success-primary, #287a4b);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #287a4b) 9%, transparent);
+  border-radius: 5px;
+  padding: 2px 6px;
+  text-align: center;
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.dsh-fleet-panel-member-access-rule-effect[data-effect="deny"] {
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);
+}
+
+.dsh-fleet-panel-member-access-rule-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.dsh-fleet-panel-member-access-rule-resource {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-strong-13);
   overflow-wrap: anywhere;
+}
+
+.dsh-fleet-panel-member-access-rule-detail {
+  margin-top: 3px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-access-remove {
+  min-height: 30px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 8px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-access-remove:hover {
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, transparent);
+}
+
+.dsh-fleet-panel-member-access-remove:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-member-access-remove:disabled {
+  cursor: default;
+  opacity: .55;
+}
+
+.dsh-fleet-panel-member-access-form {
+  grid-template-columns: minmax(130px, .7fr) minmax(220px, 1.5fr);
+  gap: 12px 16px;
+  margin-top: 10px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-access-field {
+  min-width: 0;
+  gap: 5px;
+  display: grid;
+}
+
+.dsh-fleet-panel-member-access-field[data-wide="true"] {
+  grid-column: 1 / -1;
+}
+
+.dsh-fleet-panel-member-access-label {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-access-levels {
+  align-items: center;
+  gap: 6px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-access-level {
+  min-height: 30px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 6px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  font: var(--dsw-font-xs-13);
+  display: inline-flex;
+}
+
+.dsh-fleet-panel-member-access-level:has(input:checked) {
+  color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
+}
+
+.dsh-fleet-panel-member-access-level input {
+  margin: 0;
+  accent-color: var(--dsw-alias-state-business-primary);
+}
+
+.dsh-fleet-panel-member-access-form-actions {
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.dsh-fleet-panel-member-access-feedback {
+  min-width: 0;
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-panel-member-access-feedback[data-error="true"] {
+  width: 100%;
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .dsh-fleet-panel-resource-open-error {
@@ -2415,6 +4375,11 @@ button.dsh-fleet-panel-team-title:focus-visible {
   font-size: 13px;
 }
 
+.dsh-fleet-panel-fact-value .dsh-fleet-panel-member-state {
+  font-size: inherit;
+  line-height: inherit;
+}
+
 .dsh-fleet-panel-member-self-status-detail {
   gap: 3px;
   display: grid;
@@ -2431,7 +4396,7 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-resource-preview {
-  width: min(100%, 74ch);
+  width: 100%;
   margin: 0 auto;
   color: var(--dsw-alias-label-primary);
   font-size: 14px;
@@ -2439,9 +4404,15 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-resource-content {
+  min-width: 0;
   width: min(100%, var(--dsh-fleet-panel-chat-column-width, 760px));
+  max-width: 100%;
   min-height: 100%;
   margin: 0 auto;
+}
+
+.dsh-fleet-panel-resource-content[data-mode="compare"] {
+  width: 100%;
 }
 
 .dsh-fleet-panel-resource-scroll {
@@ -2456,15 +4427,29 @@ button.dsh-fleet-panel-team-title:focus-visible {
   padding: 24px;
 }
 
+.dsh-fleet-panel-detail-head:has(.dsh-fleet-panel-resource-meta) {
+  grid-template-columns: minmax(0, max-content) max-content minmax(12px, 1fr) max-content;
+  display: grid;
+}
+
+.dsh-fleet-panel-detail-head:has(.dsh-fleet-panel-resource-meta) > .dsh-fleet-panel-detail-meta {
+  min-width: 0;
+  flex: none;
+}
+
+.dsh-fleet-panel-detail-head:has(.dsh-fleet-panel-resource-meta) > .dsh-fleet-panel-main-actions {
+  grid-column: 4;
+  justify-self: end;
+}
+
 .dsh-fleet-panel-resource-meta {
   min-width: 0;
   color: var(--dsw-alias-label-secondary);
   align-items: center;
   gap: 6px;
-  flex: 1;
+  flex: none;
   font-size: 11px;
   display: flex;
-  overflow: hidden;
 }
 
 .dsh-fleet-panel-resource-meta > span:not(:last-child)::after {
@@ -2473,13 +4458,21 @@ button.dsh-fleet-panel-team-title:focus-visible {
   color: var(--dsw-alias-label-caption);
 }
 
+.dsh-fleet-panel-resource-size {
+  width: 8ch;
+  flex: none;
+  text-align: end;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .dsh-fleet-panel-resource-path-wrap {
-  min-width: 0;
+  flex: none;
   display: flex;
+  position: relative;
 }
 
 .dsh-fleet-panel-resource-path {
-  min-width: 0;
   color: var(--dsw-alias-state-business-primary);
   cursor: pointer;
   background: transparent;
@@ -2489,10 +4482,21 @@ button.dsh-fleet-panel-team-title:focus-visible {
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
   text-underline-offset: 3px;
-  text-overflow: ellipsis;
   white-space: nowrap;
   font: inherit;
-  overflow: hidden;
+}
+
+.dsh-fleet-panel-resource-path-wrap .dsh-fleet-panel-resource-open-error {
+  width: max-content;
+  max-width: min(320px, calc(100vw - 32px));
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 6px;
+  padding: 4px 7px;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 8;
+  box-shadow: 0 4px 12px color-mix(in srgb, #24394d 16%, transparent);
 }
 
 .dsh-fleet-panel-resource-path:hover {
@@ -2506,10 +4510,13 @@ button.dsh-fleet-panel-team-title:focus-visible {
 }
 
 .dsh-fleet-panel-resource-view-switch {
+  min-width: 168px;
   background: var(--dsw-alias-interactive-bg-hover);
   border-radius: 8px;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   padding: 2px;
-  display: flex;
+  display: grid;
 }
 
 .dsh-fleet-panel-resource-actions,
@@ -2517,6 +4524,15 @@ button.dsh-fleet-panel-team-title:focus-visible {
   align-items: center;
   gap: 5px;
   display: flex;
+}
+
+.dsh-fleet-panel-resource-actions {
+  flex: none;
+}
+
+.dsh-fleet-panel-resource-file-actions {
+  width: 94px;
+  flex: none;
 }
 
 .dsh-fleet-panel-resource-file-actions > button {
@@ -2535,6 +4551,15 @@ button.dsh-fleet-panel-team-title:focus-visible {
 .dsh-fleet-panel-resource-file-actions > button:not(:disabled):hover {
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-resource-file-actions > button[aria-pressed="true"] {
+  color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-resource-file-actions > button[data-visible="false"] {
+  visibility: hidden;
 }
 
 .dsh-fleet-panel-resource-file-actions > button:disabled {
@@ -2558,10 +4583,11 @@ button.dsh-fleet-panel-team-title:focus-visible {
   position: absolute;
 }
 
-.dsh-fleet-panel-resource-view-switch button {
+.dsh-fleet-panel-resource-view-switch > button,
+.dsh-fleet-panel-resource-view-switch > .dsh-fleet-panel-resource-view-unavailable .dsh-fleet-panel-resource-view-unavailable-trigger {
+  width: 100%;
   min-height: 26px;
   color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
   background: transparent;
   border: 0;
   border-radius: 6px;
@@ -2570,19 +4596,76 @@ button.dsh-fleet-panel-team-title:focus-visible {
   font-size: 11px;
 }
 
-.dsh-fleet-panel-resource-view-switch button:hover {
+.dsh-fleet-panel-resource-view-switch > button {
+  cursor: pointer;
+}
+
+.dsh-fleet-panel-resource-view-switch > button:hover {
   color: var(--dsw-alias-label-primary);
 }
 
-.dsh-fleet-panel-resource-view-switch button[aria-pressed="true"] {
+.dsh-fleet-panel-resource-view-switch > button:disabled {
+  color: var(--dsw-alias-label-caption);
+  cursor: default;
+  opacity: .55;
+}
+
+.dsh-fleet-panel-resource-view-switch > button:disabled:hover {
+  color: var(--dsw-alias-label-caption);
+}
+
+.dsh-fleet-panel-resource-view-unavailable {
+  min-width: 0;
+  display: block;
+}
+
+.dsh-fleet-panel-resource-view-unavailable .dsh-hover-hint {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+
+.dsh-fleet-panel-resource-view-unavailable .dsh-fleet-panel-resource-view-unavailable-trigger {
+  min-width: 0;
+  height: 100%;
+}
+
+.dsh-fleet-panel-resource-view-switch > .dsh-fleet-panel-resource-view-unavailable .dsh-fleet-panel-resource-view-unavailable-trigger,
+.dsh-fleet-panel-resource-view-switch > .dsh-fleet-panel-resource-view-unavailable .dsh-fleet-panel-resource-view-unavailable-trigger:hover,
+.dsh-fleet-panel-resource-view-switch > .dsh-fleet-panel-resource-view-unavailable .dsh-fleet-panel-resource-view-unavailable-trigger:focus-visible {
+  color: var(--dsw-alias-label-caption);
+  cursor: default;
+  opacity: .55;
+  text-decoration: none;
+}
+
+.dsh-fleet-panel-resource-view-switch > button[aria-pressed="true"] {
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-bg-layer-1);
   box-shadow: 0 1px 3px color-mix(in srgb, #24394d 13%, transparent);
 }
 
-.dsh-fleet-panel-resource-view-switch button:focus-visible {
+.dsh-fleet-panel-resource-view-switch > button:focus-visible,
+.dsh-fleet-panel-resource-view-switch > .dsh-fleet-panel-resource-view-unavailable .dsh-fleet-panel-resource-view-unavailable-trigger:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 1px;
+}
+
+.dsh-fleet-panel-resource-renderer-link {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
+  text-underline-offset: 2px;
+}
+
+.dsh-fleet-panel-resource-renderer-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.dsh-fleet-panel-resource-renderer-link:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
 }
 
 .dsh-fleet-panel-resource-preview[data-mode="compare"] {
@@ -2590,18 +4673,71 @@ button.dsh-fleet-panel-team-title:focus-visible {
   max-width: none;
 }
 
-.dsh-fleet-panel-resource-compare {
+.dsh-fleet-panel-resource-preview[data-mode="source"] {
+  box-sizing: border-box;
   min-width: 0;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  max-width: 100%;
+}
+
+.dsh-fleet-panel-resource-source-frame {
+  min-width: 0;
+  max-width: 100%;
+  position: relative;
+}
+
+.dsh-fleet-panel-resource-source-viewport {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.dsh-fleet-panel-resource-source-frame[data-wrap="true"] .dsh-fleet-panel-resource-source-viewport {
+  overflow-x: visible;
+}
+
+.dsh-fleet-panel-resource-compare {
+  --dsh-fleet-panel-resource-compare-split: 50%;
+  --dsh-fleet-panel-resource-compare-left: 50fr;
+  --dsh-fleet-panel-resource-compare-right: 50fr;
+
+  min-width: 0;
+  min-height: 100%;
+  grid-template-columns:
+    minmax(0, var(--dsh-fleet-panel-resource-compare-left))
+    minmax(0, var(--dsh-fleet-panel-resource-compare-right));
   display: grid;
+  position: relative;
+}
+
+.dsh-fleet-panel-resource-compare::before {
+  width: 1px;
+  height: 100%;
+  content: '';
+  background: var(--dsw-alias-border-l2);
+  position: absolute;
+  top: 0;
+  left: var(--dsh-fleet-panel-resource-compare-split);
+  z-index: 3;
+  transform: translateX(-50%);
 }
 
 .dsh-fleet-panel-resource-compare > section {
   min-width: 0;
   background: var(--dsw-alias-bg-layer-2);
-  border-radius: 12px;
   overflow: hidden;
+}
+
+.dsh-fleet-panel-resource-compare > section:first-child {
+  border-radius: 12px 0 0 12px;
+}
+
+.dsh-fleet-panel-resource-compare > section:last-child {
+  border-radius: 0 12px 12px 0;
+}
+
+.dsh-fleet-panel-resource-compare[data-resizing="true"] {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .dsh-fleet-panel-resource-compare h3 {
@@ -2619,15 +4755,15 @@ button.dsh-fleet-panel-team-title:focus-visible {
   overflow: auto;
 }
 
-.dsh-fleet-panel-resource-compare-body .dsh-fleet-panel-resource-preview-plain {
+.dsh-fleet-panel-resource-compare-body .dsh-fleet-panel-resource-preview-plain[data-wrap="false"] {
   min-width: max-content;
 }
 
 .dsh-fleet-panel-resource-history {
   min-width: 0;
   min-height: 360px;
-  grid-template-columns: minmax(0, 1fr) 248px;
-  gap: 22px;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 16px;
   display: grid;
 }
 
@@ -2697,14 +4833,16 @@ button.dsh-fleet-panel-team-title:focus-visible {
 .dsh-fleet-panel-resource-timeline {
   min-width: 0;
   grid-area: timeline;
-  border-inline-start: 1px solid var(--dsw-alias-border-l3);
-  padding-inline-start: 18px;
+  align-self: start;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 10px;
+  padding: 8px;
 }
 
 .dsh-fleet-panel-resource-timeline-title {
   margin: 0;
   font-size: 13px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .dsh-fleet-panel-resource-timeline-head {
@@ -2712,40 +4850,33 @@ button.dsh-fleet-panel-team-title:focus-visible {
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+  margin: 0 4px 4px;
+  padding: 4px 2px 10px;
   font-size: 10px;
   display: flex;
 }
 
 .dsh-fleet-panel-resource-timeline-list {
-  position: relative;
   flex-direction: column;
   display: flex;
 }
 
-.dsh-fleet-panel-resource-timeline-list::before {
-  position: absolute;
-  top: 14px;
-  bottom: 14px;
-  left: 6px;
-  width: 1px;
-  content: "";
-  background: var(--dsw-alias-border-l2);
-}
-
 .dsh-fleet-panel-resource-revision {
   position: relative;
-  min-height: 58px;
+  min-width: 0;
+  min-height: 52px;
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
   background: transparent;
   border: 0;
-  border-radius: 8px;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 7px 8px 7px 0;
+  border-radius: 7px;
+  grid-template-columns: 42px 12px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 6px;
+  padding: 6px 7px 6px 4px;
   text-align: start;
-  display: flex;
+  display: grid;
 }
 
 .dsh-fleet-panel-resource-revision:hover,
@@ -2758,30 +4889,83 @@ button.dsh-fleet-panel-team-title:focus-visible {
   outline-offset: 1px;
 }
 
-.dsh-fleet-panel-resource-revision-dot {
-  position: relative;
-  z-index: 1;
-  width: 13px;
-  height: 13px;
-  background: var(--dsw-alias-bg-layer-1);
-  border: 2px solid var(--dsw-alias-label-caption);
-  border-radius: 50%;
-  flex: none;
-  margin-top: 3px;
+.dsh-fleet-panel-resource-revision-when {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  align-self: center;
+  text-align: end;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
 }
 
-.dsh-fleet-panel-resource-revision[aria-pressed="true"] .dsh-fleet-panel-resource-revision-dot {
+.dsh-fleet-panel-resource-revision-when span {
+  display: block;
+}
+
+.dsh-fleet-panel-resource-revision-marker {
+  position: relative;
+  align-self: stretch;
+}
+
+.dsh-fleet-panel-resource-revision-marker::before {
+  width: 1px;
+  content: "";
+  background: var(--dsw-alias-border-l2);
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  left: 5px;
+}
+
+.dsh-fleet-panel-resource-revision:first-child .dsh-fleet-panel-resource-revision-marker::before {
+  top: 50%;
+}
+
+.dsh-fleet-panel-resource-revision:last-child .dsh-fleet-panel-resource-revision-marker::before {
+  bottom: 50%;
+}
+
+.dsh-fleet-panel-resource-revision-marker::after {
+  width: 7px;
+  height: 7px;
+  content: "";
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-label-caption);
+  border-radius: 50%;
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  transform: translateY(-50%);
+}
+
+.dsh-fleet-panel-resource-revision[aria-pressed="true"] .dsh-fleet-panel-resource-revision-marker::after {
   background: var(--dsw-alias-state-business-primary);
   border-color: var(--dsw-alias-state-business-primary);
 }
 
+.dsh-fleet-panel-resource-revision[aria-pressed="true"] .dsh-fleet-panel-resource-revision-when {
+  color: var(--dsw-alias-label-primary);
+}
+
 .dsh-fleet-panel-resource-revision-copy {
   min-width: 0;
+  align-self: center;
   flex-direction: column;
+  gap: 1px;
   display: flex;
 }
 
-.dsh-fleet-panel-resource-revision-copy strong {
+.dsh-fleet-panel-resource-revision-summary {
+  min-width: 0;
+  align-items: baseline;
+  gap: 4px;
+  display: flex;
+}
+
+.dsh-fleet-panel-resource-revision-summary strong {
+  min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
@@ -2789,11 +4973,12 @@ button.dsh-fleet-panel-team-title:focus-visible {
   overflow: hidden;
 }
 
-.dsh-fleet-panel-resource-revision-copy span,
-.dsh-fleet-panel-resource-revision-copy time {
+.dsh-fleet-panel-resource-revision-summary span,
+.dsh-fleet-panel-resource-revision-detail {
   color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  line-height: 16px;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 15px;
 }
 
 .dsh-fleet-panel-resource-history-empty {
@@ -2808,11 +4993,40 @@ button.dsh-fleet-panel-team-title:focus-visible {
 
 .dsh-fleet-panel-resource-preview-plain {
   margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
   font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 13px;
+  line-height: 1.6;
   tab-size: 2;
+}
+
+.dsh-fleet-panel-resource-preview-plain[data-wrap="false"] {
+  min-width: max-content;
+}
+
+.dsh-fleet-panel-resource-source-line {
+  min-height: 1.6em;
+  grid-template-columns: 4ch minmax(0, 1fr);
+  display: grid;
+}
+
+.dsh-fleet-panel-resource-source-line::before {
+  content: attr(data-line);
+  color: var(--dsw-alias-label-caption);
+  border-inline-end: 1px solid var(--dsw-alias-border-l3);
+  padding-inline-end: 10px;
+  text-align: end;
+  user-select: none;
+}
+
+.dsh-fleet-panel-resource-source-line > span {
+  min-width: 0;
+  padding-inline-start: 12px;
+  white-space: pre;
+}
+
+.dsh-fleet-panel-resource-preview-plain[data-wrap="true"] .dsh-fleet-panel-resource-source-line > span {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .dsh-fleet-panel-resource-preview-status {
@@ -2874,6 +5088,263 @@ button.dsh-fleet-panel-team-title:focus-visible {
   border-bottom: 1px solid var(--dsw-alias-border-l3);
   padding: 12px 2px;
   display: grid;
+}
+
+.dsh-fleet-panel-activity-layout {
+  min-height: 0;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-activity-scroll {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
+  padding: 24px 130px 24px 24px;
+  overflow-y: auto;
+}
+
+.dsh-fleet-panel-activity-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.dsh-fleet-panel-activity-list {
+  width: min(100%, 760px);
+  margin: 0 auto;
+  padding-block: var(--dsh-fleet-activity-center-padding, 24px);
+}
+
+.dsh-fleet-panel-activity-timeline {
+  width: 84px;
+  height: 80%;
+  min-height: min(220px, 80%);
+  flex-direction: column;
+  display: flex;
+  position: absolute;
+  top: 10%;
+  left: min(calc(100% - 104px), calc(50% + 350px));
+  z-index: 2;
+  overflow: visible;
+}
+
+.dsh-fleet-panel-activity-timeline-wheel {
+  box-sizing: border-box;
+  width: 38px;
+  height: 18px;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  background-color: var(--dsw-alias-bg-layer-2);
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent 0 3px,
+    var(--dsw-alias-label-secondary) 3px 4px,
+    transparent 4px 7px
+  );
+  border: 1px solid var(--dsw-alias-label-secondary);
+  border-radius: 4px;
+  margin: 0;
+  display: block;
+  position: absolute;
+  top: -24px;
+  left: calc(50% + 3px);
+  z-index: 2;
+  overflow: hidden;
+  transition: background-position 140ms cubic-bezier(.16, 1, .3, 1);
+}
+
+.dsh-fleet-panel-activity-timeline-wheel:hover {
+  border-color: var(--dsw-alias-label-primary);
+}
+
+.dsh-fleet-panel-activity-timeline-wheel:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-activity-timeline-ruler {
+  min-height: 0;
+  cursor: ns-resize;
+  overscroll-behavior: contain;
+  contain: layout paint;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-activity-timeline-marker {
+  --dsh-fleet-timeline-position: 0px;
+  --dsh-fleet-timeline-strength: 0;
+  --dsh-fleet-timeline-opacity: 1;
+  width: 100%;
+  min-height: 18px;
+  color: var(--dsw-alias-label-caption);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px 0 0;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: end;
+  display: grid;
+  position: absolute;
+  top: 50%;
+  left: 0;
+  transform: translateY(calc(-50% + var(--dsh-fleet-timeline-position)));
+}
+
+.dsh-fleet-panel-activity-timeline-marker:hover .dsh-fleet-panel-activity-timeline-tick {
+  background: var(--dsw-alias-label-secondary);
+  opacity: 1;
+}
+
+.dsh-fleet-panel-activity-timeline-marker:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+}
+
+.dsh-fleet-panel-activity-timeline-label {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  opacity: var(--dsh-fleet-timeline-strength);
+  overflow: hidden;
+  transition: opacity 140ms cubic-bezier(.16, 1, .3, 1);
+}
+
+.dsh-fleet-panel-activity-timeline-tick {
+  width: 30px;
+  height: 2px;
+  background: var(--dsw-alias-border-l2);
+  justify-self: center;
+  opacity: var(--dsh-fleet-timeline-opacity);
+  transform: scaleX(calc(.53 + var(--dsh-fleet-timeline-strength) * .34));
+  transform-origin: center;
+  transition: transform 140ms cubic-bezier(.16, 1, .3, 1), opacity 140ms cubic-bezier(.16, 1, .3, 1), background-color 120ms ease-out;
+}
+
+.dsh-fleet-panel-activity-timeline-marker[data-has-event="true"] .dsh-fleet-panel-activity-timeline-tick {
+  background: color-mix(in srgb, var(--dsw-alias-label-secondary) 62%, var(--dsw-alias-border-l2));
+}
+
+.dsh-fleet-panel-activity-timeline-cursor {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+  z-index: 1;
+}
+
+.dsh-fleet-panel-activity-timeline-cursor .dsh-fleet-panel-activity-timeline-label {
+  opacity: 1;
+}
+
+.dsh-fleet-panel-activity-timeline-cursor .dsh-fleet-panel-activity-timeline-tick {
+  background: var(--dsw-alias-label-primary);
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dsh-fleet-panel-activity-timeline-wheel {
+    transition-duration: 0ms;
+  }
+
+  .dsh-fleet-panel-activity-timeline-label,
+  .dsh-fleet-panel-activity-timeline-tick {
+    transition-duration: 0ms;
+  }
+}
+
+@media (max-width: 640px) {
+  .dsh-fleet-panel-activity-scroll {
+    padding: 18px 100px 18px 14px;
+  }
+
+  .dsh-fleet-panel-activity-timeline {
+    width: 72px;
+    left: calc(100% - 80px);
+  }
+}
+
+.dsh-fleet-panel-activity-group {
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+}
+
+.dsh-fleet-panel-activity-group-toggle {
+  width: 100%;
+  min-height: 42px;
+  color: inherit;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  grid-template-columns: 12px minmax(0, 1fr) auto 14px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 2px;
+  text-align: start;
+  display: grid;
+}
+
+.dsh-fleet-panel-activity-group-toggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-panel-activity-group-toggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-panel-activity-group-copy {
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+  display: flex;
+}
+
+.dsh-fleet-panel-activity-group-label {
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 19px;
+  overflow: hidden;
+}
+
+.dsh-fleet-panel-activity-group-count {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.dsh-fleet-panel-activity-group-chevron {
+  color: var(--dsw-alias-label-secondary);
+  place-items: center;
+  display: grid;
+  transform: rotate(-90deg);
+  transition: transform 120ms ease-out;
+}
+
+.dsh-fleet-panel-activity-group-toggle[aria-expanded="true"] .dsh-fleet-panel-activity-group-chevron {
+  transform: rotate(0deg);
+}
+
+.dsh-fleet-panel-activity-group-items {
+  padding-inline-start: 22px;
+}
+
+.dsh-fleet-panel-activity-group-items .dsh-fleet-panel-activity-row {
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  border-bottom: 0;
+  padding-block: 10px;
 }
 
 .dsh-fleet-panel-activity-dot {
@@ -2949,12 +5420,18 @@ button.dsh-fleet-panel-team-title:focus-visible {
   }
 
   .dsh-fleet-panel-resource-history {
-    grid-template-columns: minmax(0, 1fr) 210px;
+    grid-template-columns: minmax(0, 1fr) 232px;
     gap: 16px;
   }
 
-  .dsh-fleet-panel-resource-timeline {
-    padding-inline-start: 14px;
+  .dsh-fleet-panel-member-access-modes,
+  .dsh-fleet-panel-member-access-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dsh-fleet-panel-member-access-field[data-wide="true"],
+  .dsh-fleet-panel-member-access-form-actions {
+    grid-column: 1;
   }
 }
 
@@ -3025,13 +5502,6 @@ button.dsh-fleet-panel-team-title:focus-visible {
     padding: 5px;
   }
 
-  .dsh-fleet-panel-send {
-    width: 44px;
-    height: 44px;
-    background-clip: content-box;
-    padding: 8px;
-  }
-
   .dsh-fleet-panel-enter-messages {
     min-height: 44px;
   }
@@ -3092,26 +5562,28 @@ button.dsh-fleet-panel-team-title:focus-visible {
   }
 
   .dsh-fleet-panel-detail-head:has(.dsh-fleet-panel-resource-meta) {
-    min-height: 116px;
+    min-height: 108px;
+    grid-template-areas:
+      "title meta ."
+      "actions actions actions";
+    grid-template-columns: minmax(0, max-content) max-content minmax(0, 1fr);
+    grid-template-rows: auto auto;
     align-content: center;
-    flex-wrap: wrap;
     padding-block: 8px;
   }
 
   .dsh-fleet-panel-detail-head:has(.dsh-fleet-panel-resource-meta) .dsh-fleet-panel-detail-title {
-    max-width: 100%;
-    flex-basis: 100%;
+    grid-area: title;
+  }
+
+  .dsh-fleet-panel-detail-head:has(.dsh-fleet-panel-resource-meta) .dsh-fleet-panel-detail-meta {
+    grid-area: meta;
   }
 
   .dsh-fleet-panel-detail-head:has(.dsh-fleet-panel-resource-meta) .dsh-fleet-panel-main-actions {
     width: 100%;
+    grid-area: actions;
     justify-content: space-between;
-    order: 2;
-  }
-
-  .dsh-fleet-panel-resource-meta {
-    flex-basis: 100%;
-    order: 3;
   }
 
   .dsh-fleet-panel-resource-view-switch {
@@ -3125,8 +5597,27 @@ button.dsh-fleet-panel-team-title:focus-visible {
     padding: 8px;
   }
 
+  .dsh-fleet-panel-resource-file-actions {
+    width: 142px;
+  }
+
   .dsh-fleet-panel-resource-compare {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dsh-fleet-panel-resource-compare > section:first-child,
+  .dsh-fleet-panel-resource-compare > section:last-child {
+    border-radius: 12px;
+  }
+
+  .dsh-fleet-panel-resource-compare > section + section {
+    border-top: 1px solid var(--dsw-alias-border-l3);
+    margin-top: 12px;
+  }
+
+  .dsh-fleet-panel-resource-compare::before,
+  .dsh-fleet-panel-resource-compare-resize-track {
+    display: none;
   }
 
   .dsh-fleet-panel-resource-scroll .dsh-fleet-panel-chat-log {
@@ -3139,9 +5630,7 @@ button.dsh-fleet-panel-team-title:focus-visible {
   }
 
   .dsh-fleet-panel-resource-timeline {
-    border-inline-start: 0;
-    border-bottom: 1px solid var(--dsw-alias-border-l3);
-    padding: 0 0 12px;
+    padding: 8px;
   }
 
   .dsh-fleet-panel-resource-timeline-list {
@@ -3155,6 +5644,65 @@ button.dsh-fleet-panel-team-title:focus-visible {
 
   .dsh-fleet-panel-resource-diff-fallback {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dsh-fleet-panel-member-permissions-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .dsh-fleet-panel-auth-head,
+  .dsh-fleet-panel-auth-access > label {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dsh-fleet-panel-auth-mode {
+    align-self: flex-start;
+  }
+
+  .dsh-fleet-panel-auth-access select {
+    width: 100%;
+  }
+
+  .dsh-fleet-panel-member-permissions-groups,
+  .dsh-fleet-panel-member-permissions-manual,
+  .dsh-fleet-panel-member-permissions-values,
+  .dsh-fleet-panel-member-request-grid,
+  .dsh-fleet-panel-member-access-modes,
+  .dsh-fleet-panel-member-access-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dsh-fleet-panel-member-request-field[data-wide="true"] {
+    grid-column: 1;
+  }
+
+  .dsh-fleet-panel-member-access-field[data-wide="true"],
+  .dsh-fleet-panel-member-access-form-actions {
+    grid-column: 1;
+  }
+
+  .dsh-fleet-panel-member-access-rule {
+    align-items: flex-start;
+  }
+
+  .dsh-fleet-panel-member-permission-group {
+    min-height: 44px;
+  }
+
+  .dsh-fleet-panel-member-permissions-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dsh-fleet-panel-member-permissions-action-buttons {
+    width: 100%;
+  }
+
+  .dsh-fleet-panel-member-permissions-action-buttons .dsh-fleet-panel-control-button {
+    min-height: 44px;
   }
 
   .dsh-fleet-panel-resource-diff-fallback > section + section {
@@ -3209,7 +5757,7 @@ export interface FleetPanelConversation {
   readonly activeCount?: number
 }
 
-export interface FleetPanelMember extends FleetChatMember {
+export interface FleetPanelMember extends FleetRuntimeMember {
   readonly responsibility: string
   /** Short, self-declared description of the work this member is currently doing. */
   readonly statusText?: string
@@ -3217,11 +5765,12 @@ export interface FleetPanelMember extends FleetChatMember {
   readonly statusUpdatedAt?: string
   readonly provider?: string
   readonly model?: string
+  readonly reasoningEffort?: string
+  readonly maxTokens?: number
   /** The native DSH Session owned by this persistent Fleet member. */
   readonly sessionId?: string
   /** Conversations visible from this member's runtime perspective. Omit to expose the Team snapshot. */
   readonly visibleConversationIds?: readonly string[]
-  readonly runtimeStatus?: 'idle' | 'running' | 'waiting' | 'error' | 'offline' | 'paused' | 'unknown'
 }
 
 export interface FleetPanelPermissionGroup {
@@ -3229,16 +5778,54 @@ export interface FleetPanelPermissionGroup {
   readonly name: string
   readonly parents: readonly string[]
   readonly preset: boolean
+  readonly toolGroups: readonly string[]
+  readonly denyToolGroups: readonly string[]
+  readonly actions: readonly string[]
+  readonly denies: readonly string[]
   readonly op?: boolean
+}
+
+export interface FleetPanelMemberPermissionAssignment {
+  readonly groups: readonly string[]
+  readonly grants: readonly string[]
+  readonly denies: readonly string[]
+  readonly toolGroups: readonly string[]
+  readonly denyToolGroups: readonly string[]
+  readonly op: boolean
 }
 
 export interface FleetPanelMemberAuthorization {
   readonly groups: readonly FleetPanelPermissionGroup[]
-  readonly selectedGroups: readonly string[]
+  readonly assignment: FleetPanelMemberPermissionAssignment
+  readonly availableActions: readonly string[]
+  readonly availableToolGroups: readonly string[]
   readonly effectiveActions: readonly string[]
   readonly effectiveToolGroups: readonly string[]
   readonly op: boolean
   readonly configured: boolean
+}
+
+export type FleetPanelAccessLevel = 'read' | 'write' | 'use' | 'manage'
+export type FleetPanelAccessMode = 'inherit' | 'restricted'
+export type FleetPanelAccessScope = 'self' | 'tree'
+export type FleetPanelAccessEffect = 'allow' | 'deny'
+
+export interface FleetPanelMemberAccessRule {
+  readonly id: string
+  readonly resourceKind: string
+  readonly resourceId: string
+  readonly scope: FleetPanelAccessScope
+  readonly effect: FleetPanelAccessEffect
+  readonly levels: readonly FleetPanelAccessLevel[]
+}
+
+export interface FleetPanelMemberAccess {
+  readonly resourceKinds: readonly string[]
+  readonly modes: readonly {
+    readonly resourceKind: string
+    readonly mode: FleetPanelAccessMode
+  }[]
+  readonly rules: readonly FleetPanelMemberAccessRule[]
 }
 
 export interface FleetPanelMessage {
@@ -3254,8 +5841,18 @@ export interface FleetPanelMessage {
     readonly visibleMemberIds: readonly string[]
     readonly readMemberIds: readonly string[]
     readonly unreadMemberIds: readonly string[]
+    readonly deliveredMemberIds?: readonly string[]
+    readonly pendingMemberIds?: readonly string[]
+    readonly pendingDeliveries?: readonly FleetPanelPendingDelivery[]
     readonly sources?: readonly FleetChatReceiptSource[]
   }
+}
+
+export interface FleetPanelPendingDelivery {
+  readonly memberId: string
+  readonly reason?: 'no_active_session' | 'inbox_delivery_failed' | 'participant_retired'
+  readonly detail?: string
+  readonly blockedAt?: string
 }
 
 export interface FleetPanelResource {
@@ -3328,11 +5925,17 @@ export interface FleetPanelTeamSnapshot {
   readonly resources: readonly FleetPanelResource[]
   readonly workspaces?: readonly FleetPanelWorkspace[]
   readonly activity: readonly FleetPanelActivity[]
+  readonly budget: FleetPanelTeamBudget
 }
 
 export interface FleetPanelTeamSummary {
   readonly teamId: string
   readonly teamName: string
+  readonly assistantConnections?: readonly {
+    readonly assistantId: string
+    readonly assistantName?: string
+    readonly sessionId: string
+  }[]
   readonly assistantSessionIds?: readonly string[]
   readonly assistantSessionAliases?: Readonly<Record<string, string>>
   readonly assistantParticipantIds?: Readonly<Record<string, string>>
@@ -3342,42 +5945,64 @@ export interface FleetPanelTeamSummary {
   readonly primaryWorkspace?: string
   readonly status: FleetPanelTeamSnapshot['status']
   readonly runtimeState?: 'active' | 'dormant'
+  /** Runtime states of ordinary Team members; assistants are intentionally excluded. */
+  readonly memberStatuses?: readonly NonNullable<FleetPanelMember['runtimeStatus']>[]
   readonly tutorial?: boolean
 }
 
 export interface FleetPanelTeamRunControl {
-  readonly action: 'pause' | 'resume'
-  readonly label: '暂停运行' | '继续运行'
-  readonly busyLabel: '正在暂停…' | '正在继续…'
+  readonly action: 'load' | 'pause' | 'resume' | 'wake'
+  readonly label: string
+  readonly busyLabel: string
   readonly title: string
 }
 
-export function fleetPanelTeamRunControl(
-  team: Pick<FleetPanelTeamSummary, 'status' | 'runtimeState'>,
-): FleetPanelTeamRunControl | undefined {
-  const canRecoverDormant = team.runtimeState === 'dormant'
-    && (team.status === 'starting'
-      || team.status === 'idle'
-      || team.status === 'running'
-      || team.status === 'paused'
-      || team.status === 'finishing')
-  if (team.status === 'paused' || canRecoverDormant) {
-    return {
+function fleetPanelMemberIsUnloaded(status: FleetPanelMember['runtimeStatus']): boolean {
+  return status === undefined || status === 'unknown' || status === 'offline'
+}
+
+function fleetPanelTeamIsControllable(status: FleetPanelTeamSummary['status']): boolean {
+  return status !== 'closed' && status !== 'failed' && status !== 'disconnected'
+}
+
+export function fleetPanelTeamRunControls(
+  team: Pick<FleetPanelTeamSummary, 'status' | 'runtimeState' | 'memberStatuses'>,
+): readonly FleetPanelTeamRunControl[] {
+  if (!fleetPanelTeamIsControllable(team.status)) return []
+  const statuses = team.memberStatuses ?? []
+  const controls: FleetPanelTeamRunControl[] = []
+  if (statuses.some(fleetPanelMemberIsUnloaded)) {
+    controls.push({
+      action: 'load',
+      label: panelText('加载团队', 'Load Team'),
+      busyLabel: panelText('正在加载…', 'Loading…'),
+      title: panelText('加载所有未加载且未暂停的成员；已加载和已暂停的成员保持不变', 'Load every unloaded, unpaused member while leaving loaded and paused members unchanged'),
+    })
+  }
+  if (team.status === 'paused') {
+    controls.push({
       action: 'resume',
-      label: '继续运行',
-      busyLabel: '正在继续…',
-      title: '恢复团队暂停前仍在运行的成员',
-    }
+      label: panelText('继续团队', 'Resume Team'),
+      busyLabel: panelText('正在继续…', 'Resuming…'),
+      title: panelText('解除由整队暂停产生的成员暂停，但不发送接续指令', 'Resume members paused with the Team without sending a continuation instruction'),
+    })
   }
-  if (team.runtimeState !== 'dormant' && (team.status === 'idle' || team.status === 'running')) {
-    return {
+  if ((team.status === 'idle' || team.status === 'running' || team.status === 'paused')
+    && statuses.some(status => status !== 'paused' && !fleetPanelMemberIsUnloaded(status))) {
+    controls.push({
       action: 'pause',
-      label: '暂停运行',
-      busyLabel: '正在暂停…',
-      title: '暂停全体成员并保存当前状态',
-    }
+      label: panelText('暂停团队', 'Pause Team'),
+      busyLabel: panelText('正在暂停…', 'Pausing…'),
+      title: panelText('暂停所有已加载且尚未暂停的普通成员；团队助理和未加载成员不受影响', 'Pause every loaded, unpaused ordinary member; Team assistants and unloaded members are unaffected'),
+    })
   }
-  return undefined
+  controls.push({
+    action: 'wake',
+    label: panelText('唤醒成员', 'Wake members'),
+    busyLabel: panelText('正在唤醒…', 'Waking…'),
+    title: panelText('加载并解除所有普通成员的暂停，然后向全体成员和助理发送接续指令', 'Load and resume every ordinary member, then send a continuation instruction to all members and assistants'),
+  })
+  return controls
 }
 
 export interface FleetPanelTeamGroup {
@@ -3444,26 +6069,258 @@ export interface FleetPanelUploadInput {
   readonly file: File
 }
 
+export interface FleetPanelRemoveResourceInput {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly resourceId: string
+}
+
 export interface FleetPanelTeamControlInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'pause' | 'resume' | 'wake' | 'close'
+  readonly action: 'load' | 'pause' | 'resume' | 'wake' | 'close'
   readonly summary?: string
+}
+
+export interface FleetPanelTeamSettings {
+  readonly name: string
+  readonly positioning: string
+  readonly rules: string
+  readonly collaborationMethod: string
+  readonly updateDensity: 'concise' | 'balanced' | 'detailed'
+  readonly notificationPolicy: 'decisions' | 'milestones' | 'continuous'
+  readonly contentPreference: string
+  readonly projectRoot: string
+  readonly budget: FleetPanelTeamBudget
+  readonly request: {
+    readonly provider?: string
+    readonly model?: string
+    readonly reasoningEffort?: string
+    readonly maxTokens?: number
+    readonly mixed: {
+      readonly model: boolean
+      readonly reasoningEffort: boolean
+      readonly maxTokens: boolean
+    }
+  }
+}
+
+export type FleetPanelBudgetState = 'unlimited' | 'normal' | 'warning' | 'danger' | 'exhausted'
+export type FleetPanelBudgetMode = 'tokens' | 'cost'
+
+export interface FleetPanelBudgetModelRate {
+  readonly provider: string
+  readonly model: string
+  readonly multiplier?: number
+  readonly inputUsdPerMillion?: number
+  readonly outputUsdPerMillion?: number
+  readonly cacheReadUsdPerMillion?: number
+  readonly cacheWriteUsdPerMillion?: number
+}
+
+export interface FleetPanelBudgetModelUsage {
+  readonly provider: string
+  readonly model: string
+  readonly charged: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+  readonly reasoningTokens: number
+  readonly calls: number
+  readonly unmeteredCalls: number
+}
+
+export interface FleetPanelBudgetAccount {
+  readonly limit?: number
+  readonly startedAt: string
+  readonly used: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+  readonly reasoningTokens: number
+  readonly calls: number
+  readonly unmeteredCalls: number
+  readonly models: readonly FleetPanelBudgetModelUsage[]
+  readonly remaining?: number
+  readonly state: FleetPanelBudgetState
+}
+
+export interface FleetPanelParticipantBudget extends FleetPanelBudgetAccount {
+  readonly memberId: string
+  readonly name: string
+  readonly role: string
+  readonly color?: string
+  readonly assistant: boolean
+  readonly active: boolean
+}
+
+export interface FleetPanelTeamBudget {
+  readonly mode: FleetPanelBudgetMode
+  readonly rates: readonly FleetPanelBudgetModelRate[]
+  readonly configuredModels: readonly { readonly provider: string; readonly model: string }[]
+  readonly team: FleetPanelBudgetAccount
+  readonly members: readonly FleetPanelParticipantBudget[]
+}
+
+export interface FleetPanelTeamSettingsInput {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly settings: Omit<FleetPanelTeamSettings, 'projectRoot' | 'request' | 'budget'>
+}
+
+export interface FleetPanelBudgetInput {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly scope: 'team' | 'member'
+  readonly member?: string
+  readonly limit?: number | null
+  readonly reset?: true
+  readonly accounting?: {
+    readonly mode: FleetPanelBudgetMode
+    readonly rates: readonly FleetPanelBudgetModelRate[]
+  }
+}
+
+export interface FleetPanelTeamRequestInput {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly request: {
+    readonly provider?: string
+    readonly model?: string
+    readonly reasoningEffort?: string | null
+    readonly maxTokens?: number | null
+  }
+}
+
+export interface FleetPanelMemberRequestInput {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly memberId: string
+  readonly assistant: boolean
+  readonly request: FleetPanelTeamRequestInput['request']
 }
 
 export interface FleetPanelMemberControlInput {
   readonly sessionId: string
   readonly teamId: string
   readonly memberId: string
-  readonly action: 'pause' | 'resume'
+  readonly action: 'pause' | 'resume' | 'wake'
+}
+
+export interface FleetPanelMemberRunControl {
+  readonly action: FleetPanelMemberControlInput['action']
+  readonly label: string
+  readonly busyLabel: string
+  readonly title: string
+  readonly primary?: boolean
+}
+
+function FleetRunControlButton({ label, displayLabel, hint, primary, disabled, busy, onClick }: {
+  readonly label: string
+  readonly displayLabel: string
+  readonly hint: string
+  readonly primary?: boolean
+  readonly disabled: boolean
+  readonly busy: boolean
+  readonly onClick: () => void
+}): ReactElement {
+  return jsx(FleetInfoHint, {
+    label: `${label}：${hint}`,
+    title: label,
+    pinOnClick: false,
+    footer: null,
+    trigger: (hintProps: HoverHintTriggerProps) => jsx('button', {
+      ref: hintProps.ref as (element: HTMLButtonElement | null) => void,
+      type: 'button',
+      className: 'dsh-fleet-panel-control-button',
+      'data-primary': primary === true ? 'true' : undefined,
+      disabled,
+      'aria-busy': busy ? 'true' : undefined,
+      'aria-label': `${label}：${hint}`,
+      onClick,
+      children: displayLabel,
+    }),
+    children: jsx('p', { className: 'dsh-hover-hint-lead', children: hint }),
+  })
+}
+
+export function fleetPanelMemberRunControls(
+  member: Pick<FleetPanelMember, 'runtimeStatus'>,
+  assistant: boolean,
+  teamStatus: FleetPanelTeamSnapshot['status'],
+): readonly FleetPanelMemberRunControl[] {
+  if (!fleetPanelTeamIsControllable(teamStatus)) return []
+  const status = member.runtimeStatus
+  const unloaded = fleetPanelMemberIsUnloaded(status)
+  const paused = status === 'paused'
+  const controls: FleetPanelMemberRunControl[] = []
+  if (unloaded || paused) {
+    controls.push({
+      action: 'resume',
+      label: paused
+        ? (assistant ? panelText('继续助理', 'Resume assistant') : panelText('继续成员', 'Resume member'))
+        : (assistant ? panelText('加载助理', 'Load assistant') : panelText('加载成员', 'Load member')),
+      busyLabel: paused ? panelText('正在继续…', 'Resuming…') : panelText('正在加载…', 'Loading…'),
+      title: paused
+        ? panelText('解除这位成员的暂停，但不发送接续指令', 'Resume this member without sending a continuation instruction')
+        : panelText('只加载这位成员的持久化会话，不影响其他成员', 'Load only this member’s persisted Session without changing other members'),
+      primary: true,
+    })
+  }
+  if (!assistant && !paused && !unloaded) {
+    controls.push({
+      action: 'pause',
+      label: panelText('暂停成员', 'Pause member'),
+      busyLabel: panelText('正在暂停…', 'Pausing…'),
+      title: panelText('打断、保存并暂停这位成员', 'Interrupt, save, and pause this member'),
+    })
+  } else if (assistant && status === 'running') {
+    controls.push({
+      action: 'pause',
+      label: panelText('打断助理', 'Interrupt assistant'),
+      busyLabel: panelText('正在打断…', 'Interrupting…'),
+      title: panelText('只打断助理当前回合，不会将助理设为暂停', 'Interrupt the assistant’s current turn without pausing it'),
+    })
+  }
+  controls.push({
+    action: 'wake',
+    label: assistant ? panelText('唤醒助理', 'Wake assistant') : panelText('唤醒成员', 'Wake member'),
+    busyLabel: panelText('正在唤醒…', 'Waking…'),
+    title: panelText('必要时先加载并解除暂停，然后发送接续指令', 'Load and resume this member if needed, then send a continuation instruction'),
+  })
+  return controls
 }
 
 export interface FleetPanelMemberPermissionInput {
   readonly sessionId: string
   readonly teamId: string
   readonly memberId: string
-  readonly groups?: readonly string[]
+  readonly assignment?: FleetPanelMemberPermissionAssignment
   readonly reset?: boolean
+}
+
+export interface FleetPanelMemberAccessTarget {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly memberId: string
+}
+
+export type FleetPanelMemberAccessChange =
+  | { readonly action: 'set_mode'; readonly resourceKind: string; readonly mode: FleetPanelAccessMode }
+  | {
+    readonly action: 'add_rule'
+    readonly resourceKind: string
+    readonly resourceId: string
+    readonly scope: FleetPanelAccessScope
+    readonly effect: FleetPanelAccessEffect
+    readonly levels: readonly FleetPanelAccessLevel[]
+  }
+  | { readonly action: 'remove_rule'; readonly ruleId: string }
+
+export interface FleetPanelMemberAccessInput extends FleetPanelMemberAccessTarget {
+  readonly change: FleetPanelMemberAccessChange
 }
 
 export interface FleetPanelArchiveExportInput {
@@ -3489,11 +6346,19 @@ export interface FleetPanelSource {
   subscribe(listener: () => void): () => void
   selectTeam(teamId: string): void
   sendMessage(input: FleetPanelSendInput): Promise<void>
-  uploadResource?(input: FleetPanelUploadInput): Promise<void>
+  uploadResource?(input: FleetPanelUploadInput): Promise<FleetPanelResource>
+  removeResource?(input: FleetPanelRemoveResourceInput): Promise<void>
   controlTeam?(input: FleetPanelTeamControlInput): Promise<void>
+  loadTeamSettings?(teamId: string, signal?: AbortSignal): Promise<FleetPanelTeamSettings>
+  updateTeamSettings?(input: FleetPanelTeamSettingsInput): Promise<FleetPanelTeamSettings>
+  updateBudget?(input: FleetPanelBudgetInput): Promise<FleetPanelTeamBudget>
+  configureTeamRequest?(input: FleetPanelTeamRequestInput): Promise<void>
+  configureMemberRequest?(input: FleetPanelMemberRequestInput): Promise<void>
   controlMember?(input: FleetPanelMemberControlInput): Promise<void>
   loadMemberAuthorization?(teamId: string, memberId: string, signal?: AbortSignal): Promise<FleetPanelMemberAuthorization>
   updateMemberPermissions?(input: FleetPanelMemberPermissionInput): Promise<FleetPanelMemberAuthorization>
+  loadMemberAccess?(input: FleetPanelMemberAccessTarget, signal?: AbortSignal): Promise<FleetPanelMemberAccess>
+  updateMemberAccess?(input: FleetPanelMemberAccessInput): Promise<FleetPanelMemberAccess>
   exportTeam?(teamId: string, signal?: AbortSignal): Promise<Record<string, unknown>>
   exportArchive?(input: FleetPanelArchiveExportInput, signal?: AbortSignal): Promise<FleetPanelArchiveFile>
   importArchive?(input: FleetPanelArchiveImportInput, signal?: AbortSignal): Promise<void>
@@ -3504,6 +6369,7 @@ export interface FleetPanelSource {
     signal?: AbortSignal,
     request?: FleetPanelMemberTraceRequest,
   ): Promise<FleetPanelMemberTrace>
+  subscribeMemberTrace?(teamId: string, memberId: string, listener: () => void): () => void
   loadConversationMessages?(
     teamId: string,
     conversationId: string,
@@ -3845,7 +6711,7 @@ function joyrideViewFeedback(
   return { view: tool }
 }
 
-type PanelIconName = 'chat' | 'team' | 'agent' | 'resources' | 'activity' | 'search' | 'send' | 'channel' | 'menu' | 'settings' | 'chevron' | 'close' | 'copy' | 'download' | 'upload'
+type PanelIconName = 'chat' | 'team' | 'agent' | 'resources' | 'activity' | 'search' | 'send' | 'channel' | 'menu' | 'settings' | 'chevron' | 'check' | 'close' | 'copy' | 'download' | 'upload' | 'wrap'
 
 function PanelIcon({ name, size = 18 }: { readonly name: PanelIconName; readonly size?: number }): ReactElement {
   const common = {
@@ -3882,6 +6748,13 @@ function PanelIcon({ name, size = 18 }: { readonly name: PanelIconName; readonly
     children: [
       jsx('path', { d: 'M10 12.7V3.5M6.6 6.6 10 3.2l3.4 3.4' }),
       jsx('path', { d: 'M4 14.8v1.3h12v-1.3' }),
+    ],
+  })
+  if (name === 'wrap') return jsxs('svg', {
+    ...common,
+    children: [
+      jsx('path', { d: 'M3 5.2h10.1a3.1 3.1 0 0 1 0 6.2H9' }),
+      jsx('path', { d: 'm11.3 9.1-2.4 2.3 2.4 2.4M3 9h4M3 13.5h4' }),
     ],
   })
   if (name === 'chat') return jsx('svg', {
@@ -3939,6 +6812,10 @@ function PanelIcon({ name, size = 18 }: { readonly name: PanelIconName; readonly
     ...common,
     children: jsx('path', { d: 'm6.5 8 3.5 3.5L13.5 8' }),
   })
+  if (name === 'check') return jsx('svg', {
+    ...common,
+    children: jsx('path', { d: 'm4.5 10.2 3.3 3.3 7.7-7.7' }),
+  })
   return jsx('svg', {
     ...common,
     children: jsx('path', { d: 'M7.2 3.5 5.4 16.5m7.4-13-1.8 13M3.5 7.4h13M2.8 12.6h13' }),
@@ -3964,53 +6841,131 @@ function HarmonyBrandIcon(): ReactElement {
 }
 
 const operator: FleetPanelMember = {
-  id: 'operator', name: 'You', role: '外部观察者', responsibility: '观察并向团队提供协作输入',
-  color: '#737985', presence: 'active', operator: true,
+  id: 'operator',
+  get name() { return getFleetOperatorProfile().name },
+  get role() { return getFleetOperatorProfile().role },
+  get responsibility() { return getFleetOperatorProfile().responsibility },
+  get color() { return getFleetOperatorProfile().color },
+  get avatarUrl() { return getFleetOperatorProfile().avatarUrl },
+  presence: 'active', operator: true,
 }
 
 function teamAgents(team: FleetPanelTeamSnapshot): readonly FleetPanelMember[] {
   return [...team.members, ...(team.assistants ?? [])]
 }
 
+function fleetPanelMemberIsOnline(member: FleetPanelMember): boolean {
+  return member.presence === 'active' || member.presence === 'busy'
+    || member.presence === 'waiting' || member.presence === 'error'
+}
+
 function panelText(zh: string, en: string): string {
-  return isChineseLocale() ? zh : en
+  return fleetText(zh, en)
 }
 const emptyDirectory: FleetPanelTeamDirectory = {
   teams: [],
   groups: [
-    { id: 'ungrouped', name: '未分组', kind: 'ungrouped', teamIds: [] },
-    { id: 'archived', name: '已归档', kind: 'archived', teamIds: [] },
+    { id: 'ungrouped', get name() { return panelText('未分组', 'Ungrouped') }, kind: 'ungrouped', teamIds: [] },
+    { id: 'archived', get name() { return panelText('已归档', 'Archived') }, kind: 'archived', teamIds: [] },
   ],
 }
 const emptySnapshot: FleetPanelSnapshot = {
   directory: emptyDirectory,
-  connection: { status: 'disconnected', error: 'Fleet 数据源不可用' },
+  connection: { status: 'disconnected', get error() { return panelText('Fleet 数据源不可用', 'Fleet data source is unavailable') } },
 }
 
 let teamDirectorySource: FleetPanelSource | undefined
+
+interface FleetTeamSettingsRequest {
+  readonly id: number
+  readonly teamId: string
+  readonly tab: TeamSettingsTab
+}
+
+let fleetTeamSettingsRequest: FleetTeamSettingsRequest | undefined
+let fleetTeamSettingsRequestSequence = 0
+const fleetTeamSettingsRequestListeners = new Set<() => void>()
+
+function subscribeFleetTeamSettingsRequest(listener: () => void): () => void {
+  fleetTeamSettingsRequestListeners.add(listener)
+  return () => { fleetTeamSettingsRequestListeners.delete(listener) }
+}
+
+function publishFleetTeamSettingsRequest(): void {
+  for (const listener of fleetTeamSettingsRequestListeners) listener()
+}
+
+function completeFleetTeamSettingsRequest(id: number): void {
+  if (fleetTeamSettingsRequest?.id !== id) return
+  fleetTeamSettingsRequest = undefined
+  publishFleetTeamSettingsRequest()
+}
+
+/** Opens one Team settings tab from composer-level shortcuts, including outside the Fleet view. */
+export function requestFleetTeamSettings(teamId: string, tab: TeamSettingsTab = 'general'): void {
+  teamDirectorySource?.selectTeam(teamId)
+  fleetTeamSettingsRequest = { id: ++fleetTeamSettingsRequestSequence, teamId, tab }
+  publishFleetTeamSettingsRequest()
+  fleetShellTabTarget()?.click()
+}
 
 /** Current Team directory shared with root-level Fleet entry surfaces. */
 export function getFleetTeamDirectorySnapshot(): FleetPanelTeamDirectory {
   return teamDirectorySource?.getSnapshot().directory ?? emptyDirectory
 }
 
+/** Display name of the Team assistant connected to a foreground Session. */
+export function getFleetAssistantDisplayName(sessionId: string | undefined): string | undefined {
+  if (sessionId === undefined) return undefined
+  const team = getFleetTeamDirectorySnapshot().teams.find(candidate =>
+    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+  const currentSessionId = team?.assistantSessionAliases?.[sessionId] ?? sessionId
+  return team?.assistantConnections?.find(connection => connection.sessionId === currentSessionId)?.assistantName
+}
+
 export function subscribeFleetTeamDirectory(listener: () => void): () => void {
   return teamDirectorySource?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE
 }
 
-export function sendFleetAssistantMailboxMessage(sessionId: string, text: string): Promise<void> {
+export async function sendFleetAssistantMailboxMessage(
+  sessionId: string,
+  text: string,
+  files: readonly File[] = [],
+  delivery: FleetPanelSendInput['delivery'] = 'wakeup',
+): Promise<void> {
   const source = teamDirectorySource
   const team = source?.getSnapshot().directory.teams.find(candidate =>
     candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
-  if (source === undefined || team === undefined) return Promise.reject(new Error('当前 Session 未连接 Fleet Team 助理'))
+  if (source === undefined || team === undefined) return Promise.reject(new Error(panelText('当前 Session 未连接 Fleet Team 助理', 'The current Session is not connected to a Fleet Team assistant')))
   const recipient = team.assistantParticipantIds?.[sessionId]
-  if (recipient === undefined) return Promise.reject(new Error('当前 Session 没有稳定的 Fleet Team 助理身份'))
+  if (recipient === undefined) return Promise.reject(new Error(panelText('当前 Session 没有稳定的 Fleet Team 助理身份', 'The current Session does not have a stable Fleet Team assistant identity')))
   return source.sendMessage({
     sessionId,
     teamId: team.teamId,
     conversationId: `@${recipient}`,
-    content: [{ type: 'text', text }],
-    delivery: 'wakeup',
+    content: [{ type: 'text', text: fleetComposerMessageText(text, files) }],
+    delivery,
+  })
+}
+
+/** Persist a foreground assistant Session's native model selection into its Fleet member view. */
+export async function configureFleetAssistantSessionModel(
+  sessionId: string,
+  request: FleetPanelTeamRequestInput['request'],
+): Promise<void> {
+  const source = teamDirectorySource
+  const team = source?.getSnapshot().directory.teams.find(candidate =>
+    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+  const assistantId = team?.assistantParticipantIds?.[sessionId]
+  if (source?.configureMemberRequest === undefined || team === undefined || assistantId === undefined) {
+    throw new Error(panelText('当前 Session 的 Fleet 助理模型配置不可用', 'Fleet assistant model configuration is unavailable for the current Session'))
+  }
+  await source.configureMemberRequest({
+    sessionId,
+    teamId: team.teamId,
+    memberId: assistantId,
+    assistant: true,
+    request,
   })
 }
 
@@ -4052,10 +7007,25 @@ function fleetAssistantMailbox(snapshot: FleetPanelSnapshot, sessionId: string |
             const member = membersById.get(id)
             return member === undefined ? [] : [member]
           }),
-          unreadMembers: message.receipt.unreadMemberIds.flatMap(id => {
-            const member = membersById.get(id)
-            return member === undefined ? [] : [member]
-          }),
+          ...(message.receipt.deliveredMemberIds === undefined && message.receipt.pendingMemberIds === undefined
+            ? {
+                unreadMembers: message.receipt.unreadMemberIds.flatMap(id => {
+                  const member = membersById.get(id)
+                  return member === undefined ? [] : [member]
+                }),
+              }
+            : {
+                deliveredMembers: (message.receipt.deliveredMemberIds ?? []).flatMap(id => {
+                  const member = membersById.get(id)
+                  return member === undefined ? [] : [member]
+                }),
+                pendingDeliveries: (message.receipt.pendingMemberIds ?? []).flatMap(id => {
+                  const member = membersById.get(id)
+                  if (member === undefined) return []
+                  const blocker = message.receipt?.pendingDeliveries?.find(candidate => candidate.memberId === id)
+                  return [{ member, ...blocker }]
+                }),
+              }),
           ...(message.receipt.sources === undefined ? {} : { sources: message.receipt.sources }),
         },
       }),
@@ -4067,7 +7037,6 @@ const EMPTY_UNSUBSCRIBE = (): void => {}
 const SIDEBAR_DEFAULT_WIDTH = 232
 const SIDEBAR_MIN_WIDTH = 196
 const SIDEBAR_MAX_WIDTH = 360
-const MEMBER_TRACE_REFRESH_INTERVAL_MS = 5_000
 const MAIN_MIN_WIDTH = 360
 
 interface FleetPanelPreferences {
@@ -4168,26 +7137,89 @@ export type FleetPanelRenderSlot = (
   options?: PanelRenderOptions,
 ) => ReactNode
 
+export interface FleetPanelToolButtonProps {
+  readonly owner: FleetPanelToolOwner
+  readonly tool: string
+  readonly label: string
+  readonly actionId?: string
+  readonly children: ReactNode
+}
+
+export interface FleetPanelTeamOption {
+  readonly teamId: string
+  readonly teamName: string
+  readonly status?: FleetPanelTeamSummary['status']
+}
+
+export interface FleetPanelTeamSwitcherProps {
+  readonly teams: readonly FleetPanelTeamOption[]
+  readonly selectedTeamId?: string
+  readonly label: string
+  readonly selectTeam: (teamId: string) => void
+}
+
+export interface FleetPanelListRowProps {
+  readonly selected: boolean
+  readonly title: ReactNode
+  readonly caption?: string
+  readonly leading?: ReactNode
+  readonly trailing?: ReactNode
+  readonly elementRef?: (element: HTMLButtonElement | null) => void
+  readonly interaction?: {
+    readonly controls: string
+    readonly expanded: boolean
+    readonly onMouseEnter: (event: ReactMouseEvent<HTMLButtonElement>) => void
+    readonly onFocus: (event: FocusEvent<HTMLButtonElement>) => void
+    readonly onBlur: (event: FocusEvent<HTMLButtonElement>) => void
+  }
+  readonly onClick: () => void
+}
+
+export interface FleetPanelUi {
+  readonly ToolButton: ComponentType<FleetPanelToolButtonProps>
+  readonly TeamSwitcher: ComponentType<FleetPanelTeamSwitcherProps>
+  readonly ListRow: ComponentType<FleetPanelListRowProps>
+  readonly SectionTitle: ComponentType<{ readonly children: ReactNode }>
+  readonly MemberPopover: ComponentType<FleetMemberPopoverProps>
+}
+
 export interface FleetPanelToolOwner {
   readonly activeTool: string
   readonly disabled?: boolean
   readonly selectTool: (tool: string) => void
+  readonly ui: FleetPanelUi
 }
 
 export interface FleetPanelPaneOwner {
   readonly sessionId: string
   readonly fleet: FleetPanelSnapshot
+  readonly markdownRendererAvailable: boolean
   readonly snapshot: FleetPanelTeamSnapshot
   readonly activeItem: string
   readonly selectItem: (item: string) => void
   readonly showMemberDetails: (memberId: string) => void
   readonly showMemberContext: (memberId: string) => void
   readonly openResource: (resourceId: string) => void
-  readonly uploadResource?: (file: File) => Promise<void>
+  readonly uploadResource?: (file: File) => Promise<FleetPanelResource>
+  readonly removeResource?: (resourceId: string) => Promise<void>
   readonly controlTeam?: (action: FleetPanelTeamControlInput['action'], summary?: string) => Promise<void>
+  readonly loadTeamSettings?: FleetPanelSource['loadTeamSettings']
+  readonly updateTeamSettings?: (teamId: string, settings: FleetPanelTeamSettingsInput['settings']) => Promise<FleetPanelTeamSettings>
+  readonly updateBudget?: (teamId: string, input: Omit<FleetPanelBudgetInput, 'sessionId' | 'teamId'>) => Promise<FleetPanelTeamBudget>
+  readonly configureTeamRequest?: (teamId: string, request: FleetPanelTeamRequestInput['request']) => Promise<void>
+  readonly configureMemberRequest?: (memberId: string, assistant: boolean, request: FleetPanelTeamRequestInput['request']) => Promise<void>
   readonly controlMember?: (memberId: string, action: FleetPanelMemberControlInput['action']) => Promise<void>
   readonly loadMemberAuthorization?: FleetPanelSource['loadMemberAuthorization']
-  readonly updateMemberPermissions?: (memberId: string, groups?: readonly string[], reset?: boolean) => Promise<FleetPanelMemberAuthorization>
+  readonly updateMemberPermissions?: (
+    memberId: string,
+    assignment?: FleetPanelMemberPermissionAssignment,
+    reset?: boolean,
+  ) => Promise<FleetPanelMemberAuthorization>
+  readonly loadMemberAccess?: (memberId: string, signal?: AbortSignal) => Promise<FleetPanelMemberAccess>
+  readonly updateMemberAccess?: (
+    memberId: string,
+    change: FleetPanelMemberAccessChange,
+  ) => Promise<FleetPanelMemberAccess>
   readonly exportTeam?: FleetPanelSource['exportTeam']
   readonly exportArchive?: (teamId: string, includeWorkspace: boolean) => Promise<FleetPanelArchiveFile>
   readonly importArchive?: (file: File, projectRoot: string, mode: 'copy' | 'restore') => Promise<void>
@@ -4197,8 +7229,9 @@ export interface FleetPanelPaneOwner {
   readonly sendError: string | null
   readonly setDraft: (draft: string) => void
   readonly setUrgent: (urgent: boolean) => void
-  readonly sendMessage: () => void
+  readonly sendMessage: (files?: readonly File[]) => Promise<void>
   readonly loadMemberTrace?: FleetPanelSource['loadMemberTrace']
+  readonly subscribeMemberTrace?: FleetPanelSource['subscribeMemberTrace']
   readonly loadConversationMessages?: FleetPanelSource['loadConversationMessages']
   readonly loadResource?: FleetPanelSource['loadResource']
   readonly contextSource?: FleetChatReceiptSource
@@ -4211,15 +7244,21 @@ export interface FleetPanelPaneOwner {
   readonly nativeContext: FleetNativeContext
   readonly t: (key: string, values?: Readonly<Record<string, unknown>>) => string
   readonly SessionProvider: ComponentType<FleetTargetSessionProviderProps>
+  readonly ui: FleetPanelUi
 }
 
 export interface FleetPanelHomeOwner {
   readonly sessionId: string
   readonly fleet: FleetPanelSnapshot
+  readonly markdownRendererAvailable: boolean
   readonly focusedTeamId?: string
   readonly selectTeam: (teamId: string) => void
   readonly openTeamMessages: (teamId: string) => void
   readonly controlTeamById?: (teamId: string, action: FleetPanelTeamControlInput['action'], summary?: string) => Promise<void>
+  readonly loadTeamSettings?: FleetPanelSource['loadTeamSettings']
+  readonly updateTeamSettings?: (teamId: string, settings: FleetPanelTeamSettingsInput['settings']) => Promise<FleetPanelTeamSettings>
+  readonly updateBudget?: (teamId: string, input: Omit<FleetPanelBudgetInput, 'sessionId' | 'teamId'>) => Promise<FleetPanelTeamBudget>
+  readonly configureTeamRequest?: (teamId: string, request: FleetPanelTeamRequestInput['request']) => Promise<void>
   readonly exportTeam?: FleetPanelSource['exportTeam']
   readonly exportArchive?: (teamId: string, includeWorkspace: boolean) => Promise<FleetPanelArchiveFile>
   readonly importArchive?: (file: File, projectRoot: string, mode: 'copy' | 'restore') => Promise<void>
@@ -4229,11 +7268,20 @@ export interface FleetPanelHomeOwner {
   readonly nativeContext: FleetNativeContext
   readonly t: (key: string, values?: Readonly<Record<string, unknown>>) => string
   readonly SessionProvider: ComponentType<FleetTargetSessionProviderProps>
+  readonly ui: FleetPanelUi
 }
 
 export interface FleetPanelSidebarSectionOwner {
   readonly panel: FleetPanelHomeOwner | FleetPanelPaneOwner
   readonly tool: 'home' | FleetPanelToolId
+}
+
+const FLEET_PANEL_UI: FleetPanelUi = {
+  ToolButton: FleetPanelToolButton,
+  TeamSwitcher: FleetPanelTeamSwitcher,
+  ListRow,
+  SectionTitle,
+  MemberPopover: FleetMemberPopover,
 }
 
 export interface FleetPanelMessageOwner {
@@ -4266,6 +7314,7 @@ export interface FleetPanelResourceDiffOwner {
 interface FleetTeamPanelProps {
   readonly sessionId: string
   readonly source?: FleetPanelSource
+  readonly markdownRendererAvailable: boolean
   readonly renderSlot: FleetPanelRenderSlot
   readonly useSessions: FleetSnapshotSelectorHook
   readonly t: (key: string, values?: Readonly<Record<string, unknown>>) => string
@@ -4287,6 +7336,12 @@ type FleetSnapshotSelectorHook = <Selection>(
 interface FleetNativeSessionFace {
   getSnapshot(): any
   subscribe(listener: () => void): () => void
+  readonly projections?: {
+    faceOf(name: string): {
+      getSnapshot(): unknown
+      subscribe(listener: () => void): () => void
+    } | undefined
+  }
   open?(): Promise<void>
   resync?(): Promise<void>
   loadOlder(): Promise<void>
@@ -4301,6 +7356,10 @@ interface FleetNativeSessionFace {
 
 interface FleetNativeContext {
   session(sessionId: string): FleetNativeSessionFace | undefined
+  executeSessionCommand(sessionId: string, line: string): Promise<{
+    readonly kind: 'success' | 'error'
+    readonly text?: string
+  }>
   activateAssistant(sessionId: string, teamId: string, assistantId: string): Promise<void>
   openPath(path: string): Promise<void>
   openFile(sessionId: string, path: string): Promise<void>
@@ -4449,6 +7508,30 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
       source => selector(decorateSnapshot(source)),
       equality,
     )
+    const mailboxMembers = useMemo<readonly FleetPanelMember[]>(() => {
+      const team = fleetSnapshot.team?.teamId === mailboxTeamId ? fleetSnapshot.team : undefined
+      return team === undefined ? [] : [operator, ...teamAgents(team)]
+    }, [fleetSnapshot.team, mailboxTeamId])
+    const showMemberDetails = mailboxTeamId === undefined || sessionId === undefined
+      ? undefined
+      : (memberId: string) => {
+          requestFleetPanelNavigation({
+            sessionId,
+            teamId: mailboxTeamId,
+            memberId,
+            target: 'details',
+          })
+        }
+    const showMemberContext = mailboxTeamId === undefined || sessionId === undefined
+      ? undefined
+      : (memberId: string) => {
+          requestFleetPanelNavigation({
+            sessionId,
+            teamId: mailboxTeamId,
+            memberId,
+            target: 'context',
+          })
+        }
     const content = welcome === null && !fleetAssistant
       ? jsx(ChatView, props)
       : jsx(AgentFleetPrivateChat, {
@@ -4456,26 +7539,23 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
           useSession: decoratedUseSession,
           loadOlder: props.loadOlder as () => void,
           loadImage: props.loadImage as (attachment: unknown) => Promise<string>,
+          renderText: (text: string) => jsx(FleetMessageText, {
+            text,
+            members: mailboxMembers,
+            ...(fleetMarkdownRenderer === undefined ? {} : { markdownRenderer: fleetMarkdownRenderer }),
+            ...(showMemberDetails === undefined ? {} : { showMemberDetails }),
+            ...(showMemberContext === undefined ? {} : { showMemberContext }),
+          }),
           renderContext: () => jsx(ChatView, props),
           ...(welcome !== null || mailbox === undefined || sessionId === undefined ? {} : {
             mailbox,
             ...(mailboxTeamId === undefined ? {} : {
-              openMemberDetails: () => {
-                requestFleetPanelNavigation({
-                  sessionId,
-                  teamId: mailboxTeamId,
-                  memberId: mailbox.assistant.id,
-                  target: 'details',
-                })
-              },
-              openMemberContext: () => {
-                requestFleetPanelNavigation({
-                  sessionId,
-                  teamId: mailboxTeamId,
-                  memberId: mailbox.assistant.id,
-                  target: 'context',
-                })
-              },
+              ...(showMemberDetails === undefined ? {} : {
+                openMemberDetails: () => { showMemberDetails(mailbox.assistant.id) },
+              }),
+              ...(showMemberContext === undefined ? {} : {
+                openMemberContext: () => { showMemberContext(mailbox.assistant.id) },
+              }),
             }),
           }),
         })
@@ -4737,15 +7817,34 @@ export function resolveFleetPanelItem(
   return requested
 }
 
+export function fleetPanelSelectedMemberId(
+  team: FleetPanelTeamSnapshot,
+  tool: string,
+  item: string,
+): string | undefined {
+  if (tool === 'team' || tool === 'git') {
+    return teamAgents(team).find(member => member.id === item)?.id
+  }
+  if (tool === 'chat') {
+    const conversation = operatorConversations(team).find(candidate => candidate.id === item)
+    if (conversation?.kind !== 'direct') return undefined
+    return teamAgents(team).find(member => member.id === conversation.peerId)?.id
+  }
+  return undefined
+}
+
 export function FleetTeamPanel({
   sessionId,
   source,
+  markdownRendererAvailable,
   renderSlot,
   useSessions,
   nativeContext,
   SessionProvider,
   t,
 }: FleetTeamPanelProps): ReactElement {
+  installPanelStyles()
+  useFleetOperatorProfile()
   const snapshot = usePanelSnapshot(source)
   const joyride = useFleetJoyride()
   const [activeTool, setActiveTool] = useState<string>(() => readPanelPreferences().activeTool ?? 'home')
@@ -4854,6 +7953,16 @@ export function FleetTeamPanel({
   }
 
   const selectTool = (tool: string): void => {
+    if (tool === 'agent' && activeTeam !== undefined) {
+      const memberId = fleetPanelSelectedMemberId(activeTeam, activeTool, activeItem)
+      if (memberId !== undefined) {
+        setContextSource(undefined)
+        setItems(current => ({
+          ...current,
+          [`${activeTeam.teamId}:agent`]: agentViewItem(memberId, AGENT_CONTEXT_ITEM_ID),
+        }))
+      }
+    }
     setActiveTool(tool)
     setNavigationOpen(true)
   }
@@ -4880,7 +7989,7 @@ export function FleetTeamPanel({
     }).catch((error: unknown) => {
       updateCompose(current => ({
         ...current,
-        error: error instanceof Error ? error.message : '团队助理加载失败',
+        error: error instanceof Error ? error.message : panelText('团队助理加载失败', 'Team assistant could not be loaded'),
       }))
     }).finally(() => {
       assistantLoads.current.delete(key)
@@ -4921,10 +8030,10 @@ export function FleetTeamPanel({
     setActiveTool('home')
     setNavigationOpen(true)
   }
-  const sendMessage = (): void => {
+  const sendMessage = (files: readonly File[] = []): Promise<void> => {
     const text = composeState.draft.trim()
     if (activeTeam === undefined || activeTool !== 'chat' || activeItem === '' || composeKey === ''
-      || text === '' || composeState.sending) return
+      || (text === '' && files.length === 0) || composeState.sending) return Promise.resolve()
     const teamId = activeTeam.teamId
     const conversationId = activeItem
     const conversation = activeTeam.conversations.find(candidate => candidate.id === conversationId)
@@ -4943,24 +8052,25 @@ export function FleetTeamPanel({
       }))
     }
     if (source === undefined) {
-      updateCompose(current => ({ ...current, error: 'Fleet 数据源不可用' }))
-      return
+      updateCompose(current => ({ ...current, error: panelText('Fleet 数据源不可用', 'Fleet data source is unavailable') }))
+      return Promise.reject(new Error(panelText('Fleet 数据源不可用', 'Fleet data source is unavailable')))
     }
     if (composeState.urgent && conversation?.kind === 'channel' && mentions.length === 0) {
-      updateCompose(current => ({ ...current, error: '频道紧急消息需要明确 @ 至少一名成员' }))
-      return
+      updateCompose(current => ({ ...current, error: panelText('频道紧急消息需要明确 @ 至少一名成员', 'Urgent Channel messages must explicitly @mention at least one member') }))
+      return Promise.reject(new Error(panelText('频道紧急消息需要明确 @ 至少一名成员', 'Urgent Channel messages must explicitly @mention at least one member')))
     }
     updateCompose(current => ({ ...current, sending: true, error: null }))
-    const content: readonly FleetChatContentBlock[] = [{ type: 'text', text }]
-    const pending = Promise.resolve().then(() => source.sendMessage({
-      sessionId,
-      teamId,
-      conversationId,
-      content,
-      delivery,
-      ...(mentions.length === 0 ? {} : { mentions }),
-    }))
-    void pending.then(() => {
+    const pending = Promise.resolve().then(async () => {
+      await source.sendMessage({
+        sessionId,
+        teamId,
+        conversationId,
+        content: [{ type: 'text', text: fleetComposerMessageText(text, files) }],
+        delivery,
+        ...(mentions.length === 0 ? {} : { mentions }),
+      })
+    })
+    return pending.then(() => {
       updateCompose(current => ({
         ...current,
         draft: current.draft === submittedDraft ? '' : current.draft,
@@ -4969,8 +8079,9 @@ export function FleetTeamPanel({
     }).catch((error: unknown) => {
       updateCompose(current => ({
         ...current,
-        error: error instanceof Error ? error.message : '消息发送失败',
+        error: error instanceof Error ? error.message : panelText('消息发送失败', 'Message could not be sent'),
       }))
+      throw error
     }).finally(() => {
       updateCompose(current => ({ ...current, sending: false }))
     })
@@ -5013,19 +8124,19 @@ export function FleetTeamPanel({
     const dispose: Array<() => void> = []
     const register = (action: FleetJoyrideAction): void => { dispose.push(joyride.register(action)) }
     const views: readonly [Exclude<keyof typeof FLEET_VIEW_ACTIONS, 'home'>, string][] = [
-      ['chat', '消息'],
-      ['team', '成员'],
-      ['agent', 'Agent 视角'],
-      ['resources', '共享资源'],
-      ['activity', '团队动态'],
+      ['chat', panelText('消息', 'Messages')],
+      ['team', panelText('成员', 'Members')],
+      ['agent', panelText('Agent 视角', 'Agent view')],
+      ['resources', panelText('共享资源', 'Shared resources')],
+      ['activity', panelText('团队动态', 'Team activity')],
     ]
     for (const [tool, label] of views) {
       const id = FLEET_VIEW_ACTIONS[tool]
       register({
         id,
-        label: `打开 Fleet ${label}`,
+        label: panelText(`打开 Fleet ${label}`, `Open Fleet ${label}`),
         scope: 'fleet',
-        description: `只切换 Agent Fleet 面板内的${label}页面。`,
+        description: panelText(`只切换 Agent Fleet 面板内的${label}页面。`, `Switch only to the ${label} page inside Agent Fleet.`),
         target: () => fleetActionTarget(id),
         perform: async () => {
           if (activeTeam === undefined) throw new Error('No Fleet team is selected')
@@ -5038,9 +8149,9 @@ export function FleetTeamPanel({
     }
     register({
       id: 'fleet.inspect',
-      label: '读取 Fleet 当前视图',
+      label: panelText('读取 Fleet 当前视图', 'Read current Fleet view'),
       scope: 'fleet',
-      description: '返回当前 Fleet 页面里可见对象的有界摘要；消息页只返回与当前屏幕相交的消息，并截断长文本。',
+      description: panelText('返回当前 Fleet 页面里可见对象的有界摘要；消息页只返回与当前屏幕相交的消息，并截断长文本。', 'Return a bounded summary of visible objects on the current Fleet page. The message view returns only on-screen messages and truncates long text.'),
       target: () => fleetScrollTarget('main'),
       perform: () => {
         if (activeTeam === undefined) throw new Error('No Fleet team is selected')
@@ -5049,9 +8160,9 @@ export function FleetTeamPanel({
     })
     register({
       id: 'fleet.scroll',
-      label: '滚动 Fleet 当前视图',
+      label: panelText('滚动 Fleet 当前视图', 'Scroll current Fleet view'),
       scope: 'fleet',
-      description: '只滚动当前 Fleet 的 sidebar 或 main。direction 可为 up、down、left、right、top、bottom。',
+      description: panelText('只滚动当前 Fleet 的 sidebar 或 main。direction 可为 up、down、left、right、top、bottom。', 'Scroll only the current Fleet sidebar or main area. direction may be up, down, left, right, top, or bottom.'),
       options: () => ({ areas: ['sidebar', 'main'], directions: ['up', 'down', 'left', 'right', 'top', 'bottom'] }),
       target: () => fleetScrollTarget('main'),
       perform: async input => {
@@ -5067,9 +8178,9 @@ export function FleetTeamPanel({
     if (activeTeam !== undefined) {
       register({
         id: 'fleet.conversation.select',
-        label: '打开 Fleet 会话',
+        label: panelText('打开 Fleet 会话', 'Open Fleet conversation'),
         scope: 'fleet',
-        description: '只允许打开当前团队中用户可见的频道或私聊。输入会话 ID 或 {"conversationId":"…"}。',
+        description: panelText('只允许打开当前团队中用户可见的频道或私聊。输入会话 ID 或 {"conversationId":"…"}。', 'Open only Channels or direct messages visible to the user in the current Team. Enter a conversation ID or {"conversationId":"…"}.'),
         options: () => operatorConversations(activeTeam).map(conversation => ({
           conversationId: conversation.id,
           name: conversation.name,
@@ -5088,9 +8199,9 @@ export function FleetTeamPanel({
       })
       register({
         id: 'fleet.member.select',
-        label: '打开 Fleet 成员资料',
+        label: panelText('打开 Fleet 成员资料', 'Open Fleet member profile'),
         scope: 'fleet',
-        description: '只允许打开当前团队中的其他成员；直播 VTuber 不能打开自己的成员资料。输入成员 ID 或 {"memberId":"…"}。',
+        description: panelText('只允许打开当前团队中的其他成员；直播 VTuber 不能打开自己的成员资料。输入成员 ID 或 {"memberId":"…"}。', 'Open only other members in the current Team; a live VTuber cannot open its own member profile. Enter a member ID or {"memberId":"…"}.'),
         options: () => joyrideProfileMembers(activeTeam)
           .map(member => ({ memberId: member.id, name: member.name, role: member.role })),
         perform: async input => {
@@ -5103,9 +8214,9 @@ export function FleetTeamPanel({
       })
       register({
         id: 'fleet.agent.select',
-        label: '打开 Fleet Agent 内部视角',
+        label: panelText('打开 Fleet Agent 内部视角', 'Open Fleet Agent view'),
         scope: 'fleet',
-        description: '只允许打开当前团队成员的内部视角。输入成员 ID 或 {"memberId":"…"}。',
+        description: panelText('只允许打开当前团队成员的内部视角。输入成员 ID 或 {"memberId":"…"}。', 'Open only the internal view of a member in the current Team. Enter a member ID or {"memberId":"…"}.'),
         options: () => activeTeam.members.map(member => ({ memberId: member.id, name: member.name, role: member.role })),
         perform: async input => {
           const memberId = fleetActionId(input, 'memberId')
@@ -5122,9 +8233,9 @@ export function FleetTeamPanel({
       })
       register({
         id: 'fleet.agent.conversation.select',
-        label: '打开 Agent 视角中的会话',
+        label: panelText('打开 Agent 视角中的会话', 'Open conversation in Agent view'),
         scope: 'fleet',
-        description: '只允许打开指定成员实际可见的频道或私聊。输入 {"memberId":"…","conversationId":"…"}。',
+        description: panelText('只允许打开指定成员实际可见的频道或私聊。输入 {"memberId":"…","conversationId":"…"}。', 'Open only Channels or direct messages actually visible to the selected member. Enter {"memberId":"…","conversationId":"…"}.'),
         options: () => activeTeam.members.map(member => ({
           memberId: member.id,
           name: member.name,
@@ -5157,9 +8268,9 @@ export function FleetTeamPanel({
       })
       register({
         id: 'fleet.resource.select',
-        label: '打开 Fleet 团队文件',
+        label: panelText('打开 Fleet 团队文件', 'Open Fleet Team file'),
         scope: 'fleet',
-        description: '只允许打开当前团队已经注册的文件、计划或清单。输入资源 ID 或 {"resourceId":"…"}。',
+        description: panelText('只允许打开当前团队已经注册的文件、计划或清单。输入资源 ID 或 {"resourceId":"…"}。', 'Open only files, plans, or checklists already registered with the current Team. Enter a resource ID or {"resourceId":"…"}.'),
         options: () => activeTeam.resources.map(resource => ({
           resourceId: resource.id,
           name: resource.name,
@@ -5177,9 +8288,9 @@ export function FleetTeamPanel({
       })
       register({
         id: 'fleet.workspace.select',
-        label: '打开 Fleet 工作区信息',
+        label: panelText('打开 Fleet 工作区信息', 'Open Fleet workspace information'),
         scope: 'fleet',
-        description: '只允许选择当前团队已经挂载的工作区。输入工作区 ID 或 {"workspaceId":"…"}。',
+        description: panelText('只允许选择当前团队已经挂载的工作区。输入工作区 ID 或 {"workspaceId":"…"}。', 'Select only workspaces already mounted by the current Team. Enter a workspace ID or {"workspaceId":"…"}.'),
         options: () => (activeTeam.workspaces ?? []).map(workspace => ({
           workspaceId: workspace.id,
           name: workspace.name,
@@ -5197,9 +8308,9 @@ export function FleetTeamPanel({
       })
       register({
         id: 'fleet.workspace.open',
-        label: '在 DSH 中浏览 Fleet 工作区',
+        label: panelText('在 DSH 中浏览 Fleet 工作区', 'Browse Fleet workspace in DSH'),
         scope: 'fleet',
-        description: '只允许打开当前团队已经挂载的工作区根目录。输入工作区 ID 或 {"workspaceId":"…"}。',
+        description: panelText('只允许打开当前团队已经挂载的工作区根目录。输入工作区 ID 或 {"workspaceId":"…"}。', 'Open only the root of a workspace already mounted by the current Team. Enter a workspace ID or {"workspaceId":"…"}.'),
         options: () => (activeTeam.workspaces ?? []).map(workspace => ({
           workspaceId: workspace.id,
           name: workspace.name,
@@ -5215,9 +8326,9 @@ export function FleetTeamPanel({
       })
       register({
         id: 'fleet.activity.select',
-        label: '筛选 Fleet 团队动态',
+        label: panelText('筛选 Fleet 团队动态', 'Filter Fleet Team activity'),
         scope: 'fleet',
-        description: '只允许选择 all、message、resource、decision、memory 五种现有动态视图。输入筛选名或 {"kind":"…"}。',
+        description: panelText('只允许选择 all、message、resource、decision、memory 五种现有动态视图。输入筛选名或 {"kind":"…"}。', 'Choose one of the available activity views: all, message, resource, decision, or memory. Enter a filter name or {"kind":"…"}.'),
         options: () => ['all', 'message', 'resource', 'decision', 'memory'],
         perform: input => {
           const kind = typeof input === 'string' ? input : fleetActionId(input, 'kind')
@@ -5234,15 +8345,15 @@ export function FleetTeamPanel({
 
   const rail = jsxs('nav', {
     className: 'dsh-fleet-panel-rail',
-    'aria-label': 'Fleet 工具',
+    'aria-label': panelText('Fleet 工具', 'Fleet tools'),
     children: [
       jsx('button', {
         type: 'button',
         className: 'dsh-fleet-panel-rail-brand',
-        'aria-label': '团队首页',
+        'aria-label': panelText('团队首页', 'Team home'),
         'aria-current': visibleTool === 'home' ? 'page' : undefined,
         'data-joyride-action': FLEET_VIEW_ACTIONS.home,
-        title: '团队首页',
+        title: panelText('团队首页', 'Team home'),
         onClick: showTeamDirectory,
         children: jsx(HarmonyBrandIcon, {}),
       }),
@@ -5252,6 +8363,7 @@ export function FleetTeamPanel({
           activeTool: visibleTool,
           disabled: activeTeam === undefined,
           selectTool,
+          ui: FLEET_PANEL_UI,
         }),
       }),
     ],
@@ -5260,6 +8372,7 @@ export function FleetTeamPanel({
   const homeOwner: FleetPanelHomeOwner = {
     sessionId,
     fleet: effectiveSnapshot,
+    markdownRendererAvailable,
     ...(homeTeamId === null ? {} : { focusedTeamId: homeTeamId }),
     selectTeam,
     openTeamMessages,
@@ -5267,13 +8380,35 @@ export function FleetTeamPanel({
       controlTeamById: (teamId: string, action: FleetPanelTeamControlInput['action'], summary?: string) =>
         source.controlTeam?.({ sessionId, teamId, action, ...(summary === undefined ? {} : { summary }) }) ?? Promise.resolve(),
     }),
+    ...(source?.loadTeamSettings === undefined ? {} : { loadTeamSettings: source.loadTeamSettings }),
+    ...(source?.updateTeamSettings === undefined ? {} : {
+      updateTeamSettings: (teamId: string, settings: FleetPanelTeamSettingsInput['settings']) => source.updateTeamSettings?.({
+        sessionId,
+        teamId,
+        settings,
+      }) ?? Promise.reject(new Error(panelText('Fleet 团队设置接口不可用', 'Fleet Team settings API is unavailable'))),
+    }),
+    ...(source?.updateBudget === undefined ? {} : {
+      updateBudget: (teamId: string, input: Omit<FleetPanelBudgetInput, 'sessionId' | 'teamId'>) => source.updateBudget?.({
+        sessionId,
+        teamId,
+        ...input,
+      }) ?? Promise.reject(new Error(panelText('Fleet 预算接口不可用', 'Fleet budget API is unavailable'))),
+    }),
+    ...(source?.configureTeamRequest === undefined ? {} : {
+      configureTeamRequest: (teamId: string, request: FleetPanelTeamRequestInput['request']) => source.configureTeamRequest?.({
+        sessionId,
+        teamId,
+        request,
+      }) ?? Promise.reject(new Error(panelText('Fleet 团队模型配置不可用', 'Fleet Team model configuration is unavailable'))),
+    }),
     ...(source?.exportTeam === undefined ? {} : { exportTeam: source.exportTeam }),
     ...(source?.exportArchive === undefined ? {} : {
       exportArchive: (teamId: string, includeWorkspace: boolean) => source.exportArchive?.({
         sessionId,
         teamId,
         includeWorkspace,
-      }) ?? Promise.reject(new Error('Fleet 存档导出不可用')),
+      }) ?? Promise.reject(new Error(panelText('Fleet 存档导出不可用', 'Fleet archive export is unavailable'))),
     }),
     ...(source?.importArchive === undefined ? {} : {
       importArchive: (file: File, projectRoot: string, mode: 'copy' | 'restore') => source.importArchive?.({
@@ -5281,7 +8416,7 @@ export function FleetTeamPanel({
         file,
         projectRoot,
         mode,
-      }) ?? Promise.reject(new Error('Fleet 存档导入不可用')),
+      }) ?? Promise.reject(new Error(panelText('Fleet 存档导入不可用', 'Fleet archive import is unavailable'))),
     }),
     openNavigation: () => { setNavigationOpen(true) },
     renderPanelSlot: renderSlot,
@@ -5289,6 +8424,7 @@ export function FleetTeamPanel({
     nativeContext,
     SessionProvider,
     t,
+    ui: FLEET_PANEL_UI,
   }
   const paneOwner: FleetPanelPaneOwner | undefined = activeTeam === undefined ? undefined : {
     ...homeOwner,
@@ -5300,24 +8436,62 @@ export function FleetTeamPanel({
     showMemberContext,
     openResource,
     ...(tutorial || source?.uploadResource === undefined ? {} : {
-      uploadResource: (file: File) => source.uploadResource?.({ sessionId, teamId: activeTeam.teamId, file }) ?? Promise.resolve(),
+      uploadResource: (file: File) => source.uploadResource?.({ sessionId, teamId: activeTeam.teamId, file })
+        ?? Promise.reject(new Error(panelText('Fleet 资源上传不可用', 'Fleet resource upload is unavailable'))),
+    }),
+    ...(tutorial || source?.removeResource === undefined ? {} : {
+      removeResource: (resourceId: string) => source.removeResource?.({
+        sessionId,
+        teamId: activeTeam.teamId,
+        resourceId,
+      }) ?? Promise.reject(new Error(panelText('Fleet 资源移除不可用', 'Fleet resource removal is unavailable'))),
     }),
     ...(tutorial || source?.controlMember === undefined ? {} : {
       controlMember: (memberId: string, action: FleetPanelMemberControlInput['action']) =>
         source.controlMember?.({ sessionId, teamId: activeTeam.teamId, memberId, action }) ?? Promise.resolve(),
     }),
+    ...(tutorial || source?.configureMemberRequest === undefined ? {} : {
+      configureMemberRequest: (memberId: string, assistant: boolean, request: FleetPanelTeamRequestInput['request']) =>
+        source.configureMemberRequest?.({
+          sessionId,
+          teamId: activeTeam.teamId,
+          memberId,
+          assistant,
+          request,
+        }) ?? Promise.reject(new Error(panelText('Fleet 成员模型配置不可用', 'Fleet member model configuration is unavailable'))),
+    }),
     ...(tutorial || source?.loadMemberAuthorization === undefined ? {} : {
       loadMemberAuthorization: source.loadMemberAuthorization,
     }),
     ...(tutorial || source?.updateMemberPermissions === undefined ? {} : {
-      updateMemberPermissions: (memberId: string, groups?: readonly string[], reset?: boolean) =>
+      updateMemberPermissions: (
+        memberId: string,
+        assignment?: FleetPanelMemberPermissionAssignment,
+        reset?: boolean,
+      ) =>
         source.updateMemberPermissions?.({
           sessionId,
           teamId: activeTeam.teamId,
           memberId,
-          ...(groups === undefined ? {} : { groups }),
+          ...(assignment === undefined ? {} : { assignment }),
           ...(reset === undefined ? {} : { reset }),
-        }) ?? Promise.reject(new Error('Fleet 成员权限接口不可用')),
+        }) ?? Promise.reject(new Error(panelText('Fleet 成员权限接口不可用', 'Fleet member permissions API is unavailable'))),
+    }),
+    ...(tutorial || source?.loadMemberAccess === undefined ? {} : {
+      loadMemberAccess: (memberId: string, signal?: AbortSignal) => source.loadMemberAccess?.({
+        sessionId,
+        teamId: activeTeam.teamId,
+        memberId,
+      }, signal) ?? Promise.reject(new Error(panelText('Fleet 成员资源访问接口不可用', 'Fleet member resource access API is unavailable'))),
+    }),
+    ...(tutorial || source?.updateMemberAccess === undefined ? {} : {
+      updateMemberAccess: (memberId: string, change: FleetPanelMemberAccessChange) =>
+        source.updateMemberAccess?.({
+          sessionId,
+          teamId: activeTeam.teamId,
+          memberId,
+          change,
+        }) ?? Promise.reject(new Error(panelText('Fleet 成员资源访问接口不可用', 'Fleet member resource access API is unavailable'))),
     }),
     ...(tutorial || source?.controlTeam === undefined ? {} : {
       controlTeam: (action: FleetPanelTeamControlInput['action'], summary?: string) =>
@@ -5343,6 +8517,7 @@ export function FleetTeamPanel({
     },
     sendMessage,
     ...(source?.loadMemberTrace === undefined ? {} : { loadMemberTrace: source.loadMemberTrace }),
+    ...(source?.subscribeMemberTrace === undefined ? {} : { subscribeMemberTrace: source.subscribeMemberTrace }),
     ...(tutorial || source?.loadConversationMessages === undefined ? {} : {
       loadConversationMessages: source.loadConversationMessages,
     }),
@@ -5359,7 +8534,7 @@ export function FleetTeamPanel({
     'data-conversation-composer-overlay': '',
     'data-fleet-team-panel': '',
     'data-navigation-open': navigationOpen ? 'true' : 'false',
-    'aria-label': '团队面板',
+    'aria-label': panelText('团队面板', 'Team panel'),
     children: [
       rail,
       jsxs('aside', {
@@ -5382,13 +8557,13 @@ export function FleetTeamPanel({
         className: 'dsh-fleet-panel-resize-handle',
         'data-resizing': sidebarResizing ? 'true' : 'false',
         role: 'separator',
-        'aria-label': '调整侧边栏宽度',
+        'aria-label': panelText('调整侧边栏宽度', 'Resize sidebar'),
         'aria-orientation': 'vertical',
         'aria-valuemin': SIDEBAR_MIN_WIDTH,
         'aria-valuemax': SIDEBAR_MAX_WIDTH,
         'aria-valuenow': sidebarWidth,
         tabIndex: 0,
-        title: '拖动调整侧边栏宽度；双击恢复默认',
+        title: panelText('拖动调整侧边栏宽度；双击恢复默认', 'Drag to resize the sidebar; double-click to restore the default'),
         onPointerDown: startSidebarResize,
         onPointerMove: moveSidebarResize,
         onPointerUp: stopSidebarResize,
@@ -5436,25 +8611,23 @@ function PanelConnectionNotice({ connection, retry }: {
       jsx('span', {
         className: 'dsh-fleet-panel-connection-copy',
         children: loading
-          ? '正在连接 Fleet…'
-          : `Fleet 连接中断，正在显示上次同步的数据。${connection.error === undefined ? '' : ` ${connection.error}`}`,
+          ? panelText('正在连接 Fleet…', 'Connecting to Fleet…')
+          : panelText(
+              `Fleet 连接中断，正在显示上次同步的数据。${connection.error === undefined ? '' : ` ${connection.error}`}`,
+              `Fleet connection was interrupted. Showing the last synchronized data.${connection.error === undefined ? '' : ` ${connection.error}`}`,
+            ),
       }),
       !loading && retry !== undefined && jsx('button', {
         type: 'button',
         className: 'dsh-fleet-panel-connection-retry',
         onClick: () => { void retry() },
-        children: '重试',
+        children: panelText('重试', 'Retry'),
       }),
     ],
   })
 }
 
-export function FleetPanelToolButton({ owner, tool, label, children }: {
-  readonly owner: FleetPanelToolOwner
-  readonly tool: string
-  readonly label: string
-  readonly children: ReactNode
-}): ReactElement {
+export function FleetPanelToolButton({ owner, tool, label, actionId, children }: FleetPanelToolButtonProps): ReactElement {
   const active = owner.activeTool === tool
   return jsx('button', {
     type: 'button',
@@ -5462,7 +8635,7 @@ export function FleetPanelToolButton({ owner, tool, label, children }: {
     disabled: owner.disabled === true,
     'aria-label': label,
     'aria-current': active ? 'page' : undefined,
-    'data-joyride-action': FLEET_VIEW_ACTIONS[tool as keyof typeof FLEET_VIEW_ACTIONS],
+    'data-joyride-action': actionId ?? FLEET_VIEW_ACTIONS[tool as keyof typeof FLEET_VIEW_ACTIONS],
     title: label,
     onClick: () => { owner.selectTool(tool) },
     children,
@@ -5484,103 +8657,579 @@ function ToolButton({ owner, tool, label, icon }: {
 }
 
 function ChatTool(owner: FleetPanelToolOwner): ReactElement {
-  return jsx(ToolButton, { owner, tool: 'chat', label: '消息', icon: 'chat' })
+  return jsx(ToolButton, { owner, tool: 'chat', label: panelText('消息', 'Messages'), icon: 'chat' })
 }
 function TeamTool(owner: FleetPanelToolOwner): ReactElement {
-  return jsx(ToolButton, { owner, tool: 'team', label: '成员', icon: 'team' })
+  return jsx(ToolButton, { owner, tool: 'team', label: panelText('成员', 'Members'), icon: 'team' })
 }
 function AgentTool(owner: FleetPanelToolOwner): ReactElement {
-  return jsx(ToolButton, { owner, tool: 'agent', label: '单 Agent 视图', icon: 'agent' })
+  return jsx(ToolButton, { owner, tool: 'agent', label: panelText('单 Agent 视图', 'Single-Agent view'), icon: 'agent' })
 }
 function ResourcesTool(owner: FleetPanelToolOwner): ReactElement {
-  return jsx(ToolButton, { owner, tool: 'resources', label: '共享资源', icon: 'resources' })
+  return jsx(ToolButton, { owner, tool: 'resources', label: panelText('共享资源', 'Shared resources'), icon: 'resources' })
 }
 function ActivityTool(owner: FleetPanelToolOwner): ReactElement {
-  return jsx(ToolButton, { owner, tool: 'activity', label: '团队动态', icon: 'activity' })
+  return jsx(ToolButton, { owner, tool: 'activity', label: panelText('团队动态', 'Team activity'), icon: 'activity' })
 }
 
-function TeamSettingsDialog({ teamId, teamName, teamStatus, exportTeam, exportArchive, importArchive, onClose }: {
-  readonly teamId?: string
-  readonly teamName?: string
-  readonly teamStatus?: FleetPanelTeamSummary['status']
+export type TeamSettingsTab = 'general' | 'model' | 'budget' | 'access' | 'collaboration' | 'data' | 'danger'
+
+function formatBudgetTokens(value: number): string {
+  return new Intl.NumberFormat(panelText('zh-CN', 'en-US'), { notation: value >= 1_000_000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value)
+}
+
+function formatBudgetAmount(value: number, mode: FleetPanelBudgetMode): string {
+  if (mode === 'tokens') return `${formatBudgetTokens(value)} Token`
+  return new Intl.NumberFormat(panelText('zh-CN', 'en-US'), {
+    style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6,
+  }).format(value / 1_000_000)
+}
+
+function formatBudgetCompactTokens(value: number): string {
+  const scaled = value >= 1_000_000
+    ? { value: value / 1_000_000, suffix: 'M' }
+    : value >= 1_000
+      ? { value: value / 1_000, suffix: 'K' }
+      : { value, suffix: '' }
+  return `${new Intl.NumberFormat(panelText('zh-CN', 'en-US'), { maximumFractionDigits: scaled.value < 10 ? 1 : 0 }).format(scaled.value)}${scaled.suffix}`
+}
+
+function formatBudgetPopoverAmount(value: number, mode: FleetPanelBudgetMode): string {
+  return mode === 'tokens' ? formatBudgetCompactTokens(value) : formatBudgetAmount(value, mode)
+}
+
+function formatApproximateBudgetAmount(value: number, mode: FleetPanelBudgetMode): string {
+  const amount = formatBudgetPopoverAmount(value, mode)
+  return value === 0 ? amount : `~${amount}`
+}
+
+function budgetStateText(account: FleetPanelBudgetAccount): string {
+  if (account.state === 'exhausted') return panelText('已用尽', 'Exhausted')
+  if (account.state === 'danger') return panelText('即将用尽', 'Nearly exhausted')
+  if (account.state === 'warning') return panelText('接近上限', 'Near limit')
+  if (account.state === 'unlimited') return panelText('无限制', 'Unlimited')
+  return panelText('正常', 'Normal')
+}
+
+function BudgetUsage({ account, mode }: {
+  readonly account: FleetPanelBudgetAccount
+  readonly mode: FleetPanelBudgetMode
+}): ReactElement {
+  const percent = account.limit === undefined || account.limit === 0
+    ? 0
+    : Math.min(100, Math.round(account.used / account.limit * 100))
+  return jsxs('div', { className: 'dsh-fleet-panel-budget-usage', children: [
+    jsxs('div', { className: 'dsh-fleet-panel-budget-usage-head', children: [
+      jsx('span', { children: account.limit === undefined
+        ? panelText(`已使用 ${formatBudgetAmount(account.used, mode)}`, `${formatBudgetAmount(account.used, mode)} used`)
+        : panelText(`已使用 ${formatBudgetAmount(account.used, mode)} / ${formatBudgetAmount(account.limit, mode)}`, `${formatBudgetAmount(account.used, mode)} / ${formatBudgetAmount(account.limit, mode)} used`) }),
+      jsx('span', { 'data-state': account.state, children: budgetStateText(account) }),
+    ] }),
+    account.limit !== undefined && jsx('div', {
+      className: 'dsh-fleet-panel-budget-progress', role: 'progressbar',
+      'aria-valuemin': 0, 'aria-valuemax': account.limit, 'aria-valuenow': Math.min(account.used, account.limit),
+      children: jsx('span', { style: { width: `${percent}%` }, 'data-state': account.state }),
+    }),
+  ] })
+}
+
+interface BudgetRateDraft {
+  readonly multiplier: string
+  readonly input: string
+  readonly output: string
+  readonly cacheRead: string
+  readonly cacheWrite: string
+}
+
+function budgetModelKey(provider: string, model: string): string {
+  return JSON.stringify([provider, model])
+}
+
+export function FleetBudgetMeter({ teamId, budget: suppliedBudget, memberId, Tooltip }: {
+  readonly teamId: string
+  readonly budget?: FleetPanelTeamBudget
+  readonly memberId?: string
+  readonly Tooltip?: ComponentType<{
+    readonly label: string
+    readonly side: 'top'
+    readonly delayMs: number
+    readonly disabled: boolean
+    readonly children: ReactElement
+  }>
+}): ReactElement {
+  installPanelStyles()
+  const popover = useFleetAnchoredPopover('below-end')
+  const subscribe = useCallback((listener: () => void) => teamDirectorySource?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE, [])
+  const liveBudget = useSyncExternalStore(
+    subscribe,
+    () => teamDirectorySource?.getSnapshot().team?.teamId === teamId
+      ? teamDirectorySource.getSnapshot().team?.budget
+      : undefined,
+    () => undefined,
+  )
+  const budget = suppliedBudget ?? liveBudget
+  const member = memberId === undefined ? undefined : budget?.members.find(candidate => candidate.memberId === memberId)
+  const account = memberId === undefined ? budget?.team : member
+  const scopeName = member === undefined
+    ? panelText('团队预算', 'Team budget')
+    : panelText(`${member.name} 的预算`, `${member.name} budget`)
+
+  const percent = account?.limit === undefined || account.limit === 0
+    ? 0
+    : Math.min(100, account.used / account.limit * 100)
+  const circumference = 2 * Math.PI * 6
+  const ringOffset = account?.limit === undefined ? circumference : circumference * (1 - percent / 100)
+  const state = account?.state ?? 'unlimited'
+  const tooltipLabel = account === undefined
+    ? panelText('正在载入预算', 'Loading budget')
+    : account.limit === undefined
+      ? panelText('预算未设置上限', 'No budget limit set')
+      : panelText(`预算已使用 ${Math.round(percent)}%`, `${Math.round(percent)}% of budget used`)
+  const displayedMembers = member === undefined ? budget?.members ?? [] : [member]
+  const displayedMemberUsage = displayedMembers.reduce((total, candidate) => total + candidate.used, 0)
+  const progressSegments = displayedMemberUsage === 0 || account === undefined || account.limit === undefined
+    ? []
+    : displayedMembers.filter(candidate => candidate.used > 0).map(candidate => ({
+        member: candidate,
+        width: percent * candidate.used / displayedMemberUsage,
+      }))
+  const figures = account === undefined || budget === undefined
+    ? '—'
+    : `${formatApproximateBudgetAmount(account.used, budget.mode)} / ${account.limit === undefined ? '∞' : formatBudgetPopoverAmount(account.limit, budget.mode)}`
+  const trigger = jsx('button', {
+    type: 'button',
+    className: 'dsh-fleet-budget-meter-button',
+    'aria-label': tooltipLabel,
+    'aria-haspopup': 'dialog',
+    'aria-expanded': popover.open,
+    'aria-controls': popover.popoverId,
+    ...(Tooltip === undefined ? { title: tooltipLabel } : {}),
+    onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
+      if (account !== undefined) popover.toggleAt(event.currentTarget)
+    },
+    children: jsxs('svg', { className: 'dsh-fleet-budget-meter-ring', viewBox: '0 0 16 16', 'aria-hidden': 'true', children: [
+      jsx('circle', { className: 'dsh-fleet-budget-meter-track', cx: 8, cy: 8, r: 6 }),
+      jsx('circle', {
+        className: 'dsh-fleet-budget-meter-value', cx: 8, cy: 8, r: 6,
+        'data-state': state,
+        strokeDasharray: circumference,
+        strokeDashoffset: ringOffset,
+      }),
+    ] }),
+  })
+
+  return jsxs('span', { className: 'dsh-fleet-budget-meter', children: [
+    Tooltip === undefined ? trigger : jsx(Tooltip, {
+      label: tooltipLabel,
+      side: 'top',
+      delayMs: 200,
+      disabled: popover.open,
+      children: trigger,
+    }),
+    popover.mounted && account !== undefined && budget !== undefined && jsxs('section', {
+      ref: popover.popover,
+      id: popover.popoverId,
+      popover: 'auto',
+      className: 'dsh-fleet-budget-popover',
+      role: 'dialog',
+      'aria-label': scopeName,
+      onClick: (event: ReactMouseEvent<HTMLElement>) => { event.stopPropagation() },
+      children: [
+        jsxs('div', { className: 'dsh-fleet-budget-popover-header', children: [
+          jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: account.limit === undefined
+            ? panelText('预算未设置上限', 'No budget limit set')
+            : panelText('预算已用', '') }),
+          account.limit !== undefined && jsx('span', { className: 'dsh-fleet-budget-popover-percent', children: `${Math.round(percent)}%` }),
+          account.limit !== undefined && jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: panelText('', 'of budget used') }),
+          jsx('span', { className: 'dsh-fleet-budget-popover-figures', children: figures }),
+        ] }),
+        jsx('div', { className: 'dsh-fleet-budget-popover-progress', role: 'progressbar',
+          'aria-valuemin': 0, 'aria-valuemax': account.limit ?? undefined, 'aria-valuenow': account.limit === undefined ? undefined : Math.min(account.used, account.limit),
+          children: progressSegments.map(segment => jsx('span', {
+            title: `${segment.member.name} · ${formatBudgetPopoverAmount(segment.member.used, budget.mode)}`,
+            style: { width: `${segment.width}%`, '--budget-member-color': segment.member.color ?? '#737985' } as CSSProperties,
+          }, segment.member.memberId)),
+        }),
+        jsx('dl', { className: 'dsh-fleet-budget-popover-members', children: displayedMembers.map(candidate => jsxs('div', {
+          className: 'dsh-fleet-budget-popover-member',
+          children: [
+            jsxs('dt', { children: [
+              jsx('span', { className: 'dsh-fleet-budget-popover-member-dot', style: { '--budget-member-color': candidate.color ?? '#737985' } as CSSProperties, 'aria-hidden': 'true' }),
+              jsx('span', { className: 'dsh-fleet-budget-popover-member-name', children: candidate.name }),
+              jsx('span', {
+                className: 'dsh-fleet-budget-popover-member-role',
+                children: candidate.active
+                  ? candidate.role
+                  : `${candidate.role}${candidate.role === '' ? '' : ' · '}${panelText('已移除', 'Removed')}`,
+              }),
+            ] }),
+            jsx('dd', {
+              className: 'dsh-fleet-budget-popover-member-usage',
+              children: formatApproximateBudgetAmount(candidate.used, budget.mode),
+            }),
+          ],
+        }, candidate.memberId)) }),
+        teamId !== FLEET_TUTORIAL_TEAM_ID && jsx('button', {
+          type: 'button', className: 'dsh-fleet-budget-popover-manage',
+          onClick: () => { popover.close(); requestFleetTeamSettings(teamId, 'budget') },
+          children: panelText('管理预算与模型计费', 'Manage budget and model pricing'),
+        }),
+      ],
+    }),
+  ] })
+}
+
+function BudgetSettings({ budget, updateBudget, onUpdated, setError, setNotice }: {
+  readonly budget: FleetPanelTeamBudget
+  readonly updateBudget?: (input: Omit<FleetPanelBudgetInput, 'sessionId' | 'teamId'>) => Promise<FleetPanelTeamBudget>
+  readonly onUpdated: (budget: FleetPanelTeamBudget) => void
+  readonly setError: (error: string | undefined) => void
+  readonly setNotice: (notice: string | undefined) => void
+}): ReactElement {
+  const [limits, setLimits] = useState<Readonly<Record<string, string>>>({})
+  const [mode, setMode] = useState<FleetPanelBudgetMode>(budget.mode)
+  const [rates, setRates] = useState<Readonly<Record<string, BudgetRateDraft>>>({})
+  const [busy, setBusy] = useState<string>()
+
+  const models = [...new Map([
+    ...budget.configuredModels,
+    ...budget.rates,
+    ...budget.team.models,
+    ...budget.members.flatMap(member => member.models),
+  ].map(item => [budgetModelKey(item.provider, item.model), { provider: item.provider, model: item.model }] as const)).values()]
+    .sort((left, right) => left.provider.localeCompare(right.provider) || left.model.localeCompare(right.model))
+
+  useEffect(() => {
+    setMode(budget.mode)
+    setLimits({
+      team: budget.team.limit === undefined ? '' : budget.mode === 'cost' ? String(budget.team.limit / 1_000_000) : String(budget.team.limit),
+      ...Object.fromEntries(budget.members.map(member => [member.memberId, member.limit === undefined ? '' : budget.mode === 'cost' ? String(member.limit / 1_000_000) : String(member.limit)])),
+    })
+    setRates(Object.fromEntries(models.map(model => {
+      const configured = budget.rates.find(rate => rate.provider === model.provider && rate.model === model.model)
+      return [budgetModelKey(model.provider, model.model), {
+        multiplier: configured?.multiplier?.toString() ?? '',
+        input: configured?.inputUsdPerMillion?.toString() ?? '',
+        output: configured?.outputUsdPerMillion?.toString() ?? '',
+        cacheRead: configured?.cacheReadUsdPerMillion?.toString() ?? '',
+        cacheWrite: configured?.cacheWriteUsdPerMillion?.toString() ?? '',
+      }]
+    })))
+  }, [budget])
+
+  const change = async (scope: 'team' | 'member', member: string | undefined, reset: boolean): Promise<void> => {
+    if (updateBudget === undefined || busy !== undefined) return
+    const key = member ?? 'team'
+    const normalized = (limits[key] ?? '').trim()
+    const parsed = normalized === '' ? undefined : Number(normalized)
+    const limit = parsed === undefined ? undefined : budget.mode === 'cost' ? Math.round(parsed * 1_000_000) : parsed
+    if (!reset && normalized !== '' && (!Number.isFinite(parsed) || parsed! <= 0
+      || !Number.isSafeInteger(limit))) {
+      setError(budget.mode === 'cost'
+        ? panelText('成本额度必须是大于 0 的美元金额；留空表示无限制。', 'The cost limit must be a USD amount above 0. Leave blank for unlimited.')
+        : panelText('Token 额度必须是正整数；留空表示无限制。', 'The token limit must be a positive integer. Leave blank for unlimited.'))
+      return
+    }
+    setBusy(`${reset ? 'reset' : 'save'}:${key}`)
+    setError(undefined)
+    setNotice(undefined)
+    try {
+      const updated = await updateBudget({
+        scope,
+        ...(member === undefined ? {} : { member }),
+        ...(reset ? { reset: true as const } : { limit: limit ?? null }),
+      })
+      onUpdated(updated)
+      setNotice(reset
+        ? scope === 'team'
+          ? panelText('团队和全部成员已开始新的预算周期。', 'The Team and all members started a new budget cycle.')
+          : panelText('成员已开始新的独立预算周期；团队累计用量不变。', 'The member started a new budget cycle. Team usage is unchanged.')
+        : panelText('预算上限已更新，从下一次模型调用开始生效。', 'Budget limit updated for the next model call.'))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : panelText('无法更新预算', 'Could not update budget'))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const updateRate = (key: string, field: keyof BudgetRateDraft, value: string): void => {
+    setRates(current => ({
+      ...current,
+      [key]: { multiplier: '', input: '', output: '', cacheRead: '', cacheWrite: '', ...current[key], [field]: value },
+    }))
+  }
+
+  const saveAccounting = async (): Promise<void> => {
+    if (updateBudget === undefined || busy !== undefined) return
+    const configured: FleetPanelBudgetModelRate[] = []
+    for (const model of models) {
+      const key = budgetModelKey(model.provider, model.model)
+      const draft = rates[key] ?? { multiplier: '', input: '', output: '', cacheRead: '', cacheWrite: '' }
+      if (mode === 'tokens') {
+        const multiplier = draft.multiplier.trim() === '' ? 1 : Number(draft.multiplier)
+        if (!Number.isFinite(multiplier) || multiplier <= 0) {
+          setError(panelText(`${model.provider} · ${model.model} 的倍率必须大于 0。`, `The multiplier for ${model.provider} · ${model.model} must be above 0.`))
+          return
+        }
+        configured.push({ provider: model.provider, model: model.model, ...(multiplier === 1 ? {} : { multiplier }) })
+        continue
+      }
+      const values = [draft.input, draft.output, draft.cacheRead, draft.cacheWrite]
+      if (values.some(value => value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0)) {
+        setError(panelText(`${model.provider} · ${model.model} 需要填写四项非负价格。`, `${model.provider} · ${model.model} requires all four non-negative prices.`))
+        return
+      }
+      configured.push({
+        provider: model.provider,
+        model: model.model,
+        inputUsdPerMillion: Number(draft.input),
+        outputUsdPerMillion: Number(draft.output),
+        cacheReadUsdPerMillion: Number(draft.cacheRead),
+        cacheWriteUsdPerMillion: Number(draft.cacheWrite),
+      })
+    }
+    setBusy('accounting')
+    setError(undefined)
+    setNotice(undefined)
+    try {
+      const updated = await updateBudget({ scope: 'team', accounting: { mode, rates: configured } })
+      onUpdated(updated)
+      setNotice(mode !== budget.mode
+        ? panelText('计量模式已切换，团队和成员已开始新预算周期；请设置新单位下的额度。', 'Accounting mode changed. The Team and members started new budget cycles; set limits in the new unit.')
+        : panelText('模型计费配置已更新，从下一次模型调用开始生效。', 'Model accounting updated for the next model call.'))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : panelText('无法更新计量模式', 'Could not update accounting mode'))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const limitEditor = (scope: 'team' | 'member', member?: string): ReactElement => {
+    const key = member ?? 'team'
+    return jsxs('div', { className: 'dsh-fleet-panel-budget-actions', children: [
+      jsx('input', {
+        type: 'number', min: budget.mode === 'cost' ? 0.000001 : 1, step: budget.mode === 'cost' ? 0.01 : 1,
+        inputMode: 'decimal', value: limits[key] ?? '',
+        disabled: updateBudget === undefined || busy !== undefined,
+        'aria-label': scope === 'team' ? panelText('团队预算上限', 'Team budget limit') : panelText('成员预算上限', 'Member budget limit'),
+        placeholder: panelText('无限制', 'Unlimited'),
+        onChange: (event: ChangeEvent<HTMLInputElement>) => { setLimits(current => ({ ...current, [key]: event.currentTarget.value })) },
+      }),
+      jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-inline-action', disabled: updateBudget === undefined || busy !== undefined, onClick: () => { void change(scope, member, false) }, children: busy === `save:${key}` ? panelText('正在保存…', 'Saving…') : panelText('应用', 'Apply') }),
+      jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-secondary', disabled: updateBudget === undefined || busy !== undefined, onClick: () => { void change(scope, member, true) }, children: busy === `reset:${key}` ? panelText('正在重置…', 'Resetting…') : panelText('新周期', 'New cycle') }),
+    ] })
+  }
+
+  return jsxs('section', { children: [
+    jsx('h3', { children: panelText('预算', 'Budget') }),
+    jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('团队共享总额度和成员独立额度同时生效。预算可以按 Token 倍率折算，也可以按模型详细价格累计实际成本。', 'The shared Team limit and each member limit apply together. Account with token multipliers or detailed model costs.') }),
+    jsxs('div', { className: 'dsh-fleet-panel-budget-accounting', children: [
+      jsxs('div', { className: 'dsh-fleet-panel-budget-mode', role: 'radiogroup', 'aria-label': panelText('预算计量模式', 'Budget accounting mode'), children: [
+        jsx('button', { type: 'button', role: 'radio', 'aria-checked': mode === 'tokens', disabled: busy !== undefined, onClick: () => { setMode('tokens') }, children: panelText('Token × 倍率', 'Tokens × multiplier') }),
+        jsx('button', { type: 'button', role: 'radio', 'aria-checked': mode === 'cost', disabled: busy !== undefined, onClick: () => { setMode('cost') }, children: panelText('成本', 'Cost') }),
+      ] }),
+      mode !== budget.mode && jsx('p', { className: 'dsh-fleet-panel-settings-error', role: 'status', children: panelText('切换计量模式会开始新周期，并清空当前团队与成员额度。', 'Changing accounting mode starts a new cycle and clears current Team and member limits.') }),
+      models.length === 0
+        ? jsx('p', { className: 'dsh-fleet-panel-settings-field-note', children: panelText('团队尚未配置可计费模型。', 'The Team has no configured models yet.') })
+        : jsx('div', { className: 'dsh-fleet-panel-budget-rate-list', children: models.map(model => {
+            const key = budgetModelKey(model.provider, model.model)
+            const draft = rates[key] ?? { multiplier: '', input: '', output: '', cacheRead: '', cacheWrite: '' }
+            return jsxs('div', { className: 'dsh-fleet-panel-budget-rate', children: [
+              jsxs('div', { className: 'dsh-fleet-panel-budget-rate-name', children: [jsx('strong', { children: model.model }), jsx('small', { children: model.provider })] }),
+              mode === 'tokens'
+                ? jsxs('label', { children: [jsx('span', { children: panelText('倍率', 'Multiplier') }), jsx('input', { type: 'number', min: 0.000001, step: 0.1, value: draft.multiplier, placeholder: '1', disabled: busy !== undefined, onChange: (event: ChangeEvent<HTMLInputElement>) => { updateRate(key, 'multiplier', event.currentTarget.value) } })] })
+                : jsx('div', { className: 'dsh-fleet-panel-budget-price-grid', children: ([['input', panelText('输入', 'Input')], ['output', panelText('输出', 'Output')], ['cacheRead', panelText('缓存读取', 'Cache read')], ['cacheWrite', panelText('缓存写入', 'Cache write')]] as const).map(([field, label]) => jsxs('label', { children: [jsx('span', { children: label }), jsx('input', { type: 'number', min: 0, step: 0.01, value: draft[field], placeholder: '$ / 1M', disabled: busy !== undefined, onChange: (event: ChangeEvent<HTMLInputElement>) => { updateRate(key, field, event.currentTarget.value) } })] }, field)) }),
+            ] }, key)
+          }) }),
+      jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-inline-action', disabled: updateBudget === undefined || busy !== undefined, onClick: () => { void saveAccounting() }, children: busy === 'accounting' ? panelText('正在保存…', 'Saving…') : mode === budget.mode ? panelText('应用计费配置', 'Apply accounting') : panelText('切换并开始新周期', 'Switch and start new cycle') }),
+    ] }),
+    jsxs('div', { className: 'dsh-fleet-panel-budget-team', children: [
+      jsxs('div', { className: 'dsh-fleet-panel-budget-title', children: [jsx('strong', { children: panelText('团队总额度', 'Team total') }), jsx('small', { children: panelText(`本周期 ${budget.team.calls} 次调用`, `${budget.team.calls} calls this cycle`) })] }),
+      jsx(BudgetUsage, { account: budget.team, mode: budget.mode }),
+      limitEditor('team'),
+    ] }),
+    jsxs('div', { className: 'dsh-fleet-panel-budget-members', children: [
+      jsx('h4', { children: panelText('成员额度', 'Member limits') }),
+      jsx('p', { className: 'dsh-fleet-panel-settings-field-note', children: panelText('成员新周期只清零该成员的独立计数，不会返还团队已用额度。团队助理也作为成员计费。', 'A member cycle clears only that member counter and does not refund Team usage. Team assistants are metered as members too.') }),
+      ...budget.members.filter(member => member.active).map(member => jsxs('div', { className: 'dsh-fleet-panel-budget-member', children: [
+        jsxs('div', { className: 'dsh-fleet-panel-budget-title', children: [
+          jsxs('span', { children: [jsx('strong', { children: member.name }), jsx('small', { children: `${member.role}${member.assistant ? panelText(' · 助理', ' · Assistant') : ''}` })] }),
+          jsx('small', { children: panelText(`${member.calls} 次调用`, `${member.calls} calls`) }),
+        ] }),
+        jsx(BudgetUsage, { account: member, mode: budget.mode }),
+        limitEditor('member', member.memberId),
+      ] }, member.memberId)),
+    ] }),
+    (budget.team.unmeteredCalls > 0 || budget.members.some(member => member.unmeteredCalls > 0)) && jsx('p', { className: 'dsh-fleet-panel-settings-error', role: 'status', children: panelText('部分模型调用没有返回 Token usage，已记录调用次数但无法计入 Token 总量。', 'Some model calls returned no token usage. Their call counts are recorded, but their tokens cannot be included.') }),
+  ] })
+}
+
+function TeamSettingsDialog({ sessionId, team, initialTab = 'general', loadSettings, updateSettings, updateBudget, configureRequest, exportTeam, exportArchive, finishTeam, onClose }: {
+  readonly sessionId: string
+  readonly team: FleetPanelTeamSummary
+  readonly initialTab?: TeamSettingsTab
+  readonly loadSettings?: FleetPanelSource['loadTeamSettings']
+  readonly updateSettings?: (settings: FleetPanelTeamSettingsInput['settings']) => Promise<FleetPanelTeamSettings>
+  readonly updateBudget?: (input: Omit<FleetPanelBudgetInput, 'sessionId' | 'teamId'>) => Promise<FleetPanelTeamBudget>
+  readonly configureRequest?: (request: FleetPanelTeamRequestInput['request']) => Promise<void>
   readonly exportTeam?: FleetPanelSource['exportTeam']
   readonly exportArchive?: (teamId: string, includeWorkspace: boolean) => Promise<FleetPanelArchiveFile>
-  readonly importArchive?: (file: File, projectRoot: string, mode: 'copy' | 'restore') => Promise<void>
+  readonly finishTeam?: (summary: string) => Promise<void>
   readonly onClose: () => void
 }): ReactElement {
   const dialog = useRef<HTMLElement>(null)
-  const closeButton = useRef<HTMLButtonElement>(null)
-  const archiveInput = useRef<HTMLInputElement>(null)
+  const [tab, setTab] = useState<TeamSettingsTab>(initialTab)
+  const [settings, setSettings] = useState<FleetPanelTeamSettings>()
+  const [savedSettings, setSavedSettings] = useState<FleetPanelTeamSettings>()
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [configurationExporting, setConfigurationExporting] = useState(false)
   const [archiveExporting, setArchiveExporting] = useState(false)
-  const [archiveImporting, setArchiveImporting] = useState(false)
   const [includeWorkspace, setIncludeWorkspace] = useState(false)
-  const [importMode, setImportMode] = useState<'copy' | 'restore'>('copy')
-  const [importRoot, setImportRoot] = useState('')
+  const [modelKey, setModelKey] = useState('')
+  const [providerName, setProviderName] = useState('')
+  const [modelName, setModelName] = useState('')
+  const [modelDirty, setModelDirty] = useState(false)
+  const [effort, setEffort] = useState('')
+  const [effortDirty, setEffortDirty] = useState(false)
+  const [maxTokens, setMaxTokens] = useState('')
+  const [maxTokensDirty, setMaxTokensDirty] = useState(false)
+  const [ending, setEnding] = useState(false)
   const [error, setError] = useState<string>()
   const [notice, setNotice] = useState<string>()
+  const [modelDirectory, modelDirectoryState] = useFleetPanelModelDirectory(sessionId)
 
-  const downloadBlob = (blob: Blob, name: string): void => {
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = name
-    document.body.append(link)
-    link.click()
-    link.remove()
-    URL.revokeObjectURL(url)
-  }
+  const load = useCallback(async (): Promise<void> => {
+    if (loadSettings === undefined) {
+      setLoading(false)
+      setError(panelText('当前 Fleet 实例不支持运行期团队设置。', 'This Fleet instance does not support runtime Team settings.'))
+      return
+    }
+    setLoading(true)
+    setError(undefined)
+    try {
+      const value = await loadSettings(team.teamId)
+      setSettings(value)
+      setSavedSettings(value)
+      setModelKey(value.request.mixed.model || value.request.provider === undefined || value.request.model === undefined
+        ? ''
+        : JSON.stringify([value.request.provider, value.request.model]))
+      setProviderName(value.request.mixed.model ? '' : value.request.provider ?? '')
+      setModelName(value.request.mixed.model ? '' : value.request.model ?? '')
+      setEffort(value.request.mixed.reasoningEffort ? '' : value.request.reasoningEffort ?? '')
+      setMaxTokens(value.request.mixed.maxTokens ? '' : value.request.maxTokens?.toString() ?? '')
+      setModelDirty(false)
+      setEffortDirty(false)
+      setMaxTokensDirty(false)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : panelText('无法读取团队设置', 'Could not load Team settings'))
+    } finally {
+      setLoading(false)
+    }
+  }, [loadSettings, team.teamId])
+
+  useEffect(() => { void load() }, [load])
 
   const downloadConfiguration = async (): Promise<void> => {
-    if (teamId === undefined || exportTeam === undefined || configurationExporting) return
+    if (exportTeam === undefined || configurationExporting) return
     setConfigurationExporting(true)
     setError(undefined)
     setNotice(undefined)
     try {
-      const configuration = await exportTeam(teamId)
-      const blob = new Blob([`${JSON.stringify(configuration, null, 2)}\n`], { type: 'application/json' })
-      const stem = (teamName ?? 'fleet-team').trim()
-        .replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]+/g, '-')
-        .replace(/^-|-$/g, '')
-      downloadBlob(blob, `${stem || 'fleet-team'}.fleet-team.json`)
+      const configuration = await exportTeam(team.teamId)
+      downloadFleetTeamConfiguration(settings?.name ?? team.teamName, configuration)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '团队导出失败')
+      setError(reason instanceof Error ? reason.message : panelText('团队导出失败', 'Team export failed'))
     } finally {
       setConfigurationExporting(false)
     }
   }
 
   const downloadArchive = async (): Promise<void> => {
-    if (teamId === undefined || exportArchive === undefined || archiveExporting || teamStatus !== 'paused') return
+    if (exportArchive === undefined || archiveExporting || team.status !== 'paused') return
     setArchiveExporting(true)
     setError(undefined)
     setNotice(undefined)
     try {
-      const archive = await exportArchive(teamId, includeWorkspace)
-      downloadBlob(archive.blob, archive.name)
-      setNotice('团队存档已导出。')
+      const archive = await exportArchive(team.teamId, includeWorkspace)
+      downloadFleetBlob(archive.blob, archive.name)
+      setNotice(panelText('团队存档已导出。', 'Team archive exported.'))
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '团队存档导出失败')
+      setError(reason instanceof Error ? reason.message : panelText('团队存档导出失败', 'Team archive export failed'))
     } finally {
       setArchiveExporting(false)
     }
   }
 
-  const importArchiveFile = async (file: File): Promise<void> => {
-    if (importArchive === undefined || archiveImporting || importRoot.trim() === '') return
-    setArchiveImporting(true)
+  const profile = (value: FleetPanelTeamSettings): FleetPanelTeamSettingsInput['settings'] => ({
+    name: value.name,
+    positioning: value.positioning,
+    rules: value.rules,
+    collaborationMethod: value.collaborationMethod,
+    updateDensity: value.updateDensity,
+    notificationPolicy: value.notificationPolicy,
+    contentPreference: value.contentPreference,
+  })
+  const profileDirty = settings !== undefined && savedSettings !== undefined
+    && JSON.stringify(profile(settings)) !== JSON.stringify(profile(savedSettings))
+  const manualModelEntry = modelDirectory === undefined
+    || (modelDirectoryState.status === 'error' && modelDirectoryState.groups.length === 0)
+
+  const saveProfile = async (): Promise<void> => {
+    if (settings === undefined || updateSettings === undefined || saving || settings.name.trim() === '') return
+    setSaving(true)
     setError(undefined)
     setNotice(undefined)
     try {
-      await importArchive(file, importRoot.trim(), importMode)
-      setNotice(importMode === 'copy'
-        ? '团队副本已导入并分配新身份，当前保持暂停状态。'
-        : '原团队已恢复，当前保持暂停状态。')
+      const updated = await updateSettings(profile(settings))
+      setSettings(updated)
+      setSavedSettings(updated)
+      setNotice(panelText('团队设置已保存；已加载成员将在下一次模型调用中接收更新。', 'Team settings saved. Loaded members will receive the update on their next model call.'))
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '团队存档导入失败')
+      setError(reason instanceof Error ? reason.message : panelText('无法保存团队设置', 'Could not save Team settings'))
     } finally {
-      setArchiveImporting(false)
-      if (archiveInput.current !== null) archiveInput.current.value = ''
+      setSaving(false)
+    }
+  }
+
+  const saveRequest = async (): Promise<void> => {
+    if (configureRequest === undefined || saving || (!modelDirty && !effortDirty && !maxTokensDirty)) return
+    const request: FleetPanelTeamRequestInput['request'] = {}
+    if (modelDirty) {
+      if (manualModelEntry) {
+        if (providerName.trim() === '' || modelName.trim() === '') {
+          setError(panelText('Provider 和模型名称都不能为空。', 'Provider and model name are both required.'))
+          return
+        }
+        Object.assign(request, { provider: providerName.trim(), model: modelName.trim() })
+      } else {
+        const selected = modelDirectoryState.groups.flatMap(group => group.models.map(model => ({
+          key: JSON.stringify([group.id, model.id]), provider: group.id, model: model.id,
+        }))).find(choice => choice.key === modelKey)
+        if (selected === undefined) return
+        Object.assign(request, { provider: selected.provider, model: selected.model })
+      }
+    }
+    if (effortDirty) Object.assign(request, { reasoningEffort: effort === '' ? null : effort })
+    if (maxTokensDirty) {
+      const normalized = maxTokens.trim()
+      if (normalized !== '' && (!Number.isSafeInteger(Number(normalized)) || Number(normalized) <= 0)) {
+        setError(panelText('最大 Token 必须是正整数。', 'Maximum tokens must be a positive integer.'))
+        return
+      }
+      Object.assign(request, { maxTokens: normalized === '' ? null : Number(normalized) })
+    }
+    setSaving(true)
+    setError(undefined)
+    setNotice(undefined)
+    try {
+      await configureRequest(request)
+      await load()
+      setNotice(panelText('整队模型配置已更新，从下一次模型调用开始生效。', 'Team model configuration updated. It takes effect on the next model call.'))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : panelText('无法更新整队模型配置', 'Could not update Team model configuration'))
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -5606,11 +9255,11 @@ function TeamSettingsDialog({ teamId, teamName, teamStatus, exportTeam, exportAr
       className: 'dsh-fleet-panel-settings-dialog',
       role: 'dialog',
       'aria-modal': 'true',
-      'aria-label': teamName === undefined ? '团队设置' : `${teamName} 团队设置`,
+      'aria-label': panelText(`${settings?.name ?? team.teamName} 团队设置`, `${settings?.name ?? team.teamName} Team settings`),
       tabIndex: -1,
       onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
         if (event.key !== 'Tab') return
-        const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)'))
+        const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)'))
         const first = focusable[0]
         const last = focusable.at(-1)
         if (first === undefined || last === undefined) return
@@ -5628,171 +9277,164 @@ function TeamSettingsDialog({ teamId, teamName, teamStatus, exportTeam, exportAr
           children: [
             jsx('h2', {
               className: 'dsh-fleet-panel-settings-title',
-              children: teamName === undefined ? '团队设置' : `${teamName} · 团队设置`,
+              children: panelText(`${settings?.name ?? team.teamName} · 团队设置`, `${settings?.name ?? team.teamName} · Team settings`),
             }),
             jsx('button', {
-              ref: closeButton,
               type: 'button',
               className: 'dsh-fleet-panel-settings-close',
-              'aria-label': '关闭团队设置',
-              title: '关闭',
+              'aria-label': panelText('关闭团队设置', 'Close Team settings'),
+              title: panelText('关闭', 'Close'),
               onClick: onClose,
               children: jsx(PanelIcon, { name: 'close', size: 16 }),
             }),
           ],
         }),
-        jsxs('div', {
-          className: 'dsh-fleet-panel-settings-body',
+        loading ? jsx('div', { className: 'dsh-fleet-panel-settings-empty', children: panelText('正在读取团队设置…', 'Loading Team settings…') }) : jsxs('div', {
+          className: 'dsh-fleet-panel-settings-workspace',
           children: [
-            jsxs('div', {
-              className: 'dsh-fleet-panel-settings-section',
-              children: [
-                jsx('h3', { className: 'dsh-fleet-panel-settings-section-title', children: '团队配置' }),
-                jsx('p', {
-                  className: 'dsh-fleet-panel-settings-section-copy',
-                  children: '只导出团队结构和成员配置，用于创建新的同类团队；不会包含运行记录与文件。',
-                }),
-                jsx('button', {
-                  type: 'button',
-                  className: 'dsh-fleet-panel-settings-export',
-                  disabled: teamId === undefined || exportTeam === undefined || configurationExporting,
-                  onClick: () => { void downloadConfiguration() },
-                  children: [
-                    jsx(PanelIcon, { name: 'download', size: 16 }),
-                    configurationExporting ? '正在导出…' : '导出团队配置',
-                  ],
-                }),
-              ],
+            jsx('nav', {
+              className: 'dsh-fleet-panel-settings-nav',
+              'aria-label': panelText('团队设置分区', 'Team settings sections'),
+              children: ([
+                ['general', panelText('常规', 'General')], ['model', panelText('模型与推理', 'Model & reasoning')],
+                ['budget', panelText('预算', 'Budget')],
+                ['access', panelText('用户接入', 'User access')], ['collaboration', panelText('协作约定', 'Collaboration')],
+                ['data', panelText('数据与存档', 'Data & archives')], ['danger', panelText('危险操作', 'Danger zone')],
+              ] as const).map(([id, label]) => jsx('button', {
+                type: 'button', className: 'dsh-fleet-panel-settings-nav-item',
+                'aria-current': tab === id ? 'page' : undefined,
+                'data-danger': id === 'danger' ? 'true' : undefined,
+                onClick: () => { setTab(id); setError(undefined); setNotice(undefined) }, children: label,
+              }, id)),
             }),
-            jsxs('div', {
-              className: 'dsh-fleet-panel-settings-section dsh-fleet-panel-settings-section-separated',
-              children: [
-                jsx('h3', { className: 'dsh-fleet-panel-settings-section-title', children: '完整团队存档' }),
-                jsx('p', {
-                  className: 'dsh-fleet-panel-settings-section-copy',
-                  children: teamStatus === 'paused'
-                    ? '包含成员上下文、消息、轨迹、共享文档和下游插件数据；导入后可直接继续运行。'
-                    : '完整存档需要一致的持久化状态。请先暂停团队，再进行导出。',
-                }),
-                jsxs('label', {
-                  className: 'dsh-fleet-panel-settings-check',
-                  children: [
-                    jsx('input', {
-                      type: 'checkbox',
-                      checked: includeWorkspace,
-                      disabled: archiveExporting,
-                      onChange: (event: ChangeEvent<HTMLInputElement>) => { setIncludeWorkspace(event.currentTarget.checked) },
-                    }),
-                    jsx('span', { children: '同时打包工作区文件' }),
-                  ],
-                }),
-                jsx('button', {
-                  type: 'button',
-                  className: 'dsh-fleet-panel-settings-export',
-                  disabled: teamId === undefined || teamStatus !== 'paused' || exportArchive === undefined || archiveExporting,
-                  title: teamStatus === 'paused' ? '导出完整团队存档' : '请先暂停团队',
-                  onClick: () => { void downloadArchive() },
-                  children: [
-                    jsx(PanelIcon, { name: 'download', size: 16 }),
-                    archiveExporting ? '正在生成存档…' : '导出完整存档',
-                  ],
-                }),
-                jsxs('fieldset', {
-                  className: 'dsh-fleet-panel-settings-import-mode',
-                  disabled: archiveImporting,
-                  children: [
-                    jsx('legend', { children: '导入方式' }),
-                    jsxs('label', {
-                      className: 'dsh-fleet-panel-settings-import-choice',
-                      children: [
-                        jsx('input', {
-                          type: 'radio',
-                          name: 'fleet-archive-import-mode',
-                          value: 'copy',
-                          checked: importMode === 'copy',
-                          onChange: () => { setImportMode('copy') },
-                        }),
-                        jsxs('span', {
-                          children: [
-                            jsx('strong', { children: '创建为新团队' }),
-                            jsx('small', { children: '分配新的团队和成员身份，可与原团队同时存在。' }),
-                          ],
-                        }),
-                      ],
-                    }),
-                    jsxs('label', {
-                      className: 'dsh-fleet-panel-settings-import-choice',
-                      children: [
-                        jsx('input', {
-                          type: 'radio',
-                          name: 'fleet-archive-import-mode',
-                          value: 'restore',
-                          checked: importMode === 'restore',
-                          onChange: () => { setImportMode('restore') },
-                        }),
-                        jsxs('span', {
-                          children: [
-                            jsx('strong', { children: '恢复原团队' }),
-                            jsx('small', { children: '保留原始身份；目标环境中不能已有同一团队或成员会话。' }),
-                          ],
-                        }),
-                      ],
-                    }),
-                  ],
-                }),
-                jsx('label', {
-                  className: 'dsh-fleet-panel-settings-field',
-                  children: [
-                    jsx('span', { children: '导入到工作区路径' }),
-                    jsx('input', {
-                      type: 'text',
-                      value: importRoot,
-                      disabled: archiveImporting,
-                      placeholder: '/path/to/project',
-                      onChange: (event: ChangeEvent<HTMLInputElement>) => { setImportRoot(event.currentTarget.value) },
-                    }),
-                  ],
-                }),
-                jsx('input', {
-                  ref: archiveInput,
-                  className: 'dsh-fleet-panel-settings-file-input',
-                  type: 'file',
-                  accept: '.fleet.tar.gz,.tar.gz,.tgz,application/gzip',
-                  disabled: archiveImporting,
-                  onChange: (event: ChangeEvent<HTMLInputElement>) => {
-                    const file = event.currentTarget.files?.[0]
-                    if (file !== undefined) void importArchiveFile(file)
+            jsx('div', {
+              className: 'dsh-fleet-panel-settings-content',
+              children: settings === undefined ? jsx('p', { className: 'dsh-fleet-panel-settings-error', children: error })
+                : tab === 'general' ? jsxs('section', { children: [
+                  jsx('h3', { children: panelText('常规', 'General') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('修改团队在 Fleet 中的名称与长期定位；稳定的 Team ID 不会改变。', 'Change how the Team is named and positioned in Fleet. Its stable Team ID does not change.') }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('团队名称', 'Team name') }), jsx('input', { value: settings.name, onChange: (event: ChangeEvent<HTMLInputElement>) => setSettings({ ...settings, name: event.currentTarget.value }) })] }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('团队定位', 'Team positioning') }), jsx('textarea', { value: settings.positioning, rows: 5, placeholder: panelText('描述团队长期负责什么，以及不负责什么', 'Describe what the Team owns over time and what it does not own'), onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setSettings({ ...settings, positioning: event.currentTarget.value }) })] }),
+                  jsxs('dl', { className: 'dsh-fleet-panel-settings-facts', children: [jsx('dt', { children: 'Team ID' }), jsx('dd', { children: team.teamId }), jsx('dt', { children: panelText('主要工作区', 'Primary Workspace') }), jsx('dd', { children: settings.projectRoot })] }),
+                ] }) : tab === 'access' ? jsxs('section', { children: [
+                  jsx('h3', { children: panelText('用户接入', 'User access') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('控制团队向你汇报的详细程度、通知时机和内容表达偏好。', 'Control how much detail the Team reports, when it notifies you, and how it presents content.') }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('更新详细度', 'Update detail') }), jsx('select', { value: settings.updateDensity, onChange: (event: ChangeEvent<HTMLSelectElement>) => setSettings({ ...settings, updateDensity: event.currentTarget.value as FleetPanelTeamSettings['updateDensity'] }), children: [jsx('option', { value: 'concise', children: panelText('简洁', 'Concise') }), jsx('option', { value: 'balanced', children: panelText('均衡', 'Balanced') }), jsx('option', { value: 'detailed', children: panelText('详细', 'Detailed') })] })] }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('通知时机', 'Notification timing') }), jsx('select', { value: settings.notificationPolicy, onChange: (event: ChangeEvent<HTMLSelectElement>) => setSettings({ ...settings, notificationPolicy: event.currentTarget.value as FleetPanelTeamSettings['notificationPolicy'] }), children: [jsx('option', { value: 'decisions', children: panelText('仅需决策时', 'Decisions only') }), jsx('option', { value: 'milestones', children: panelText('重要里程碑', 'Important milestones') }), jsx('option', { value: 'continuous', children: panelText('持续更新', 'Continuous updates') })] })] }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('内容偏好', 'Content preference') }), jsx('textarea', { value: settings.contentPreference, rows: 5, placeholder: panelText('例如：结论优先，技术细节按需展开', 'For example: lead with conclusions and expand technical detail on demand'), onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setSettings({ ...settings, contentPreference: event.currentTarget.value }) })] }),
+                ] }) : tab === 'collaboration' ? jsxs('section', { children: [
+                  jsx('h3', { children: panelText('协作约定', 'Collaboration') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('这些约定会作为团队长期指导，并发送给当前已加载的成员。', 'These agreements become durable Team guidance and are sent to currently loaded members.') }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('规则与偏好', 'Rules and preferences') }), jsx('textarea', { value: settings.rules, rows: 6, onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setSettings({ ...settings, rules: event.currentTarget.value }) })] }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('协作方式', 'Collaboration method') }), jsx('textarea', { value: settings.collaborationMethod, rows: 7, onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setSettings({ ...settings, collaborationMethod: event.currentTarget.value }) })] }),
+                ] }) : tab === 'model' ? jsxs('section', { children: [
+                  jsx('h3', { children: panelText('模型与推理', 'Model & reasoning') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('统一修改普通成员和团队助理；不会暂停或重启 Agent，从下一次模型调用开始生效。', 'Apply one configuration to members and Team assistants without pausing or restarting Agents. It takes effect on the next model call.') }),
+                  manualModelEntry ? jsxs('div', { className: 'dsh-fleet-panel-settings-model-grid', children: [
+                    jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: 'Provider' }), jsx('input', { value: providerName, placeholder: settings.request.mixed.model && !modelDirty ? panelText('当前成员配置不一致', 'Current member settings differ') : 'memorax', onChange: (event: ChangeEvent<HTMLInputElement>) => { setProviderName(event.currentTarget.value); setModelDirty(true) } })] }),
+                    jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('模型名称', 'Model name') }), jsx('input', { value: modelName, placeholder: settings.request.mixed.model && !modelDirty ? panelText('当前成员配置不一致', 'Current member settings differ') : 'deepseek-v4-flash', onChange: (event: ChangeEvent<HTMLInputElement>) => { setModelName(event.currentTarget.value); setModelDirty(true) } })] }),
+                  ] }) : jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('模型', 'Model') }), jsx('select', { value: modelKey, disabled: modelDirectoryState.status === 'loading', onChange: (event: ChangeEvent<HTMLSelectElement>) => { setModelKey(event.currentTarget.value); setModelDirty(true) }, children: [
+                    settings.request.mixed.model && !modelDirty && jsx('option', { value: '', children: panelText('当前成员配置不一致', 'Current member settings differ') }),
+                    !settings.request.mixed.model && modelKey !== '' && jsx('option', { value: modelKey, children: `${settings.request.provider ?? '—'} · ${settings.request.model ?? '—'}` }),
+                    ...modelDirectoryState.groups.map(group => jsx('optgroup', { label: group.name, children: group.models.map(model => jsx('option', { value: JSON.stringify([group.id, model.id]), children: model.name }, model.id)) }, group.id)),
+                  ] })] }),
+                  manualModelEntry && jsx('p', { className: 'dsh-fleet-panel-settings-field-note', children: panelText('当前实例未提供模型目录，请填写 DSH 中已配置的 Provider 和模型标识。', 'This instance does not provide a model catalog. Enter a Provider and model identifier configured in DSH.') }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('推理强度', 'Reasoning effort') }), jsx('select', { value: effort, onChange: (event: ChangeEvent<HTMLSelectElement>) => { setEffort(event.currentTarget.value); setEffortDirty(true) }, children: [settings.request.mixed.reasoningEffort && !effortDirty && jsx('option', { value: '', children: panelText('当前成员配置不一致', 'Current member settings differ') }), !settings.request.mixed.reasoningEffort && jsx('option', { value: '', children: panelText('使用模型默认值', 'Use model default') }), ...['low', 'medium', 'high', 'xhigh', 'max'].map(value => jsx('option', { value, children: value }, value))] })] }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('最大 Token', 'Maximum tokens') }), jsx('input', { type: 'number', min: 1, step: 1, value: maxTokens, placeholder: settings.request.mixed.maxTokens && !maxTokensDirty ? panelText('当前成员配置不一致', 'Current member settings differ') : panelText('使用模型默认值', 'Use model default'), onChange: (event: ChangeEvent<HTMLInputElement>) => { setMaxTokens(event.currentTarget.value); setMaxTokensDirty(true) } })] }),
+                  modelDirectoryState.status === 'error' && jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-inline-action', onClick: () => { void modelDirectory?.load() }, children: panelText('重新读取模型目录', 'Reload model catalog') }),
+                ] }) : tab === 'budget' ? jsx(BudgetSettings, {
+                  budget: settings.budget,
+                  updateBudget,
+                  onUpdated: (budget: FleetPanelTeamBudget) => {
+                    setSettings(current => current === undefined ? current : { ...current, budget })
+                    setSavedSettings(current => current === undefined ? current : { ...current, budget })
                   },
-                }),
-                jsx('button', {
-                  type: 'button',
-                  className: 'dsh-fleet-panel-settings-export',
-                  disabled: importArchive === undefined || archiveImporting || importRoot.trim() === '',
-                  onClick: () => { archiveInput.current?.click() },
-                  children: [
-                    jsx(PanelIcon, { name: 'upload', size: 16 }),
-                    archiveImporting
-                      ? '正在导入存档…'
-                      : importMode === 'copy' ? '选择存档并创建副本' : '选择存档并恢复',
-                  ],
-                }),
-                error !== undefined && jsx('p', {
-                  className: 'dsh-fleet-panel-settings-error',
-                  role: 'alert',
-                  children: error,
-                }),
-                notice !== undefined && jsx('p', {
-                  className: 'dsh-fleet-panel-settings-notice',
-                  role: 'status',
-                  children: notice,
-                }),
-              ],
+                  setError,
+                  setNotice,
+                }) : tab === 'data' ? jsxs('section', { children: [
+                  jsx('h3', { children: panelText('数据与存档', 'Data & archives') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('配置导出用于创建同类团队；完整存档包含运行上下文和插件数据。', 'Configuration export creates similar Teams. A complete archive includes runtime context and plugin data.') }),
+                  jsxs('div', { className: 'dsh-fleet-panel-settings-action-row', children: [jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-export', disabled: exportTeam === undefined || configurationExporting, onClick: () => { void downloadConfiguration() }, children: [jsx(PanelIcon, { name: 'download', size: 16 }), configurationExporting ? panelText('正在导出…', 'Exporting…') : panelText('导出团队配置', 'Export Team configuration')] })] }),
+                  jsx('hr', {}),
+                  jsx('h4', { children: panelText('完整团队存档', 'Complete Team archive') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: team.status === 'paused' ? panelText('团队已暂停，可以生成一致的完整存档。', 'The Team is paused and ready for a consistent archive.') : panelText('请先在团队概况中暂停团队，再导出完整存档。', 'Pause the Team from its overview before exporting a complete archive.') }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-check', children: [jsx('input', { type: 'checkbox', checked: includeWorkspace, disabled: archiveExporting, onChange: (event: ChangeEvent<HTMLInputElement>) => { setIncludeWorkspace(event.currentTarget.checked) } }), jsx('span', { children: panelText('同时打包工作区文件', 'Include Workspace files') })] }),
+                  jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-export', disabled: team.status !== 'paused' || exportArchive === undefined || archiveExporting, title: team.status === 'paused' ? undefined : panelText('请先暂停团队', 'Pause the Team first'), onClick: () => { void downloadArchive() }, children: [jsx(PanelIcon, { name: 'download', size: 16 }), archiveExporting ? panelText('正在生成存档…', 'Creating archive…') : panelText('导出完整存档', 'Export complete archive')] }),
+                ] }) : jsxs('section', { className: 'dsh-fleet-panel-settings-danger', children: [
+                  jsx('h3', { children: panelText('危险操作', 'Danger zone') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('终结后团队进入归档，成员会话和历史记录仍会保留，但不能继续运行。', 'Finishing archives the Team. Member Sessions and history remain, but the Team can no longer run.') }),
+                  jsx('button', { type: 'button', disabled: finishTeam === undefined, onClick: () => { setEnding(true) }, children: panelText('终结团队', 'Finish Team') }),
+                ] }),
             }),
           ],
         }),
+        !loading && jsxs('footer', { className: 'dsh-fleet-panel-settings-footer', children: [
+          jsxs('div', { className: 'dsh-fleet-panel-settings-feedback', children: [error !== undefined && jsx('span', { 'data-error': 'true', role: 'alert', children: error }), notice !== undefined && jsx('span', { role: 'status', children: notice })] }),
+          jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-secondary', onClick: onClose, children: panelText('关闭', 'Close') }),
+          (tab === 'general' || tab === 'access' || tab === 'collaboration') && jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-primary', disabled: !profileDirty || saving || settings?.name.trim() === '' || updateSettings === undefined, onClick: () => { void saveProfile() }, children: saving ? panelText('正在保存…', 'Saving…') : panelText('保存设置', 'Save settings') }),
+          tab === 'model' && jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-primary', disabled: saving || (!modelDirty && !effortDirty && !maxTokensDirty) || configureRequest === undefined, onClick: () => { void saveRequest() }, children: saving ? panelText('正在应用…', 'Applying…') : panelText('应用到整队', 'Apply to Team') }),
+        ] }),
+        ending && finishTeam !== undefined && jsx(EndTeamDialog, { teamName: settings?.name ?? team.teamName, onClose: () => { setEnding(false) }, onConfirm: finishTeam }),
       ],
     }),
   })
+}
+
+function TeamImportDialog({ importArchive, onClose }: {
+  readonly importArchive: (file: File, projectRoot: string, mode: 'copy' | 'restore') => Promise<void>
+  readonly onClose: () => void
+}): ReactElement {
+  const dialog = useRef<HTMLElement>(null)
+  const input = useRef<HTMLInputElement>(null)
+  const [mode, setMode] = useState<'copy' | 'restore'>('copy')
+  const [root, setRoot] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const importFile = async (file: File): Promise<void> => {
+    if (busy || root.trim() === '') return
+    setBusy(true); setError(undefined)
+    try { await importArchive(file, root.trim(), mode); onClose() } catch (reason) {
+      setError(reason instanceof Error ? reason.message : panelText('团队存档导入失败', 'Team archive import failed'))
+    } finally { setBusy(false); if (input.current !== null) input.current.value = '' }
+  }
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    dialog.current?.focus()
+    const closeOnEscape = (event: globalThis.KeyboardEvent): void => {
+      if (event.key !== 'Escape' || busy) return
+      event.preventDefault()
+      onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape)
+      previousFocus?.focus()
+    }
+  }, [busy, onClose])
+
+  return jsx('div', { className: 'dsh-fleet-panel-settings-overlay', children: jsxs('section', { ref: dialog, className: 'dsh-fleet-panel-settings-dialog dsh-fleet-panel-import-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': panelText('导入团队', 'Import Team'), tabIndex: -1, onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Tab') return
+    const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)'))
+    const first = focusable[0]
+    const last = focusable.at(-1)
+    if (first === undefined || last === undefined) return
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
+      event.preventDefault(); last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus()
+    }
+  }, children: [
+    jsxs('header', { className: 'dsh-fleet-panel-settings-head', children: [jsx('h2', { className: 'dsh-fleet-panel-settings-title', children: panelText('导入团队', 'Import Team') }), jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-close', 'aria-label': panelText('关闭导入', 'Close import'), onClick: onClose, children: jsx(PanelIcon, { name: 'close', size: 16 }) })] }),
+    jsxs('div', { className: 'dsh-fleet-panel-settings-body', children: [
+      jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('从完整团队存档创建副本，或在当前实例中恢复原团队身份。', 'Create a copy from a complete Team archive, or restore its original identity in this instance.') }),
+      jsxs('fieldset', { className: 'dsh-fleet-panel-settings-import-mode', disabled: busy, children: [jsx('legend', { children: panelText('导入方式', 'Import mode') }), ...([['copy', panelText('创建为新团队', 'Create as new Team'), panelText('分配新的团队和成员身份。', 'Assign new Team and member identities.')], ['restore', panelText('恢复原团队', 'Restore original Team'), panelText('保留存档中的原始身份。', 'Keep the original archived identities.')]] as const).map(([value, title, copy]) => jsxs('label', { className: 'dsh-fleet-panel-settings-import-choice', children: [jsx('input', { type: 'radio', name: 'fleet-import-mode', checked: mode === value, onChange: () => { setMode(value) } }), jsxs('span', { children: [jsx('strong', { children: title }), jsx('small', { children: copy })] })] }, value))] }),
+      jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('目标工作区路径', 'Destination Workspace path') }), jsx('input', { value: root, disabled: busy, placeholder: '/path/to/project', onChange: (event: ChangeEvent<HTMLInputElement>) => { setRoot(event.currentTarget.value) } })] }),
+      jsx('input', { ref: input, className: 'dsh-fleet-panel-settings-file-input', type: 'file', accept: '.fleet.tar.gz,.tar.gz,.tgz,application/gzip', onChange: (event: ChangeEvent<HTMLInputElement>) => { const file = event.currentTarget.files?.[0]; if (file !== undefined) void importFile(file) } }),
+      error !== undefined && jsx('p', { className: 'dsh-fleet-panel-settings-error', role: 'alert', children: error }),
+    ] }),
+    jsxs('footer', { className: 'dsh-fleet-panel-settings-footer', children: [jsx('span', { className: 'dsh-fleet-panel-settings-feedback' }), jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-secondary', disabled: busy, onClick: onClose, children: panelText('取消', 'Cancel') }), jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-primary', disabled: busy || root.trim() === '', onClick: () => { input.current?.click() }, children: busy ? panelText('正在导入…', 'Importing…') : panelText('选择存档', 'Choose archive') })] }),
+  ] }) })
 }
 
 function EndTeamDialog({ teamName, onClose, onConfirm }: {
@@ -5827,7 +9469,7 @@ function EndTeamDialog({ teamName, onClose, onConfirm }: {
     setSubmitting(true)
     setError(undefined)
     void onConfirm(reason).then(onClose).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : '无法终结团队')
+      setError(reason instanceof Error ? reason.message : panelText('无法终结团队', 'Could not finish Team'))
     }).finally(() => { setSubmitting(false) })
   }
 
@@ -5838,17 +9480,17 @@ function EndTeamDialog({ teamName, onClose, onConfirm }: {
       className: 'dsh-fleet-panel-settings-dialog',
       role: 'dialog',
       'aria-modal': 'true',
-      'aria-label': `终结 ${teamName}`,
+      'aria-label': panelText(`终结 ${teamName}`, `Finish ${teamName}`),
       tabIndex: -1,
       children: [
         jsxs('header', {
           className: 'dsh-fleet-panel-settings-head',
           children: [
-            jsx('h2', { className: 'dsh-fleet-panel-settings-title', children: `终结 ${teamName}` }),
+            jsx('h2', { className: 'dsh-fleet-panel-settings-title', children: panelText(`终结 ${teamName}`, `Finish ${teamName}`) }),
             jsx('button', {
               type: 'button',
               className: 'dsh-fleet-panel-settings-close',
-              'aria-label': '取消终结团队',
+              'aria-label': panelText('取消终结团队', 'Cancel finishing Team'),
               disabled: submitting,
               onClick: onClose,
               children: jsx(PanelIcon, { name: 'close', size: 16 }),
@@ -5860,18 +9502,18 @@ function EndTeamDialog({ teamName, onClose, onConfirm }: {
           children: [
             jsx('p', {
               className: 'dsh-fleet-panel-control-dialog-copy',
-              children: '终结会结束当前工作并关闭团队成员。团队记录仍会保留在已归档列表中，但不能继续运行。',
+              children: panelText('终结会结束当前工作并关闭团队成员。团队记录仍会保留在已归档列表中，但不能继续运行。', 'Finishing ends current work and closes Team members. Team records remain in the archived list but cannot resume.'),
             }),
             jsxs('label', {
               className: 'dsh-fleet-panel-control-dialog-label',
               children: [
-                '终结摘要',
+                panelText('终结摘要', 'Finish summary'),
                 jsx('textarea', {
                   ref: input,
                   className: 'dsh-fleet-panel-control-dialog-input',
                   value: summary,
                   disabled: submitting,
-                  placeholder: '说明终结原因和需要保留的状态',
+                  placeholder: panelText('说明终结原因和需要保留的状态', 'Explain why the Team is finishing and what state should be preserved'),
                   onChange: (event: { readonly currentTarget: { readonly value: string } }) => { setSummary(event.currentTarget.value) },
                 }),
               ],
@@ -5887,7 +9529,7 @@ function EndTeamDialog({ teamName, onClose, onConfirm }: {
               className: 'dsh-fleet-panel-control-button',
               disabled: submitting,
               onClick: onClose,
-              children: '取消',
+              children: panelText('取消', 'Cancel'),
             }),
             jsx('button', {
               type: 'button',
@@ -5895,7 +9537,7 @@ function EndTeamDialog({ teamName, onClose, onConfirm }: {
               'data-danger': 'true',
               disabled: submitting || summary.trim() === '',
               onClick: confirm,
-              children: submitting ? '正在终结…' : '终结团队',
+              children: submitting ? panelText('正在终结…', 'Finishing…') : panelText('终结团队', 'Finish Team'),
             }),
           ],
         }),
@@ -5937,30 +9579,116 @@ function handleRadioMenuKeyDown(
   else items[(current <= 0 ? items.length : current) - 1]?.focus()
 }
 
-function SidebarHead({ teams, selectedTeamId, label, selectTeam, exportTeam, exportArchive, importArchive, secondary }: {
+function useFleetRadioMenu(selectedKey: string | undefined, itemCount: number) {
+  const [open, setOpen] = useState(false)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const menu = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (open && menu.current !== null) focusCurrentRadioMenuItem(menu.current)
+  }, [itemCount, open, selectedKey])
+
+  const close = (restoreFocus: boolean): void => {
+    setOpen(false)
+    if (restoreFocus) queueMicrotask(() => { trigger.current?.focus() })
+  }
+  const onBlur = (event: FocusEvent<HTMLDivElement>): void => {
+    const next = event.relatedTarget
+    if (!(next instanceof Node) || !event.currentTarget.contains(next)) setOpen(false)
+  }
+  const onTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>): void => {
+    if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      setOpen(true)
+    }
+  }
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    handleRadioMenuKeyDown(event, () => { close(true) })
+  }
+  return { open, setOpen, trigger, menu, close, onBlur, onTriggerKeyDown, onMenuKeyDown }
+}
+
+export function FleetPanelTeamSwitcher({ teams, selectedTeamId, label, selectTeam }: FleetPanelTeamSwitcherProps): ReactElement {
+  const radio = useFleetRadioMenu(selectedTeamId, teams.length)
+
+  return jsxs('div', {
+    className: 'dsh-fleet-panel-team-switcher',
+    onBlur: radio.onBlur,
+    children: [
+      jsxs('button', {
+        ref: radio.trigger,
+        type: 'button',
+        className: 'dsh-fleet-panel-team-switch',
+        'aria-haspopup': 'menu',
+        'aria-expanded': radio.open ? 'true' : 'false',
+        title: panelText('切换团队', 'Switch Team'),
+        onClick: () => { radio.setOpen(current => !current) },
+        onKeyDown: radio.onTriggerKeyDown,
+        children: [
+          jsx('span', { className: 'dsh-fleet-panel-team-switch-name', children: label }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-team-switch-chevron',
+            children: jsx(PanelIcon, { name: 'chevron', size: 14 }),
+          }),
+        ],
+      }),
+      radio.open && jsx('div', {
+        ref: radio.menu,
+        className: 'dsh-fleet-panel-team-menu',
+        role: 'menu',
+        'aria-label': panelText('切换团队', 'Switch Team'),
+        onKeyDown: radio.onMenuKeyDown,
+        children: teams.map(team => jsxs('button', {
+          type: 'button',
+          tabIndex: -1,
+          className: 'dsh-fleet-panel-team-option',
+          role: 'menuitemradio',
+          'aria-checked': team.teamId === selectedTeamId ? 'true' : 'false',
+          onClick: () => {
+            selectTeam(team.teamId)
+            radio.close(true)
+          },
+          children: [
+            team.status !== undefined && jsx('span', { className: 'dsh-fleet-panel-team-row-status', 'data-status': team.status }),
+            jsx('span', { className: 'dsh-fleet-panel-team-option-name', children: team.teamName }),
+          ],
+        }, team.teamId)),
+      }),
+    ],
+  })
+}
+
+function SidebarHead({ sessionId, teams, selectedTeamId, label, selectTeam, loadTeamSettings, updateTeamSettings, updateBudget, configureTeamRequest, controlTeamById, exportTeam, exportArchive, importArchive, secondary }: {
+  readonly sessionId: string
   readonly teams: readonly FleetPanelTeamSummary[]
   readonly selectedTeamId?: string
   readonly label: string
   readonly selectTeam: (teamId: string) => void
+  readonly loadTeamSettings?: FleetPanelSource['loadTeamSettings']
+  readonly updateTeamSettings?: (teamId: string, settings: FleetPanelTeamSettingsInput['settings']) => Promise<FleetPanelTeamSettings>
+  readonly updateBudget?: (teamId: string, input: Omit<FleetPanelBudgetInput, 'sessionId' | 'teamId'>) => Promise<FleetPanelTeamBudget>
+  readonly configureTeamRequest?: (teamId: string, request: FleetPanelTeamRequestInput['request']) => Promise<void>
+  readonly controlTeamById?: (teamId: string, action: FleetPanelTeamControlInput['action'], summary?: string) => Promise<void>
   readonly exportTeam?: FleetPanelSource['exportTeam']
   readonly exportArchive?: (teamId: string, includeWorkspace: boolean) => Promise<FleetPanelArchiveFile>
   readonly importArchive?: (file: File, projectRoot: string, mode: 'copy' | 'restore') => Promise<void>
   readonly secondary?: ReactNode
 }): ReactElement {
-  const [teamsOpen, setTeamsOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const teamTrigger = useRef<HTMLButtonElement>(null)
-  const teamMenu = useRef<HTMLDivElement>(null)
+  const [dialogOpen, setDialogOpen] = useState<'settings' | 'import'>()
+  const [settingsInitialTab, setSettingsInitialTab] = useState<TeamSettingsTab>('general')
   const selectedTeam = teams.find(team => team.teamId === selectedTeamId)
+  const settingsRequest = useSyncExternalStore(
+    subscribeFleetTeamSettingsRequest,
+    () => fleetTeamSettingsRequest,
+    () => undefined,
+  )
 
   useEffect(() => {
-    if (teamsOpen && teamMenu.current !== null) focusCurrentRadioMenuItem(teamMenu.current)
-  }, [teamsOpen, selectedTeamId, teams.length])
-
-  const closeTeams = (restoreFocus: boolean): void => {
-    setTeamsOpen(false)
-    if (restoreFocus) queueMicrotask(() => { teamTrigger.current?.focus() })
-  }
+    if (settingsRequest === undefined || settingsRequest.teamId !== selectedTeamId || selectedTeam === undefined) return
+    setSettingsInitialTab(settingsRequest.tab)
+    setDialogOpen('settings')
+    completeFleetTeamSettingsRequest(settingsRequest.id)
+  }, [selectedTeam, selectedTeamId, settingsRequest])
 
   return jsxs('div', {
     className: 'dsh-fleet-panel-sidebar-team-block',
@@ -5968,81 +9696,35 @@ function SidebarHead({ teams, selectedTeamId, label, selectTeam, exportTeam, exp
       jsxs('div', {
         className: 'dsh-fleet-panel-sidebar-team-primary',
         children: [
-          jsxs('div', {
-            className: 'dsh-fleet-panel-team-switcher',
-            onBlur: (event: FocusEvent<HTMLDivElement>) => {
-              const next = event.relatedTarget
-              if (!(next instanceof Node) || !event.currentTarget.contains(next)) setTeamsOpen(false)
-            },
-            children: [
-              jsxs('button', {
-                ref: teamTrigger,
-                type: 'button',
-                className: 'dsh-fleet-panel-team-switch',
-                'aria-haspopup': 'menu',
-                'aria-expanded': teamsOpen ? 'true' : 'false',
-                title: '切换团队',
-                onClick: () => { setTeamsOpen(open => !open) },
-                onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => {
-                  if (!teamsOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-                    event.preventDefault()
-                    setTeamsOpen(true)
-                  }
-                },
-                children: [
-                  jsx('span', { className: 'dsh-fleet-panel-team-switch-name', children: label }),
-                  jsx('span', {
-                    className: 'dsh-fleet-panel-team-switch-chevron',
-                    children: jsx(PanelIcon, { name: 'chevron', size: 14 }),
-                  }),
-                ],
-              }),
-              teamsOpen && jsx('div', {
-                ref: teamMenu,
-                className: 'dsh-fleet-panel-team-menu',
-                role: 'menu',
-                'aria-label': '切换团队',
-                onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
-                  handleRadioMenuKeyDown(event, () => { closeTeams(true) })
-                },
-                children: teams.map(team => jsxs('button', {
-                  type: 'button',
-                  tabIndex: -1,
-                  className: 'dsh-fleet-panel-team-option',
-                  role: 'menuitemradio',
-                  'aria-checked': team.teamId === selectedTeamId ? 'true' : 'false',
-                  onClick: () => {
-                    selectTeam(team.teamId)
-                    closeTeams(true)
-                  },
-                  children: [
-                    jsx('span', { className: 'dsh-fleet-panel-team-row-status', 'data-status': team.status }),
-                    jsx('span', { className: 'dsh-fleet-panel-team-option-name', children: team.teamName }),
-                  ],
-                }, team.teamId)),
-              }),
-            ],
-          }),
-          selectedTeam?.tutorial !== true && jsx('button', {
+          jsx(FleetPanelTeamSwitcher, { teams, selectedTeamId, label, selectTeam }),
+          (selectedTeam?.tutorial !== true && (selectedTeam !== undefined || importArchive !== undefined)) && jsx('button', {
             type: 'button',
             className: 'dsh-fleet-panel-team-settings',
-            'aria-label': '团队设置',
-            title: '团队设置',
-            onClick: () => { setSettingsOpen(true) },
-            children: jsx(PanelIcon, { name: 'settings', size: 16 }),
+            'aria-label': selectedTeam === undefined ? panelText('导入团队', 'Import Team') : panelText('团队设置', 'Team settings'),
+            title: selectedTeam === undefined ? panelText('导入团队', 'Import Team') : panelText('团队设置', 'Team settings'),
+            onClick: () => {
+              setSettingsInitialTab('general')
+              setDialogOpen(selectedTeam === undefined ? 'import' : 'settings')
+            },
+            children: jsx(PanelIcon, { name: selectedTeam === undefined ? 'upload' : 'settings', size: 16 }),
           }),
         ],
       }),
       secondary,
-      settingsOpen && jsx(TeamSettingsDialog, {
-        ...(selectedTeamId === undefined ? {} : { teamId: selectedTeamId }),
-        ...(selectedTeamId === undefined ? {} : { teamName: label }),
-        ...(selectedTeam === undefined ? {} : { teamStatus: selectedTeam.status }),
+      dialogOpen === 'settings' && selectedTeam !== undefined && jsx(TeamSettingsDialog, {
+        sessionId,
+        team: selectedTeam,
+        initialTab: settingsInitialTab,
+        ...(loadTeamSettings === undefined ? {} : { loadSettings: loadTeamSettings }),
+        ...(updateTeamSettings === undefined ? {} : { updateSettings: (settings: FleetPanelTeamSettingsInput['settings']) => updateTeamSettings(selectedTeam.teamId, settings) }),
+        ...(updateBudget === undefined ? {} : { updateBudget: (input: Omit<FleetPanelBudgetInput, 'sessionId' | 'teamId'>) => updateBudget(selectedTeam.teamId, input) }),
+        ...(configureTeamRequest === undefined ? {} : { configureRequest: (request: FleetPanelTeamRequestInput['request']) => configureTeamRequest(selectedTeam.teamId, request) }),
         ...(exportTeam === undefined ? {} : { exportTeam }),
         ...(exportArchive === undefined ? {} : { exportArchive }),
-        ...(importArchive === undefined ? {} : { importArchive }),
-        onClose: () => { setSettingsOpen(false) },
+        ...(controlTeamById === undefined ? {} : { finishTeam: (summary: string) => controlTeamById(selectedTeam.teamId, 'close', summary).then(() => { setDialogOpen(undefined) }) }),
+        onClose: () => { setDialogOpen(undefined) },
       }),
+      dialogOpen === 'import' && importArchive !== undefined && jsx(TeamImportDialog, { importArchive, onClose: () => { setDialogOpen(undefined) } }),
     ],
   })
 }
@@ -6052,49 +9734,30 @@ function AgentPicker({ members, selectedMemberId, selectMember }: {
   readonly selectedMemberId?: string
   readonly selectMember: (member: FleetPanelMember) => void
 }): ReactElement {
-  const [open, setOpen] = useState(false)
-  const trigger = useRef<HTMLButtonElement>(null)
-  const menu = useRef<HTMLDivElement>(null)
   const selected = members.find(member => member.id === selectedMemberId) ?? members[0]
-
-  useEffect(() => {
-    if (open && menu.current !== null) focusCurrentRadioMenuItem(menu.current)
-  }, [open, selected?.id, members.length])
-
-  const close = (restoreFocus: boolean): void => {
-    setOpen(false)
-    if (restoreFocus) queueMicrotask(() => { trigger.current?.focus() })
-  }
+  const radio = useFleetRadioMenu(selected?.id, members.length)
 
   if (selected === undefined) {
     return jsx('button', {
       type: 'button',
       className: 'dsh-fleet-panel-agent-switch',
       disabled: true,
-      children: '没有可选 Agent',
+      children: panelText('没有可选 Agent', 'No Agents available'),
     })
   }
   return jsxs('div', {
     className: 'dsh-fleet-panel-agent-switcher',
-    onBlur: (event: FocusEvent<HTMLDivElement>) => {
-      const next = event.relatedTarget
-      if (!(next instanceof Node) || !event.currentTarget.contains(next)) setOpen(false)
-    },
+    onBlur: radio.onBlur,
     children: [
       jsxs('button', {
-        ref: trigger,
+        ref: radio.trigger,
         type: 'button',
         className: 'dsh-fleet-panel-agent-switch',
         'aria-haspopup': 'menu',
-        'aria-expanded': open ? 'true' : 'false',
-        'aria-label': `切换 Agent，当前为 ${selected.name}`,
-        onClick: () => { setOpen(current => !current) },
-        onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => {
-          if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-            event.preventDefault()
-            setOpen(true)
-          }
-        },
+        'aria-expanded': radio.open ? 'true' : 'false',
+        'aria-label': panelText(`切换 Agent，当前为 ${selected.name}`, `Switch Agent; currently ${selected.name}`),
+        onClick: () => { radio.setOpen(current => !current) },
+        onKeyDown: radio.onTriggerKeyDown,
         children: [
           jsx(FleetChatAvatar, { member: selected, size: 24, showPresence: true }),
           jsxs('span', {
@@ -6108,8 +9771,8 @@ function AgentPicker({ members, selectedMemberId, selectMember }: {
                     selected.role,
                     ' · ',
                     jsx(FleetPresenceLabel, {
-                      presence: selected.runtimeStatus === 'paused' ? 'offline' : selected.presence ?? 'offline',
-                      label: memberPresenceLabel(selected),
+                      presence: fleetMemberPresence(selected),
+                      label: fleetMemberPresenceLabel(selected),
                     }),
                   ],
                 }),
@@ -6122,14 +9785,12 @@ function AgentPicker({ members, selectedMemberId, selectMember }: {
           }),
         ],
       }),
-      open && jsx('div', {
-        ref: menu,
+      radio.open && jsx('div', {
+        ref: radio.menu,
         className: 'dsh-fleet-panel-team-menu',
         role: 'menu',
-        'aria-label': '选择 Agent 视角',
-        onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
-          handleRadioMenuKeyDown(event, () => { close(true) })
-        },
+        'aria-label': panelText('选择 Agent 视角', 'Choose Agent view'),
+        onKeyDown: radio.onMenuKeyDown,
         children: members.map(member => jsxs('button', {
           type: 'button',
           tabIndex: -1,
@@ -6138,7 +9799,7 @@ function AgentPicker({ members, selectedMemberId, selectMember }: {
           'aria-checked': member.id === selected.id ? 'true' : 'false',
           onClick: () => {
             selectMember(member)
-            close(true)
+            radio.close(true)
           },
           children: [
             jsx(FleetChatAvatar, { member, size: 24, showPresence: true }),
@@ -6153,8 +9814,8 @@ function AgentPicker({ members, selectedMemberId, selectMember }: {
                       member.role,
                       ' · ',
                       jsx(FleetPresenceLabel, {
-                        presence: member.runtimeStatus === 'paused' ? 'offline' : member.presence ?? 'offline',
-                        label: memberPresenceLabel(member),
+                        presence: fleetMemberPresence(member),
+                        label: fleetMemberPresenceLabel(member),
                       }),
                     ],
                   }),
@@ -6203,10 +9864,16 @@ function PaneSidebar({ owner, placeholder, query, setQuery, children }: {
     className: 'dsh-fleet-panel-sidebar-layout',
     children: [
       jsx(SidebarHead, {
+        sessionId: owner.sessionId,
         teams: owner.fleet.directory.teams,
         selectedTeamId: owner.snapshot.teamId,
         label: owner.snapshot.teamName,
         selectTeam: owner.selectTeam,
+        ...(owner.loadTeamSettings === undefined ? {} : { loadTeamSettings: owner.loadTeamSettings }),
+        ...(owner.updateTeamSettings === undefined ? {} : { updateTeamSettings: owner.updateTeamSettings }),
+        ...(owner.updateBudget === undefined ? {} : { updateBudget: owner.updateBudget }),
+        ...(owner.configureTeamRequest === undefined ? {} : { configureTeamRequest: owner.configureTeamRequest }),
+        ...(owner.controlTeam === undefined ? {} : { controlTeamById: (teamId: string, action: FleetPanelTeamControlInput['action'], summary?: string) => owner.controlTeam?.(action, summary) ?? Promise.resolve() }),
         ...(owner.exportTeam === undefined ? {} : { exportTeam: owner.exportTeam }),
         ...(owner.exportArchive === undefined ? {} : { exportArchive: owner.exportArchive }),
         ...(owner.importArchive === undefined ? {} : { importArchive: owner.importArchive }),
@@ -6222,22 +9889,24 @@ function PaneSidebar({ owner, placeholder, query, setQuery, children }: {
   })
 }
 
-function SectionTitle({ children }: { readonly children: ReactNode }): ReactElement {
+export function SectionTitle({ children }: { readonly children: ReactNode }): ReactElement {
   return jsx('div', { className: 'dsh-fleet-panel-section-title', children })
 }
 
-function ListRow({ selected, title, caption, leading, trailing, onClick }: {
-  readonly selected: boolean
-  readonly title: string
-  readonly caption?: string
-  readonly leading?: ReactNode
-  readonly trailing?: ReactNode
-  readonly onClick: () => void
-}): ReactElement {
+export function ListRow({ selected, title, caption, leading, trailing, elementRef, interaction, onClick }: FleetPanelListRowProps): ReactElement {
   return jsxs('button', {
+    ref: elementRef,
     type: 'button',
     className: 'dsh-fleet-panel-list-row',
     'aria-current': selected ? 'true' : undefined,
+    ...(interaction === undefined ? {} : {
+      'aria-haspopup': 'dialog' as const,
+      'aria-expanded': interaction.expanded ? 'true' : 'false',
+      'aria-controls': interaction.controls,
+      onMouseEnter: interaction.onMouseEnter,
+      onFocus: interaction.onFocus,
+      onBlur: interaction.onBlur,
+    }),
     onClick,
     children: [
       leading,
@@ -6253,15 +9922,63 @@ function ListRow({ selected, title, caption, leading, trailing, onClick }: {
   })
 }
 
+function ChannelListRow({ conversation, selected, onClick }: {
+  readonly conversation: FleetPanelConversation
+  readonly selected: boolean
+  readonly onClick: () => void
+}): ReactElement {
+  return jsx(FleetInfoHint, {
+    className: 'dsh-fleet-panel-channel-hint',
+    label: panelText(`关于频道“${conversation.name}”`, `About Channel “${conversation.name}”`),
+    title: panelText(`频道 · ${conversation.name}`, `Channel · ${conversation.name}`),
+    seenMarker: 'fleet.channel',
+    pinOnClick: false,
+    footer: null,
+    trigger: (hintProps: HoverHintTriggerProps) => jsx(ListRow, {
+      elementRef: hintProps.ref as (element: HTMLButtonElement | null) => void,
+      selected,
+      title: conversation.name,
+      caption: conversation.topic,
+      leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(PanelIcon, { name: 'channel', size: 15 }) }),
+      trailing: conversation.unread === undefined
+        ? undefined
+        : jsx('span', { className: 'dsh-fleet-panel-unread', children: conversation.unread }),
+      onClick,
+    }),
+    children: jsxs(Fragment, {
+      children: [
+        jsx('p', {
+          className: 'dsh-hover-hint-lead',
+          children: panelText('频道是团队内按主题共享的消息空间。', 'A Channel is a topic-based message space shared within a Team.'),
+        }),
+        jsxs('section', {
+          className: 'dsh-hover-hint-section',
+          children: [
+            jsx('h4', { children: panelText('谁能看到', 'Who can see it') }),
+            jsx('p', { children: panelText('有访问权限的成员看到同一段频道历史；它不是成员之间的私聊。', 'Members with access share the same Channel history; it is not a direct conversation between members.') }),
+          ],
+        }),
+        jsxs('section', {
+          className: 'dsh-hover-hint-section',
+          children: [
+            jsx('h4', { children: panelText('与 Inbox 的区别', 'How it differs from Inbox') }),
+            jsx('p', { children: panelText('频道保存共享历史；每位成员自己的 Inbox 只负责把相关频道消息送入其 Agent 上下文。', 'The Channel stores shared history; each member’s Inbox only delivers relevant Channel messages into that Agent’s context.') }),
+          ],
+        }),
+      ],
+    }),
+  })
+}
+
 function statusLabel(status: FleetPanelTeamSummary['status']): string {
-  if (status === 'running') return '运行中'
-  if (status === 'idle') return '待命'
-  if (status === 'paused') return '已暂停'
-  if (status === 'starting') return '正在建立'
-  if (status === 'finishing') return '正在收尾'
-  if (status === 'closed') return '已结束'
-  if (status === 'failed') return '异常'
-  return '未连接'
+  if (status === 'running') return panelText('运行中', 'Running')
+  if (status === 'idle') return panelText('待命', 'Idle')
+  if (status === 'paused') return panelText('已暂停', 'Paused')
+  if (status === 'starting') return panelText('正在建立', 'Starting')
+  if (status === 'finishing') return panelText('正在收尾', 'Finishing')
+  if (status === 'closed') return panelText('已结束', 'Closed')
+  if (status === 'failed') return panelText('异常', 'Error')
+  return panelText('未连接', 'Disconnected')
 }
 
 function renderSidebarSection(
@@ -6284,7 +10001,7 @@ function renderMessageBlockExtension(
       entryKey: blockOwner.block.type,
       fallback: jsx('div', {
         className: 'dsh-fleet-chat-content-resource-meta',
-        children: '此消息需要对应的扩展来显示',
+        children: panelText('此消息需要对应的扩展来显示', 'This message requires an extension to display'),
       }),
     },
   )
@@ -6366,18 +10083,23 @@ export function insertFleetMemberMention(
   }
 }
 
-function FleetPlainMessageText({ owner, text }: {
-  readonly owner: FleetPanelPaneOwner
+interface FleetMessageTextProps {
   readonly text: string
-}): ReactElement {
+  readonly members: readonly FleetPanelMember[]
+  readonly markdownRenderer?: FleetMarkdownRenderer
+  readonly showMemberDetails?: (memberId: string) => void
+  readonly showMemberContext?: (memberId: string) => void
+}
+
+function FleetPlainMessageText({ text, members, showMemberDetails, showMemberContext }: FleetMessageTextProps): ReactElement {
   return jsx(Fragment, {
-    children: splitFleetMemberMentions(text, owner.snapshot.members).map((segment, index) => segment.member === undefined
+    children: splitFleetMemberMentions(text, members).map((segment, index) => segment.member === undefined
       ? jsx(Fragment, { children: segment.text }, index)
       : jsx(FleetMemberMentionPopover, {
           member: segment.member,
           label: segment.text,
-          showDetails: owner.showMemberDetails,
-          showContext: owner.showMemberContext,
+          ...(showMemberDetails === undefined ? {} : { showDetails: showMemberDetails }),
+          ...(showMemberContext === undefined ? {} : { showContext: showMemberContext }),
         }, index)),
   })
 }
@@ -6391,7 +10113,15 @@ function renderMessageText(
   return owner.renderPanelSlot(
     FLEET_PANEL_SLOTS.messageText,
     textOwner as unknown as Record<string, unknown>,
-    { entryKey: 'markdown', fallback: jsx(FleetPlainMessageText, { owner, text }) },
+    {
+      entryKey: 'markdown',
+      fallback: jsx(FleetPlainMessageText, {
+        text,
+        members: owner.snapshot.members,
+        showMemberDetails: owner.showMemberDetails,
+        showMemberContext: owner.showMemberContext,
+      }),
+    },
   )
 }
 
@@ -6420,10 +10150,25 @@ function messageReadReceipt(
       const member = members.get(id)
       return member === undefined ? [] : [member]
     }),
-    unreadMembers: receipt.unreadMemberIds.flatMap(id => {
-      const member = members.get(id)
-      return member === undefined ? [] : [member]
-    }),
+    ...(receipt.deliveredMemberIds === undefined && receipt.pendingMemberIds === undefined
+      ? {
+          unreadMembers: receipt.unreadMemberIds.flatMap(id => {
+            const member = members.get(id)
+            return member === undefined ? [] : [member]
+          }),
+        }
+      : {
+          deliveredMembers: (receipt.deliveredMemberIds ?? []).flatMap(id => {
+            const member = members.get(id)
+            return member === undefined ? [] : [member]
+          }),
+          pendingDeliveries: (receipt.pendingMemberIds ?? []).flatMap(id => {
+            const member = members.get(id)
+            if (member === undefined) return []
+            const blocker = receipt.pendingDeliveries?.find(candidate => candidate.memberId === id)
+            return [{ member, ...blocker }]
+          }),
+        }),
     sources: receipt.sources ?? [],
     onOpenSource: openSource,
     renderMember: (member: FleetChatMember) => {
@@ -6549,10 +10294,16 @@ function HomeSidebar(owner: FleetPanelHomeOwner): ReactElement {
     className: 'dsh-fleet-panel-sidebar-layout',
     children: [
       jsx(SidebarHead, {
+        sessionId: owner.sessionId,
         teams: owner.fleet.directory.teams,
         ...(focusedTeam === undefined ? {} : { selectedTeamId: focusedTeam.teamId }),
-        label: focusedTeam?.teamName ?? '所有团队',
+        label: focusedTeam?.teamName ?? panelText('所有团队', 'All Teams'),
         selectTeam: owner.selectTeam,
+        ...(owner.loadTeamSettings === undefined ? {} : { loadTeamSettings: owner.loadTeamSettings }),
+        ...(owner.updateTeamSettings === undefined ? {} : { updateTeamSettings: owner.updateTeamSettings }),
+        ...(owner.updateBudget === undefined ? {} : { updateBudget: owner.updateBudget }),
+        ...(owner.configureTeamRequest === undefined ? {} : { configureTeamRequest: owner.configureTeamRequest }),
+        ...(owner.controlTeamById === undefined ? {} : { controlTeamById: owner.controlTeamById }),
         ...(owner.exportTeam === undefined ? {} : { exportTeam: owner.exportTeam }),
         ...(owner.exportArchive === undefined ? {} : { exportArchive: owner.exportArchive }),
         ...(owner.importArchive === undefined ? {} : { importArchive: owner.importArchive }),
@@ -6566,7 +10317,7 @@ function HomeSidebar(owner: FleetPanelHomeOwner): ReactElement {
               jsxs('div', {
                 className: 'dsh-fleet-panel-team-row',
                 children: [
-                  jsx('h2', { className: 'dsh-fleet-panel-team-title', children: '团队' }),
+                  jsx('h2', { className: 'dsh-fleet-panel-team-title', children: panelText('团队', 'Teams') }),
                 ],
               }),
               jsxs('label', {
@@ -6576,9 +10327,9 @@ function HomeSidebar(owner: FleetPanelHomeOwner): ReactElement {
                   jsx('input', {
                     className: 'dsh-fleet-panel-search',
                     type: 'search',
-                    'aria-label': '搜索团队或工作区',
+                    'aria-label': panelText('搜索团队或工作区', 'Search Teams or Workspaces'),
                     value: query,
-                    placeholder: '搜索团队或工作区',
+                    placeholder: panelText('搜索团队或工作区', 'Search Teams or Workspaces'),
                     onChange: (event: ChangeEvent<HTMLInputElement>) => { setQuery(event.target.value) },
                   }),
                 ],
@@ -6589,7 +10340,7 @@ function HomeSidebar(owner: FleetPanelHomeOwner): ReactElement {
             className: 'dsh-fleet-panel-sidebar-scroll',
             children: [
               groups.length === 0
-                ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '没有匹配的团队' })
+                ? jsx('div', { className: 'dsh-fleet-panel-empty', children: panelText('没有匹配的团队', 'No Teams match') })
                 : groups.map(({ group, teams: groupTeams }) => {
                   const open = collapsed[group.id] !== true
                   return jsxs('section', {
@@ -6615,11 +10366,13 @@ function HomeSidebar(owner: FleetPanelHomeOwner): ReactElement {
                         title: team.teamName,
                         caption: team.tutorial === true
                           ? panelText('一次性引导 · 不会启动 Agent', 'One-time guide · No Agents started')
-                          : [statusLabel(team.status), team.primaryWorkspace === undefined ? '未挂载工作区' : `主要工作区 · ${team.primaryWorkspace}`].join(' · '),
+                          : [statusLabel(team.status), team.primaryWorkspace === undefined
+                            ? panelText('未挂载工作区', 'No Workspace mounted')
+                            : panelText(`主要工作区 · ${team.primaryWorkspace}`, `Primary Workspace · ${team.primaryWorkspace}`)].join(' · '),
                         leading: jsx('span', { className: 'dsh-fleet-panel-team-row-status', 'data-status': team.status }),
                         trailing: team.unread !== undefined
                           ? jsx('span', { className: 'dsh-fleet-panel-unread', children: team.unread })
-                          : team.needsAttention === true ? jsx('span', { className: 'dsh-fleet-panel-attention', title: '需要关注' }) : undefined,
+                          : team.needsAttention === true ? jsx('span', { className: 'dsh-fleet-panel-attention', title: panelText('需要关注', 'Needs attention') }) : undefined,
                         onClick: () => { owner.selectTeam(team.teamId) },
                       }, `${group.id}:${team.teamId}`)),
                     ],
@@ -6645,21 +10398,18 @@ function ChatSidebar(owner: FleetPanelPaneOwner): ReactElement {
   const directs = conversations.filter(item => item.kind === 'direct')
   return jsx(PaneSidebar, {
     owner,
-    placeholder: '搜索频道或成员',
+    placeholder: panelText('搜索频道或成员', 'Search Channels or members'),
     query,
     setQuery,
     children: [
-          jsx(SectionTitle, { children: '频道' }),
-          ...channels.map(item => jsx(ListRow, {
+          jsx(SectionTitle, { children: panelText('频道', 'Channels') }),
+          ...channels.map(item => jsx(ChannelListRow, {
+            conversation: item,
             selected: owner.activeItem === item.id,
-            title: item.name,
-            caption: item.topic,
-            leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(PanelIcon, { name: 'channel', size: 15 }) }),
-            trailing: item.unread === undefined ? undefined : jsx('span', { className: 'dsh-fleet-panel-unread', children: item.unread }),
             onClick: () => { owner.selectItem(item.id) },
           }, item.id)),
           ...(crossTeam.length === 0 ? [] : [
-            jsx(SectionTitle, { children: '跨团队' }, 'cross-team-title'),
+            jsx(SectionTitle, { children: panelText('跨团队', 'Cross-Team') }, 'cross-team-title'),
             ...crossTeam.map(item => jsx(ListRow, {
               selected: owner.activeItem === item.id,
               title: item.name,
@@ -6669,7 +10419,7 @@ function ChatSidebar(owner: FleetPanelPaneOwner): ReactElement {
               onClick: () => { owner.selectItem(item.id) },
             }, item.id)),
           ]),
-          jsx(SectionTitle, { children: '私聊' }),
+          jsx(SectionTitle, { children: panelText('私聊', 'Direct messages') }),
           ...directs.map(item => {
             const peer = teamAgents(owner.snapshot).find(member => member.id === item.peerId)
             return jsx(ListRow, {
@@ -6696,22 +10446,12 @@ function TeamSidebar(owner: FleetPanelPaneOwner): ReactElement {
     || member.role.toLocaleLowerCase().includes(normalized))
   return jsx(PaneSidebar, {
     owner,
-    placeholder: '搜索成员或角色',
+    placeholder: panelText('搜索成员或角色', 'Search members or roles'),
     query,
     setQuery,
     children: [
-          jsx(SectionTitle, { children: `${members.length} 位成员` }),
-          ...members.map(member => jsx(ListRow, {
-            selected: owner.activeItem === member.id,
-            title: member.name,
-            caption: member.role,
-            leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx('span', {
-              className: 'dsh-fleet-panel-presence',
-              'data-presence': member.presence ?? 'offline',
-            }) }),
-            trailing: jsx(MemberState, { member, showDot: false }),
-            onClick: () => { owner.selectItem(member.id) },
-          }, member.id)),
+          jsx(SectionTitle, { children: panelText(`${members.length} 位成员`, `${members.length} members`) }),
+          ...members.map(member => jsx(FleetMemberListRow, { member, owner }, member.id)),
           renderSidebarSection(owner, 'team'),
     ],
   })
@@ -6735,10 +10475,16 @@ function AgentSidebar(owner: FleetPanelPaneOwner): ReactElement {
     className: 'dsh-fleet-panel-sidebar-layout',
     children: [
       jsx(SidebarHead, {
+        sessionId: owner.sessionId,
         teams: owner.fleet.directory.teams,
         selectedTeamId: owner.snapshot.teamId,
         label: owner.snapshot.teamName,
         selectTeam: owner.selectTeam,
+        ...(owner.loadTeamSettings === undefined ? {} : { loadTeamSettings: owner.loadTeamSettings }),
+        ...(owner.updateTeamSettings === undefined ? {} : { updateTeamSettings: owner.updateTeamSettings }),
+        ...(owner.updateBudget === undefined ? {} : { updateBudget: owner.updateBudget }),
+        ...(owner.configureTeamRequest === undefined ? {} : { configureTeamRequest: owner.configureTeamRequest }),
+        ...(owner.controlTeam === undefined ? {} : { controlTeamById: (teamId: string, action: FleetPanelTeamControlInput['action'], summary?: string) => owner.controlTeam?.(action, summary) ?? Promise.resolve() }),
         ...(owner.exportTeam === undefined ? {} : { exportTeam: owner.exportTeam }),
         ...(owner.exportArchive === undefined ? {} : { exportArchive: owner.exportArchive }),
         ...(owner.importArchive === undefined ? {} : { importArchive: owner.importArchive }),
@@ -6753,31 +10499,28 @@ function AgentSidebar(owner: FleetPanelPaneOwner): ReactElement {
       jsxs('div', {
         className: 'dsh-fleet-panel-sidebar',
         children: [
-          jsx(SidebarSearch, { placeholder: '搜索 Agent 可见消息', query, setQuery }),
+          jsx(SidebarSearch, { placeholder: panelText('搜索 Agent 可见消息', 'Search messages visible to this Agent'), query, setQuery }),
           jsxs('div', {
             className: 'dsh-fleet-panel-sidebar-scroll',
             children: [
               jsx(SectionTitle, { children: 'Agent' }),
               jsx(ListRow, {
                 selected: perspective.context,
-                title: '执行上下文',
-                caption: perspective.member === undefined ? undefined : `${perspective.member.name} 的真实 Session 历史`,
+                title: panelText('执行上下文', 'Execution context'),
+                caption: perspective.member === undefined ? undefined : panelText(`${perspective.member.name} 的真实 Session 历史`, `${perspective.member.name}'s real Session history`),
                 leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(PanelIcon, { name: 'activity', size: 15 }) }),
                 onClick: () => {
                   if (perspective.member !== undefined) owner.selectItem(agentViewItem(perspective.member.id, AGENT_CONTEXT_ITEM_ID))
                 },
               }),
-              jsx(SectionTitle, { children: '频道' }),
-              ...channels.map(item => jsx(ListRow, {
+              jsx(SectionTitle, { children: panelText('频道', 'Channels') }),
+              ...channels.map(item => jsx(ChannelListRow, {
+                conversation: item,
                 selected: perspective.conversation?.id === item.id,
-                title: item.name,
-                caption: item.topic,
-                leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(PanelIcon, { name: 'channel', size: 15 }) }),
-                trailing: item.unread === undefined ? undefined : jsx('span', { className: 'dsh-fleet-panel-unread', children: item.unread }),
                 onClick: () => { selectConversation(item) },
               }, item.id)),
               ...(crossTeam.length === 0 ? [] : [
-                jsx(SectionTitle, { children: '跨团队' }, 'agent-cross-team-title'),
+                jsx(SectionTitle, { children: panelText('跨团队', 'Cross-Team') }, 'agent-cross-team-title'),
                 ...crossTeam.map(item => jsx(ListRow, {
                   selected: perspective.conversation?.id === item.id,
                   title: item.name,
@@ -6787,7 +10530,7 @@ function AgentSidebar(owner: FleetPanelPaneOwner): ReactElement {
                   onClick: () => { selectConversation(item) },
                 }, item.id)),
               ]),
-              jsx(SectionTitle, { children: '私聊' }),
+              jsx(SectionTitle, { children: panelText('私聊', 'Direct messages') }),
               ...directs.map(item => {
                 const peer = perspective.member === undefined
                   ? undefined
@@ -6815,7 +10558,9 @@ function AgentSidebar(owner: FleetPanelPaneOwner): ReactElement {
 function ResourcesSidebar(owner: FleetPanelPaneOwner): ReactElement {
   const [query, setQuery] = useState('')
   const [uploading, setUploading] = useState(false)
-  const [uploadError, setUploadError] = useState<string>()
+  const [removalMode, setRemovalMode] = useState(false)
+  const [removingIds, setRemovingIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [resourceError, setResourceError] = useState<string>()
   const fileInput = useRef<HTMLInputElement>(null)
   const normalized = query.trim().toLocaleLowerCase()
   const resources = owner.snapshot.resources.filter(resource => normalized === ''
@@ -6828,61 +10573,122 @@ function ResourcesSidebar(owner: FleetPanelPaneOwner): ReactElement {
   const upload = (file: File | undefined): void => {
     if (file === undefined || owner.uploadResource === undefined || uploading) return
     setUploading(true)
-    setUploadError(undefined)
+    setResourceError(undefined)
     void owner.uploadResource(file).catch((reason: unknown) => {
-      setUploadError(reason instanceof Error ? reason.message : '上传文件失败')
+      setResourceError(reason instanceof Error ? reason.message : panelText('上传文件失败', 'File upload failed'))
     }).finally(() => {
       setUploading(false)
       if (fileInput.current !== null) fileInput.current.value = ''
     })
   }
+  const remove = (resource: FleetPanelResource): void => {
+    if (owner.removeResource === undefined || removingIds.has(resource.id)) return
+    setResourceError(undefined)
+    setRemovingIds(current => new Set(current).add(resource.id))
+    void owner.removeResource(resource.id).catch((reason: unknown) => {
+      setResourceError(reason instanceof Error ? reason.message : panelText('移除文件失败', 'File removal failed'))
+    }).finally(() => {
+      setRemovingIds(current => {
+        const next = new Set(current)
+        next.delete(resource.id)
+        return next
+      })
+    })
+  }
   return jsx(PaneSidebar, {
     owner,
-    placeholder: '搜索共享资源',
+    placeholder: panelText('搜索共享资源', 'Search shared resources'),
     query,
     setQuery,
     children: [
           jsx(SectionTitle, {
             children: jsxs(Fragment, {
               children: [
-                jsx('span', { children: '团队文件' }),
-                owner.uploadResource !== undefined && jsxs(Fragment, {
+                jsx('span', { children: panelText('团队文件', 'Team files') }),
+                (owner.uploadResource !== undefined || owner.removeResource !== undefined) && jsxs('span', {
+                  className: 'dsh-fleet-panel-section-actions',
                   children: [
-                    jsx('input', {
-                      ref: fileInput,
-                      type: 'file',
-                      hidden: true,
-                      onChange: (event: ChangeEvent<HTMLInputElement>) => { upload(event.target.files?.[0]) },
+                    owner.uploadResource !== undefined && jsxs(Fragment, {
+                      children: [
+                        jsx('input', {
+                          ref: fileInput,
+                          type: 'file',
+                          hidden: true,
+                          onChange: (event: ChangeEvent<HTMLInputElement>) => { upload(event.target.files?.[0]) },
+                        }),
+                        jsx('button', {
+                          type: 'button',
+                          className: 'dsh-fleet-panel-section-action',
+                          disabled: uploading,
+                          onClick: () => { fileInput.current?.click() },
+                          children: uploading ? panelText('上传中…', 'Uploading…') : panelText('添加文件', 'Add file'),
+                        }),
+                      ],
                     }),
-                    jsx('button', {
+                    owner.removeResource !== undefined && jsx('button', {
                       type: 'button',
                       className: 'dsh-fleet-panel-section-action',
-                      disabled: uploading,
-                      onClick: () => { fileInput.current?.click() },
-                      children: uploading ? '上传中…' : '添加文件',
+                      'data-tone': 'danger',
+                      'aria-pressed': removalMode,
+                      onClick: () => {
+                        setResourceError(undefined)
+                        setRemovalMode(current => !current)
+                      },
+                      children: panelText('删除文件', 'Remove files'),
                     }),
                   ],
                 }),
               ],
             }),
           }),
-          uploadError !== undefined && jsx('div', {
+          resourceError !== undefined && jsx('div', {
             className: 'dsh-fleet-panel-resource-upload-error',
             role: 'alert',
-            children: uploadError,
+            children: resourceError,
           }),
-          ...resources.map(resource => jsx(ListRow, {
-            selected: owner.activeItem === resource.id,
-            title: resource.name,
-            caption: resource.detail,
-            leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(PanelIcon, { name: 'resources', size: 15 }) }),
-            onClick: () => { owner.selectItem(resource.id) },
+          ...resources.map(resource => jsxs('div', {
+            className: 'dsh-fleet-panel-resource-file-item',
+            'data-removal-mode': removalMode ? 'true' : 'false',
+            children: [
+              jsx(ListRow, {
+                selected: owner.activeItem === resource.id,
+                title: jsxs('span', {
+                  className: 'dsh-fleet-panel-resource-file-title',
+                  children: [
+                    jsx('span', {
+                      className: 'dsh-fleet-panel-resource-file-name',
+                      title: resourceFileName(resource),
+                      children: resourceFileName(resource),
+                    }),
+                    jsx('span', {
+                      className: 'dsh-fleet-panel-resource-file-size',
+                      children: resource.size === undefined ? '—' : formatBytes(resource.size),
+                    }),
+                  ],
+                }),
+                caption: resource.path,
+                leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(PanelIcon, { name: 'resources', size: 15 }) }),
+                onClick: () => { owner.selectItem(resource.id) },
+              }),
+              removalMode && jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-panel-resource-file-remove',
+                disabled: removingIds.has(resource.id),
+                'aria-label': panelText(`移除 ${resourceFileName(resource)}`, `Remove ${resourceFileName(resource)}`),
+                title: panelText(`移除 ${resourceFileName(resource)}`, `Remove ${resourceFileName(resource)}`),
+                onClick: () => { remove(resource) },
+                children: jsx(PanelIcon, { name: 'close', size: 14 }),
+              }),
+            ],
           }, resource.id)),
-          jsx(SectionTitle, { children: '工作区' }),
+          jsx(SectionTitle, { children: panelText('工作区', 'Workspaces') }),
           ...workspaces.map(workspace => jsx(ListRow, {
             selected: owner.activeItem === workspace.id,
             title: workspace.name,
-            caption: `${workspace.access === 'write' ? '可写' : '只读'} · ${workspace.members.length} 位成员`,
+            caption: panelText(
+              `${workspace.access === 'write' ? '可写' : '只读'} · ${workspace.members.length} 位成员`,
+              `${workspace.access === 'write' ? 'Writable' : 'Read-only'} · ${workspace.members.length} members`,
+            ),
             leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx(PanelIcon, { name: 'resources', size: 15 }) }),
             onClick: () => { owner.selectItem(workspace.id) },
           }, workspace.id)),
@@ -6894,19 +10700,19 @@ function ResourcesSidebar(owner: FleetPanelPaneOwner): ReactElement {
 function ActivitySidebar(owner: FleetPanelPaneOwner): ReactElement {
   const [query, setQuery] = useState('')
   const filters = [
-    ['all', '全部动态', '消息、资源、决策和记忆'],
-    ['message', '消息', '频道与私聊'],
-    ['resource', '资源', '共享文件与引用'],
-    ['decision', '决策', '投票与共识'],
-    ['memory', '记忆', '历史写入与召回'],
+    ['all', panelText('全部动态', 'All activity'), panelText('消息、资源、决策和记忆', 'Messages, resources, decisions, and memory')],
+    ['message', panelText('消息', 'Messages'), panelText('频道与私聊', 'Channels and direct messages')],
+    ['resource', panelText('资源', 'Resources'), panelText('共享文件与引用', 'Shared files and references')],
+    ['decision', panelText('决策', 'Decisions'), panelText('投票与共识', 'Votes and consensus')],
+    ['memory', panelText('记忆', 'Memory'), panelText('历史写入与召回', 'Historical stores and recalls')],
   ] as const
   return jsx(PaneSidebar, {
     owner,
-    placeholder: '搜索动态',
+    placeholder: panelText('搜索动态', 'Search activity'),
     query,
     setQuery,
     children: [
-          jsx(SectionTitle, { children: '筛选' }),
+          jsx(SectionTitle, { children: panelText('筛选', 'Filters') }),
           ...filters.map(([id, title, caption]) => jsx(ListRow, {
             selected: owner.activeItem === id,
             title,
@@ -6919,12 +10725,72 @@ function ActivitySidebar(owner: FleetPanelPaneOwner): ReactElement {
   })
 }
 
+interface PanelColumnResizeHandleProps {
+  readonly label: string
+  readonly title: string
+  readonly resizing: boolean
+  readonly min: number
+  readonly max: number
+  readonly value: number
+  readonly placement?: 'edge' | 'split'
+  readonly handle: {
+    readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void
+    readonly onPointerDown: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onPointerMove: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onPointerUp: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onPointerCancel: (event: PointerEvent<HTMLDivElement>) => void
+    readonly onLostPointerCapture: (event: PointerEvent<HTMLDivElement>) => void
+  }
+  readonly onDoubleClick?: () => void
+}
+
+function PanelColumnResizeHandle({
+  label,
+  title,
+  resizing,
+  min,
+  max,
+  value,
+  placement = 'edge',
+  handle,
+  onDoubleClick,
+}: PanelColumnResizeHandleProps): ReactElement {
+  const interaction = {
+    'data-dragging': resizing ? 'true' : undefined,
+    role: 'separator',
+    'aria-label': label,
+    'aria-orientation': 'vertical' as const,
+    'aria-valuemin': min,
+    'aria-valuemax': max,
+    'aria-valuenow': value,
+    tabIndex: 0,
+    title,
+    ...handle,
+    onDoubleClick,
+  }
+  if (placement === 'split') {
+    return jsx('div', {
+      className: 'dsh-fleet-panel-resource-compare-resize-track',
+      ...interaction,
+      children: jsx('span', {
+        className: 'dsh-fleet-panel-chat-width-handle',
+        'aria-hidden': 'true',
+      }),
+    })
+  }
+  return jsx('div', {
+    className: 'dsh-fleet-panel-chat-width-handle',
+    'data-placement': placement,
+    ...interaction,
+  })
+}
+
 function PanelMessageLog({
   conversationKey,
   messageCount,
   children,
   resizable = false,
-  resizeLabel = '调整消息区域宽度',
+  resizeLabel = panelText('调整消息区域宽度', 'Resize message area'),
   initialScroll = 'bottom',
   hasOlder = false,
   loadingOlder = false,
@@ -7018,15 +10884,16 @@ function PanelMessageLog({
       loadingOlder && jsx('div', {
         className: 'dsh-fleet-panel-chat-history-loading',
         role: 'status',
-        children: '正在加载更早消息…',
+        children: panelText('正在加载更早消息…', 'Loading earlier messages…'),
       }),
-      resizable && jsx('button', {
-        type: 'button',
-        className: 'dsh-fleet-panel-chat-width-handle',
-        'data-dragging': column.resizing ? 'true' : undefined,
-        'aria-label': resizeLabel,
-        title: `拖动${resizeLabel}`,
-        ...column.handle,
+      resizable && jsx(PanelColumnResizeHandle, {
+        label: resizeLabel,
+        title: panelText(`拖动${resizeLabel}`, `Drag to resize ${resizeLabel}`),
+        resizing: column.resizing,
+        min: CHAT_COLUMN_MIN_WIDTH,
+        max: CHAT_COLUMN_MAX_WIDTH,
+        value: column.width,
+        handle: column.handle,
       }),
       hasNewMessages && jsxs('button', {
         type: 'button',
@@ -7034,34 +10901,24 @@ function PanelMessageLog({
         onClick: scrollToLatest,
         children: [
           jsx(PanelIcon, { name: 'chevron', size: 12 }),
-          jsx('span', { children: '查看新消息' }),
+          jsx('span', { children: panelText('查看新消息', 'View new messages') }),
         ],
       }),
     ],
   })
 }
 
-function memberPresenceLabel(member: FleetPanelMember): string {
-  if (member.runtimeStatus === 'paused') return '已暂停'
-  if (member.presence === 'active') return '空闲'
-  if (member.presence === 'busy') return '工作中'
-  if (member.presence === 'waiting') return '等待中'
-  if (member.presence === 'error') return '异常'
-  if (member.presence === 'unknown') return '状态待同步'
-  return '离线'
-}
-
 function MemberState({ member, showDot = true }: {
   readonly member: FleetPanelMember
   readonly showDot?: boolean
 }): ReactElement {
-  const presence = member.runtimeStatus === 'paused' ? 'offline' : member.presence ?? 'offline'
+  const presence = fleetMemberPresence(member)
   return jsxs('span', {
     className: 'dsh-fleet-panel-member-state',
     'data-presence': presence,
     children: [
       showDot && jsx('span', { className: 'dsh-fleet-panel-presence', 'data-presence': presence }),
-      jsx(FleetPresenceLabel, { presence, label: memberPresenceLabel(member) }),
+      jsx(FleetPresenceLabel, { presence, label: fleetMemberPresenceLabel(member) }),
     ],
   })
 }
@@ -7072,171 +10929,67 @@ function AgentPerspectiveMeta({ member }: { readonly member: FleetPanelMember })
     children: [
       jsx('span', { className: 'dsh-fleet-panel-agent-view-role', children: member.role }),
       jsx('span', { className: 'dsh-fleet-panel-agent-view-separator', 'aria-hidden': 'true', children: '·' }),
-      jsx('span', { children: '内部视角' }),
+      jsx('span', { children: panelText('内部视角', 'Internal view') }),
       jsx('span', { className: 'dsh-fleet-panel-agent-view-separator', 'aria-hidden': 'true', children: '·' }),
       jsx(MemberState, { member, showDot: false }),
     ],
   })
 }
 
-function useFleetMemberPopover() {
-  const popover = useRef<HTMLElement>(null)
-  const nameId = useId()
-  const popoverId = useId()
-  const [open, setOpen] = useState(false)
-
-  useEffect(() => {
-    const node = popover.current
-    if (node === null) return
-    const syncOpen = (): void => { setOpen(node.matches(':popover-open')) }
-    const closeOnViewportMove = (event: Event): void => {
-      if (event.target instanceof Node && node.contains(event.target)) return
-      if (node.matches(':popover-open')) node.hidePopover()
-    }
-    node.addEventListener('toggle', syncOpen)
-    window.addEventListener('resize', closeOnViewportMove)
-    document.addEventListener('scroll', closeOnViewportMove, true)
-    return () => {
-      node.removeEventListener('toggle', syncOpen)
-      window.removeEventListener('resize', closeOnViewportMove)
-      document.removeEventListener('scroll', closeOnViewportMove, true)
-    }
-  }, [])
-
-  const openAt = (anchorElement: Element): void => {
-    const node = popover.current
-    if (node === null) return
-    const anchor = anchorElement.getBoundingClientRect()
-    node.style.visibility = 'hidden'
-    if (!node.matches(':popover-open')) node.showPopover()
-    const bounds = node.getBoundingClientRect()
-    const gutter = 12
-    const gap = 8
-    const left = Math.max(gutter, Math.min(anchor.left, window.innerWidth - bounds.width - gutter))
-    const below = anchor.bottom + gap
-    const top = below + bounds.height <= window.innerHeight - gutter
-      ? below
-      : Math.max(gutter, anchor.top - bounds.height - gap)
-    node.style.left = `${Math.round(left)}px`
-    node.style.top = `${Math.round(top)}px`
-    node.style.visibility = ''
-  }
-
-  const close = (): void => {
-    if (popover.current?.matches(':popover-open') === true) popover.current.hidePopover()
-  }
-  const toggleAt = (anchor: Element): void => {
-    if (popover.current?.matches(':popover-open') === true) close()
-    else openAt(anchor)
-  }
-
-  return { popover, nameId, popoverId, open, openAt, close, toggleAt }
-}
-
-function FleetMemberPopoverCard({ member, controller, showDetails, showContext }: {
+function FleetMemberListRow({ member, owner }: {
   readonly member: FleetPanelMember
-  readonly controller: ReturnType<typeof useFleetMemberPopover>
-  readonly showDetails: (memberId: string) => void
-  readonly showContext: (memberId: string) => void
+  readonly owner: FleetPanelPaneOwner
 }): ReactElement {
-  return jsxs('div', {
-    ref: controller.popover,
-    id: controller.popoverId,
-    popover: 'auto',
-    className: 'dsh-fleet-panel-member-popover',
-    role: 'dialog',
-    'aria-labelledby': controller.nameId,
-    children: [
-      jsxs('header', {
-        className: 'dsh-fleet-panel-member-popover-head',
-        children: [
-          jsx(FleetChatAvatar, { member, size: 42 }),
-          jsxs('div', {
-            className: 'dsh-fleet-panel-member-popover-copy',
-            children: [
-              jsx('div', { id: controller.nameId, className: 'dsh-fleet-panel-member-popover-name', children: member.name }),
-              jsx('div', { className: 'dsh-fleet-panel-member-popover-role', children: member.role }),
-            ],
-          }),
-        ],
+  return jsx(FleetMemberPopover, {
+    member,
+    mode: 'hover',
+    placement: 'right',
+    className: 'dsh-fleet-panel-member-list-anchor',
+    showStatusText: true,
+    showDetails: owner.showMemberDetails,
+    showContext: owner.showMemberContext,
+    trigger: (interaction: FleetMemberPopoverTriggerProps) => jsx(ListRow, {
+        selected: owner.activeItem === member.id,
+        title: member.name,
+        caption: member.role,
+        leading: jsx('span', { className: 'dsh-fleet-panel-list-icon', children: jsx('span', {
+          className: 'dsh-fleet-panel-presence',
+          'data-presence': fleetMemberPresence(member),
+        }) }),
+        trailing: jsx(MemberState, { member, showDot: false }),
+        interaction: {
+          controls: interaction['aria-controls'],
+          expanded: interaction['aria-expanded'],
+          onMouseEnter: interaction.onMouseEnter ?? (() => undefined),
+          onFocus: interaction.onFocus ?? (() => undefined),
+          onBlur: interaction.onBlur ?? (() => undefined),
+        },
+        onClick: () => { owner.selectItem(member.id) },
       }),
-      jsx('p', {
-        className: 'dsh-fleet-panel-member-popover-responsibility',
-        children: member.responsibility,
-      }),
-      jsx('div', {
-        className: 'dsh-fleet-panel-member-popover-status',
-        'data-status': member.presence ?? 'offline',
-        children: jsx(FleetPresenceLabel, {
-          presence: member.runtimeStatus === 'paused' ? 'offline' : member.presence ?? 'offline',
-          label: memberPresenceLabel(member),
-        }),
-      }),
-      jsxs('div', {
-        className: 'dsh-fleet-panel-member-popover-self-status',
-        'data-empty': member.statusText === undefined ? 'true' : undefined,
-        children: [
-          jsxs('div', {
-            className: 'dsh-fleet-panel-member-popover-self-status-head',
-            children: [
-              jsx('div', { className: 'dsh-fleet-panel-member-popover-self-status-label', children: '成员自述' }),
-              jsx(MemberStatusUpdatedAt, { member }),
-            ],
-          }),
-          jsx('p', {
-            className: 'dsh-fleet-panel-member-popover-self-status-text',
-            children: member.statusText ?? '暂未填写工作状态',
-          }),
-        ],
-      }),
-      jsxs('div', {
-        className: 'dsh-fleet-panel-member-popover-actions',
-        children: [
-          jsx('button', {
-            type: 'button',
-            className: 'dsh-fleet-panel-member-popover-detail',
-            onClick: () => {
-              controller.close()
-              showDetails(member.id)
-            },
-            children: '详细信息',
-          }),
-          jsx('button', {
-            type: 'button',
-            className: 'dsh-fleet-panel-member-popover-detail',
-            onClick: () => {
-              controller.close()
-              showContext(member.id)
-            },
-            children: '上下文',
-          }),
-        ],
-      }),
-    ],
   })
 }
 
 function FleetMemberAvatarPopover({ member, showDetails, showContext }: {
   readonly member: FleetPanelMember
-  readonly showDetails: (memberId: string) => void
-  readonly showContext: (memberId: string) => void
+  readonly showDetails?: (memberId: string) => void
+  readonly showContext?: (memberId: string) => void
 }): ReactElement {
-  const controller = useFleetMemberPopover()
-  return jsxs('div', {
+  return jsx(FleetMemberPopover, {
+    member,
     className: 'dsh-fleet-panel-member-avatar-anchor',
-    children: [
-      jsx('button', {
+    showStatusText: member.operator !== true,
+    ...(member.operator === true ? { editProfile: updateFleetOperatorProfile } : {}),
+    ...(showDetails === undefined ? {} : { showDetails }),
+    ...(showContext === undefined ? {} : { showContext }),
+    trigger: (interaction: FleetMemberPopoverTriggerProps) => jsx('button', {
         type: 'button',
         className: 'dsh-fleet-panel-member-avatar-trigger',
-        'aria-label': `查看 ${member.name} 的成员信息`,
-        'aria-haspopup': 'dialog',
-        'aria-expanded': controller.open ? 'true' : 'false',
-        'aria-controls': controller.popoverId,
-        onClick: (event: { readonly currentTarget: Element }) => { controller.toggleAt(event.currentTarget) },
+        'aria-label': member.operator === true
+          ? panelText('查看或编辑你的资料', 'View or edit your profile')
+          : panelText(`查看 ${member.name} 的成员信息`, `View member information for ${member.name}`),
+        ...interaction,
         children: jsx(FleetChatAvatar, { member }),
       }),
-      jsx(FleetMemberPopoverCard, { member, controller, showDetails, showContext }),
-    ],
   })
 }
 
@@ -7245,18 +10998,17 @@ function FleetReceiptMemberPopover({ member, showDetails, showContext }: {
   readonly showDetails: (memberId: string) => void
   readonly showContext: (memberId: string) => void
 }): ReactElement {
-  const controller = useFleetMemberPopover()
-  return jsxs('div', {
+  return jsx(FleetMemberPopover, {
+    member,
     className: 'dsh-fleet-panel-receipt-member-anchor',
-    children: [
-      jsxs('button', {
+    showStatusText: true,
+    showDetails,
+    showContext,
+    trigger: (interaction: FleetMemberPopoverTriggerProps) => jsxs('button', {
         type: 'button',
         className: 'dsh-fleet-message-receipt-member dsh-fleet-panel-receipt-member-trigger',
-        'aria-label': `查看 ${member.name} 的成员信息`,
-        'aria-haspopup': 'dialog',
-        'aria-expanded': controller.open ? 'true' : 'false',
-        'aria-controls': controller.popoverId,
-        onClick: (event: { readonly currentTarget: Element }) => { controller.toggleAt(event.currentTarget) },
+        'aria-label': panelText(`查看 ${member.name} 的成员信息`, `View member information for ${member.name}`),
+        ...interaction,
         children: [
           jsx(FleetChatAvatar, { member, size: 28, showPresence: false }),
           jsxs('span', {
@@ -7268,82 +11020,655 @@ function FleetReceiptMemberPopover({ member, showDetails, showContext }: {
           }),
         ],
       }),
-      jsx(FleetMemberPopoverCard, { member, controller, showDetails, showContext }),
-    ],
   })
 }
 
 function FleetMemberMentionPopover({ member, label, showDetails, showContext }: {
   readonly member: FleetPanelMember
   readonly label: string
-  readonly showDetails: (memberId: string) => void
-  readonly showContext: (memberId: string) => void
+  readonly showDetails?: (memberId: string) => void
+  readonly showContext?: (memberId: string) => void
 }): ReactElement {
-  const controller = useFleetMemberPopover()
-  return jsxs(Fragment, {
-    children: [
-      jsx('button', {
+  return jsx(FleetMemberPopover, {
+    member,
+    as: 'span',
+    showStatusText: true,
+    ...(showDetails === undefined ? {} : { showDetails }),
+    ...(showContext === undefined ? {} : { showContext }),
+    trigger: (interaction: FleetMemberPopoverTriggerProps) => jsx('button', {
         type: 'button',
         className: 'dsh-fleet-panel-member-mention',
-        'aria-label': `${label}，查看 ${member.name} 的成员信息`,
-        'aria-haspopup': 'dialog',
-        'aria-expanded': controller.open ? 'true' : 'false',
-        'aria-controls': controller.popoverId,
+        'aria-label': panelText(`${label}，查看 ${member.name} 的成员信息`, `${label}; view member information for ${member.name}`),
         'data-member-id': member.id,
-        onClick: (event: { readonly currentTarget: Element }) => { controller.toggleAt(event.currentTarget) },
+        ...interaction,
         children: label,
       }),
-      jsx(FleetMemberPopoverCard, { member, controller, showDetails, showContext }),
+  })
+}
+
+type FleetOfficialInputBar = ComponentType<Record<string, unknown>>
+
+interface FleetOfficialComposerCapture {
+  InputBar: FleetOfficialInputBar
+  props: Record<string, unknown>
+}
+
+const fleetOfficialComposerCaptures = new Map<string, FleetOfficialComposerCapture>()
+const fleetOfficialComposerListeners = new Set<() => void>()
+
+/** Capture the official DSH InputBar so every Fleet conversation can use the same adapted component. */
+export function captureFleetOfficialComposer(
+  sessionId: string,
+  InputBar: FleetOfficialInputBar,
+  props: Record<string, unknown>,
+): void {
+  const current = fleetOfficialComposerCaptures.get(sessionId)
+  if (current !== undefined) {
+    current.InputBar = InputBar
+    current.props = props
+    return
+  }
+  fleetOfficialComposerCaptures.set(sessionId, { InputBar, props })
+  queueMicrotask(() => { for (const listener of fleetOfficialComposerListeners) listener() })
+}
+
+function useFleetOfficialComposer(sessionId: string): FleetOfficialComposerCapture | undefined {
+  return useSyncExternalStore(
+    listener => {
+      fleetOfficialComposerListeners.add(listener)
+      return () => { fleetOfficialComposerListeners.delete(listener) }
+    },
+    () => fleetOfficialComposerCaptures.get(sessionId),
+    () => undefined,
+  )
+}
+
+export type FleetConversationCommand = 'compact' | 'goal' | 'plan' | 'model' | 'export'
+
+export function parseFleetConversationCommand(
+  line: string,
+  kind: FleetPanelConversation['kind'] = 'direct',
+): FleetConversationCommand | undefined {
+  const trimmed = line.trim()
+  if (kind === 'channel') return trimmed === '/export' ? 'export' : undefined
+  if (trimmed === '/compact') return 'compact'
+  if (trimmed === '/export') return 'export'
+  if (trimmed === '/model') return 'model'
+  if (/^\/goal\s+\S/u.test(trimmed)) return 'goal'
+  if (/^\/plan\s+\S/u.test(trimmed)) return 'plan'
+  return undefined
+}
+
+function downloadFleetBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  document.body.append(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function downloadFleetTeamConfiguration(teamName: string, configuration: Record<string, unknown>): void {
+  const stem = teamName.trim()
+    .replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]+/g, '-')
+    .replace(/^-|-$/g, '')
+  const blob = new Blob([`${JSON.stringify(configuration, null, 2)}\n`], { type: 'application/json' })
+  downloadFleetBlob(blob, `${stem || 'fleet-team'}.fleet-team.json`)
+}
+
+export interface FleetConversationCommandEntry {
+  readonly name: FleetConversationCommand
+  readonly description: string
+  readonly behavior: 'execute' | 'input' | 'model'
+}
+
+export function fleetPrivateConversationCommands(member: string): readonly FleetConversationCommandEntry[] {
+  return [
+    {
+      name: 'compact',
+      description: panelText(`压缩 ${member} 的较早会话上下文`, `Compact older Session context for ${member}`),
+      behavior: 'execute',
+    },
+    {
+      name: 'goal',
+      description: panelText(`设定或管理 ${member} 的原生 Goal`, `Set or manage ${member}’s native Goal`),
+      behavior: 'input',
+    },
+    {
+      name: 'plan',
+      description: panelText(`切换 ${member} 的原生 Plan 模式`, `Change ${member}’s native Plan mode`),
+      behavior: 'input',
+    },
+    {
+      name: 'model',
+      description: panelText(`选择 ${member} 下一步使用的模型`, `Select the model for ${member}’s next step`),
+      behavior: 'model',
+    },
+    {
+      name: 'export',
+      description: panelText(`导出 ${member} 的会话`, `Export ${member}’s Session`),
+      behavior: 'execute',
+    },
+  ]
+}
+
+function fleetConversationCommands(
+  conversation: FleetPanelConversation,
+  peer: FleetPanelMember | undefined,
+): readonly FleetConversationCommandEntry[] {
+  if (conversation.kind === 'channel') return [{
+    name: 'export',
+    description: panelText('导出当前团队', 'Export the current Team'),
+    behavior: 'execute',
+  }]
+  return fleetPrivateConversationCommands(peer?.name ?? conversation.name)
+}
+
+interface FleetSessionGoalProjection {
+  readonly goal?: {
+    readonly objective: string
+    readonly phase: 'active' | 'paused' | 'blocked' | 'complete'
+  } | null
+}
+
+function FleetSessionGoalDock({ session }: { readonly session: FleetNativeSessionFace | undefined }): ReactElement | null {
+  const projection = session?.projections?.faceOf('goal')
+  const subscribe = useCallback(
+    (listener: () => void) => projection?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE,
+    [projection],
+  )
+  const snapshot = useCallback(
+    () => projection?.getSnapshot() as FleetSessionGoalProjection | undefined,
+    [projection],
+  )
+  const goal = useSyncExternalStore(subscribe, snapshot, snapshot)?.goal
+  if (goal === undefined || goal === null || goal.phase === 'complete') return null
+  const phase = ({
+    active: panelText('目标进行中', 'Ongoing Goal'),
+    paused: panelText('目标已暂停', 'Paused Goal'),
+    blocked: panelText('目标受阻', 'Blocked Goal'),
+  } as const)[goal.phase]
+  return jsxs('div', {
+    className: 'dsh-fleet-session-goal-dock',
+    'data-goal-bar': 'true',
+    children: [
+      jsx('span', { className: 'dsh-fleet-session-goal-phase', children: phase }),
+      jsx('span', { className: 'dsh-fleet-session-goal-objective', title: goal.objective, children: goal.objective }),
+    ],
+  })
+}
+
+function FleetOfficialConversationComposer({ owner, conversation }: {
+  readonly owner: FleetPanelPaneOwner
+  readonly conversation: FleetPanelConversation
+}): ReactElement {
+  const capture = useFleetOfficialComposer(owner.sessionId)
+  const attachments = useFleetComposerAttachments(`${owner.snapshot.teamId}:${owner.activeItem}`)
+  const peer = conversation.peerId === undefined
+    ? undefined
+    : teamAgents(owner.snapshot).find(member => member.id === conversation.peerId)
+  const targetSessionId = conversation.kind === 'direct' ? peer?.sessionId : undefined
+  const targetSession = targetSessionId === undefined ? undefined : owner.nativeContext.session(targetSessionId)
+  const modelDirectorySessionId = getFleetModelDirectory(targetSessionId) === undefined
+    ? owner.sessionId
+    : targetSessionId
+  const [modelDirectory, modelDirectoryState] = useFleetPanelModelDirectory(modelDirectorySessionId)
+  const draftHistory = useRef<readonly string[]>([owner.draft])
+  const draftHistoryIndex = useRef(0)
+  const commandMenuRef = useRef<HTMLDivElement>(null)
+  const [commandMenuOpen, setCommandMenuOpen] = useState(false)
+  const [commandMenuView, setCommandMenuView] = useState<'commands' | 'models'>('commands')
+  const [commandHighlight, setCommandHighlight] = useState(0)
+  const [commandRunning, setCommandRunning] = useState(false)
+  const [commandFeedback, setCommandFeedback] = useState<{
+    readonly kind: 'success' | 'error'
+    readonly text: string
+  }>()
+  const tutorial = owner.snapshot.tutorial === true
+
+  useEffect(() => {
+    draftHistory.current = [owner.draft]
+    draftHistoryIndex.current = 0
+    setCommandMenuOpen(false)
+    setCommandMenuView('commands')
+    setCommandFeedback(undefined)
+  }, [owner.activeItem, owner.snapshot.teamId])
+
+  useEffect(() => { void targetSession?.open?.() }, [targetSession])
+
+  useEffect(() => {
+    if (!commandMenuOpen) return
+    const close = (event: globalThis.PointerEvent): void => {
+      if (!(event.target instanceof Node)) return
+      const card = commandMenuRef.current?.closest('[data-composer-card="true"]')
+      if (card?.contains(event.target) === true) return
+      setCommandMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', close, true)
+    return () => { document.removeEventListener('pointerdown', close, true) }
+  }, [commandMenuOpen])
+
+  if (capture === undefined) {
+    return jsx('div', {
+      className: 'dsh-fleet-panel-composer-wrap dsh-fleet-official-composer-loading',
+      role: 'status',
+      children: panelText('正在载入输入框…', 'Loading composer…'),
+    })
+  }
+
+  const fileIds = attachments.items.map(item => item.id)
+  const inputSnapshot = {
+    draft: owner.draft,
+    phase: owner.sending || commandRunning ? 'submitting' : 'plain',
+    imageIds: fileIds,
+    occurrences: [],
+    queue: [],
+  }
+  const useInput = <Selection,>(selector: (snapshot: typeof inputSnapshot) => Selection): Selection => selector(inputSnapshot)
+  const useSession = <Selection,>(selector: (snapshot: Record<string, unknown>) => Selection): Selection => selector({
+    running: false,
+    removed: false,
+    promptError: null,
+    subagent: null,
+  })
+  const useNotices = <Selection,>(selector: (snapshot: undefined) => Selection): Selection => selector(undefined)
+  const useLexicon = <Selection,>(selector: (snapshot: ReadonlyMap<string, readonly string[]>) => Selection): Selection => selector(new Map([
+    ['/', fleetConversationCommands(conversation, peer).map(command => command.name)],
+    ['@', teamAgents(owner.snapshot).map(member => member.name)],
+  ]))
+  const useMenuLauncher = <Selection,>(selector: (snapshot: string | null) => Selection): Selection => selector(commandMenuOpen ? 'command' : null)
+  const useProjection = <Selection,>(name: string, selector?: (snapshot: any) => Selection): Selection | undefined => {
+    const projection = targetSession?.projections?.faceOf(name)
+    const subscribe = (listener: () => void): (() => void) => projection?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE
+    const snapshot = (): Selection | undefined => {
+      const value = projection?.getSnapshot()
+      return selector === undefined ? value as Selection | undefined : selector(value)
+    }
+    return useSyncExternalStore(subscribe, snapshot, snapshot)
+  }
+  const setDraft = (draft: string): void => {
+    setCommandFeedback(undefined)
+    if (draftHistory.current[draftHistoryIndex.current] !== draft) {
+      draftHistory.current = [...draftHistory.current.slice(0, draftHistoryIndex.current + 1), draft].slice(-100)
+      draftHistoryIndex.current = draftHistory.current.length - 1
+    }
+    owner.setDraft(draft)
+  }
+  const moveDraftHistory = (offset: -1 | 1): void => {
+    const next = Math.max(0, Math.min(draftHistory.current.length - 1, draftHistoryIndex.current + offset))
+    if (next === draftHistoryIndex.current) return
+    draftHistoryIndex.current = next
+    owner.setDraft(draftHistory.current[next] ?? '')
+  }
+  const commandEntries = fleetConversationCommands(conversation, peer)
+  const modelEntries = modelDirectoryState.groups.flatMap(group => group.models.map(model => ({ group, model })))
+  const exportTeam = (clearDraft: boolean): void => {
+    if (owner.exportTeam === undefined || commandRunning) return
+    setCommandMenuOpen(false)
+    setCommandRunning(true)
+    setCommandFeedback(undefined)
+    void owner.exportTeam(owner.snapshot.teamId).then(configuration => {
+      downloadFleetTeamConfiguration(owner.snapshot.teamName, configuration)
+      if (clearDraft) owner.setDraft('')
+      setCommandFeedback({ kind: 'success', text: panelText('团队已导出', 'Team exported') })
+    }).catch((error: unknown) => {
+      setCommandFeedback({
+        kind: 'error',
+        text: error instanceof Error ? error.message : panelText('团队导出失败', 'Team export failed'),
+      })
+    }).finally(() => { setCommandRunning(false) })
+  }
+  const executeMemberCommand = (line: string, clearDraft: boolean): void => {
+    if (targetSessionId === undefined || commandRunning) {
+      setCommandFeedback({
+        kind: 'error',
+        text: panelText('这个成员当前没有可用的 Session', 'This member does not currently have an available Session'),
+      })
+      return
+    }
+    const command = parseFleetConversationCommand(line, 'direct')
+    setCommandMenuOpen(false)
+    setCommandRunning(true)
+    setCommandFeedback(undefined)
+    void owner.nativeContext.executeSessionCommand(targetSessionId, line).then(result => {
+      if (result.kind === 'error') throw new Error(result.text ?? panelText('命令执行失败', 'Command failed'))
+      if (clearDraft) owner.setDraft('')
+      setCommandFeedback({
+        kind: 'success',
+        text: command === 'export'
+          ? panelText(`${peer?.name ?? conversation.name} 的会话导出已开始`, `${peer?.name ?? conversation.name}’s Session export has started`)
+          : panelText(`/${command ?? 'command'} 已交给 ${peer?.name ?? conversation.name}`, `/${command ?? 'command'} was applied to ${peer?.name ?? conversation.name}`),
+      })
+    }).catch((error: unknown) => {
+      setCommandFeedback({
+        kind: 'error',
+        text: error instanceof Error ? error.message : panelText('Session 命令执行失败', 'Session command failed'),
+      })
+    }).finally(() => { setCommandRunning(false) })
+  }
+  const selectModel = (group: FleetModelProviderGroup, model: FleetModelCatalogModel): void => {
+    if (peer === undefined || owner.configureMemberRequest === undefined || commandRunning) return
+    setCommandRunning(true)
+    setCommandFeedback(undefined)
+    const request = {
+      provider: group.id,
+      model: model.id,
+      ...(model.reasoning?.defaultEffort === undefined ? {} : { reasoningEffort: model.reasoning.defaultEffort }),
+    }
+    const assistant = owner.snapshot.assistants?.some(candidate => candidate.id === peer.id) === true
+    void owner.configureMemberRequest(peer.id, assistant, request).then(async () => {
+      await modelDirectory?.load().catch(() => undefined)
+      setCommandMenuOpen(false)
+      setCommandMenuView('commands')
+      setCommandFeedback({
+        kind: 'success',
+        text: panelText(`${peer?.name ?? conversation.name} 已切换到 ${model.name}`, `${peer?.name ?? conversation.name} now uses ${model.name}`),
+      })
+    }).catch((error: unknown) => {
+      setCommandFeedback({
+        kind: 'error',
+        text: error instanceof Error ? error.message : panelText('模型切换失败', 'Model selection failed'),
+      })
+    }).finally(() => { setCommandRunning(false) })
+  }
+  const pickCommand = (entry = commandEntries[commandHighlight]): void => {
+    if (entry === undefined) return
+    if (entry.behavior === 'input') {
+      setCommandMenuOpen(false)
+      setDraft(`/${entry.name} `)
+      return
+    }
+    if (entry.behavior === 'model') {
+      setCommandHighlight(0)
+      setCommandMenuView('models')
+      if (modelDirectory !== undefined) void modelDirectory.load().catch(() => undefined)
+      return
+    }
+    if (conversation.kind === 'channel') exportTeam(false)
+    else executeMemberCommand(`/${entry.name}`, false)
+  }
+  const submit = (): void => {
+    if (owner.sending || commandRunning || (owner.draft.trim() === '' && attachments.files.length === 0)) return
+    const command = parseFleetConversationCommand(owner.draft, conversation.kind)
+    if (command !== undefined) {
+      if (attachments.files.length > 0) {
+        setCommandFeedback({
+          kind: 'error',
+          text: conversation.kind === 'channel'
+            ? panelText('导出团队时不能同时携带文件', 'Team export cannot include files')
+            : panelText('Session 命令不能同时携带文件', 'Session commands cannot include files'),
+        })
+        return
+      }
+      if (conversation.kind === 'channel') exportTeam(true)
+      else if (command === 'model') {
+        setCommandMenuOpen(true)
+        setCommandMenuView('models')
+        setCommandHighlight(0)
+        if (modelDirectory !== undefined) void modelDirectory.load().catch(() => undefined)
+      } else executeMemberCommand(owner.draft.trim(), true)
+      return
+    }
+    if (conversation.kind === 'direct' && (owner.draft.trim() === '/goal' || owner.draft.trim() === '/plan')) {
+      setDraft(`${owner.draft.trim()} `)
+      return
+    }
+    setCommandFeedback(undefined)
+    void owner.sendMessage(attachments.files).then(attachments.clearFiles).catch(() => undefined)
+  }
+  const keyboard = {
+    snapshot: { ...inputSnapshot, paste: undefined },
+    setDraft,
+    track: () => { setCommandMenuOpen(false) },
+    arbitrate: (key: 'up' | 'down' | 'enter' | 'escape') => {
+      if (!commandMenuOpen) return 'pass'
+      if (key === 'escape') {
+        if (commandMenuView === 'models') {
+          setCommandMenuView('commands')
+          setCommandHighlight(0)
+          return 'consumed'
+        }
+        setCommandMenuOpen(false)
+        return 'consumed'
+      }
+      if (key === 'up' || key === 'down') {
+        const count = commandMenuView === 'models' ? modelEntries.length : commandEntries.length
+        if (count > 0) setCommandHighlight(current => (current + (key === 'up' ? -1 : 1) + count) % count)
+        return 'consumed'
+      }
+      if (commandMenuView === 'models') {
+        const choice = modelEntries[commandHighlight]
+        if (choice !== undefined) selectModel(choice.group, choice.model)
+      } else if (commandEntries[commandHighlight] !== undefined) pickCommand()
+      return 'pick-highlighted'
+    },
+    dismissPopup: () => undefined,
+    redo: () => { moveDraftHistory(1) },
+    undo: () => { moveDraftHistory(-1) },
+    space: () => false,
+    submit,
+    steerQueue: () => undefined,
+    invalidatePaste: () => undefined,
+    pasteBegin: (text: string, selection: { readonly start: number; readonly end: number }) => {
+      setDraft(`${owner.draft.slice(0, selection.start)}${text}${owner.draft.slice(selection.end)}`)
+    },
+  }
+  const inputActions = {
+    setDraft,
+    submit,
+    pruneImages: () => undefined,
+  }
+  const leftItems = jsxs('span', {
+    className: 'dsh-fleet-official-composer-actions',
+    children: [
+      !tutorial && jsx(FleetComposerAttachmentButton, {
+        attachments,
+        disabled: owner.sending || commandRunning,
+      }),
+      owner.renderPanelSlot(FLEET_PANEL_SLOTS.composerAction, owner as unknown as Record<string, unknown>),
+      jsx('button', {
+        type: 'button',
+        className: 'dsh-fleet-panel-urgent-toggle',
+        disabled: tutorial || owner.sending || commandRunning,
+        'aria-pressed': owner.urgent,
+        title: conversation.kind === 'channel'
+          ? panelText('紧急消息会中断被 @ 成员的当前步骤', 'An urgent message interrupts the current step of @mentioned members')
+          : panelText('紧急消息会中断该成员的当前步骤', 'An urgent message interrupts this member’s current step'),
+        onClick: () => { owner.setUrgent(!owner.urgent) },
+        children: panelText('紧急', 'Urgent'),
+      }),
+    ],
+  })
+  const feedback = owner.sendError === null ? commandFeedback : { kind: 'error' as const, text: owner.sendError }
+  const footer = !tutorial && !owner.sending && !commandRunning && feedback === undefined ? undefined : jsx('span', {
+    className: feedback?.kind === 'error' ? 'dsh-fleet-panel-compose-error' : 'dsh-fleet-panel-compose-context',
+    role: feedback?.kind === 'error' ? 'alert' : 'status',
+    'aria-live': 'polite',
+    children: tutorial
+      ? panelText('演示数据不会启动 Agent 或发送消息', 'Demo data never starts Agents or sends messages')
+        : owner.sending
+          ? panelText('发送中…', 'Sending…')
+        : commandRunning
+          ? panelText('正在应用命令…', 'Applying command…')
+          : feedback?.text,
+  })
+  const overlay = commandMenuOpen && jsx('div', {
+    ref: commandMenuRef,
+    className: 'dsh-fleet-conversation-command-menu',
+    role: 'listbox',
+    'aria-label': commandMenuView === 'models'
+      ? panelText('选择成员 Session 模型', 'Select member Session model')
+      : panelText('团队会话命令', 'Fleet conversation commands'),
+    'aria-activedescendant': commandMenuView === 'models'
+      ? `dsh-fleet-model-${modelEntries[commandHighlight]?.group.id ?? 'none'}-${modelEntries[commandHighlight]?.model.id ?? 'none'}`
+      : `dsh-fleet-command-${commandEntries[commandHighlight]?.name ?? 'export'}`,
+    children: commandMenuView === 'models' ? [
+      jsx('button', {
+        type: 'button',
+        className: 'dsh-fleet-conversation-command-menu-title dsh-fleet-conversation-command-menu-back',
+        onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+          event.preventDefault()
+          setCommandMenuView('commands')
+          setCommandHighlight(0)
+        },
+        children: panelText(`‹ 选择 ${peer?.name ?? conversation.name} 的模型`, `‹ Select a model for ${peer?.name ?? conversation.name}`),
+      }),
+      modelDirectoryState.status === 'loading' && jsx('div', {
+        className: 'dsh-fleet-conversation-command-menu-title',
+        role: 'status',
+        children: panelText('正在载入模型…', 'Loading models…'),
+      }),
+      modelDirectoryState.error !== null && jsx('div', {
+        className: 'dsh-fleet-conversation-command-menu-title',
+        role: 'alert',
+        children: modelDirectoryState.error,
+      }),
+      ...modelEntries.map((choice, index) => jsxs('button', {
+        id: `dsh-fleet-model-${choice.group.id}-${choice.model.id}`,
+        type: 'button',
+        role: 'option',
+        'aria-selected': commandHighlight === index,
+        className: 'dsh-fleet-conversation-command-menu-item',
+        onMouseEnter: () => { setCommandHighlight(index) },
+        onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+          event.preventDefault()
+          selectModel(choice.group, choice.model)
+        },
+        children: [
+          jsx('span', { className: 'dsh-fleet-conversation-command-menu-name', children: choice.model.name }),
+          jsx('span', {
+            className: 'dsh-fleet-conversation-command-menu-description',
+            children: choice.model.description ?? choice.group.name,
+          }),
+        ],
+      }, `${choice.group.id}:${choice.model.id}`)),
+      modelEntries.length === 0 && modelDirectoryState.status !== 'loading' && jsx('div', {
+        className: 'dsh-fleet-conversation-command-menu-title',
+        children: panelText('没有可用模型', 'No models available'),
+      }),
+    ] : [
+      jsx('div', {
+        className: 'dsh-fleet-conversation-command-menu-title',
+        role: 'presentation',
+        children: panelText('命令', 'Commands'),
+      }),
+      ...commandEntries.map((entry, index) => jsxs('button', {
+        id: `dsh-fleet-command-${entry.name}`,
+        type: 'button',
+        role: 'option',
+        'aria-selected': commandHighlight === index,
+        className: 'dsh-fleet-conversation-command-menu-item',
+        onMouseEnter: () => { setCommandHighlight(index) },
+        onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+          event.preventDefault()
+          pickCommand(entry)
+        },
+        children: [
+          jsx('span', { className: 'dsh-fleet-conversation-command-menu-name', children: entry.name }),
+          jsx('span', { className: 'dsh-fleet-conversation-command-menu-description', children: entry.description }),
+        ],
+      }, entry.name)),
+    ],
+  })
+  const capturedRenderSlot = capture.props.renderSlot as ((
+    name: string,
+    owner: Readonly<Record<string, unknown>>,
+    options?: Readonly<Record<string, unknown>>,
+  ) => ReactNode) | undefined
+  const renderSlot = (
+    name: string,
+    slotOwner: Readonly<Record<string, unknown>>,
+    options?: Readonly<Record<string, unknown>>,
+  ): ReactNode => {
+    if (name !== 'conversation.input.attachments') return null
+    return jsxs(Fragment, {
+      children: [
+        capturedRenderSlot?.(name, { ...slotOwner, attachments: attachments.imageItems }, options),
+        jsx(FleetComposerAttachmentList, { attachments }),
+      ],
+    })
+  }
+  const InputBar = capture.InputBar
+  return jsxs('div', {
+    className: 'dsh-fleet-panel-composer-wrap dsh-fleet-official-composer',
+    children: [
+      jsx(FleetSessionGoalDock, { session: targetSession }),
+      jsx(InputBar, {
+      ...capture.props,
+      sessionId: targetSessionId ?? owner.sessionId,
+      disabled: tutorial || commandRunning,
+      blocked: undefined,
+      workspacePickerOpen: false,
+      onRequestWorkspace: undefined,
+      placeholder: tutorial
+        ? panelText('引导团队为只读演示', 'The guided Team is a read-only demo')
+        : panelText(`发送消息到 ${conversation.kind === 'channel' ? '#' : ''}${conversation.name}`, `Send a message to ${conversation.kind === 'channel' ? '#' : ''}${conversation.name}`),
+      useInput,
+      useSession,
+      useNotices,
+      useLexicon,
+      useMenuLauncher,
+      useProjection,
+      inputActions,
+      keyboard,
+      addImages: (added: readonly File[]) => {
+        if (!tutorial && !owner.sending && !commandRunning) attachments.addFiles(added)
+        return null
+      },
+      removeImage: attachments.removeFile,
+      draftImages: (ids: readonly string[]) => ids.flatMap(id => attachments.items.filter(item => item.id === id)),
+      resolveSubmitMode: () => 'queue',
+      toggleCommandMenu: tutorial
+        || (conversation.kind === 'channel' && owner.exportTeam === undefined)
+        || (conversation.kind === 'direct' && peer === undefined)
+        ? undefined
+        : () => {
+            setCommandHighlight(0)
+            setCommandMenuView('commands')
+            setCommandMenuOpen(current => !current)
+          },
+      stop: undefined,
+      command: undefined,
+      renderSlot,
+      accessory: undefined,
+      overlay,
+      leftItems,
+      rightItems: null,
+      usageMeter: jsx(FleetBudgetMeter, {
+        teamId: owner.snapshot.teamId,
+        budget: owner.snapshot.budget,
+        ...(conversation.kind === 'direct' && peer !== undefined ? { memberId: peer.id } : {}),
+      }),
+      footer,
+      }),
     ],
   })
 }
 
 function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
-  const textarea = useRef<HTMLTextAreaElement>(null)
-  const mentionListId = useId()
-  const [caret, setCaret] = useState(0)
-  const [composerFocused, setComposerFocused] = useState(false)
-  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0)
-  const [dismissedMention, setDismissedMention] = useState<string>()
   const conversation = operatorConversations(owner.snapshot).find(item => item.id === owner.activeItem)
-  const tutorial = owner.snapshot.tutorial === true
-  const mentionQuery = conversation?.kind === 'channel'
-    ? activeFleetMentionQuery(owner.draft, caret)
-    : undefined
-  const mentionKey = mentionQuery === undefined
-    ? ''
-    : `${mentionQuery.start}:${mentionQuery.end}:${mentionQuery.query}`
-  const normalizedMentionQuery = mentionQuery?.query.toLocaleLowerCase() ?? ''
-  const mentionCandidates = mentionQuery === undefined ? [] : owner.snapshot.members.filter(member =>
-    normalizedMentionQuery === ''
-      || member.name.toLocaleLowerCase().includes(normalizedMentionQuery)
-      || member.id.toLocaleLowerCase().includes(normalizedMentionQuery)
-      || member.role.toLocaleLowerCase().includes(normalizedMentionQuery))
-  const mentionOpen = composerFocused && mentionQuery !== undefined && dismissedMention !== mentionKey
   const recentMessages = conversation === undefined
     ? []
     : owner.snapshot.messages.filter(message => message.conversationId === conversation.id)
   const history = useConversationHistory(owner, conversation?.id ?? '', recentMessages)
 
-  useEffect(() => { setSelectedMentionIndex(0) }, [mentionKey])
-
-  if (conversation === undefined) return jsx(PanelUnavailable, { label: '请选择一个频道或成员' })
+  if (conversation === undefined) return jsx(PanelUnavailable, { label: panelText('请选择一个频道或成员', 'Choose a Channel or member') })
   const peer = conversation.peerId === undefined ? undefined : teamAgents(owner.snapshot).find(member => member.id === conversation.peerId)
-  const members = new Map(teamAgents(owner.snapshot).map(member => [member.id, member]))
+  const teamMembers = teamAgents(owner.snapshot)
+  const members = new Map(teamMembers.map(member => [member.id, member]))
   members.set(operator.id, operator)
+  const channelMembers = conversation.kind !== 'channel'
+    ? undefined
+    : conversation.participantIds === undefined
+      ? teamMembers
+      : conversation.participantIds.flatMap(id => {
+          const member = members.get(id)
+          return member === undefined || member.operator === true ? [] : [member]
+        })
+  const onlineMembers = channelMembers?.filter(fleetPanelMemberIsOnline)
   const messages = history.messages
-  const send = (): void => { owner.sendMessage() }
-  const selectMention = (member: FleetPanelMember): void => {
-    if (mentionQuery === undefined) return
-    const next = insertFleetMemberMention(owner.draft, mentionQuery, member.name)
-    owner.setDraft(next.text)
-    setCaret(next.caret)
-    setDismissedMention(undefined)
-    queueMicrotask(() => {
-      textarea.current?.focus()
-      textarea.current?.setSelectionRange(next.caret, next.caret)
-    })
-  }
   return jsxs('section', {
     className: 'dsh-fleet-panel-chat',
     children: [
@@ -7353,9 +11678,22 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
         description: conversation.topic,
         memberCount: conversation.memberCount ?? owner.snapshot.members.length,
         activeCount: conversation.activeCount ?? owner.snapshot.members.filter(member =>
-          member.presence === 'active' || member.presence === 'busy'
-            || member.presence === 'waiting' || member.presence === 'error',
+          fleetPanelMemberIsOnline(member),
         ).length,
+        ...(channelMembers === undefined ? {} : {
+          members: channelMembers,
+          onlineMembers: onlineMembers ?? [],
+          renderMember: (member: FleetChatMember) => {
+            const panelMember = members.get(member.id)
+            return panelMember === undefined
+              ? undefined
+              : jsx(FleetReceiptMemberPopover, {
+                  member: panelMember,
+                  showDetails: owner.showMemberDetails,
+                  showContext: owner.showMemberContext,
+                })
+          },
+        }),
         ...(peer === undefined ? {} : { peer }),
         actions: jsxs('div', {
           className: 'dsh-fleet-panel-main-actions',
@@ -7378,11 +11716,14 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
           'aria-live': 'polite',
           'data-fleet-conversation-id': conversation.id,
           children: messages.length === 0
-            ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '这里还没有消息' })
+            ? jsx('div', { className: 'dsh-fleet-panel-empty', children: panelText('这里还没有消息', 'No messages here yet') })
             : messages.map(message => {
-                const sender = message.sender ?? members.get(message.senderId)
+                const projectedSender = message.sender ?? members.get(message.senderId)
+                const sender = projectedSender?.operator === true ? operator : projectedSender
                 if (sender === undefined) return null
-                const member = teamAgents(owner.snapshot).find(candidate => candidate.id === sender.id)
+                const member = sender.operator === true
+                  ? operator
+                  : teamAgents(owner.snapshot).find(candidate => candidate.id === sender.id)
                 const messageOwner: FleetPanelMessageOwner = { panel: owner, conversation, message, sender }
                 return jsx('div', {
                   className: 'dsh-fleet-panel-agent-message-row',
@@ -7404,8 +11745,10 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
                     ...(member === undefined ? {} : {
                       avatar: jsx(FleetMemberAvatarPopover, {
                         member,
-                        showDetails: owner.showMemberDetails,
-                        showContext: owner.showMemberContext,
+                        ...(member.operator === true ? {} : {
+                          showDetails: owner.showMemberDetails,
+                          showContext: owner.showMemberContext,
+                        }),
                       }),
                     }),
                     actions: owner.renderPanelSlot(
@@ -7424,141 +11767,7 @@ function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
               }),
         }),
       }),
-      jsxs('div', {
-        className: 'dsh-fleet-panel-composer-wrap',
-        children: [
-          jsxs('div', {
-            className: 'dsh-fleet-panel-composer',
-            'aria-busy': owner.sending ? 'true' : 'false',
-            children: [
-              mentionOpen && jsx('div', {
-                id: mentionListId,
-                className: 'dsh-fleet-panel-mention-menu',
-                role: 'listbox',
-                'aria-label': '选择要提及的团队成员',
-                children: mentionCandidates.length === 0
-                  ? jsx('div', { className: 'dsh-fleet-panel-mention-empty', children: '没有匹配的团队成员' })
-                  : mentionCandidates.map((member, index) => jsxs('button', {
-                      id: `${mentionListId}-${index}`,
-                      type: 'button',
-                      className: 'dsh-fleet-panel-mention-option',
-                      role: 'option',
-                      'aria-selected': index === selectedMentionIndex ? 'true' : 'false',
-                      onPointerMove: () => { setSelectedMentionIndex(index) },
-                      onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
-                        event.preventDefault()
-                        selectMention(member)
-                      },
-                      children: [
-                        jsx(FleetChatAvatar, { member, size: 28 }),
-                        jsxs('span', {
-                          className: 'dsh-fleet-panel-mention-option-copy',
-                          children: [
-                            jsx('div', { className: 'dsh-fleet-panel-mention-option-name', children: member.name }),
-                            jsx('div', { className: 'dsh-fleet-panel-mention-option-role', children: member.role }),
-                          ],
-                        }),
-                      ],
-                    }, member.id)),
-              }),
-              jsx('textarea', {
-                ref: textarea,
-                className: 'dsh-fleet-panel-composer-input',
-                value: owner.draft,
-                rows: 2,
-                disabled: tutorial,
-                placeholder: tutorial
-                  ? panelText('引导团队为只读演示', 'The guided Team is a read-only demo')
-                  : `发送消息到 ${conversation.kind === 'channel' ? '#' : ''}${conversation.name}`,
-                'aria-label': `发送消息到 ${conversation.name}`,
-                'aria-autocomplete': conversation.kind === 'channel' ? 'list' : undefined,
-                'aria-controls': mentionOpen ? mentionListId : undefined,
-                'aria-expanded': conversation.kind === 'channel' ? (mentionOpen ? 'true' : 'false') : undefined,
-                'aria-activedescendant': mentionOpen && mentionCandidates.length > 0
-                  ? `${mentionListId}-${Math.min(selectedMentionIndex, mentionCandidates.length - 1)}`
-                  : undefined,
-                onFocus: () => { setComposerFocused(true) },
-                onBlur: () => { setComposerFocused(false) },
-                onSelect: (event: { readonly currentTarget: HTMLTextAreaElement }) => {
-                  setCaret(event.currentTarget.selectionStart ?? event.currentTarget.value.length)
-                },
-                onChange: (event: ChangeEvent<HTMLTextAreaElement>) => {
-                  setCaret(event.target.selectionStart ?? event.target.value.length)
-                  setDismissedMention(undefined)
-                  owner.setDraft(event.target.value)
-                },
-                onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => {
-                  if (event.nativeEvent.isComposing) return
-                  if (mentionOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-                    if (mentionCandidates.length === 0) return
-                    event.preventDefault()
-                    setSelectedMentionIndex(current => event.key === 'ArrowDown'
-                      ? (current + 1) % mentionCandidates.length
-                      : (current <= 0 ? mentionCandidates.length : current) - 1)
-                    return
-                  }
-                  if (mentionOpen && (event.key === 'Enter' || event.key === 'Tab') && mentionCandidates.length > 0) {
-                    event.preventDefault()
-                    selectMention(mentionCandidates[Math.min(selectedMentionIndex, mentionCandidates.length - 1)]!)
-                    return
-                  }
-                  if (mentionOpen && event.key === 'Escape') {
-                    event.preventDefault()
-                    setDismissedMention(mentionKey)
-                    return
-                  }
-                  if (event.key !== 'Enter' || event.shiftKey) return
-                  event.preventDefault()
-                  send()
-                },
-              }),
-              jsxs('div', {
-                className: 'dsh-fleet-panel-composer-foot',
-                children: [
-                  jsxs('div', {
-                    className: 'dsh-fleet-panel-composer-actions',
-                    children: [
-                      owner.renderPanelSlot(FLEET_PANEL_SLOTS.composerAction, owner as unknown as Record<string, unknown>),
-                      jsx('button', {
-                        type: 'button',
-                        className: 'dsh-fleet-panel-urgent-toggle',
-                        disabled: tutorial,
-                        'aria-pressed': owner.urgent,
-                        title: conversation.kind === 'channel'
-                          ? '紧急消息会中断被 @ 成员的当前步骤'
-                          : '紧急消息会中断该成员的当前步骤',
-                        onClick: () => { owner.setUrgent(!owner.urgent) },
-                        children: '紧急',
-                      }),
-                      jsx('span', {
-                        className: owner.sendError === null ? 'dsh-fleet-panel-compose-context' : 'dsh-fleet-panel-compose-error',
-                        role: owner.sendError === null ? 'status' : 'alert',
-                        'aria-live': 'polite',
-                        children: tutorial
-                          ? panelText('演示数据不会启动 Agent 或发送消息', 'Demo data never starts Agents or sends messages')
-                          : owner.sending
-                          ? '发送中…'
-                          : owner.sendError ?? (owner.urgent
-                            ? (conversation.kind === 'channel' ? '将中断被 @ 的成员' : '将中断成员当前步骤')
-                            : '以外部观察者身份发送'),
-                      }),
-                    ],
-                  }),
-                  jsx('button', {
-                    type: 'button',
-                    className: 'dsh-fleet-panel-send',
-                    disabled: tutorial || owner.sending || owner.draft.trim() === '',
-                    'aria-label': owner.sending ? '正在发送消息' : '发送消息',
-                    title: owner.sending ? '正在发送消息' : '发送消息',
-                    onClick: send,
-                    children: jsx(PanelIcon, { name: 'send', size: 15 }),
-                  }),
-                ],
-              }),
-            ],
-          }),
-        ],
-      }),
+      jsx(FleetOfficialConversationComposer, { owner, conversation }),
     ],
   })
 }
@@ -7598,8 +11807,8 @@ function NavigationToggle({ owner }: { readonly owner: { readonly openNavigation
   return jsx('button', {
     type: 'button',
     className: 'dsh-fleet-panel-navigation-toggle',
-    'aria-label': '打开团队导航',
-    title: '打开团队导航',
+    'aria-label': panelText('打开团队导航', 'Open Team navigation'),
+    title: panelText('打开团队导航', 'Open Team navigation'),
     onClick: owner.openNavigation,
     children: jsx(PanelIcon, { name: 'menu', size: 16 }),
   })
@@ -7615,40 +11824,10 @@ function Fact({ label, value }: { readonly label: string; readonly value: ReactN
   })
 }
 
-function MemberStatusUpdatedAt({ member }: { readonly member: FleetPanelMember }): ReactElement | null {
-  if (member.statusText === undefined) return null
-  const updatedAt = member.statusUpdatedAt
-  if (updatedAt === undefined) {
-    return jsx('span', {
-      className: 'dsh-fleet-panel-member-status-updated',
-      children: panelText('更新时间未知', 'Update time unavailable'),
-    })
-  }
-  const date = new Date(updatedAt)
-  if (Number.isNaN(date.getTime())) {
-    return jsx('span', {
-      className: 'dsh-fleet-panel-member-status-updated',
-      children: panelText('更新时间未知', 'Update time unavailable'),
-    })
-  }
-  const compact = date.toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-  return jsx('time', {
-    className: 'dsh-fleet-panel-member-status-updated',
-    dateTime: updatedAt,
-    title: date.toLocaleString(),
-    children: panelText(`更新于 ${compact}`, `Updated ${compact}`),
-  })
-}
-
 function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
   const [controlBusy, setControlBusy] = useState<{
     readonly teamId: string
-    readonly action: 'pause' | 'resume' | 'wake'
+    readonly action: 'load' | 'pause' | 'resume' | 'wake'
   }>()
   const [controlError, setControlError] = useState<{
     readonly teamId: string
@@ -7660,9 +11839,13 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
   const tutorialOnly = realTeams.length === 0 && teams.some(team => team.tutorial === true)
   const focusedTeam = teams.find(team => team.teamId === owner.focusedTeamId)
   if (focusedTeam !== undefined) {
-    const teamRunControl = fleetPanelTeamRunControl(focusedTeam)
+    const teamRunControls = fleetPanelTeamRunControls(focusedTeam)
+    const memberStatuses = focusedTeam.memberStatuses ?? []
+    const unloadedMembers = memberStatuses.filter(fleetPanelMemberIsUnloaded).length
+    const pausedMembers = memberStatuses.filter(status => status === 'paused').length
+    const loadedMembers = memberStatuses.length - unloadedMembers - pausedMembers
     const busyAction = controlBusy?.teamId === focusedTeam.teamId ? controlBusy.action : undefined
-    const runControl = (action: 'pause' | 'resume' | 'wake'): void => {
+    const runControl = (action: 'load' | 'pause' | 'resume' | 'wake'): void => {
       if (owner.controlTeamById === undefined || controlBusy !== undefined) return
       setControlBusy({ teamId: focusedTeam.teamId, action })
       setControlError(undefined)
@@ -7671,7 +11854,9 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
           teamId: focusedTeam.teamId,
           message: reason instanceof Error
             ? reason.message
-            : action === 'pause'
+            : action === 'load'
+              ? panelText('无法加载团队', 'Could not load the Team')
+              : action === 'pause'
               ? panelText('无法暂停团队', 'Could not pause the Team')
               : action === 'resume'
                 ? panelText('无法继续团队', 'Could not resume the Team')
@@ -7708,7 +11893,7 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
                 className: 'dsh-fleet-panel-overview-title',
                 children: focusedTeam.tutorial === true
                   ? panelText('这是一个一次性引导团队', 'This is a one-time guided Team')
-                  : '团队概况',
+                  : panelText('团队概况', 'Team overview'),
               }),
               jsx('p', {
                 className: 'dsh-fleet-panel-overview-copy',
@@ -7717,7 +11902,7 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
                       '它使用真实团队界面展示频道、成员与资源，但不会启动 Agent、消耗 Token 或写入工作区。创建第一个真实团队后，它会自动消失。',
                       'It uses the real Team interface to show channels, members, and resources without starting Agents, using tokens, or writing to a Workspace. It disappears after you create your first real Team.',
                     )
-                  : '查看团队当前状态与主要工作上下文。更多概况信息将在后续补充。',
+                  : panelText('查看团队当前状态与主要工作上下文。更多概况信息将在后续补充。', 'Review the Team’s current status and primary work context. More overview information will be added later.'),
               }),
               jsxs('div', {
                 className: 'dsh-fleet-panel-facts',
@@ -7728,10 +11913,16 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
                       jsx(Fact, { label: panelText('工作区写入', 'Workspace writes'), value: panelText('无', 'None') }),
                     ]
                   : [
-                      jsx(Fact, { label: '运行状态', value: statusLabel(focusedTeam.status) }),
-                      jsx(Fact, { label: '成员运行时', value: focusedTeam.runtimeState === 'dormant' ? '等待恢复' : '已连接' }),
-                      jsx(Fact, { label: '未读消息', value: `${focusedTeam.unread ?? 0}` }),
-                      jsx(Fact, { label: '主要工作区', value: focusedTeam.primaryWorkspace ?? '未挂载' }),
+                      jsx(Fact, { label: panelText('运行状态', 'Run status'), value: statusLabel(focusedTeam.status) }),
+                      jsx(Fact, {
+                        label: panelText('成员运行时', 'Member runtime'),
+                        value: panelText(
+                          `${String(loadedMembers)} 已加载 · ${String(unloadedMembers)} 未加载 · ${String(pausedMembers)} 已暂停`,
+                          `${String(loadedMembers)} loaded · ${String(unloadedMembers)} unloaded · ${String(pausedMembers)} paused`,
+                        ),
+                      }),
+                      jsx(Fact, { label: panelText('未读消息', 'Unread messages'), value: `${focusedTeam.unread ?? 0}` }),
+                      jsx(Fact, { label: panelText('主要工作区', 'Primary Workspace'), value: focusedTeam.primaryWorkspace ?? panelText('未挂载', 'Not mounted') }),
                     ],
               }),
               jsx('div', {
@@ -7743,47 +11934,28 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
                     onClick: () => { owner.openTeamMessages(focusedTeam.teamId) },
                     children: [
                       jsx(PanelIcon, { name: 'chat', size: 15 }),
-                      jsx('span', { children: '进入团队消息' }),
+                      jsx('span', { children: panelText('进入团队消息', 'Open Team messages') }),
                     ],
                   }),
-                  focusedTeam.tutorial !== true && owner.controlTeamById !== undefined && teamRunControl !== undefined && jsx('button', {
-                    type: 'button',
-                    className: 'dsh-fleet-panel-control-button',
-                    'data-primary': teamRunControl.action === 'resume' ? 'true' : undefined,
-                    disabled: controlBusy !== undefined,
-                    'aria-busy': busyAction === teamRunControl.action ? 'true' : undefined,
-                    'aria-label': `${teamRunControl.label}：${teamRunControl.title}`,
-                    title: teamRunControl.title,
-                    onClick: () => { runControl(teamRunControl.action) },
-                    children: busyAction === undefined
-                      ? (controlBusy === undefined ? teamRunControl.label : '正在处理…')
-                      : (busyAction === teamRunControl.action ? teamRunControl.busyLabel : '正在处理…'),
-                  }),
-                  focusedTeam.tutorial !== true
-                    && owner.controlTeamById !== undefined
-                    && focusedTeam.status === 'running'
-                    && focusedTeam.runtimeState !== 'dormant'
-                    && jsx('button', {
-                      type: 'button',
-                      className: 'dsh-fleet-panel-control-button',
+                  focusedTeam.tutorial !== true && owner.controlTeamById !== undefined
+                    && teamRunControls.map(control => jsx(FleetRunControlButton, {
+                      label: control.label,
+                      displayLabel: busyAction === undefined
+                        ? (controlBusy === undefined ? control.label : panelText('正在处理…', 'Working…'))
+                        : (busyAction === control.action ? control.busyLabel : panelText('正在处理…', 'Working…')),
+                      hint: control.title,
+                      primary: control.action === 'load' || control.action === 'resume',
                       disabled: controlBusy !== undefined,
-                      'aria-busy': busyAction === 'wake' ? 'true' : undefined,
-                      title: panelText(
-                        '非打断式唤醒所有在线成员，继续当前工作',
-                        'Wake every online member without interrupting active work',
-                      ),
-                      onClick: () => { runControl('wake') },
-                      children: busyAction === 'wake'
-                        ? panelText('正在唤醒…', 'Waking…')
-                        : panelText('唤醒团队', 'Wake Team'),
-                    }),
+                      busy: busyAction === control.action,
+                      onClick: () => { runControl(control.action) },
+                    }, control.action)),
                   focusedTeam.tutorial !== true && owner.controlTeamById !== undefined && focusedTeam.status !== 'closed' && jsx('button', {
                     type: 'button',
                     className: 'dsh-fleet-panel-control-button',
                     'data-danger': 'true',
                     disabled: controlBusy !== undefined,
                     onClick: () => { setEndingTeam(true) },
-                    children: '终结团队',
+                    children: panelText('终结团队', 'Finish Team'),
                   }),
                   controlError?.teamId === focusedTeam.teamId && jsx('span', {
                     className: 'dsh-fleet-panel-control-error',
@@ -7812,10 +11984,10 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
       jsxs('header', {
         className: 'dsh-fleet-panel-detail-head',
         children: [
-          jsx('h2', { className: 'dsh-fleet-panel-detail-title', children: '团队首页' }),
+          jsx('h2', { className: 'dsh-fleet-panel-detail-title', children: panelText('团队首页', 'Team home') }),
           jsx('span', {
             className: 'dsh-fleet-panel-detail-meta',
-            children: tutorialOnly ? panelText('引导模式', 'Guided mode') : `${realTeams.length} 个团队`,
+            children: tutorialOnly ? panelText('引导模式', 'Guided mode') : panelText(`${realTeams.length} 个团队`, `${realTeams.length} Teams`),
           }),
           jsxs('div', {
             className: 'dsh-fleet-panel-main-actions',
@@ -7833,7 +12005,7 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
           children: [
             jsx('h3', {
               className: 'dsh-fleet-panel-overview-title',
-              children: tutorialOnly ? panelText('先看看团队如何工作', 'See how a Team works') : 'Fleet 团队',
+              children: tutorialOnly ? panelText('先看看团队如何工作', 'See how a Team works') : panelText('Fleet 团队', 'Fleet Teams'),
             }),
             jsx('p', {
               className: 'dsh-fleet-panel-overview-copy',
@@ -7842,28 +12014,30 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
                     '打开下面的临时团队，可以在不启动 Agent 的情况下查看频道、成员状态与共享资源。',
                     'Open the temporary Team below to explore channels, member status, and shared resources without starting Agents.',
                   )
-                : 'Team 是独立持久实体。工作区作为可挂载的执行资源，不决定团队的归属。',
+                : panelText('Team 是独立持久实体。工作区作为可挂载的执行资源，不决定团队的归属。', 'Teams are independent persistent entities. Workspaces are mountable execution resources and do not determine Team ownership.'),
             }),
             jsxs('div', {
               className: 'dsh-fleet-panel-facts',
               children: [
-                jsx(Fact, { label: '活跃团队', value: `${active}` }),
-                jsx(Fact, { label: '需要关注', value: `${attention}` }),
-                jsx(Fact, { label: '已挂载工作区', value: `${mounted} / ${realTeams.length}` }),
+                jsx(Fact, { label: panelText('活跃团队', 'Active Teams'), value: `${active}` }),
+                jsx(Fact, { label: panelText('需要关注', 'Needs attention'), value: `${attention}` }),
+                jsx(Fact, { label: panelText('已挂载工作区', 'Mounted Workspaces'), value: `${mounted} / ${realTeams.length}` }),
               ],
             }),
             jsxs('div', {
               className: 'dsh-fleet-panel-home-team-list',
               children: [
-                jsx(SectionTitle, { children: '所有团队' }),
+                jsx(SectionTitle, { children: panelText('所有团队', 'All Teams') }),
                 ...teams.map(team => jsx(ListRow, {
                   selected: owner.focusedTeamId === team.teamId,
                   title: team.teamName,
                   caption: team.tutorial === true
                     ? panelText('一次性引导 · 不会启动 Agent', 'One-time guide · No Agents started')
-                    : [statusLabel(team.status), team.primaryWorkspace === undefined ? '未挂载工作区' : `主要工作区 · ${team.primaryWorkspace}`].join(' · '),
+                    : [statusLabel(team.status), team.primaryWorkspace === undefined
+                      ? panelText('未挂载工作区', 'No Workspace mounted')
+                      : panelText(`主要工作区 · ${team.primaryWorkspace}`, `Primary Workspace · ${team.primaryWorkspace}`)].join(' · '),
                   leading: jsx('span', { className: 'dsh-fleet-panel-team-row-status', 'data-status': team.status }),
-                  trailing: team.needsAttention === true ? jsx('span', { className: 'dsh-fleet-panel-attention', title: '需要关注' }) : undefined,
+                  trailing: team.needsAttention === true ? jsx('span', { className: 'dsh-fleet-panel-attention', title: panelText('需要关注', 'Needs attention') }) : undefined,
                   onClick: () => { owner.selectTeam(team.teamId) },
                 }, team.teamId)),
               ],
@@ -7875,8 +12049,255 @@ function HomeMain(owner: FleetPanelHomeOwner): ReactElement {
   })
 }
 
-function samePermissionGroups(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every(group => right.includes(group))
+function samePermissionValues(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every(value => right.includes(value))
+}
+
+export function sameFleetPermissionAssignment(
+  left: FleetPanelMemberPermissionAssignment,
+  right: FleetPanelMemberPermissionAssignment,
+): boolean {
+  return left.op === right.op
+    && samePermissionValues(left.groups, right.groups)
+    && samePermissionValues(left.grants, right.grants)
+    && samePermissionValues(left.denies, right.denies)
+    && samePermissionValues(left.toolGroups, right.toolGroups)
+    && samePermissionValues(left.denyToolGroups, right.denyToolGroups)
+}
+
+export function updateFleetPermissionAssignmentValues(
+  assignment: FleetPanelMemberPermissionAssignment,
+  key: 'grants' | 'denies' | 'toolGroups' | 'denyToolGroups',
+  opposite: 'grants' | 'denies' | 'toolGroups' | 'denyToolGroups',
+  values: readonly string[],
+): FleetPanelMemberPermissionAssignment {
+  const added = values.find(value => !assignment[key].includes(value))
+  return {
+    ...assignment,
+    [key]: values,
+    ...(added === undefined ? {} : {
+      [opposite]: assignment[opposite].filter(value => value !== added),
+    }),
+  }
+}
+
+function fleetPermissionAssignment(value: FleetPanelMemberPermissionAssignment): FleetPanelMemberPermissionAssignment {
+  return {
+    groups: [...value.groups],
+    grants: [...value.grants],
+    denies: [...value.denies],
+    toolGroups: [...value.toolGroups],
+    denyToolGroups: [...value.denyToolGroups],
+    op: value.op,
+  }
+}
+
+const PERMISSION_GROUP_NAMES: Readonly<Record<string, readonly [string, string]>> = {
+  observer: ['观察者', 'Observer'],
+  member: ['协作者', 'Collaborator'],
+  researcher: ['研究员', 'Researcher'],
+  facilitator: ['协调者', 'Facilitator'],
+  maintainer: ['维护者', 'Maintainer'],
+  op: ['OP', 'OP'],
+}
+
+const PERMISSION_GROUP_DESCRIPTIONS: Readonly<Record<string, readonly [string, string]>> = {
+  observer: ['阅读消息、状态、任务、日程和共享内容。', 'Read messages, status, tasks, schedules, and shared content.'],
+  member: ['在只读基础上发消息、推进任务、参加会议并评论。', 'View content, send messages, advance tasks, join meetings, and comment.'],
+  researcher: ['参与工作，并可写共享资源和文档。', 'Collaborate and write shared resources and documents.'],
+  facilitator: ['参与工作，并可管理频道、会议、任务和日程。', 'Collaborate and manage channels, meetings, tasks, and schedules.'],
+  maintainer: ['创作、协调并管理团队、权限和资源访问。', 'Create, coordinate, and manage the Team, permissions, and resource access.'],
+  op: ['完整控制，不受普通权限限制。', 'Full control without ordinary permission limits.'],
+}
+
+const PERMISSION_DOMAINS: Readonly<Record<string, readonly [string, string]>> = {
+  access: ['访问', 'Access'], calendar: ['日历', 'Calendar'], channel: ['频道', 'Channel'],
+  document: ['文档', 'Document'], meeting: ['会议', 'Meeting'], 'member-status': ['成员状态', 'Member status'],
+  message: ['消息', 'Message'], permissions: ['权限', 'Permissions'], resource: ['资源', 'Resource'],
+  git: ['Git', 'Git'], joyride: ['浏览器演示', 'Browser demo'], lark: ['飞书', 'Lark'],
+  livestream: ['直播', 'Livestream'], schedule: ['日程', 'Schedule'], task: ['任务', 'Task'],
+  team: ['团队', 'Team'], vote: ['投票', 'Vote'], work: ['工作项', 'Work item'], workspace: ['工作区', 'Workspace'],
+}
+
+const PERMISSION_OPERATIONS: Readonly<Record<string, readonly [string, string]>> = {
+  'act-as-user': ['以用户身份操作', 'Act as user'], claim: ['领取', 'Claim'], comment: ['评论', 'Comment'],
+  'content-write': ['写入内容', 'Write content'], control: ['控制', 'Control'], create: ['创建', 'Create'],
+  host: ['主持', 'Host'], 'history-rewrite': ['改写历史', 'Rewrite history'], inspect: ['检查', 'Inspect'],
+  interrupt: ['中断', 'Interrupt'], join: ['加入', 'Join'], manage: ['管理', 'Manage'],
+  'message-post': ['发送消息', 'Post messages'], post: ['发送', 'Post'], progress: ['更新进度', 'Update progress'],
+  publish: ['发布', 'Publish'], read: ['查看', 'Read'], 'repository-manage': ['管理仓库', 'Manage repository'],
+  rsvp: ['回应邀请', 'Respond to invitation'], 'scope-check': ['检查范围', 'Check scope'], update: ['更新', 'Update'],
+  use: ['使用', 'Use'], wakeup: ['唤醒', 'Wake'], write: ['写入', 'Write'],
+  'worktree-create': ['创建工作树', 'Create worktree'], 'worktree-manage': ['管理工作树', 'Manage worktree'],
+}
+
+const PERMISSION_TOOL_GROUPS: Readonly<Record<string, readonly [string, string]>> = {
+  calendar: ['日历工具', 'Calendar tools'], coordination: ['协作工具', 'Collaboration tools'],
+  documents: ['文档工具', 'Document tools'], messages: ['消息工具', 'Message tools'],
+  resources: ['资源工具', 'Resource tools'], schedule: ['日程工具', 'Schedule tools'],
+  status: ['状态工具', 'Status tools'], tasks: ['任务工具', 'Task tools'],
+}
+
+function permissionGroupName(group: FleetPanelPermissionGroup): string {
+  const copy = group.preset ? PERMISSION_GROUP_NAMES[group.id] : undefined
+  return copy === undefined ? group.name : panelText(copy[0], copy[1])
+}
+
+function permissionGroupDescription(group: FleetPanelPermissionGroup, groupNames: ReadonlyMap<string, string>): string {
+  const preset = group.preset ? PERMISSION_GROUP_DESCRIPTIONS[group.id] : undefined
+  if (preset !== undefined) return panelText(preset[0], preset[1])
+  if (group.op === true) return panelText('完整控制，不受普通权限限制。', 'Full control without ordinary permission limits.')
+  return group.parents.length === 0
+    ? panelText('这个自定义组只包含下方列出的能力。', 'This custom group contains only the capabilities listed below.')
+    : panelText(`包含自身设置，并继承 ${group.parents.map(parent => groupNames.get(parent) ?? parent).join('、')}。`, `Includes its own settings and inherits ${group.parents.map(parent => groupNames.get(parent) ?? parent).join(', ')}.`)
+}
+
+function permissionValueLabel(value: string, type: 'action' | 'tool'): string {
+  if (type === 'tool') {
+    const copy = PERMISSION_TOOL_GROUPS[value]
+    return copy === undefined ? value : panelText(copy[0], copy[1])
+  }
+  const [domain, operation, ...rest] = value.split('.')
+  if (domain === undefined || operation === undefined || rest.length > 0) return value
+  const domainLabel = PERMISSION_DOMAINS[domain]
+  const operationLabel = PERMISSION_OPERATIONS[operation]
+  return domainLabel === undefined || operationLabel === undefined
+    ? value
+    : `${panelText(domainLabel[0], domainLabel[1])} · ${panelText(operationLabel[0], operationLabel[1])}`
+}
+
+export interface FleetPanelPermissionCapability {
+  readonly type: 'action' | 'tool'
+  readonly value: string
+}
+
+export function fleetPermissionGroupCapabilities(
+  group: FleetPanelPermissionGroup,
+  groups: readonly FleetPanelPermissionGroup[],
+): {
+    readonly granted: readonly FleetPanelPermissionCapability[]
+    readonly restricted: readonly FleetPanelPermissionCapability[]
+  } {
+  const byId = new Map(groups.map(candidate => [candidate.id, candidate]))
+  const granted = new Map<string, FleetPanelPermissionCapability>()
+  const restricted = new Map<string, FleetPanelPermissionCapability>()
+  const visited = new Set<string>()
+  const key = (type: 'action' | 'tool', value: string): string => `${type}:${value}`
+  const add = (target: Map<string, FleetPanelPermissionCapability>, type: 'action' | 'tool', value: string): void => {
+    target.set(key(type, value), { type, value })
+  }
+  const visit = (candidate: FleetPanelPermissionGroup): void => {
+    if (visited.has(candidate.id)) return
+    visited.add(candidate.id)
+    for (const parent of candidate.parents) {
+      const parentGroup = byId.get(parent)
+      if (parentGroup !== undefined) visit(parentGroup)
+    }
+    for (const value of candidate.toolGroups) add(granted, 'tool', value)
+    for (const value of candidate.actions) add(granted, 'action', value)
+    for (const value of candidate.denyToolGroups) add(restricted, 'tool', value)
+    for (const value of candidate.denies) add(restricted, 'action', value)
+  }
+  visit(group)
+  for (const denied of restricted.keys()) granted.delete(denied)
+  return { granted: [...granted.values()], restricted: [...restricted.values()] }
+}
+
+function PermissionValues({ values, type }: {
+  readonly values: readonly string[]
+  readonly type: 'action' | 'tool'
+}): ReactElement {
+  if (values.length === 0) return jsx('span', {
+    className: 'dsh-fleet-panel-member-permissions-none',
+    children: panelText('无', 'None'),
+  })
+  return jsx('div', {
+    className: 'dsh-fleet-panel-member-permissions-value-list',
+    children: values.map(value => jsx('span', {
+      className: 'dsh-fleet-panel-member-permission-value',
+      title: value,
+      children: permissionValueLabel(value, type),
+    }, `${type}:${value}`)),
+  })
+}
+
+function PermissionValueEditor({
+  title,
+  emptyLabel,
+  addLabel,
+  values,
+  options,
+  type,
+  restricted = false,
+  disabled,
+  onChange,
+}: {
+  readonly title: string
+  readonly emptyLabel: string
+  readonly addLabel: string
+  readonly values: readonly string[]
+  readonly options: readonly string[]
+  readonly type: 'action' | 'tool'
+  readonly restricted?: boolean
+  readonly disabled: boolean
+  readonly onChange: (values: readonly string[]) => void
+}): ReactElement {
+  const available = options.filter(value => !values.includes(value))
+  return jsxs('div', {
+    className: 'dsh-fleet-panel-member-permission-editor',
+    children: [
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permission-editor-head',
+        children: [
+          jsx('h5', { className: 'dsh-fleet-panel-member-permission-editor-title', children: title }),
+          jsx('span', { className: 'dsh-fleet-panel-member-permission-editor-count', children: panelText(`${values.length} 项`, `${values.length} items`) }),
+        ],
+      }),
+      jsx('select', {
+        className: 'dsh-fleet-panel-member-permission-editor-select',
+        'aria-label': addLabel,
+        value: '',
+        disabled: disabled || available.length === 0,
+        onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+          const value = event.currentTarget.value
+          if (value.length > 0) onChange([...values, value])
+        },
+        children: [
+          jsx('option', {
+            value: '',
+            children: available.length === 0 ? panelText('没有可添加项', 'No items available to add') : addLabel,
+          }),
+          ...available.map(value => jsx('option', {
+            value,
+            children: permissionValueLabel(value, type),
+          }, value)),
+        ],
+      }),
+      jsx('div', {
+        className: 'dsh-fleet-panel-member-permission-editor-values',
+        children: values.length === 0
+          ? jsx('span', { className: 'dsh-fleet-panel-member-permissions-none', children: emptyLabel })
+          : values.map(value => jsxs('span', {
+              className: 'dsh-fleet-panel-member-permission-direct-value',
+              'data-restricted': restricted ? 'true' : undefined,
+              title: value,
+              children: [
+                jsx('span', {
+                  className: 'dsh-fleet-panel-member-permission-direct-value-label',
+                  children: permissionValueLabel(value, type),
+                }),
+                jsx('button', {
+                  type: 'button',
+                  disabled,
+                  'aria-label': panelText(`删除${permissionValueLabel(value, type)}`, `Remove ${permissionValueLabel(value, type)}`),
+                  onClick: () => { onChange(values.filter(candidate => candidate !== value)) },
+                  children: panelText('移除', 'Remove'),
+                }),
+              ],
+            }, value)),
+      }),
+    ],
+  })
 }
 
 function MemberPermissions({ owner, member }: {
@@ -7887,22 +12308,36 @@ function MemberPermissions({ owner, member }: {
   const update = owner.updateMemberPermissions
   const [state, setState] = useState<
     | { readonly status: 'loading' }
-    | { readonly status: 'ready'; readonly value: FleetPanelMemberAuthorization; readonly selected: readonly string[] }
+    | {
+      readonly status: 'ready'
+      readonly value: FleetPanelMemberAuthorization
+      readonly draft: FleetPanelMemberPermissionAssignment
+    }
     | { readonly status: 'error'; readonly message: string }
   >({ status: 'loading' })
-  const [saving, setSaving] = useState(false)
+  const [savingMode, setSavingMode] = useState<'save' | 'reset'>()
+  const [saveError, setSaveError] = useState<string>()
   const [attempt, setAttempt] = useState(0)
+  const viewKey = `${owner.snapshot.teamId}:${member.id}`
+  const activeViewKey = useRef(viewKey)
+  activeViewKey.current = viewKey
 
   useEffect(() => {
     if (load === undefined) return
     const controller = new AbortController()
+    setSavingMode(undefined)
+    setSaveError(undefined)
     setState({ status: 'loading' })
     void load(owner.snapshot.teamId, member.id, controller.signal).then(value => {
-      if (!controller.signal.aborted) setState({ status: 'ready', value, selected: value.selectedGroups })
+      if (!controller.signal.aborted) setState({
+        status: 'ready',
+        value,
+        draft: fleetPermissionAssignment(value.assignment),
+      })
     }).catch((reason: unknown) => {
       if (!controller.signal.aborted) setState({
         status: 'error',
-        message: reason instanceof Error ? reason.message : '无法读取成员权限',
+        message: reason instanceof Error ? reason.message : panelText('无法读取成员权限', 'Could not read member permissions'),
       })
     })
     return () => { controller.abort(new Error('Fleet member permission view changed')) }
@@ -7912,32 +12347,52 @@ function MemberPermissions({ owner, member }: {
   if (state.status !== 'ready') return jsxs('section', {
     className: 'dsh-fleet-panel-member-permissions',
     children: [
-      jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: '成员权限' }),
+      jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: panelText('成员权限', 'Member permissions') }),
       jsx('p', {
         className: state.status === 'error'
           ? 'dsh-fleet-panel-control-error'
           : 'dsh-fleet-panel-member-permissions-copy',
         role: state.status === 'error' ? 'alert' : 'status',
-        children: state.status === 'error' ? state.message : '正在读取权限…',
+        children: state.status === 'error' ? state.message : panelText('正在读取权限…', 'Loading permissions…'),
       }),
       state.status === 'error' && jsx('button', {
         type: 'button',
         className: 'dsh-fleet-panel-control-button',
         onClick: () => { setAttempt(current => current + 1) },
-        children: '重试',
+        children: panelText('重试', 'Retry'),
       }),
     ],
   })
 
-  const dirty = !samePermissionGroups(state.selected, state.value.selectedGroups)
+  const dirty = !sameFleetPermissionAssignment(state.draft, state.value.assignment)
+  const saving = savingMode !== undefined
+  const groupNames = new Map(state.value.groups.map(group => [group.id, permissionGroupName(group)]))
+  const setDraft = (draft: FleetPanelMemberPermissionAssignment): void => {
+    setSaveError(undefined)
+    setState({ ...state, draft })
+  }
+  const setDraftValues = (
+    key: 'grants' | 'denies' | 'toolGroups' | 'denyToolGroups',
+    opposite: 'grants' | 'denies' | 'toolGroups' | 'denyToolGroups',
+    values: readonly string[],
+  ): void => {
+    setDraft(updateFleetPermissionAssignmentValues(state.draft, key, opposite, values))
+  }
   const save = (reset = false): void => {
     if (saving || (!reset && !dirty)) return
-    setSaving(true)
-    void update(member.id, reset ? undefined : state.selected, reset).then(value => {
-      setState({ status: 'ready', value, selected: value.selectedGroups })
+    const savedViewKey = viewKey
+    setSavingMode(reset ? 'reset' : 'save')
+    setSaveError(undefined)
+    void update(member.id, reset ? undefined : state.draft, reset).then(value => {
+      if (activeViewKey.current !== savedViewKey) return
+      setState({ status: 'ready', value, draft: fleetPermissionAssignment(value.assignment) })
+      setSaveError(undefined)
     }).catch((reason: unknown) => {
-      setState({ status: 'error', message: reason instanceof Error ? reason.message : '无法保存成员权限' })
-    }).finally(() => { setSaving(false) })
+      if (activeViewKey.current !== savedViewKey) return
+      setSaveError(reason instanceof Error ? reason.message : panelText('无法保存成员权限，请重试', 'Could not save member permissions. Try again.'))
+    }).finally(() => {
+      if (activeViewKey.current === savedViewKey) setSavingMode(undefined)
+    })
   }
 
   return jsxs('section', {
@@ -7946,81 +12401,267 @@ function MemberPermissions({ owner, member }: {
       jsxs('div', {
         className: 'dsh-fleet-panel-member-permissions-head',
         children: [
-          jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: '成员权限' }),
+          jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: panelText('成员权限', 'Member permissions') }),
           jsx('span', {
-            className: 'dsh-fleet-panel-member-permissions-summary',
-            children: state.value.op ? 'OP · 完整权限' : `${state.value.effectiveActions.length} 项有效权限`,
+            className: 'dsh-fleet-panel-member-permissions-source',
+            'data-configured': state.value.configured ? 'true' : undefined,
+            children: state.value.configured ? panelText('自定义配置', 'Custom configuration') : panelText('团队模板', 'Team template'),
           }),
         ],
       }),
       jsx('p', {
         className: 'dsh-fleet-panel-member-permissions-copy',
         children: state.value.configured
-          ? '一个成员可以属于多个权限组；继承关系会自动生效。'
-          : '当前沿用团队模板中的成员权限。选择权限组并保存后，将改用权限组管理。',
+          ? panelText('权限组提供常用组合，也可以为这位成员单独添加或限制工具组和操作。', 'Permission groups provide common combinations. You can also grant or restrict tool groups and actions for this member.')
+          : panelText('当前沿用团队模板。修改权限组或单独权限并保存后，将为这位成员建立独立配置。', 'This member currently follows the Team template. Saving changes to groups or individual permissions creates an independent configuration.'),
+      }),
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permissions-section-head',
+        children: [
+          jsx('h4', {
+            id: `dsh-fleet-member-permissions-${member.id}`,
+            className: 'dsh-fleet-panel-member-permissions-section-title',
+            children: panelText('权限组', 'Permission groups'),
+          }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-permissions-section-meta',
+            children: panelText(`已选 ${state.draft.groups.length} / ${state.value.groups.length}`, `Selected ${state.draft.groups.length} / ${state.value.groups.length}`),
+          }),
+        ],
       }),
       jsx('div', {
         className: 'dsh-fleet-panel-member-permissions-groups',
-        children: state.value.groups.map(group => jsxs('label', {
-          className: 'dsh-fleet-panel-member-permission-group',
-          children: [
-            jsx('input', {
-              type: 'checkbox',
-              checked: state.selected.includes(group.id),
-              disabled: saving,
-              onChange: (event: ChangeEvent<HTMLInputElement>) => {
-                const selected = event.currentTarget.checked
-                  ? [...state.selected, group.id]
-                  : state.selected.filter(id => id !== group.id)
-                setState({ ...state, selected })
-              },
-            }),
-            jsxs('span', {
-              className: 'dsh-fleet-panel-member-permission-group-copy',
+        role: 'group',
+        'aria-labelledby': `dsh-fleet-member-permissions-${member.id}`,
+        children: state.value.groups.length === 0
+          ? jsx('p', {
+              className: 'dsh-fleet-panel-member-permissions-empty',
+              children: panelText('团队还没有可分配的权限组。', 'This Team has no assignable permission groups.'),
+            })
+          : state.value.groups.map(group => {
+            const capabilities = fleetPermissionGroupCapabilities(group, state.value.groups)
+            return jsxs('label', {
+              className: 'dsh-fleet-panel-member-permission-group',
               children: [
-                jsx('span', { className: 'dsh-fleet-panel-member-permission-group-name', children: group.name }),
-                jsx('div', {
-                  className: 'dsh-fleet-panel-member-permission-group-detail',
-                  children: group.op === true
-                    ? '不受普通权限限制'
-                    : group.parents.length === 0 ? '基础权限组' : `继承 ${group.parents.join('、')}`,
+                jsx('input', {
+                  type: 'checkbox',
+                  checked: state.draft.groups.includes(group.id),
+                  disabled: saving,
+                  onChange: (event: ChangeEvent<HTMLInputElement>) => {
+                    const selected = event.currentTarget.checked
+                      ? [...state.draft.groups, group.id]
+                      : state.draft.groups.filter(id => id !== group.id)
+                    setDraft({ ...state.draft, groups: selected })
+                  },
+                }),
+                jsxs('span', {
+                  className: 'dsh-fleet-panel-member-permission-group-copy',
+                  children: [
+                    jsx('span', {
+                      className: 'dsh-fleet-panel-member-permission-group-name',
+                      children: permissionGroupName(group),
+                    }),
+                    jsx('div', {
+                      className: 'dsh-fleet-panel-member-permission-group-detail',
+                      children: permissionGroupDescription(group, groupNames),
+                    }),
+                    jsx('span', {
+                      className: 'dsh-fleet-panel-member-permission-group-scope',
+                      children: group.op === true
+                        ? jsx('span', {
+                            className: 'dsh-fleet-panel-member-permission-value',
+                            children: panelText('全部工具与操作', 'All tools and actions'),
+                          })
+                        : capabilities.granted.length === 0 && capabilities.restricted.length === 0
+                          ? jsx('span', {
+                              className: 'dsh-fleet-panel-member-permission-more',
+                              children: panelText('未授予能力', 'No capabilities granted'),
+                            })
+                          : [
+                              ...capabilities.granted.slice(0, 3).map(item => jsx('span', {
+                                className: 'dsh-fleet-panel-member-permission-value',
+                                title: item.value,
+                                children: permissionValueLabel(item.value, item.type),
+                              }, `${item.type}:${item.value}`)),
+                              capabilities.granted.length > 3 && jsx('span', {
+                                className: 'dsh-fleet-panel-member-permission-more',
+                                children: panelText(`另有 ${capabilities.granted.length - 3} 项`, `${capabilities.granted.length - 3} more`),
+                              }),
+                              ...capabilities.restricted.slice(0, 2).map(item => jsx('span', {
+                                className: 'dsh-fleet-panel-member-permission-value',
+                                'data-restricted': 'true',
+                                title: item.value,
+                                children: panelText(`限制 ${permissionValueLabel(item.value, item.type)}`, `Restricts ${permissionValueLabel(item.value, item.type)}`),
+                              }, `restricted:${item.type}:${item.value}`)),
+                              capabilities.restricted.length > 2 && jsx('span', {
+                                className: 'dsh-fleet-panel-member-permission-more',
+                                children: panelText(`另有限制 ${capabilities.restricted.length - 2} 项`, `${capabilities.restricted.length - 2} more restrictions`),
+                              }),
+                            ],
+                    }),
+                  ],
                 }),
               ],
-            }),
-          ],
-        }, group.id)),
+            }, group.id)
+          }),
+      }),
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permissions-section-head',
+        children: [
+          jsx('h4', {
+            className: 'dsh-fleet-panel-member-permissions-section-title',
+            children: panelText('单独添加与限制', 'Individual grants and restrictions'),
+          }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-permissions-section-meta',
+            children: panelText('限制项优先', 'Restrictions take precedence'),
+          }),
+        ],
+      }),
+      jsx('p', {
+        className: 'dsh-fleet-panel-member-permissions-copy',
+        children: panelText('这里的设置会与所选权限组合并。添加同一项时，会自动从相反列表移除。', 'These settings are combined with the selected permission groups. Adding an item automatically removes it from the opposite list.'),
+      }),
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permissions-manual',
+        children: [
+          jsx(PermissionValueEditor, {
+            title: panelText('添加工具组', 'Grant tool groups'),
+            emptyLabel: panelText('没有单独添加的工具组', 'No individually granted tool groups'),
+            addLabel: panelText('选择要添加的工具组', 'Choose a tool group to grant'),
+            values: state.draft.toolGroups,
+            options: state.value.availableToolGroups,
+            type: 'tool',
+            disabled: saving,
+            onChange: (values: readonly string[]) => { setDraftValues('toolGroups', 'denyToolGroups', values) },
+          }),
+          jsx(PermissionValueEditor, {
+            title: panelText('限制工具组', 'Restrict tool groups'),
+            emptyLabel: panelText('没有单独限制的工具组', 'No individually restricted tool groups'),
+            addLabel: panelText('选择要限制的工具组', 'Choose a tool group to restrict'),
+            values: state.draft.denyToolGroups,
+            options: state.value.availableToolGroups,
+            type: 'tool',
+            restricted: true,
+            disabled: saving,
+            onChange: (values: readonly string[]) => { setDraftValues('denyToolGroups', 'toolGroups', values) },
+          }),
+          jsx(PermissionValueEditor, {
+            title: panelText('添加操作权限', 'Grant actions'),
+            emptyLabel: panelText('没有单独添加的操作权限', 'No individually granted actions'),
+            addLabel: panelText('选择要添加的操作权限', 'Choose an action to grant'),
+            values: state.draft.grants,
+            options: state.value.availableActions,
+            type: 'action',
+            disabled: saving,
+            onChange: (values: readonly string[]) => { setDraftValues('grants', 'denies', values) },
+          }),
+          jsx(PermissionValueEditor, {
+            title: panelText('限制操作权限', 'Restrict actions'),
+            emptyLabel: panelText('没有单独限制的操作权限', 'No individually restricted actions'),
+            addLabel: panelText('选择要限制的操作权限', 'Choose an action to restrict'),
+            values: state.draft.denies,
+            options: state.value.availableActions,
+            type: 'action',
+            restricted: true,
+            disabled: saving,
+            onChange: (values: readonly string[]) => { setDraftValues('denies', 'grants', values) },
+          }),
+        ],
       }),
       jsxs('details', {
         className: 'dsh-fleet-panel-member-permissions-effective',
         children: [
-          jsx('summary', { children: '查看当前有效权限' }),
-          jsxs('p', {
-            className: 'dsh-fleet-panel-member-permissions-values',
+          jsxs('summary', {
             children: [
-              `工具组：${state.value.effectiveToolGroups.join('、') || '无'}`,
-              jsx('br', {}),
-              `操作：${state.value.effectiveActions.join('、') || '无'}`,
+              panelText('当前生效范围', 'Current effective scope'),
+              jsx('span', {
+                className: 'dsh-fleet-panel-member-permissions-effective-summary',
+                children: state.value.op
+                  ? panelText('OP · 完整权限', 'OP · Full permissions')
+                  : panelText(`${state.value.effectiveToolGroups.length} 个工具组 · ${state.value.effectiveActions.length} 项操作`, `${state.value.effectiveToolGroups.length} tool groups · ${state.value.effectiveActions.length} actions`),
+              }),
             ],
           }),
+          state.value.op
+            ? jsx('p', {
+                className: 'dsh-fleet-panel-member-permissions-op',
+                children: panelText('这位成员当前拥有完整权限；普通工具组和操作限制不适用。', 'This member currently has full permissions; ordinary tool-group and action restrictions do not apply.'),
+              })
+            : jsxs('div', {
+                className: 'dsh-fleet-panel-member-permissions-values',
+                children: [
+                  jsxs('div', {
+                    className: 'dsh-fleet-panel-member-permissions-value-group',
+                    children: [
+                      jsx('h5', {
+                        className: 'dsh-fleet-panel-member-permissions-value-title',
+                        children: panelText(`工具组（${state.value.effectiveToolGroups.length}）`, `Tool groups (${state.value.effectiveToolGroups.length})`),
+                      }),
+                      jsx(PermissionValues, { values: state.value.effectiveToolGroups, type: 'tool' }),
+                    ],
+                  }),
+                  jsxs('div', {
+                    className: 'dsh-fleet-panel-member-permissions-value-group',
+                    children: [
+                      jsx('h5', {
+                        className: 'dsh-fleet-panel-member-permissions-value-title',
+                        children: panelText(`操作（${state.value.effectiveActions.length}）`, `Actions (${state.value.effectiveActions.length})`),
+                      }),
+                      jsx(PermissionValues, { values: state.value.effectiveActions, type: 'action' }),
+                    ],
+                  }),
+                ],
+              }),
         ],
       }),
       jsxs('div', {
-        className: 'dsh-fleet-panel-overview-actions',
+        className: 'dsh-fleet-panel-member-permissions-actions',
         children: [
-          jsx('button', {
-            type: 'button',
-            className: 'dsh-fleet-panel-control-button',
-            'data-primary': dirty ? 'true' : undefined,
-            disabled: saving || !dirty,
-            onClick: () => { save() },
-            children: saving ? '正在保存…' : '保存权限',
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-permissions-draft',
+            role: 'status',
+            children: dirty
+              ? panelText(
+                  `有未保存更改；保存后将使用 ${state.draft.groups.length} 个权限组和 ${state.draft.toolGroups.length + state.draft.grants.length + state.draft.denyToolGroups.length + state.draft.denies.length} 项单独配置。`,
+                  `There are unsaved changes. Saving will use ${state.draft.groups.length} permission groups and ${state.draft.toolGroups.length + state.draft.grants.length + state.draft.denyToolGroups.length + state.draft.denies.length} individual settings.`,
+                )
+              : panelText('当前权限配置已生效。', 'The current permission configuration is active.'),
           }),
-          state.value.configured && jsx('button', {
-            type: 'button',
-            className: 'dsh-fleet-panel-control-button',
-            disabled: saving,
-            onClick: () => { save(true) },
-            children: '恢复模板默认',
+          jsxs('div', {
+            className: 'dsh-fleet-panel-member-permissions-action-buttons',
+            children: [
+              dirty && jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-panel-control-button',
+                disabled: saving,
+                onClick: () => {
+                  setSaveError(undefined)
+                  setState({ ...state, draft: fleetPermissionAssignment(state.value.assignment) })
+                },
+                children: panelText('撤销更改', 'Discard changes'),
+              }),
+              state.value.configured && jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-panel-control-button',
+                disabled: saving,
+                onClick: () => { save(true) },
+                children: savingMode === 'reset' ? panelText('正在恢复…', 'Restoring…') : panelText('改回团队模板', 'Restore Team template'),
+              }),
+              dirty && jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-panel-control-button',
+                'data-primary': 'true',
+                disabled: saving,
+                onClick: () => { save() },
+                children: savingMode === 'save' ? panelText('正在保存…', 'Saving…') : panelText('保存权限', 'Save permissions'),
+              }),
+            ],
+          }),
+          saveError !== undefined && jsx('p', {
+            className: 'dsh-fleet-panel-member-permissions-save-error',
+            role: 'alert',
+            children: saveError,
           }),
         ],
       }),
@@ -8028,21 +12669,966 @@ function MemberPermissions({ owner, member }: {
   })
 }
 
+const ACCESS_RESOURCE_KIND_NAMES: Readonly<Record<string, readonly [string, string]>> = {
+  conversation: ['会话', 'Conversation'],
+  document: ['文档', 'Document'],
+  file: ['文件', 'File'],
+  'git-repository': ['Git 仓库', 'Git repository'],
+  'lark-resource': ['飞书资源', 'Lark resource'],
+  resource: ['共享资源', 'Shared resource'],
+  team: ['团队', 'Team'],
+  workspace: ['工作区', 'Workspace'],
+}
+
+const ACCESS_LEVEL_NAMES: Readonly<Record<FleetPanelAccessLevel, readonly [string, string]>> = {
+  read: ['查看', 'Read'],
+  write: ['写入', 'Write'],
+  use: ['使用', 'Use'],
+  manage: ['管理', 'Manage'],
+}
+
+const ACCESS_LEVELS: readonly FleetPanelAccessLevel[] = ['read', 'write', 'use', 'manage']
+
+function accessResourceKindName(kind: string): string {
+  const copy = ACCESS_RESOURCE_KIND_NAMES[kind]
+  return copy === undefined ? kind : panelText(...copy)
+}
+
+function accessLevelName(level: FleetPanelAccessLevel): string {
+  return panelText(...ACCESS_LEVEL_NAMES[level])
+}
+
+const SIMPLE_PERMISSION_LEVELS = [
+  { id: 'observer', name: ['只查看', 'View only'], description: ['读取消息、状态、任务、日程和共享内容，不能修改。', 'Read messages, status, tasks, schedules, and shared content without changing them.'] },
+  { id: 'member', name: ['参与工作', 'Collaborate'], description: ['发消息、领取和推进任务、参加会议并评论文档。', 'Send messages, claim and advance tasks, join meetings, and comment on documents.'] },
+  { id: 'researcher', name: ['创作内容', 'Create content'], description: ['在参与工作的基础上，还能写共享资源和文档。', 'Collaborate and also write shared resources and documents.'] },
+  { id: 'facilitator', name: ['协调团队', 'Coordinate Team'], description: ['管理频道、会议、任务和日程，并可中断或唤醒成员。', 'Manage channels, meetings, tasks, and schedules, and interrupt or wake members.'] },
+  { id: 'maintainer', name: ['管理团队', 'Manage Team'], description: ['同时拥有创作与协调能力，并可管理团队、权限和资源访问。', 'Create and coordinate, plus manage the Team, permissions, and resource access.'] },
+  { id: 'op', name: ['完全控制', 'Full control'], description: ['不受普通权限限制。仅用于需要维护整个 Fleet 的成员。', 'Bypass ordinary permission limits. Use only for members maintaining the whole Fleet.'] },
+] as const
+
+const SIMPLE_ACCESS_CATEGORY_COPY = {
+  conversations: {
+    name: ['团队会话', 'Team conversations'] as const,
+    description: ['频道和成员私聊。', 'Channels and member direct conversations.'] as const,
+  },
+  content: {
+    name: ['文件与工作内容', 'Files and work content'] as const,
+    description: ['文件、文档、工作区、Git 仓库和共享资源。', 'Files, documents, workspaces, Git repositories, and shared resources.'] as const,
+  },
+  team: {
+    name: ['团队本身', 'The Team itself'] as const,
+    description: ['针对团队整体的查看和管理操作。', 'Viewing and management operations aimed at the Team itself.'] as const,
+  },
+  other: {
+    name: ['插件资源', 'Plugin resources'] as const,
+    description: ['由已安装插件提供的其它资源类型。', 'Other resource types provided by installed plugins.'] as const,
+  },
+}
+
+function simplePermissionSelection(authorization: FleetPanelMemberAuthorization): string | undefined {
+  const assignment = authorization.assignment
+  if (assignment.grants.length > 0 || assignment.denies.length > 0
+    || assignment.toolGroups.length > 0 || assignment.denyToolGroups.length > 0) return undefined
+  if (assignment.op) return 'op'
+  return assignment.groups.length === 1 && SIMPLE_PERMISSION_LEVELS.some(level => level.id === assignment.groups[0])
+    ? assignment.groups[0]
+    : undefined
+}
+
+function simpleAccessCategories(resourceKinds: readonly string[]): readonly {
+  readonly id: keyof typeof SIMPLE_ACCESS_CATEGORY_COPY
+  readonly kinds: readonly string[]
+}[] {
+  const known = new Set(resourceKinds)
+  const conversations = ['conversation'].filter(kind => known.has(kind))
+  const content = ['document', 'file', 'git-repository', 'lark-resource', 'resource', 'workspace'].filter(kind => known.has(kind))
+  const team = ['team'].filter(kind => known.has(kind))
+  const claimed = new Set([...conversations, ...content, ...team])
+  const other = resourceKinds.filter(kind => !claimed.has(kind))
+  const categories: readonly {
+    readonly id: keyof typeof SIMPLE_ACCESS_CATEGORY_COPY
+    readonly kinds: readonly string[]
+  }[] = [
+    { id: 'conversations' as const, kinds: conversations },
+    { id: 'content' as const, kinds: content },
+    { id: 'team' as const, kinds: team },
+    { id: 'other' as const, kinds: other },
+  ].filter(category => category.kinds.length > 0)
+  return categories
+}
+
+function SimpleMemberAuthorization({ owner, member, showDetailed }: {
+  readonly owner: FleetPanelPaneOwner
+  readonly member: FleetPanelMember
+  readonly showDetailed: () => void
+}): ReactElement {
+  const loadPermissions = owner.loadMemberAuthorization
+  const loadAccess = owner.loadMemberAccess
+  const updatePermissions = owner.updateMemberPermissions
+  const updateAccess = owner.updateMemberAccess
+  const viewKey = `${owner.snapshot.teamId}:${member.id}`
+  const activeViewKey = useRef(viewKey)
+  activeViewKey.current = viewKey
+  const [state, setState] = useState<
+    | { readonly status: 'loading' }
+    | { readonly status: 'error'; readonly message: string }
+    | { readonly status: 'ready'; readonly permissions: FleetPanelMemberAuthorization; readonly access: FleetPanelMemberAccess }
+  >({ status: 'loading' })
+  const [busy, setBusy] = useState<string>()
+  const [saveError, setSaveError] = useState<string>()
+
+  useEffect(() => {
+    if (loadPermissions === undefined || loadAccess === undefined) return
+    const controller = new AbortController()
+    setState({ status: 'loading' })
+    setSaveError(undefined)
+    void Promise.all([
+      loadPermissions(owner.snapshot.teamId, member.id, controller.signal),
+      loadAccess(member.id, controller.signal),
+    ]).then(([permissions, access]) => {
+      if (!controller.signal.aborted) setState({ status: 'ready', permissions, access })
+    }).catch((reason: unknown) => {
+      if (!controller.signal.aborted) setState({
+        status: 'error',
+        message: reason instanceof Error ? reason.message : panelText('无法读取权限配置', 'Permission settings could not be loaded'),
+      })
+    })
+    return () => controller.abort()
+  }, [loadAccess, loadPermissions, member.id, owner.snapshot.teamId])
+
+  if (loadPermissions === undefined || loadAccess === undefined) return jsx('p', {
+    className: 'dsh-fleet-panel-member-permissions-empty',
+    children: panelText('当前实例没有提供权限配置接口。', 'This instance does not provide permission configuration APIs.'),
+  })
+  if (state.status === 'loading') return jsx('p', {
+    className: 'dsh-fleet-panel-member-permissions-empty',
+    children: panelText('正在读取权限与访问范围…', 'Loading permissions and access…'),
+  })
+  if (state.status === 'error') return jsxs('div', {
+    className: 'dsh-fleet-panel-member-permissions-error',
+    children: [
+      jsx('p', { children: state.message }),
+      jsx('button', { type: 'button', onClick: () => showDetailed(), children: panelText('打开详细配置', 'Open detailed settings') }),
+    ],
+  })
+
+  const selected = simplePermissionSelection(state.permissions)
+  const categories = simpleAccessCategories(state.access.resourceKinds)
+  const setPermission = (id: string): void => {
+    if (updatePermissions === undefined || busy !== undefined) return
+    const savedViewKey = viewKey
+    setBusy(`permission:${id}`)
+    setSaveError(undefined)
+    void updatePermissions(member.id, {
+      groups: id === 'op' ? [] : [id],
+      grants: [], denies: [], toolGroups: [], denyToolGroups: [], op: id === 'op',
+    }).then(permissions => {
+      if (activeViewKey.current === savedViewKey) setState({ ...state, permissions })
+    }).catch((reason: unknown) => {
+      if (activeViewKey.current === savedViewKey) setSaveError(reason instanceof Error ? reason.message : panelText('无法更新权限', 'Permissions could not be updated'))
+    }).finally(() => {
+      if (activeViewKey.current === savedViewKey) setBusy(undefined)
+    })
+  }
+  const setAccess = (categoryId: string, kinds: readonly string[], mode: FleetPanelAccessMode): void => {
+    if (updateAccess === undefined || busy !== undefined) return
+    const savedViewKey = viewKey
+    setBusy(`access:${categoryId}`)
+    setSaveError(undefined)
+    void (async () => {
+      let access = state.access
+      for (const resourceKind of kinds) {
+        access = await updateAccess(member.id, { action: 'set_mode', resourceKind, mode })
+      }
+      if (activeViewKey.current === savedViewKey) setState({ ...state, access })
+    })().catch((reason: unknown) => {
+      if (activeViewKey.current === savedViewKey) setSaveError(reason instanceof Error ? reason.message : panelText('无法更新资源范围', 'Resource access could not be updated'))
+    }).finally(() => {
+      if (activeViewKey.current === savedViewKey) setBusy(undefined)
+    })
+  }
+
+  return jsxs('div', {
+    className: 'dsh-fleet-panel-auth-simple',
+    children: [
+      jsx('h4', { children: panelText('能做什么', 'What they can do') }),
+      jsx('div', {
+        className: 'dsh-fleet-panel-auth-levels',
+        children: [
+          ...SIMPLE_PERMISSION_LEVELS.map(level => jsxs('button', {
+            type: 'button',
+            'aria-pressed': selected === level.id,
+            disabled: busy !== undefined || updatePermissions === undefined,
+            onClick: () => setPermission(level.id),
+            children: [
+              jsx('strong', { children: panelText(level.name[0], level.name[1]) }),
+              jsx('span', { children: panelText(level.description[0], level.description[1]) }),
+            ],
+          }, level.id)),
+          selected === undefined && jsxs('button', {
+            type: 'button', 'aria-pressed': 'true', onClick: showDetailed,
+            children: [
+              jsx('strong', { children: panelText('自定义设置', 'Custom setup') }),
+              jsx('span', { children: panelText('当前组合不能归入单一档位；点击查看具体设置。', 'The current combination does not match one level; click to inspect it.') }),
+            ],
+          }),
+        ],
+      }),
+      jsx('h4', { children: panelText('能访问哪些内容', 'Which content they can access') }),
+      jsx('div', {
+        className: 'dsh-fleet-panel-auth-access',
+        children: categories.map(category => {
+          const copy = SIMPLE_ACCESS_CATEGORY_COPY[category.id]
+          const restricted = category.kinds.filter(kind => state.access.modes.some(candidate => candidate.resourceKind === kind && candidate.mode === 'restricted')).length
+          const value = restricted === 0 ? 'inherit' : restricted === category.kinds.length ? 'restricted' : 'mixed'
+          return jsxs('label', {
+            children: [
+              jsxs('span', { children: [
+                jsx('strong', { children: panelText(copy.name[0], copy.name[1]) }),
+                jsx('small', { children: panelText(copy.description[0], copy.description[1]) }),
+              ] }),
+              jsxs('select', {
+                value,
+                disabled: busy !== undefined || updateAccess === undefined,
+                onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+                  if (event.currentTarget.value !== 'mixed') setAccess(category.id, category.kinds, event.currentTarget.value as FleetPanelAccessMode)
+                },
+                children: [
+                  jsx('option', { value: 'inherit', children: panelText('按团队默认范围', 'Use Team defaults') }),
+                  jsx('option', { value: 'restricted', children: panelText('仅限允许清单', 'Allow-list only') }),
+                  value === 'mixed' && jsx('option', { value: 'mixed', children: panelText('混合设置', 'Mixed setup') }),
+                ],
+              }),
+            ],
+          }, category.id)
+        }),
+      }),
+      jsxs('div', { className: 'dsh-fleet-panel-auth-exceptions', children: [
+        jsx('span', { children: state.access.rules.length === 0
+          ? panelText('没有具体资源例外。', 'No specific resource exceptions.')
+          : panelText(`${state.access.rules.length} 条具体资源例外正在生效。`, `${state.access.rules.length} specific resource exceptions are active.`) }),
+        jsx('button', { type: 'button', onClick: showDetailed, children: state.access.rules.length === 0 ? panelText('添加例外', 'Add exception') : panelText('查看例外', 'View exceptions') }),
+      ] }),
+      saveError !== undefined && jsx('p', { className: 'dsh-fleet-panel-member-permissions-save-error', role: 'alert', children: saveError }),
+    ],
+  })
+}
+
+function MemberAuthorizationPanel({ owner, member }: {
+  readonly owner: FleetPanelPaneOwner
+  readonly member: FleetPanelMember
+}): ReactElement {
+  const [mode, setMode] = useState<'simple' | 'detailed'>('simple')
+  return jsxs('section', {
+    className: 'dsh-fleet-panel-auth',
+    children: [
+      jsxs('div', { className: 'dsh-fleet-panel-auth-head', children: [
+        jsxs('div', { children: [
+          jsx('h3', { children: panelText('权限与访问', 'Permissions and access') }),
+          jsx('p', { children: panelText('权限决定能做什么；资源访问决定能对哪些内容做。', 'Permissions decide what this member can do; resource access decides which content they can do it to.') }),
+        ] }),
+        jsxs('div', { className: 'dsh-fleet-panel-auth-mode', role: 'group', 'aria-label': panelText('配置精细程度', 'Configuration detail'), children: [
+          jsx('button', { type: 'button', 'aria-pressed': mode === 'simple', onClick: () => setMode('simple'), children: panelText('简单', 'Simple') }),
+          jsx('button', { type: 'button', 'aria-pressed': mode === 'detailed', onClick: () => setMode('detailed'), children: panelText('详细', 'Detailed') }),
+        ] }),
+      ] }),
+      mode === 'simple'
+        ? jsx(SimpleMemberAuthorization, { owner, member, showDetailed: () => setMode('detailed') })
+        : jsxs('div', { className: 'dsh-fleet-panel-auth-detailed', children: [
+          jsx(MemberPermissions, { owner, member }),
+          jsx(MemberAccess, { owner, member }),
+        ] }),
+    ],
+  })
+}
+
+function MemberAccess({ owner, member }: {
+  readonly owner: FleetPanelPaneOwner
+  readonly member: FleetPanelMember
+}): ReactElement | null {
+  const load = owner.loadMemberAccess
+  const update = owner.updateMemberAccess
+  const [state, setState] = useState<
+    | { readonly status: 'loading' }
+    | { readonly status: 'ready'; readonly value: FleetPanelMemberAccess }
+    | { readonly status: 'error'; readonly message: string }
+  >({ status: 'loading' })
+  const [ruleDraft, setRuleDraft] = useState<{
+    readonly resourceKind: string
+    readonly resourceId: string
+    readonly scope: FleetPanelAccessScope
+    readonly effect: FleetPanelAccessEffect
+    readonly levels: readonly FleetPanelAccessLevel[]
+  }>({ resourceKind: 'file', resourceId: '', scope: 'self', effect: 'allow', levels: ['read'] })
+  const [busy, setBusy] = useState<string>()
+  const [saveError, setSaveError] = useState<string>()
+  const [attempt, setAttempt] = useState(0)
+  const viewKey = `${owner.snapshot.teamId}:${member.id}`
+  const activeViewKey = useRef(viewKey)
+  activeViewKey.current = viewKey
+
+  useEffect(() => {
+    if (load === undefined) return
+    const controller = new AbortController()
+    setBusy(undefined)
+    setSaveError(undefined)
+    setState({ status: 'loading' })
+    void load(member.id, controller.signal).then(value => {
+      if (!controller.signal.aborted) setState({ status: 'ready', value })
+    }).catch((reason: unknown) => {
+      if (!controller.signal.aborted) setState({
+        status: 'error',
+        message: reason instanceof Error ? reason.message : panelText('无法读取成员资源访问配置', 'Member resource access settings could not be loaded'),
+      })
+    })
+    return () => { controller.abort(new Error('Fleet member Access view changed')) }
+  }, [attempt, load, member.id, owner.snapshot.teamId])
+
+  if (load === undefined || update === undefined) return null
+  if (state.status !== 'ready') return jsxs('section', {
+    className: 'dsh-fleet-panel-member-access',
+    children: [
+      jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: panelText('资源访问', 'Resource access') }),
+      jsx('p', {
+        className: state.status === 'error'
+          ? 'dsh-fleet-panel-control-error'
+          : 'dsh-fleet-panel-member-permissions-copy',
+        role: state.status === 'error' ? 'alert' : 'status',
+        children: state.status === 'error' ? state.message : panelText('正在读取资源访问配置…', 'Loading resource access settings…'),
+      }),
+      state.status === 'error' && jsx('button', {
+        type: 'button',
+        className: 'dsh-fleet-panel-control-button',
+        onClick: () => { setAttempt(current => current + 1) },
+        children: panelText('重试', 'Retry'),
+      }),
+    ],
+  })
+
+  const selectedResourceKind = state.value.resourceKinds.includes(ruleDraft.resourceKind)
+    ? ruleDraft.resourceKind
+    : (state.value.resourceKinds[0] ?? '')
+  const applyChange = (
+    change: FleetPanelMemberAccessChange,
+    operation: string,
+    complete?: () => void,
+  ): void => {
+    if (busy !== undefined) return
+    const savedViewKey = viewKey
+    setBusy(operation)
+    setSaveError(undefined)
+    void update(member.id, change).then(value => {
+      if (activeViewKey.current !== savedViewKey) return
+      setState({ status: 'ready', value })
+      complete?.()
+    }).catch((reason: unknown) => {
+      if (activeViewKey.current !== savedViewKey) return
+      setSaveError(reason instanceof Error ? reason.message : panelText('无法更新成员资源访问，请重试', 'Member resource access could not be updated. Try again.'))
+    }).finally(() => {
+      if (activeViewKey.current === savedViewKey) setBusy(undefined)
+    })
+  }
+  const toggleLevel = (level: FleetPanelAccessLevel): void => {
+    const levels = ruleDraft.levels.includes(level)
+      ? ruleDraft.levels.filter(candidate => candidate !== level)
+      : ACCESS_LEVELS.filter(candidate => candidate === level || ruleDraft.levels.includes(candidate))
+    setRuleDraft({ ...ruleDraft, levels })
+  }
+  const addRule = (): void => {
+    const resourceId = ruleDraft.resourceId.trim()
+    if (selectedResourceKind.length === 0 || resourceId.length === 0 || ruleDraft.levels.length === 0) return
+    applyChange({
+      action: 'add_rule',
+      resourceKind: selectedResourceKind,
+      resourceId,
+      scope: ruleDraft.scope,
+      effect: ruleDraft.effect,
+      levels: ruleDraft.levels,
+    }, 'add', () => { setRuleDraft(current => ({ ...current, resourceId: '' })) })
+  }
+
+  return jsxs('section', {
+    className: 'dsh-fleet-panel-member-access',
+    children: [
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permissions-head',
+        children: [
+          jsx('h3', { className: 'dsh-fleet-panel-member-permissions-title', children: panelText('资源访问', 'Resource access') }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-permissions-source',
+            'data-configured': state.value.rules.length > 0
+              || state.value.modes.some(mode => mode.mode === 'restricted') ? 'true' : undefined,
+            children: panelText(`${state.value.rules.length} 条专属规则`, `${state.value.rules.length} custom ${state.value.rules.length === 1 ? 'rule' : 'rules'}`),
+          }),
+        ],
+      }),
+      jsx('p', {
+        className: 'dsh-fleet-panel-member-permissions-copy',
+        children: panelText('资源访问在操作权限通过后判定。这里编辑这位成员的专属规则；权限组规则仍会叠加生效，拒绝优先。更改会立即生效。', 'Resource access is evaluated after operation permissions. Edit this member’s custom rules here; permission-group rules still apply, and deny takes precedence. Changes take effect immediately.'),
+      }),
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permissions-section-head',
+        children: [
+          jsx('h4', {
+            id: `dsh-fleet-member-access-modes-${member.id}`,
+            className: 'dsh-fleet-panel-member-permissions-section-title',
+            children: panelText('资源默认方式', 'Resource defaults'),
+          }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-permissions-section-meta',
+            children: panelText('按资源类型设置', 'Set by resource type'),
+          }),
+        ],
+      }),
+      state.value.resourceKinds.length === 0
+        ? jsx('p', {
+            className: 'dsh-fleet-panel-member-permissions-empty',
+            children: panelText('当前没有已注册的资源类型。', 'No resource types are registered.'),
+          })
+        : jsx('div', {
+            className: 'dsh-fleet-panel-member-access-modes',
+            'aria-labelledby': `dsh-fleet-member-access-modes-${member.id}`,
+            children: state.value.resourceKinds.map(resourceKind => {
+              const mode = state.value.modes.find(candidate => candidate.resourceKind === resourceKind)?.mode ?? 'inherit'
+              return jsxs('label', {
+                className: 'dsh-fleet-panel-member-access-mode',
+                children: [
+                  jsxs('span', {
+                    className: 'dsh-fleet-panel-member-access-mode-copy',
+                    children: [
+                      jsx('span', {
+                        className: 'dsh-fleet-panel-member-access-mode-name',
+                        children: accessResourceKindName(resourceKind),
+                      }),
+                      jsx('span', {
+                        className: 'dsh-fleet-panel-member-access-mode-detail',
+                        children: mode === 'restricted'
+                          ? panelText('未匹配允许规则时拒绝', 'Deny when no allow rule matches')
+                          : panelText('未匹配规则时沿用默认访问', 'Use default access when no rule matches'),
+                      }),
+                    ],
+                  }),
+                  jsx('select', {
+                    className: 'dsh-fleet-panel-member-access-select',
+                    'aria-label': panelText(`${accessResourceKindName(resourceKind)}默认访问方式`, `Default access mode for ${accessResourceKindName(resourceKind)}`),
+                    value: mode,
+                    disabled: busy !== undefined,
+                    onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+                      applyChange({
+                        action: 'set_mode',
+                        resourceKind,
+                        mode: event.currentTarget.value as FleetPanelAccessMode,
+                      }, `mode:${resourceKind}`)
+                    },
+                    children: [
+                      jsx('option', { value: 'inherit', children: panelText('沿用默认', 'Use default') }),
+                      jsx('option', { value: 'restricted', children: panelText('仅允许规则', 'Allow rules only') }),
+                    ],
+                  }),
+                ],
+              }, resourceKind)
+            }),
+          }),
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-permissions-section-head',
+        children: [
+          jsx('h4', {
+            className: 'dsh-fleet-panel-member-permissions-section-title',
+            children: panelText('专属访问规则', 'Custom access rules'),
+          }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-permissions-section-meta',
+            children: panelText('拒绝规则优先', 'Deny rules take precedence'),
+          }),
+        ],
+      }),
+      state.value.rules.length === 0
+        ? jsx('p', {
+            className: 'dsh-fleet-panel-member-permissions-empty',
+            children: panelText('还没有专属规则。沿用默认时使用资源自身的访问范围；仅允许规则时，没有匹配项就会拒绝。', 'There are no custom rules yet. Use default applies the resource’s own access scope; allow-rules-only denies access when nothing matches.'),
+          })
+        : jsx('div', {
+            className: 'dsh-fleet-panel-member-access-rules',
+            children: state.value.rules.map(rule => jsxs('div', {
+              className: 'dsh-fleet-panel-member-access-rule',
+              children: [
+                jsx('span', {
+                  className: 'dsh-fleet-panel-member-access-rule-effect',
+                  'data-effect': rule.effect,
+                  children: rule.effect === 'allow' ? panelText('允许', 'Allow') : panelText('拒绝', 'Deny'),
+                }),
+                jsxs('div', {
+                  className: 'dsh-fleet-panel-member-access-rule-copy',
+                  children: [
+                    jsx('div', {
+                      className: 'dsh-fleet-panel-member-access-rule-resource',
+                      children: `${accessResourceKindName(rule.resourceKind)} · ${rule.resourceId}`,
+                    }),
+                    jsx('div', {
+                      className: 'dsh-fleet-panel-member-access-rule-detail',
+                      children: `${rule.scope === 'tree' ? panelText('包含下级', 'Includes children') : panelText('仅此资源', 'This resource only')} · ${rule.levels.map(accessLevelName).join(panelText('、', ', '))}`,
+                    }),
+                  ],
+                }),
+                jsx('button', {
+                  type: 'button',
+                  className: 'dsh-fleet-panel-member-access-remove',
+                  disabled: busy !== undefined,
+                  'aria-label': panelText(`删除 ${rule.resourceId} 的访问规则`, `Delete access rule for ${rule.resourceId}`),
+                  onClick: () => { applyChange({ action: 'remove_rule', ruleId: rule.id }, `remove:${rule.id}`) },
+                  children: busy === `remove:${rule.id}` ? panelText('正在删除…', 'Deleting…') : panelText('删除', 'Delete'),
+                }),
+              ],
+            }, rule.id)),
+          }),
+      jsx('h4', {
+        className: 'dsh-fleet-panel-member-permissions-section-title',
+        style: { marginTop: 20 },
+        children: panelText('添加规则', 'Add rule'),
+      }),
+      jsxs('div', {
+        className: 'dsh-fleet-panel-member-access-form',
+        children: [
+          jsxs('label', {
+            className: 'dsh-fleet-panel-member-access-field',
+            children: [
+              jsx('span', { className: 'dsh-fleet-panel-member-access-label', children: panelText('资源类型', 'Resource type') }),
+              jsx('select', {
+                className: 'dsh-fleet-panel-member-access-select',
+                value: selectedResourceKind,
+                disabled: busy !== undefined || state.value.resourceKinds.length === 0,
+                onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+                  setRuleDraft({ ...ruleDraft, resourceKind: event.currentTarget.value })
+                },
+                children: state.value.resourceKinds.map(kind => jsx('option', {
+                  value: kind,
+                  children: accessResourceKindName(kind),
+                }, kind)),
+              }),
+            ],
+          }),
+          jsxs('label', {
+            className: 'dsh-fleet-panel-member-access-field',
+            children: [
+              jsx('span', { className: 'dsh-fleet-panel-member-access-label', children: panelText('资源标识', 'Resource identifier') }),
+              jsx('input', {
+                className: 'dsh-fleet-panel-member-access-input',
+                value: ruleDraft.resourceId,
+                disabled: busy !== undefined,
+                placeholder: panelText('路径、会话 ID 或资源 ID', 'Path, conversation ID, or resource ID'),
+                onChange: (event: ChangeEvent<HTMLInputElement>) => {
+                  setRuleDraft({ ...ruleDraft, resourceId: event.currentTarget.value })
+                },
+              }),
+            ],
+          }),
+          jsxs('label', {
+            className: 'dsh-fleet-panel-member-access-field',
+            children: [
+              jsx('span', { className: 'dsh-fleet-panel-member-access-label', children: panelText('规则效果', 'Rule effect') }),
+              jsx('select', {
+                className: 'dsh-fleet-panel-member-access-select',
+                value: ruleDraft.effect,
+                disabled: busy !== undefined,
+                onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+                  setRuleDraft({ ...ruleDraft, effect: event.currentTarget.value as FleetPanelAccessEffect })
+                },
+                children: [
+                  jsx('option', { value: 'allow', children: panelText('允许', 'Allow') }),
+                  jsx('option', { value: 'deny', children: panelText('拒绝', 'Deny') }),
+                ],
+              }),
+            ],
+          }),
+          jsxs('label', {
+            className: 'dsh-fleet-panel-member-access-field',
+            children: [
+              jsx('span', { className: 'dsh-fleet-panel-member-access-label', children: panelText('作用范围', 'Scope') }),
+              jsx('select', {
+                className: 'dsh-fleet-panel-member-access-select',
+                value: ruleDraft.scope,
+                disabled: busy !== undefined,
+                onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+                  setRuleDraft({ ...ruleDraft, scope: event.currentTarget.value as FleetPanelAccessScope })
+                },
+                children: [
+                  jsx('option', { value: 'self', children: panelText('仅此资源', 'This resource only') }),
+                  jsx('option', { value: 'tree', children: panelText('包含下级资源', 'Include child resources') }),
+                ],
+              }),
+            ],
+          }),
+          jsxs('fieldset', {
+            className: 'dsh-fleet-panel-member-access-field',
+            'data-wide': 'true',
+            style: { border: 0, margin: 0, padding: 0 },
+            children: [
+              jsx('legend', { className: 'dsh-fleet-panel-member-access-label', children: panelText('访问级别', 'Access levels') }),
+              jsx('div', {
+                className: 'dsh-fleet-panel-member-access-levels',
+                children: ACCESS_LEVELS.map(level => jsxs('label', {
+                  className: 'dsh-fleet-panel-member-access-level',
+                  children: [
+                    jsx('input', {
+                      type: 'checkbox',
+                      checked: ruleDraft.levels.includes(level),
+                      disabled: busy !== undefined,
+                      onChange: () => { toggleLevel(level) },
+                    }),
+                    accessLevelName(level),
+                  ],
+                }, level)),
+              }),
+            ],
+          }),
+          jsxs('div', {
+            className: 'dsh-fleet-panel-member-access-form-actions',
+            children: [
+              jsx('p', {
+                className: 'dsh-fleet-panel-member-access-feedback',
+                children: ruleDraft.levels.length === 0
+                  ? panelText('至少选择一个访问级别。', 'Select at least one access level.')
+                  : panelText('写入包含查看；管理包含写入和查看。', 'Write includes read; manage includes write and read.'),
+              }),
+              jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-panel-control-button',
+                'data-primary': 'true',
+                disabled: busy !== undefined || selectedResourceKind.length === 0
+                  || ruleDraft.resourceId.trim().length === 0 || ruleDraft.levels.length === 0,
+                onClick: addRule,
+                children: busy === 'add' ? panelText('正在添加…', 'Adding…') : panelText('添加规则', 'Add rule'),
+              }),
+              saveError !== undefined && jsx('p', {
+                className: 'dsh-fleet-panel-member-access-feedback',
+                'data-error': 'true',
+                role: 'alert',
+                children: saveError,
+              }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+function FleetMemberModelSelect({
+  groups,
+  failures,
+  value,
+  fallbackLabel,
+  effort,
+  disabled,
+  status,
+  error,
+  reload,
+  onChange,
+}: {
+  readonly groups: readonly FleetModelProviderGroup[]
+  readonly failures: readonly FleetModelCatalogFailure[]
+  readonly value: string
+  readonly fallbackLabel?: string
+  readonly effort: string
+  readonly disabled: boolean
+  readonly status: FleetModelDirectoryState['status']
+  readonly error: string | null
+  readonly reload: () => void
+  readonly onChange: (provider: string, model: string) => void
+}): ReactElement {
+  const choices = groups.flatMap(group => group.models.map(model => ({
+    key: JSON.stringify([group.id, model.id]),
+    model,
+  })))
+  const selected = choices.find(choice => choice.key === value)
+  const label = selected?.model.name ?? fallbackLabel ?? panelText('选择模型', 'Select model')
+  const title = effort === '' ? label : `${label} · ${effort}`
+  const menuId = useId()
+  const radio = useFleetRadioMenu(value === '' ? undefined : value, choices.length)
+  const toggle = (): void => {
+    if (!radio.open) reload()
+    radio.setOpen(current => !current)
+  }
+
+  return jsxs('div', {
+    className: 'dsh-fleet-panel-member-model-select',
+    onBlur: radio.onBlur,
+    children: [
+      jsxs('button', {
+        ref: radio.trigger,
+        type: 'button',
+        className: 'dsh-fleet-panel-member-model-trigger',
+        'aria-label': effort === ''
+          ? panelText(`选择模型，当前 ${label}`, `Select model, current ${label}`)
+          : panelText(`选择模型，当前 ${label}，推理等级 ${effort}`, `Select model, current ${label}, reasoning effort ${effort}`),
+        'aria-haspopup': 'menu',
+        'aria-expanded': radio.open ? 'true' : 'false',
+        'aria-controls': radio.open ? menuId : undefined,
+        title,
+        disabled,
+        onClick: toggle,
+        onKeyDown: radio.onTriggerKeyDown,
+        children: [
+          jsx('span', { className: 'dsh-fleet-panel-member-model-trigger-label', children: label }),
+          effort !== '' && jsx('span', { className: 'dsh-fleet-panel-member-model-trigger-effort', children: effort }),
+          jsx('span', {
+            className: 'dsh-fleet-panel-member-model-chevron',
+            children: jsx(PanelIcon, { name: 'chevron', size: 14 }),
+          }),
+        ],
+      }),
+      radio.open && jsxs('div', {
+        ref: radio.menu,
+        id: menuId,
+        className: 'dsh-fleet-panel-member-model-menu',
+        role: 'menu',
+        'aria-label': panelText('选择成员模型', 'Select member model'),
+        'aria-busy': status === 'loading' ? 'true' : 'false',
+        onKeyDown: radio.onMenuKeyDown,
+        children: [
+          status === 'loading' && jsx('div', {
+            className: 'dsh-fleet-panel-member-model-status',
+            children: panelText('正在刷新模型列表…', 'Refreshing model list…'),
+          }),
+          error !== null && jsxs('div', {
+            className: 'dsh-fleet-panel-member-model-error',
+            children: [
+              jsx('span', { children: panelText(`模型目录加载失败：${error}`, `Model catalog failed to load: ${error}`) }),
+              jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-panel-member-model-retry',
+                onClick: reload,
+                children: panelText('重新加载', 'Reload'),
+              }),
+            ],
+          }),
+          ...failures.map(failure => jsx('div', {
+            className: 'dsh-fleet-panel-member-model-warning',
+            children: panelText(`${failure.name} 加载失败：${failure.message}`, `${failure.name} failed to load: ${failure.message}`),
+          }, failure.id)),
+          choices.length === 0 && status !== 'loading'
+            ? jsx('div', {
+                className: 'dsh-fleet-panel-member-model-empty',
+                children: panelText('没有可用的模型。', 'No models available.'),
+              })
+            : jsx('div', {
+                className: 'dsh-fleet-panel-member-model-groups scrollable',
+                children: groups.map(group => jsxs('section', {
+                  className: 'dsh-fleet-panel-member-model-group',
+                  role: 'group',
+                  'aria-label': group.name,
+                  children: [
+                    jsx('div', { className: 'dsh-fleet-panel-member-model-group-title', children: group.name }),
+                    ...group.models.map(model => {
+                      const key = JSON.stringify([group.id, model.id])
+                      const checked = key === value
+                      return jsxs('button', {
+                        type: 'button',
+                        tabIndex: -1,
+                        role: 'menuitemradio',
+                        'aria-checked': checked ? 'true' : 'false',
+                        className: 'dsh-fleet-panel-member-model-option',
+                        title: model.name,
+                        onClick: () => {
+                          onChange(group.id, model.id)
+                          radio.close(true)
+                        },
+                        children: [
+                          jsxs('span', {
+                            className: 'dsh-fleet-panel-member-model-option-copy',
+                            children: [
+                              jsx('span', { className: 'dsh-fleet-panel-member-model-option-name', children: model.name }),
+                              model.description !== undefined && jsx('span', {
+                                className: 'dsh-fleet-panel-member-model-option-description',
+                                children: model.description,
+                              }),
+                            ],
+                          }),
+                          jsx('span', {
+                            className: 'dsh-fleet-panel-member-model-option-check',
+                            children: checked ? jsx(PanelIcon, { name: 'check', size: 16 }) : null,
+                          }),
+                        ],
+                      }, model.id)
+                    }),
+                  ],
+                }, group.id)),
+              }),
+        ],
+      }),
+    ],
+  })
+}
+
+function MemberRequestConfiguration({ owner, member, assistant }: {
+  readonly owner: FleetPanelPaneOwner
+  readonly member: FleetPanelMember
+  readonly assistant: boolean
+}): ReactElement {
+  const configure = owner.configureMemberRequest
+  const [modelDirectory, modelDirectoryState] = useFleetPanelModelDirectory(owner.sessionId)
+  const [providerName, setProviderName] = useState(member.provider ?? '')
+  const [modelName, setModelName] = useState(member.model ?? '')
+  const [modelKey, setModelKey] = useState(member.provider === undefined || member.model === undefined
+    ? ''
+    : JSON.stringify([member.provider, member.model]))
+  const [effort, setEffort] = useState(member.reasoningEffort ?? '')
+  const [maxTokens, setMaxTokens] = useState(member.maxTokens?.toString() ?? '')
+  const [modelDirty, setModelDirty] = useState(false)
+  const [effortDirty, setEffortDirty] = useState(false)
+  const [maxTokensDirty, setMaxTokensDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string>()
+  const [notice, setNotice] = useState<string>()
+  const modelChoices = useMemo(() => modelDirectoryState.groups.flatMap(group => group.models.map(model => ({
+    key: JSON.stringify([group.id, model.id]),
+    provider: group.id,
+    model: model.id,
+  }))), [modelDirectoryState.groups])
+  const manualModelEntry = modelDirectory === undefined
+    || (modelDirectoryState.status === 'error' && modelDirectoryState.groups.length === 0)
+  const currentModelAdvertised = modelChoices.some(choice => choice.key === modelKey)
+  const dirty = modelDirty || effortDirty || maxTokensDirty
+
+  useEffect(() => {
+    setProviderName(member.provider ?? '')
+    setModelName(member.model ?? '')
+    setModelKey(member.provider === undefined || member.model === undefined
+      ? ''
+      : JSON.stringify([member.provider, member.model]))
+    setEffort(member.reasoningEffort ?? '')
+    setMaxTokens(member.maxTokens?.toString() ?? '')
+    setModelDirty(false)
+    setEffortDirty(false)
+    setMaxTokensDirty(false)
+    setError(undefined)
+    setNotice(undefined)
+  }, [member.id, member.maxTokens, member.model, member.provider, member.reasoningEffort])
+
+  const save = async (): Promise<void> => {
+    if (configure === undefined || saving || !dirty) return
+    const request: FleetPanelTeamRequestInput['request'] = {}
+    if (modelDirty) {
+      if (manualModelEntry) {
+        if (providerName.trim() === '' || modelName.trim() === '') {
+          setError(panelText('Provider 和模型名称都不能为空。', 'Provider and model name are both required.'))
+          return
+        }
+        Object.assign(request, { provider: providerName.trim(), model: modelName.trim() })
+      } else {
+        const selected = modelChoices.find(choice => choice.key === modelKey)
+        if (selected === undefined) {
+          setError(panelText('请选择一个可用模型。', 'Choose an available model.'))
+          return
+        }
+        Object.assign(request, { provider: selected.provider, model: selected.model })
+      }
+    }
+    if (effortDirty) Object.assign(request, { reasoningEffort: effort === '' ? null : effort })
+    if (maxTokensDirty) {
+      const normalized = maxTokens.trim()
+      if (normalized !== '' && (!Number.isSafeInteger(Number(normalized)) || Number(normalized) <= 0)) {
+        setError(panelText('最大 Token 必须是正整数。', 'Maximum tokens must be a positive integer.'))
+        return
+      }
+      Object.assign(request, { maxTokens: normalized === '' ? null : Number(normalized) })
+    }
+    setSaving(true)
+    setError(undefined)
+    setNotice(undefined)
+    try {
+      await configure(member.id, assistant, request)
+      setModelDirty(false)
+      setEffortDirty(false)
+      setMaxTokensDirty(false)
+      setNotice(panelText('请求配置已保存，从下一次模型调用开始生效。', 'Request configuration saved. It takes effect on the next model call.'))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : panelText('无法保存成员请求配置', 'Could not save member request configuration'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return jsxs('section', {
+    className: 'dsh-fleet-panel-member-request',
+    children: [
+      jsxs('div', { className: 'dsh-fleet-panel-member-request-head', children: [
+        jsx('h3', { children: panelText('模型与请求', 'Model and request') }),
+        jsx('p', { children: panelText('单独配置这位成员；不会中断当前回合，从下一次模型调用开始生效。', 'Configure this member without interrupting the current turn. Changes apply on the next model call.') }),
+      ] }),
+      jsxs('div', { className: 'dsh-fleet-panel-member-request-grid', children: [
+        manualModelEntry ? jsxs(Fragment, { children: [
+          jsxs('label', { className: 'dsh-fleet-panel-member-request-field', children: [
+            jsx('span', { children: 'Provider' }),
+            jsx('input', { value: providerName, disabled: saving || configure === undefined, placeholder: 'memorax', onChange: (event: ChangeEvent<HTMLInputElement>) => { setProviderName(event.currentTarget.value); setModelDirty(true); setNotice(undefined) } }),
+          ] }),
+          jsxs('label', { className: 'dsh-fleet-panel-member-request-field', children: [
+            jsx('span', { children: panelText('模型名称', 'Model name') }),
+            jsx('input', { value: modelName, disabled: saving || configure === undefined, placeholder: 'deepseek-v4-flash', onChange: (event: ChangeEvent<HTMLInputElement>) => { setModelName(event.currentTarget.value); setModelDirty(true); setNotice(undefined) } }),
+          ] }),
+        ] }) : jsxs('div', { className: 'dsh-fleet-panel-member-request-field', 'data-wide': 'true', children: [
+          jsx('span', { children: panelText('模型', 'Model') }),
+          jsx(FleetMemberModelSelect, {
+            groups: modelDirectoryState.groups,
+            failures: modelDirectoryState.failures,
+            value: modelKey,
+            ...(modelKey !== '' && !currentModelAdvertised && member.model !== undefined
+              ? { fallbackLabel: member.model }
+              : {}),
+            effort,
+            disabled: saving || configure === undefined,
+            status: modelDirectoryState.status,
+            error: modelDirectoryState.error,
+            reload: () => { void modelDirectory?.load().catch(() => undefined) },
+            onChange: (provider: string, model: string) => {
+              setModelKey(JSON.stringify([provider, model]))
+              setProviderName(provider)
+              setModelName(model)
+              setModelDirty(true)
+              setNotice(undefined)
+            },
+          }),
+        ] }),
+        jsxs('label', { className: 'dsh-fleet-panel-member-request-field', children: [
+          jsx('span', { children: panelText('推理强度', 'Reasoning effort') }),
+          jsx('select', { value: effort, disabled: saving || configure === undefined, onChange: (event: ChangeEvent<HTMLSelectElement>) => { setEffort(event.currentTarget.value); setEffortDirty(true); setNotice(undefined) }, children: [
+            jsx('option', { value: '', children: panelText('使用模型默认值', 'Use model default') }),
+            ...['low', 'medium', 'high', 'xhigh', 'max'].map(value => jsx('option', { value, children: value }, value)),
+          ] }),
+        ] }),
+        jsxs('label', { className: 'dsh-fleet-panel-member-request-field', children: [
+          jsx('span', { children: panelText('最大 Token', 'Maximum tokens') }),
+          jsx('input', { type: 'number', min: 1, step: 1, value: maxTokens, disabled: saving || configure === undefined, placeholder: panelText('使用模型默认值', 'Use model default'), onChange: (event: ChangeEvent<HTMLInputElement>) => { setMaxTokens(event.currentTarget.value); setMaxTokensDirty(true); setNotice(undefined) } }),
+        ] }),
+      ] }),
+      manualModelEntry && jsx('p', { className: 'dsh-fleet-panel-member-request-note', children: panelText('当前实例未提供模型目录，请填写 DSH 中已配置的 Provider 和模型标识。', 'This instance does not provide a model catalog. Enter a Provider and model identifier configured in DSH.') }),
+      jsxs('div', { className: 'dsh-fleet-panel-member-request-actions', children: [
+        jsx('span', { className: 'dsh-fleet-panel-member-request-feedback', role: error === undefined ? 'status' : 'alert', 'data-error': error === undefined ? undefined : 'true', children: error ?? notice }),
+        jsx('button', { type: 'button', className: 'dsh-fleet-panel-control-button', 'data-primary': 'true', disabled: !dirty || saving || configure === undefined, onClick: () => { void save() }, children: saving ? panelText('正在应用…', 'Applying…') : panelText('应用配置', 'Apply configuration') }),
+      ] }),
+    ],
+  })
+}
+
 function TeamMain(owner: FleetPanelPaneOwner): ReactElement {
-  const [controlBusy, setControlBusy] = useState<'pause' | 'resume'>()
+  const [controlBusy, setControlBusy] = useState<'load' | 'pause' | 'resume' | 'wake'>()
   const [controlError, setControlError] = useState<string>()
   const member = teamAgents(owner.snapshot).find(item => item.id === owner.activeItem)
-  if (member === undefined) return jsx(PanelUnavailable, { label: '请选择一位成员' })
+  if (member === undefined) return jsx(PanelUnavailable, { label: panelText('请选择一位成员', 'Choose a member') })
   const assistant = owner.snapshot.assistants?.some(item => item.id === member.id) === true
-  const needsResume = member.runtimeStatus === 'paused' || member.runtimeStatus === 'offline'
-    || member.runtimeStatus === 'unknown' || member.presence === 'offline' || member.presence === 'unknown'
-  const controlMember = (): void => {
+  const memberRunControls = fleetPanelMemberRunControls(member, assistant, owner.snapshot.status)
+  const controlMember = (action: FleetPanelMemberControlInput['action']): void => {
     if (owner.controlMember === undefined || controlBusy !== undefined) return
-    const action = needsResume ? 'resume' : 'pause'
     setControlBusy(action)
     setControlError(undefined)
     void owner.controlMember(member.id, action).catch((reason: unknown) => {
-      setControlError(reason instanceof Error ? reason.message : `无法${action === 'pause' ? '暂停' : '继续'}成员`)
+      setControlError(reason instanceof Error ? reason.message : panelText(
+        action === 'pause' ? (assistant ? '无法打断助理' : '无法暂停成员')
+          : action === 'resume' ? '无法继续成员' : '无法唤醒成员',
+        action === 'pause' ? (assistant ? 'Could not interrupt the assistant' : 'Could not pause the member')
+          : action === 'resume' ? 'Could not resume the member' : 'Could not wake the member',
+      ))
     }).finally(() => { setControlBusy(undefined) })
   }
   return jsx(DetailShell, {
@@ -8052,42 +13638,48 @@ function TeamMain(owner: FleetPanelPaneOwner): ReactElement {
     children: jsxs('div', {
       className: 'dsh-fleet-panel-overview',
       children: [
-        jsx('h3', { className: 'dsh-fleet-panel-overview-title', children: member.role }),
+        jsxs('h3', {
+          className: 'dsh-fleet-panel-overview-title dsh-fleet-panel-member-heading',
+          children: [
+            jsx('span', { children: member.name }),
+            jsx('span', { className: 'dsh-fleet-panel-member-heading-role', children: member.role }),
+          ],
+        }),
         jsx('p', { className: 'dsh-fleet-panel-overview-copy', children: member.responsibility }),
         jsxs('div', {
           className: 'dsh-fleet-panel-facts',
           children: [
-            jsx(Fact, { label: '当前状态', value: jsx(MemberState, { member }) }),
+            jsx(Fact, { label: panelText('当前状态', 'Current status'), value: jsx(MemberState, { member }) }),
             jsx(Fact, {
-              label: '成员自述',
+              label: panelText('成员自述', 'Member update'),
               value: jsxs('span', {
                 className: 'dsh-fleet-panel-member-self-status-detail',
                 children: [
-                  jsx('span', { children: member.statusText ?? '暂未填写工作状态' }),
-                  jsx(MemberStatusUpdatedAt, { member }),
+                  jsx('span', { children: member.statusText ?? panelText('暂未填写工作状态', 'No work update yet') }),
+                  jsx(FleetMemberStatusUpdatedAt, { member }),
                 ],
               }),
             }),
-            jsx(Fact, { label: '使用模型', value: member.model ?? '由 Agent 配置决定' }),
-            jsx(Fact, { label: '模型提供方', value: member.provider ?? '由 Agent 配置决定' }),
-            jsx(Fact, { label: '成员标识', value: member.id }),
-            jsx(Fact, { label: '身份边界', value: assistant ? 'Fleet 团队助理' : 'Fleet 团队成员' }),
+            jsx(Fact, { label: panelText('使用模型', 'Model'), value: member.model ?? panelText('由 Agent 配置决定', 'Determined by Agent configuration') }),
+            jsx(Fact, { label: panelText('模型提供方', 'Model provider'), value: member.provider ?? panelText('由 Agent 配置决定', 'Determined by Agent configuration') }),
+            jsx(Fact, { label: panelText('成员标识', 'Member id'), value: member.id }),
+            jsx(Fact, { label: panelText('身份边界', 'Identity boundary'), value: assistant ? panelText('Fleet 团队助理', 'Fleet Team assistant') : panelText('Fleet 团队成员', 'Fleet Team member') }),
           ],
         }),
-        !assistant && owner.controlMember !== undefined && jsxs('div', {
+        owner.controlMember !== undefined && jsxs('div', {
           className: 'dsh-fleet-panel-overview-actions',
           children: [
-            jsx('button', {
-              type: 'button',
-              className: 'dsh-fleet-panel-control-button',
-              'data-primary': needsResume ? 'true' : undefined,
-              disabled: controlBusy !== undefined || owner.snapshot.status === 'paused',
-              title: owner.snapshot.status === 'paused' ? '请先继续运行整个团队' : undefined,
-              onClick: controlMember,
-              children: controlBusy !== undefined
-                ? (controlBusy === 'pause' ? '正在暂停…' : '正在恢复…')
-                : (needsResume ? '继续成员' : '暂停成员'),
-            }),
+            ...memberRunControls.map(control => jsx(FleetRunControlButton, {
+              label: control.label,
+              displayLabel: controlBusy === undefined
+                ? control.label
+                : (controlBusy === control.action ? control.busyLabel : panelText('正在处理…', 'Working…')),
+              hint: control.title,
+              ...(control.primary === undefined ? {} : { primary: control.primary }),
+              disabled: controlBusy !== undefined,
+              busy: controlBusy === control.action,
+              onClick: () => { controlMember(control.action) },
+            }, control.action)),
             controlError !== undefined && jsx('span', {
               className: 'dsh-fleet-panel-control-error',
               role: 'alert',
@@ -8095,7 +13687,8 @@ function TeamMain(owner: FleetPanelPaneOwner): ReactElement {
             }),
           ],
         }),
-        !assistant && jsx(MemberPermissions, { owner, member }),
+        jsx(MemberRequestConfiguration, { owner, member, assistant }),
+        jsx(MemberAuthorizationPanel, { owner, member }),
       ],
     }),
   })
@@ -8211,7 +13804,7 @@ function FleetNativeMemberChat({ owner, session, sessionId, source }: {
   const ChatView = NativeChatView
   const runtime = nativeChatRuntime
   if (ChatView === undefined || runtime === undefined) {
-    return jsx(PanelUnavailable, { label: '正在载入原生 ChatView…' })
+    return jsx(PanelUnavailable, { label: panelText('正在载入原生 ChatView…', 'Loading native ChatView…') })
   }
   return jsx('div', {
     ref: root,
@@ -8314,29 +13907,29 @@ function traceEventPresentation(event: FleetPanelMemberTraceEvent): {
     : {}
   const message = typeof data.message === 'object' && data.message !== null ? data.message : data
   if (event.type === 'session.user/message') {
-    return { label: '进入 Agent 上下文', text: clipTraceText(traceMessageText(message)) || '收到一条上下文消息', agent: false }
+    return { label: panelText('进入 Agent 上下文', 'Entered Agent context'), text: clipTraceText(traceMessageText(message)) || panelText('收到一条上下文消息', 'Received a context message'), agent: false }
   }
   if (event.type === 'session.assistant/message') {
-    return { label: 'Agent', text: clipTraceText(traceMessageText(message)) || '完成了一次模型响应', agent: true }
+    return { label: 'Agent', text: clipTraceText(traceMessageText(message)) || panelText('完成了一次模型响应', 'Completed a model response'), agent: true }
   }
   if (event.type === 'session.tool/call') {
-    const name = typeof data.name === 'string' ? data.name : '工具'
+    const name = typeof data.name === 'string' ? data.name : panelText('工具', 'Tool')
     const args = typeof data.arguments === 'string' ? data.arguments : ''
-    return { label: '工具调用', text: clipTraceText(args === '' ? name : `${name}\n${args}`), agent: true }
+    return { label: panelText('工具调用', 'Tool call'), text: clipTraceText(args === '' ? name : `${name}\n${args}`), agent: true }
   }
   if (event.type === 'session.tool/result') {
-    return { label: '工具结果', text: clipTraceText(traceMessageText(message)) || '工具已返回结果', agent: true }
+    return { label: panelText('工具结果', 'Tool result'), text: clipTraceText(traceMessageText(message)) || panelText('工具已返回结果', 'The tool returned a result'), agent: true }
   }
   if (event.type === 'session.turn/end') {
     const reason = typeof data.reason === 'object' && data.reason !== null
       ? JSON.stringify(data.reason)
-      : '回合结束'
-    return { label: '运行状态', text: reason, agent: true }
+      : panelText('回合结束', 'Turn ended')
+    return { label: panelText('运行状态', 'Run status'), text: reason, agent: true }
   }
   const readable = JSON.stringify(payload, null, 2)
   return {
     label: event.type.replace(/^session\./u, '').replaceAll('/', ' · '),
-    text: readable === undefined || readable === '{}' ? '状态已更新' : clipTraceText(readable),
+    text: readable === undefined || readable === '{}' ? panelText('状态已更新', 'Status updated') : clipTraceText(readable),
     agent: event.type !== 'session.user/message',
   }
 }
@@ -8400,7 +13993,7 @@ function FleetPersistedMemberTrace({ owner, member, source }: {
   useEffect(() => {
     const load = owner.loadMemberTrace
     if (load === undefined) {
-      setState({ status: 'error', message: '持久轨迹接口尚不可用' })
+      setState({ status: 'error', message: panelText('持久轨迹接口尚不可用', 'Persistent trace API is unavailable') })
       return
     }
     const controller = new AbortController()
@@ -8409,19 +14002,18 @@ function FleetPersistedMemberTrace({ owner, member, source }: {
       if (!controller.signal.aborted) setState({ status: 'ready', trace })
     }).catch((error: unknown) => {
       if (!controller.signal.aborted) {
-        setState({ status: 'error', message: error instanceof Error ? error.message : '无法读取 Agent 持久轨迹' })
+        setState({ status: 'error', message: error instanceof Error ? error.message : panelText('无法读取 Agent 持久轨迹', 'Agent persistent trace could not be loaded') })
       }
     })
     return () => { controller.abort(new Error('Agent trace view changed')) }
   }, [attempt, member.id, owner.loadMemberTrace, owner.snapshot.teamId, source?.contextMessageId, source?.sessionId])
 
   useEffect(() => {
-    if (state.status !== 'ready' || expanded || source !== undefined) return
-    const timer = window.setTimeout(() => {
+    if (expanded || source !== undefined || owner.subscribeMemberTrace === undefined) return
+    return owner.subscribeMemberTrace(owner.snapshot.teamId, member.id, () => {
       setAttempt(current => current + 1)
-    }, MEMBER_TRACE_REFRESH_INTERVAL_MS)
-    return () => { window.clearTimeout(timer) }
-  }, [expanded, source, state])
+    })
+  }, [expanded, member.id, owner.snapshot.teamId, owner.subscribeMemberTrace, source])
 
   const loadOlder = (): void => {
     if (state.status !== 'ready' || state.trace.previous === undefined || owner.loadMemberTrace === undefined || loadingOlder) return
@@ -8455,12 +14047,12 @@ function FleetPersistedMemberTrace({ owner, member, source }: {
       className: 'dsh-fleet-panel-trace-state',
       role: state.status === 'error' ? 'alert' : 'status',
       children: [
-        jsx('span', { children: state.status === 'loading' ? '正在读取持久执行上下文…' : state.message }),
+        jsx('span', { children: state.status === 'loading' ? panelText('正在读取持久执行上下文…', 'Loading persistent execution context…') : state.message }),
         state.status === 'error' && jsx('button', {
           type: 'button',
           className: 'dsh-fleet-panel-trace-retry',
           onClick: () => { setAttempt(current => current + 1) },
-          children: '重试',
+          children: panelText('重试', 'Retry'),
         }),
       ],
     })
@@ -8472,24 +14064,24 @@ function FleetPersistedMemberTrace({ owner, member, source }: {
       jsx('p', {
         className: 'dsh-fleet-panel-trace-note',
         children: source !== undefined
-          ? '以下为这条团队消息进入该 Agent 上下文时的实际位置。'
+          ? panelText('以下为这条团队消息进入该 Agent 上下文时的实际位置。', 'This is the actual location where the Team message entered this Agent’s context.')
           : state.trace.truncated
-          ? '当前成员不在线；以下为持久轨迹中最近的执行上下文。较早记录仍保存在 Fleet 中。'
-          : '当前成员不在线；以下内容来自 Fleet 持久轨迹。',
+          ? panelText('当前成员不在线；以下为持久轨迹中最近的执行上下文。较早记录仍保存在 Fleet 中。', 'This member is offline. The latest execution context from the persistent trace is shown below; earlier records remain in Fleet.')
+          : panelText('当前成员不在线；以下内容来自 Fleet 持久轨迹。', 'This member is offline. The content below comes from the Fleet persistent trace.'),
       }),
       source === undefined && state.trace.previous !== undefined && jsx('button', {
         type: 'button',
         className: 'dsh-fleet-panel-trace-retry',
         disabled: loadingOlder,
         onClick: loadOlder,
-        children: loadingOlder ? '正在加载更早记录…' : '加载更早记录',
+        children: loadingOlder ? panelText('正在加载更早记录…', 'Loading earlier records…') : panelText('加载更早记录', 'Load earlier records'),
       }),
       jsx('div', {
         className: 'dsh-fleet-panel-trace-list',
         role: 'log',
-        'aria-label': `${member.name} 的持久执行上下文`,
+        'aria-label': panelText(`${member.name} 的持久执行上下文`, `Persistent execution context for ${member.name}`),
         children: state.trace.events.length === 0
-          ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '这个 Agent 还没有持久执行记录' })
+          ? jsx('div', { className: 'dsh-fleet-panel-empty', children: panelText('这个 Agent 还没有持久执行记录', 'This Agent has no persistent execution records yet') })
           : state.trace.events.map(event => {
               const presentation = traceEventPresentation(event)
               return jsxs('article', {
@@ -8532,7 +14124,7 @@ function AgentContextMain({ owner, member }: {
       children: [
         jsx(FleetConversationHeader, {
           kind: 'context',
-          name: '执行上下文',
+          name: panelText('执行上下文', 'Execution context'),
           description: source === undefined
             ? panelText('回放一次真实团队运行中记录的 Agent 上下文', 'Replay Agent context recorded during a real Team run')
             : panelText('定位这条团队消息进入 Agent 上下文时的录制位置', 'Locate where this Team message entered the recorded Agent context'),
@@ -8580,16 +14172,16 @@ function AgentContextMain({ owner, member }: {
     children: [
       jsx(FleetConversationHeader, {
         kind: 'context',
-        name: '执行上下文',
+        name: panelText('执行上下文', 'Execution context'),
         description: source !== undefined && session === undefined
-          ? '原生 Session 不可用，改从 Fleet 持久轨迹定位消息'
+          ? panelText('原生 Session 不可用，改从 Fleet 持久轨迹定位消息', 'The native Session is unavailable; locating the message in the Fleet persistent trace')
           : source !== undefined
-          ? '现场加载原生 ChatView，并定位这条团队消息进入 Agent 上下文的位置'
+          ? panelText('现场加载原生 ChatView，并定位这条团队消息进入 Agent 上下文的位置', 'Loading the native ChatView and locating where this Team message entered the Agent context')
           : emptyAssistantSession
-          ? '当前助理 Session 尚无可见消息，显示其历次绑定的持久轨迹'
+          ? panelText('当前助理 Session 尚无可见消息，显示其历次绑定的持久轨迹', 'The assistant Session has no visible messages yet; showing its persistent trace across bindings')
           : session === undefined
-          ? '成员离线时从 Fleet 持久轨迹恢复最近上下文'
-          : '复用原生 ChatView，只读呈现这个 Agent 的真实 Session',
+          ? panelText('成员离线时从 Fleet 持久轨迹恢复最近上下文', 'Restoring the latest context from the Fleet persistent trace while the member is offline')
+          : panelText('复用原生 ChatView，只读呈现这个 Agent 的真实 Session', 'Showing this Agent’s actual Session in the native ChatView as read-only'),
         peer: member,
         meta: jsx(AgentPerspectiveMeta, { member }),
         actions: jsxs('div', {
@@ -8604,7 +14196,7 @@ function AgentContextMain({ owner, member }: {
         ? jsx(FleetPersistedMemberTrace, { owner, member, ...(source === undefined ? {} : { source }) }, `${owner.snapshot.teamId}:${member.id}:${source?.sessionId ?? ''}:${source?.contextMessageId ?? ''}`)
         : jsx(owner.SessionProvider, {
             sessionId: contextSessionId,
-            empty: () => jsx(PanelUnavailable, { label: '成员 Session 当前不在 DSH 可见范围内' }),
+            empty: () => jsx(PanelUnavailable, { label: panelText('成员 Session 当前不在 DSH 可见范围内', 'The member Session is not currently visible in DSH') }),
             children: () => jsx(FleetNativeMemberChat, {
               owner,
               session,
@@ -8616,12 +14208,12 @@ function AgentContextMain({ owner, member }: {
         className: 'dsh-fleet-panel-agent-readonly',
         role: 'status',
         children: source !== undefined && session === undefined
-          ? `正在查看 ${member.name} 的持久消息来源 · 只读`
+          ? panelText(`正在查看 ${member.name} 的持久消息来源 · 只读`, `Viewing ${member.name}’s persistent message source · Read-only`)
           : source !== undefined
-          ? `正在原生 ChatView 中查看 ${member.name} 的消息来源 · 只读`
+          ? panelText(`正在原生 ChatView 中查看 ${member.name} 的消息来源 · 只读`, `Viewing ${member.name}’s message source in the native ChatView · Read-only`)
           : usePersistedTrace
-          ? `以 ${member.name} 的视角查看持久轨迹 · 只读`
-          : `以 ${member.name} 的视角查看原生 Session · 只读`,
+          ? panelText(`以 ${member.name} 的视角查看持久轨迹 · 只读`, `Viewing the persistent trace from ${member.name}’s perspective · Read-only`)
+          : panelText(`以 ${member.name} 的视角查看原生 Session · 只读`, `Viewing the native Session from ${member.name}’s perspective · Read-only`),
       }),
     ],
   })
@@ -8633,9 +14225,9 @@ function AgentMain(owner: FleetPanelPaneOwner): ReactElement {
     ? []
     : owner.snapshot.messages.filter(message => message.conversationId === conversation.id)
   const history = useConversationHistory(owner, conversation?.id ?? '', recentMessages)
-  if (member === undefined) return jsx(PanelUnavailable, { label: '请选择一位 Agent' })
+  if (member === undefined) return jsx(PanelUnavailable, { label: panelText('请选择一位 Agent', 'Select an Agent') })
   if (context) return jsx(AgentContextMain, { owner, member })
-  if (conversation === undefined) return jsx(PanelUnavailable, { label: '这个 Agent 当前没有可见消息' })
+  if (conversation === undefined) return jsx(PanelUnavailable, { label: panelText('这个 Agent 当前没有可见消息', 'This Agent currently has no visible messages') })
   const peer = agentConversationPeer(owner.snapshot, member, conversation)
   const members = new Map(owner.snapshot.members.map(candidate => [candidate.id, candidate]))
   members.set(operator.id, operator)
@@ -8675,11 +14267,14 @@ function AgentMain(owner: FleetPanelPaneOwner): ReactElement {
           'aria-live': 'polite',
           'data-fleet-conversation-id': conversation.id,
           children: messages.length === 0
-            ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '这里还没有消息' })
+            ? jsx('div', { className: 'dsh-fleet-panel-empty', children: panelText('这里还没有消息', 'No messages yet') })
             : messages.map(message => {
-                const sender = message.sender ?? members.get(message.senderId)
+                const projectedSender = message.sender ?? members.get(message.senderId)
+                const sender = projectedSender?.operator === true ? operator : projectedSender
                 if (sender === undefined) return null
-                const senderMember = owner.snapshot.members.find(candidate => candidate.id === sender.id)
+                const senderMember = sender.operator === true
+                  ? operator
+                  : teamAgents(owner.snapshot).find(candidate => candidate.id === sender.id)
                 const messageOwner: FleetPanelMessageOwner = { panel: owner, conversation, message, sender }
                 return jsx('div', {
                   className: 'dsh-fleet-panel-agent-message-row',
@@ -8701,8 +14296,10 @@ function AgentMain(owner: FleetPanelPaneOwner): ReactElement {
                     ...(senderMember === undefined ? {} : {
                       avatar: jsx(FleetMemberAvatarPopover, {
                         member: senderMember,
-                        showDetails: owner.showMemberDetails,
-                        showContext: owner.showMemberContext,
+                        ...(senderMember.operator === true ? {} : {
+                          showDetails: owner.showMemberDetails,
+                          showContext: owner.showMemberContext,
+                        }),
                       }),
                     }),
                     actions: owner.renderPanelSlot(
@@ -8724,7 +14321,7 @@ function AgentMain(owner: FleetPanelPaneOwner): ReactElement {
       jsx('div', {
         className: 'dsh-fleet-panel-agent-readonly',
         role: 'status',
-        children: `以 ${member.name} 的视角查看 · 只读`,
+        children: panelText(`以 ${member.name} 的视角查看 · 只读`, `Viewing from ${member.name}’s perspective · Read-only`),
       }),
     ],
   })
@@ -8743,7 +14340,7 @@ function OpenFleetPath({ owner, path, label, appearance = 'button' }: {
     setOpening(true)
     setError(undefined)
     void owner.nativeContext.openPath(path).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : '无法打开这个路径')
+      setError(reason instanceof Error ? reason.message : panelText('无法打开这个路径', 'Could not open this path'))
     }).finally(() => { setOpening(false) })
   }
   return jsxs('div', {
@@ -8753,10 +14350,11 @@ function OpenFleetPath({ owner, path, label, appearance = 'button' }: {
         type: 'button',
         className: appearance === 'link' ? 'dsh-fleet-panel-resource-path' : 'dsh-fleet-panel-enter-messages',
         disabled: opening,
+        'aria-busy': opening ? 'true' : undefined,
         onClick: open,
         children: [
           appearance === 'button' && jsx(PanelIcon, { name: 'resources', size: 15 }),
-          jsx('span', { children: opening ? '正在打开…' : label }),
+          jsx('span', { children: appearance === 'link' ? label : opening ? panelText('正在打开…', 'Opening…') : label }),
         ],
       }),
       error !== undefined && jsx('span', {
@@ -8789,9 +14387,127 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function resourceFileName(resource: FleetPanelResource): string {
+  return resource.path.split(/[\\/]/u).at(-1) || resource.name.split(/[\\/]/u).at(-1) || resource.name
+}
+
 type FleetResourceContentMode = 'rendered' | 'source' | 'compare'
 
-function ResourceContentPreview({ owner, resource, content, loading, error, onRetry, mode }: {
+const RESOURCE_COMPARE_MIN_SPLIT = 25
+const RESOURCE_COMPARE_MAX_SPLIT = 75
+const RESOURCE_COMPARE_DEFAULT_SPLIT = 50
+
+function ResourceComparison({ source, rendered }: {
+  readonly source: ReactNode
+  readonly rendered: ReactNode
+}): ReactElement {
+  const root = useRef<HTMLDivElement>(null)
+  const pointer = useRef<number>()
+  const [split, setSplit] = useState(RESOURCE_COMPARE_DEFAULT_SPLIT)
+  const [resizing, setResizing] = useState(false)
+  const resize = (next: number): void => {
+    setSplit(Math.min(RESOURCE_COMPARE_MAX_SPLIT, Math.max(RESOURCE_COMPARE_MIN_SPLIT, Math.round(next))))
+  }
+  const resizeFromPointer = (clientX: number): void => {
+    const bounds = root.current?.getBoundingClientRect()
+    if (bounds === undefined || bounds.width <= 0) return
+    resize((clientX - bounds.left) / bounds.width * 100)
+  }
+  const startResize = (event: PointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return
+    pointer.current = event.pointerId
+    setResizing(true)
+    resizeFromPointer(event.clientX)
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+  const moveResize = (event: PointerEvent<HTMLDivElement>): void => {
+    if (pointer.current !== event.pointerId) return
+    resizeFromPointer(event.clientX)
+  }
+  const stopResize = (event: PointerEvent<HTMLDivElement>): void => {
+    if (pointer.current !== event.pointerId) return
+    pointer.current = undefined
+    setResizing(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+  const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
+    const step = event.shiftKey ? 10 : 2
+    if (event.key === 'ArrowLeft') resize(split - step)
+    else if (event.key === 'ArrowRight') resize(split + step)
+    else if (event.key === 'Home') resize(RESOURCE_COMPARE_MIN_SPLIT)
+    else if (event.key === 'End') resize(RESOURCE_COMPARE_MAX_SPLIT)
+    else return
+    event.preventDefault()
+  }
+  return jsxs('div', {
+    ref: root,
+    className: 'dsh-fleet-panel-resource-compare',
+    'data-resizing': resizing ? 'true' : undefined,
+    style: {
+      '--dsh-fleet-panel-resource-compare-split': `${String(split)}%`,
+      '--dsh-fleet-panel-resource-compare-left': `${String(split)}fr`,
+      '--dsh-fleet-panel-resource-compare-right': `${String(100 - split)}fr`,
+    } as CSSProperties,
+    children: [
+      jsxs('section', {
+        children: [
+          jsx('h3', { children: panelText('源码', 'Source') }),
+          jsx('div', { className: 'dsh-fleet-panel-resource-compare-body', children: source }),
+        ],
+      }),
+      jsx(PanelColumnResizeHandle, {
+        placement: 'split',
+        label: panelText('调整源码与渲染结果宽度', 'Resize source and rendered output'),
+        title: panelText('拖动调整源码与渲染结果宽度；双击恢复均分', 'Drag to resize source and rendered output; double-click to split evenly'),
+        resizing,
+        min: RESOURCE_COMPARE_MIN_SPLIT,
+        max: RESOURCE_COMPARE_MAX_SPLIT,
+        value: split,
+        handle: {
+          onKeyDown: resizeWithKeyboard,
+          onPointerDown: startResize,
+          onPointerMove: moveResize,
+          onPointerUp: stopResize,
+          onPointerCancel: stopResize,
+          onLostPointerCapture: stopResize,
+        },
+        onDoubleClick: () => { resize(RESOURCE_COMPARE_DEFAULT_SPLIT) },
+      }),
+      jsxs('section', {
+        children: [
+          jsx('h3', { children: panelText('渲染效果', 'Rendered output') }),
+          jsx('div', { className: 'dsh-fleet-panel-resource-compare-body', children: rendered }),
+        ],
+      }),
+    ],
+  })
+}
+
+function ResourceSourcePreview({ body, wrap }: {
+  readonly body: string
+  readonly wrap: boolean
+}): ReactElement {
+  const source = jsx('pre', {
+    className: 'dsh-fleet-panel-resource-preview-plain',
+    'data-wrap': wrap ? 'true' : 'false',
+    children: body.split(/\r\n|\r|\n/u).map((line, index) => jsx('span', {
+      className: 'dsh-fleet-panel-resource-source-line',
+      'data-line': index + 1,
+      children: jsx('span', { children: line }),
+    }, index)),
+  })
+  return jsx('div', {
+    className: 'dsh-fleet-panel-resource-source-frame',
+    'data-wrap': wrap ? 'true' : 'false',
+    children: jsx('div', {
+      className: 'dsh-fleet-panel-resource-source-viewport',
+      children: source,
+    }),
+  })
+}
+
+function ResourceContentPreview({ owner, resource, content, loading, error, onRetry, mode, wrapSource }: {
   readonly owner: FleetPanelPaneOwner
   readonly resource: FleetPanelResource
   readonly content?: FleetPanelResourceContent
@@ -8799,13 +14515,14 @@ function ResourceContentPreview({ owner, resource, content, loading, error, onRe
   readonly error?: string
   readonly onRetry: () => void
   readonly mode: FleetResourceContentMode
+  readonly wrapSource: boolean
 }): ReactElement | null {
   const previewKind = fleetResourcePreviewKind(resource)
   if (previewKind === undefined) return null
   if (loading) return jsx('div', {
     className: 'dsh-fleet-panel-resource-preview-status',
     role: 'status',
-    children: '正在读取文件…',
+    children: panelText('正在读取文件…', 'Loading file…'),
   })
   if (error !== undefined) return jsxs('div', {
     className: 'dsh-fleet-panel-resource-preview-error',
@@ -8816,14 +14533,14 @@ function ResourceContentPreview({ owner, resource, content, loading, error, onRe
         type: 'button',
         className: 'dsh-fleet-panel-resource-preview-retry',
         onClick: onRetry,
-        children: '重新读取',
+        children: panelText('重新读取', 'Reload'),
       }),
     ],
   })
   if (content === undefined) return null
   if (content.body.length === 0) return jsx('div', {
     className: 'dsh-fleet-panel-resource-preview-status',
-    children: '文件为空',
+    children: panelText('文件为空', 'File is empty'),
   })
 
   const mediaType = content.mediaType ?? resource.mediaType
@@ -8833,10 +14550,7 @@ function ResourceContentPreview({ owner, resource, content, loading, error, onRe
     ...(mediaType === undefined ? {} : { mediaType }),
   }
   const previewOwner: FleetPanelResourcePreviewOwner = { panel: owner, resource: previewResource }
-  const source = jsx('pre', {
-    className: 'dsh-fleet-panel-resource-preview-plain',
-    children: content.body,
-  })
+  const source = jsx(ResourceSourcePreview, { body: content.body, wrap: wrapSource })
   const rendered = owner.renderPanelSlot(
     FLEET_PANEL_SLOTS.resourcePreview,
     previewOwner as unknown as Record<string, unknown>,
@@ -8845,26 +14559,11 @@ function ResourceContentPreview({ owner, resource, content, loading, error, onRe
   return jsx('div', {
     className: 'dsh-fleet-panel-resource-preview',
     'data-mode': mode,
+    'data-wrap': wrapSource ? 'true' : 'false',
     children: mode === 'source'
       ? source
       : mode === 'compare'
-        ? jsxs('div', {
-            className: 'dsh-fleet-panel-resource-compare',
-            children: [
-              jsxs('section', {
-                children: [
-                  jsx('h3', { children: '源码' }),
-                  jsx('div', { className: 'dsh-fleet-panel-resource-compare-body', children: source }),
-                ],
-              }),
-              jsxs('section', {
-                children: [
-                  jsx('h3', { children: '渲染效果' }),
-                  jsx('div', { className: 'dsh-fleet-panel-resource-compare-body', children: rendered }),
-                ],
-              }),
-            ],
-          })
+        ? jsx(ResourceComparison, { source, rendered })
         : rendered,
   })
 }
@@ -8876,7 +14575,7 @@ function resourceMember(owner: FleetPanelPaneOwner, actorId: string): FleetPanel
 
 function resourceActorName(owner: FleetPanelPaneOwner, actorId: string): string {
   return resourceMember(owner, actorId)?.name
-    ?? (actorId === 'fleet-filesystem' ? '文件系统自动发现' : actorId)
+    ?? (actorId === 'fleet-filesystem' ? panelText('文件系统自动发现', 'Discovered by filesystem') : actorId)
 }
 
 function ResourceDiffFallback({ revision }: { readonly revision: FleetPanelResourceRevision }): ReactElement {
@@ -8885,13 +14584,13 @@ function ResourceDiffFallback({ revision }: { readonly revision: FleetPanelResou
     children: [
       jsxs('section', {
         children: [
-          jsx('h3', { children: revision.before === null ? '创建前' : '修改前' }),
-          jsx('pre', { children: revision.before ?? '文件不存在' }),
+          jsx('h3', { children: revision.before === null ? panelText('创建前', 'Before creation') : panelText('修改前', 'Before change') }),
+          jsx('pre', { children: revision.before ?? panelText('文件不存在', 'File did not exist') }),
         ],
       }),
       jsxs('section', {
         children: [
-          jsx('h3', { children: '修改后' }),
+          jsx('h3', { children: panelText('修改后', 'After change') }),
           jsx('pre', { children: revision.after }),
         ],
       }),
@@ -8914,19 +14613,19 @@ function ResourceHistoryView({ owner, resource, history, historyTruncated, revis
   if (history.length === 0 && loading) return jsx('div', {
     className: 'dsh-fleet-panel-resource-preview-status',
     role: 'status',
-    children: '正在读取变更历史…',
+    children: panelText('正在读取变更历史…', 'Loading change history…'),
   })
   if (history.length === 0 && error !== undefined) return jsxs('div', {
     className: 'dsh-fleet-panel-resource-preview-error',
     role: 'alert',
     children: [
       jsx('span', { children: error }),
-      jsx('button', { type: 'button', className: 'dsh-fleet-panel-resource-preview-retry', onClick: retry, children: '重新读取' }),
+      jsx('button', { type: 'button', className: 'dsh-fleet-panel-resource-preview-retry', onClick: retry, children: panelText('重新读取', 'Reload') }),
     ],
   })
   if (history.length === 0) return jsx('div', {
     className: 'dsh-fleet-panel-resource-history-empty',
-    children: '暂时没有可归属到团队成员的文件变更',
+    children: panelText('暂时没有可归属到团队成员的文件变更', 'No file changes can currently be attributed to Team members'),
   })
   const selectedSummary = history.find(item => item.id === selectedId)
   const diffOwner = revision === undefined ? undefined : { panel: owner, resource, revision }
@@ -8940,23 +14639,23 @@ function ResourceHistoryView({ owner, resource, history, historyTruncated, revis
               className: 'dsh-fleet-panel-resource-preview-status',
               role: 'status',
               children: [
-                jsx('strong', { children: '这次变更未载入正文' }),
-                jsx('span', { children: `前后版本合计 ${formatBytes(selectedSummary.size)}，超过 2 MiB 的变更只保留时间与来源。` }),
+                jsx('strong', { children: panelText('这次变更未载入正文', 'Content was not loaded for this change') }),
+                jsx('span', { children: panelText(`前后版本合计 ${formatBytes(selectedSummary.size)}，超过 2 MiB 的变更只保留时间与来源。`, `Before and after versions total ${formatBytes(selectedSummary.size)}. Changes over 2 MiB retain only time and source.`) }),
               ],
             })
           : loading
-          ? jsx('div', { className: 'dsh-fleet-panel-resource-preview-status', role: 'status', children: '正在读取变更…' })
+          ? jsx('div', { className: 'dsh-fleet-panel-resource-preview-status', role: 'status', children: panelText('正在读取变更…', 'Loading change…') })
           : error !== undefined
             ? jsxs('div', {
                 className: 'dsh-fleet-panel-resource-preview-error',
                 role: 'alert',
                 children: [
                   jsx('span', { children: error }),
-                  jsx('button', { type: 'button', className: 'dsh-fleet-panel-resource-preview-retry', onClick: retry, children: '重新读取' }),
+                  jsx('button', { type: 'button', className: 'dsh-fleet-panel-resource-preview-retry', onClick: retry, children: panelText('重新读取', 'Reload') }),
                 ],
               })
             : revision === undefined || diffOwner === undefined
-              ? jsx('div', { className: 'dsh-fleet-panel-resource-preview-status', children: '请选择一条变更' })
+              ? jsx('div', { className: 'dsh-fleet-panel-resource-preview-status', children: panelText('请选择一条变更', 'Choose a change') })
               : owner.renderPanelSlot(
                   FLEET_PANEL_SLOTS.resourceDiff,
                   diffOwner as unknown as Record<string, unknown>,
@@ -8965,36 +14664,51 @@ function ResourceHistoryView({ owner, resource, history, historyTruncated, revis
       }),
       jsxs('aside', {
         className: 'dsh-fleet-panel-resource-timeline',
-        'aria-label': '文件变更时间轴',
+        'aria-label': panelText('文件变更时间轴', 'File change timeline'),
         children: [
           jsxs('div', {
             className: 'dsh-fleet-panel-resource-timeline-head',
             children: [
-              jsx('h3', { className: 'dsh-fleet-panel-resource-timeline-title', children: '变更时间轴' }),
-              historyTruncated && jsx('span', { children: '最近 500 条' }),
+              jsx('h3', { className: 'dsh-fleet-panel-resource-timeline-title', children: panelText('变更时间轴', 'Change timeline') }),
+              historyTruncated && jsx('span', { children: panelText('最近 500 条', 'Latest 500') }),
             ],
           }),
           jsx('div', {
             className: 'dsh-fleet-panel-resource-timeline-list',
             children: history.map(item => {
+              const updatedAt = new Date(item.updatedAt)
               return jsxs('button', {
                 type: 'button',
                 className: 'dsh-fleet-panel-resource-revision',
                 'aria-pressed': selectedId === item.id,
                 onClick: () => { selectRevision(item.id) },
                 children: [
-                  jsx('span', { className: 'dsh-fleet-panel-resource-revision-dot', 'aria-hidden': 'true' }),
+                  jsxs('time', {
+                    className: 'dsh-fleet-panel-resource-revision-when',
+                    dateTime: item.updatedAt,
+                    children: [
+                      jsx('span', {
+                        children: updatedAt.toLocaleDateString([], { month: 'short', day: 'numeric' }),
+                      }),
+                      jsx('span', {
+                        children: updatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                      }),
+                    ],
+                  }),
+                  jsx('span', { className: 'dsh-fleet-panel-resource-revision-marker', 'aria-hidden': 'true' }),
                   jsxs('span', {
                     className: 'dsh-fleet-panel-resource-revision-copy',
                     children: [
-                      jsx('strong', { children: resourceActorName(owner, item.updatedBy) }),
-                      jsx('span', { children: item.operation === 'created' ? '创建了文件' : '修改了文件' }),
-                      !item.available && jsx('span', { children: `${formatBytes(item.size)} · 正文未载入` }),
-                      jsx('time', {
-                        dateTime: item.updatedAt,
-                        children: new Date(item.updatedAt).toLocaleString([], {
-                          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-                        }),
+                      jsxs('span', {
+                        className: 'dsh-fleet-panel-resource-revision-summary',
+                        children: [
+                          jsx('strong', { children: resourceActorName(owner, item.updatedBy) }),
+                          jsx('span', { children: item.operation === 'created' ? panelText('创建了文件', 'Created file') : panelText('修改了文件', 'Modified file') }),
+                        ],
+                      }),
+                      !item.available && jsx('span', {
+                        className: 'dsh-fleet-panel-resource-revision-detail',
+                        children: panelText(`${formatBytes(item.size)} · 正文未载入`, `${formatBytes(item.size)} · Content not loaded`),
                       }),
                     ],
                   }),
@@ -9008,12 +14722,43 @@ function ResourceHistoryView({ owner, resource, history, historyTruncated, revis
   })
 }
 
+function MarkdownRendererUnavailableView({ label }: {
+  readonly label: string
+}): ReactElement {
+  const rendererLink = jsx('a', {
+    className: 'dsh-fleet-panel-resource-renderer-link',
+    href: 'https://github.com/CH4ACKO3/dsh-render-engine',
+    target: '_blank',
+    rel: 'noreferrer',
+    children: panelText('渲染器', 'renderer'),
+  })
+  return jsx('span', {
+    className: 'dsh-fleet-panel-resource-view-unavailable',
+    children: jsx(FleetInfoHint, {
+      label: panelText(`${label}视图不可用，需要安装 Markdown 渲染器`, `${label} view is unavailable; install the Markdown renderer`),
+      title: panelText(`${label}视图不可用`, `${label} view unavailable`),
+      trigger: (triggerProps: HoverHintTriggerProps) => jsx('button', {
+        ...triggerProps,
+        type: 'button',
+        className: 'dsh-fleet-panel-resource-view-unavailable-trigger',
+        'aria-disabled': 'true',
+        children: label,
+      }),
+      children: isChineseLocale()
+        ? jsxs(Fragment, { children: ['需要安装 ', rendererLink, ' 插件依赖，才能使用此视图。'] })
+        : jsxs(Fragment, { children: ['Install the ', rendererLink, ' plugin dependency to use this view.'] }),
+      footer: null,
+    }),
+  })
+}
+
 function ResourceDetailMain({ owner, resource }: {
   readonly owner: FleetPanelPaneOwner
   readonly resource: FleetPanelResource
 }): ReactElement {
   const [view, setView] = useState<'content' | 'history'>('content')
-  const [contentMode, setContentMode] = useState<FleetResourceContentMode>('rendered')
+  const [contentMode, setContentMode] = useState<FleetResourceContentMode>(() => owner.markdownRendererAvailable ? 'rendered' : 'source')
+  const [wrapSource, setWrapSource] = useState(true)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const [attempt, setAttempt] = useState(0)
   const [content, setContent] = useState<FleetPanelResourceContent>()
@@ -9054,7 +14799,7 @@ function ResourceDetailMain({ owner, resource }: {
     setError(undefined)
     void owner.loadResource(owner.snapshot.teamId, resource.id, controller.signal).then(
       next => { if (!controller.signal.aborted) setContent(next) },
-      reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : '无法读取团队文件') },
+      reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : panelText('无法读取团队文件', 'Could not read Team file')) },
     ).finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => { controller.abort() }
   }, [attempt, owner.loadResource, owner.snapshot.teamId, previewKind, resource.body, resource.id, resource.mediaType])
@@ -9083,7 +14828,7 @@ function ResourceDetailMain({ owner, resource }: {
         if (!controller.signal.aborted) setRevision(next.revision)
       },
       reason => {
-        if (!controller.signal.aborted) setRevisionError(reason instanceof Error ? reason.message : '无法读取这次变更')
+        if (!controller.signal.aborted) setRevisionError(reason instanceof Error ? reason.message : panelText('无法读取这次变更', 'Could not read this change'))
       },
     ).finally(() => { if (!controller.signal.aborted) setRevisionLoading(false) })
     return () => { controller.abort() }
@@ -9107,27 +14852,27 @@ function ResourceDetailMain({ owner, resource }: {
       () => { setCopyState('error') },
     )
   }
+  const fileName = resourceFileName(resource)
   const exportContent = (): void => {
     if (content === undefined) return
     const url = URL.createObjectURL(new Blob([content.body], { type: content.mediaType ?? resource.mediaType ?? 'text/plain;charset=utf-8' }))
     const link = document.createElement('a')
     link.href = url
-    link.download = resource.name
+    link.download = fileName
     link.click()
     URL.revokeObjectURL(url)
   }
 
-  const size = content?.size ?? resource.size
-  const kindLabel = resource.kind === 'plan' ? '团队计划' : resource.kind === 'checklist' ? '交付检查' : '共享文件'
+  const size = resource.size ?? content?.size
   const meta = jsxs('div', {
     className: 'dsh-fleet-panel-resource-meta',
     children: [
-      jsx('span', { children: kindLabel }),
-      size !== undefined && jsx('span', { children: formatBytes(size) }),
-      jsx(OpenFleetPath, { owner, path: resource.path, label: resource.path, appearance: 'link' }),
+      jsx('span', { className: 'dsh-fleet-panel-resource-size', children: size === undefined ? '—' : formatBytes(size) }),
+      jsx(OpenFleetPath, { owner, path: resource.path, label: panelText('本地文件', 'Local file'), appearance: 'link' }),
     ],
   })
   const isMarkdown = previewKind === 'markdown'
+  const sourceControlsVisible = view === 'content' && (!isMarkdown || contentMode !== 'rendered')
   const selectContentMode = (mode: FleetResourceContentMode): void => {
     setContentMode(mode)
     setView('content')
@@ -9135,31 +14880,35 @@ function ResourceDetailMain({ owner, resource }: {
   const viewSwitch = jsxs('div', {
     className: 'dsh-fleet-panel-resource-view-switch',
     role: 'group',
-    'aria-label': isMarkdown ? 'Markdown 文件视图' : '文件视图',
+    'aria-label': isMarkdown ? panelText('Markdown 文件视图', 'Markdown file view') : panelText('文件视图', 'File view'),
     children: [
-      jsx('button', {
-        type: 'button',
-        'aria-pressed': view === 'content' && (!isMarkdown || contentMode === 'rendered'),
-        onClick: () => { selectContentMode(isMarkdown ? 'rendered' : 'source') },
-        children: isMarkdown ? '渲染' : '内容',
-      }),
+      isMarkdown && !owner.markdownRendererAvailable
+        ? jsx(MarkdownRendererUnavailableView, { label: panelText('渲染', 'Rendered') })
+        : jsx('button', {
+            type: 'button',
+            'aria-pressed': view === 'content' && (!isMarkdown || contentMode === 'rendered'),
+            onClick: () => { selectContentMode(isMarkdown ? 'rendered' : 'source') },
+            children: isMarkdown ? panelText('渲染', 'Rendered') : panelText('内容', 'Content'),
+          }),
       isMarkdown && jsx('button', {
         type: 'button',
         'aria-pressed': view === 'content' && contentMode === 'source',
         onClick: () => { selectContentMode('source') },
-        children: '源码',
+        children: panelText('源码', 'Source'),
       }),
-      isMarkdown && jsx('button', {
-        type: 'button',
-        'aria-pressed': view === 'content' && contentMode === 'compare',
-        onClick: () => { selectContentMode('compare') },
-        children: '对照',
-      }),
+      isMarkdown && (owner.markdownRendererAvailable
+        ? jsx('button', {
+            type: 'button',
+            'aria-pressed': view === 'content' && contentMode === 'compare',
+            onClick: () => { selectContentMode('compare') },
+            children: panelText('对照', 'Compare'),
+          })
+        : jsx(MarkdownRendererUnavailableView, { label: panelText('对照', 'Compare') })),
       jsx('button', {
         type: 'button',
         'aria-pressed': view === 'history',
         onClick: () => { setView('history') },
-        children: `历史${content?.history.length === undefined ? '' : ` ${content.history.length}`}`,
+        children: panelText('历史', 'History'),
       }),
     ],
   })
@@ -9172,17 +14921,29 @@ function ResourceDetailMain({ owner, resource }: {
         children: [
           jsx('button', {
             type: 'button',
+            disabled: content === undefined || !sourceControlsVisible,
+            'data-visible': sourceControlsVisible ? 'true' : 'false',
+            'aria-hidden': sourceControlsVisible ? undefined : 'true',
+            'aria-label': wrapSource ? panelText('关闭源码折行', 'Disable source wrapping') : panelText('开启源码折行', 'Enable source wrapping'),
+            'aria-pressed': wrapSource,
+            tabIndex: sourceControlsVisible ? undefined : -1,
+            title: wrapSource ? panelText('关闭源码折行', 'Disable source wrapping') : panelText('开启源码折行', 'Enable source wrapping'),
+            onClick: () => { setWrapSource(current => !current) },
+            children: jsx(PanelIcon, { name: 'wrap', size: 15 }),
+          }),
+          jsx('button', {
+            type: 'button',
             disabled: content === undefined,
-            'aria-label': copyState === 'copied' ? '已复制文件内容' : '复制文件内容',
-            title: copyState === 'copied' ? '已复制' : copyState === 'error' ? '复制失败' : '复制源码',
+            'aria-label': copyState === 'copied' ? panelText('已复制文件内容', 'File content copied') : panelText('复制文件内容', 'Copy file content'),
+            title: copyState === 'copied' ? panelText('已复制', 'Copied') : copyState === 'error' ? panelText('复制失败', 'Copy failed') : panelText('复制源码', 'Copy source'),
             onClick: copyContent,
             children: jsx(PanelIcon, { name: 'copy', size: 15 }),
           }),
           jsx('button', {
             type: 'button',
             disabled: content === undefined,
-            'aria-label': '导出文件',
-            title: '导出文件',
+            'aria-label': panelText('导出文件', 'Export file'),
+            title: panelText('导出文件', 'Export file'),
             onClick: exportContent,
             children: jsx(PanelIcon, { name: 'download', size: 15 }),
           }),
@@ -9190,7 +14951,7 @@ function ResourceDetailMain({ owner, resource }: {
             className: 'dsh-fleet-panel-resource-action-status',
             role: 'status',
             'aria-live': 'polite',
-            children: copyState === 'copied' ? '已复制' : copyState === 'error' ? '复制失败' : '',
+            children: copyState === 'copied' ? panelText('已复制', 'Copied') : copyState === 'error' ? panelText('复制失败', 'Copy failed') : '',
           }),
         ],
       }),
@@ -9199,10 +14960,11 @@ function ResourceDetailMain({ owner, resource }: {
   const preview = jsx(ResourceContentPreview, {
     owner, resource, content, loading, error,
     mode: isMarkdown ? contentMode : 'source',
+    wrapSource,
     onRetry: () => { setAttempt(current => current + 1) },
   })
   return jsx(DetailShell, {
-    title: resource.name,
+    title: fileName,
     meta,
     actions,
     owner,
@@ -9214,10 +14976,14 @@ function ResourceDetailMain({ owner, resource }: {
         ? jsx(PanelMessageLog, {
             conversationKey: `${owner.snapshot.teamId}:resource:${resource.id}`,
             messageCount: 0,
-            resizable: true,
-            resizeLabel: '调整 Markdown 阅读宽度',
+            resizable: contentMode !== 'compare',
+            resizeLabel: panelText('调整 Markdown 阅读宽度', 'Resize Markdown reading width'),
             initialScroll: 'top',
-            children: jsx('div', { className: 'dsh-fleet-panel-resource-content', children: preview }),
+            children: jsx('div', {
+              className: 'dsh-fleet-panel-resource-content',
+              'data-mode': contentMode,
+              children: preview,
+            }),
           })
         : jsx('div', { className: 'dsh-fleet-panel-resource-content', children: preview })
       : jsx(ResourceHistoryView, {
@@ -9242,24 +15008,24 @@ function ResourcesMain(owner: FleetPanelPaneOwner): ReactElement {
   const resource = owner.snapshot.resources.find(item => item.id === owner.activeItem)
   if (resource === undefined) {
     const workspace = owner.snapshot.workspaces?.find(item => item.id === owner.activeItem)
-    if (workspace === undefined) return jsx(PanelUnavailable, { label: '请选择一个团队文件或工作区' })
+    if (workspace === undefined) return jsx(PanelUnavailable, { label: panelText('请选择一个团队文件或工作区', 'Choose a Team file or Workspace') })
     return jsx(DetailShell, {
       title: workspace.name,
-      meta: workspace.access === 'write' ? '可写工作区' : '只读工作区',
+      meta: workspace.access === 'write' ? panelText('可写工作区', 'Writable Workspace') : panelText('只读工作区', 'Read-only Workspace'),
       owner,
       children: jsxs('div', {
         className: 'dsh-fleet-panel-overview',
         children: [
-          jsx('h3', { className: 'dsh-fleet-panel-overview-title', children: '工作区文件' }),
-          jsx('p', { className: 'dsh-fleet-panel-overview-copy', children: '普通文件按需通过 DSH 工作区浏览，不会自动加入团队共享。' }),
+          jsx('h3', { className: 'dsh-fleet-panel-overview-title', children: panelText('工作区文件', 'Workspace files') }),
+          jsx('p', { className: 'dsh-fleet-panel-overview-copy', children: panelText('普通文件按需通过 DSH 工作区浏览，不会自动加入团队共享。', 'Browse ordinary files through the DSH Workspace as needed; they are not automatically shared with the Team.') }),
           jsxs('div', {
             className: 'dsh-fleet-panel-facts',
             children: [
-              jsx(Fact, { label: '路径', value: workspace.path }),
-              jsx(Fact, { label: '团队成员', value: `${workspace.members.length} 位` }),
+              jsx(Fact, { label: panelText('路径', 'Path'), value: workspace.path }),
+              jsx(Fact, { label: panelText('团队成员', 'Team members'), value: `${workspace.members.length}` }),
             ],
           }),
-          jsx(OpenFleetPath, { owner, path: workspace.path, label: '打开工作区' }),
+          jsx(OpenFleetPath, { owner, path: workspace.path, label: panelText('打开工作区', 'Open Workspace') }),
         ],
       }),
     })
@@ -9267,45 +15033,808 @@ function ResourcesMain(owner: FleetPanelPaneOwner): ReactElement {
   return jsx(ResourceDetailMain, { owner, resource })
 }
 
+const FLEET_ACTIVITY_WINDOW_PAGE = 40
+const FLEET_ACTIVITY_WINDOW_MAX = 120
+const FLEET_TIMELINE_MIN_SCALE = Math.log10(1_000)
+const FLEET_TIMELINE_MAX_SCALE = Math.log10(365.25 * 24 * 60 * 60 * 1_000)
+const FLEET_TIMELINE_DEFAULT_SCALE = Math.log10(60 * 60 * 1_000)
+const FLEET_TIMELINE_TICK_SPACING = 20
+const FLEET_TIMELINE_SCROLL_DISTANCE = 120
+const FLEET_TIMELINE_WHEEL_IDLE_MS = 140
+const FLEET_TIMELINE_JUMP_IDLE_MS = 280
+const FLEET_TIMELINE_RENDER_RADIUS = 360
+const FLEET_TIMELINE_MINOR_MIN_SPACING = 12
+const FLEET_TIMELINE_MINOR_MAX_SPACING = 20
+const FLEET_TIMELINE_MAJOR_MIN_SPACING = 60
+const FLEET_TIMELINE_MAJOR_MAX_SPACING = 100
+const FLEET_TIMELINE_SECOND = 1_000
+const FLEET_TIMELINE_MINUTE = 60 * FLEET_TIMELINE_SECOND
+const FLEET_TIMELINE_HOUR = 60 * FLEET_TIMELINE_MINUTE
+const FLEET_TIMELINE_DAY = 24 * FLEET_TIMELINE_HOUR
+const FLEET_TIMELINE_YEAR = 365.25 * FLEET_TIMELINE_DAY
+
+interface FleetActivityWindow {
+  readonly start: number
+  readonly end: number
+}
+
+interface FleetTimelineTick {
+  readonly timestamp: number
+  readonly position: number
+  readonly strength: number
+  readonly opacity: number
+}
+
+type FleetTimelineIntervalUnit = 'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'year'
+
+interface FleetTimelineInterval {
+  readonly unit: FleetTimelineIntervalUnit
+  readonly amount: number
+  readonly approximateMs: number
+}
+
+interface FleetTimelineIntervalBlend {
+  readonly fine: FleetTimelineInterval
+  readonly coarse: FleetTimelineInterval
+  readonly progress: number
+}
+
+interface FleetTimelineGrid {
+  readonly minor: FleetTimelineIntervalBlend
+  readonly major: FleetTimelineIntervalBlend
+  readonly dominantMinor: FleetTimelineInterval
+  readonly dominantMajor: FleetTimelineInterval
+}
+
+const FLEET_TIMELINE_INTERVALS: readonly FleetTimelineInterval[] = [
+  { unit: 'second', amount: 1, approximateMs: FLEET_TIMELINE_SECOND },
+  { unit: 'second', amount: 2, approximateMs: 2 * FLEET_TIMELINE_SECOND },
+  { unit: 'second', amount: 5, approximateMs: 5 * FLEET_TIMELINE_SECOND },
+  { unit: 'second', amount: 10, approximateMs: 10 * FLEET_TIMELINE_SECOND },
+  { unit: 'second', amount: 15, approximateMs: 15 * FLEET_TIMELINE_SECOND },
+  { unit: 'second', amount: 30, approximateMs: 30 * FLEET_TIMELINE_SECOND },
+  { unit: 'minute', amount: 1, approximateMs: FLEET_TIMELINE_MINUTE },
+  { unit: 'minute', amount: 2, approximateMs: 2 * FLEET_TIMELINE_MINUTE },
+  { unit: 'minute', amount: 5, approximateMs: 5 * FLEET_TIMELINE_MINUTE },
+  { unit: 'minute', amount: 10, approximateMs: 10 * FLEET_TIMELINE_MINUTE },
+  { unit: 'minute', amount: 15, approximateMs: 15 * FLEET_TIMELINE_MINUTE },
+  { unit: 'minute', amount: 30, approximateMs: 30 * FLEET_TIMELINE_MINUTE },
+  { unit: 'hour', amount: 1, approximateMs: FLEET_TIMELINE_HOUR },
+  { unit: 'hour', amount: 2, approximateMs: 2 * FLEET_TIMELINE_HOUR },
+  { unit: 'hour', amount: 3, approximateMs: 3 * FLEET_TIMELINE_HOUR },
+  { unit: 'hour', amount: 6, approximateMs: 6 * FLEET_TIMELINE_HOUR },
+  { unit: 'hour', amount: 12, approximateMs: 12 * FLEET_TIMELINE_HOUR },
+  { unit: 'day', amount: 1, approximateMs: FLEET_TIMELINE_DAY },
+  { unit: 'day', amount: 2, approximateMs: 2 * FLEET_TIMELINE_DAY },
+  { unit: 'week', amount: 1, approximateMs: 7 * FLEET_TIMELINE_DAY },
+  { unit: 'week', amount: 2, approximateMs: 14 * FLEET_TIMELINE_DAY },
+  { unit: 'month', amount: 1, approximateMs: FLEET_TIMELINE_YEAR / 12 },
+  { unit: 'month', amount: 2, approximateMs: FLEET_TIMELINE_YEAR / 6 },
+  { unit: 'month', amount: 3, approximateMs: FLEET_TIMELINE_YEAR / 4 },
+  { unit: 'month', amount: 6, approximateMs: FLEET_TIMELINE_YEAR / 2 },
+  { unit: 'year', amount: 1, approximateMs: FLEET_TIMELINE_YEAR },
+  { unit: 'year', amount: 2, approximateMs: 2 * FLEET_TIMELINE_YEAR },
+  { unit: 'year', amount: 5, approximateMs: 5 * FLEET_TIMELINE_YEAR },
+  { unit: 'year', amount: 10, approximateMs: 10 * FLEET_TIMELINE_YEAR },
+]
+
+function fleetTimelineIntervalBlend(millisecondsPerPixel: number, minSpacing: number, maxSpacing: number): FleetTimelineIntervalBlend {
+  let fineIndex = 0
+  for (let index = 1; index < FLEET_TIMELINE_INTERVALS.length; index += 1) {
+    if (FLEET_TIMELINE_INTERVALS[index]!.approximateMs / millisecondsPerPixel > maxSpacing) break
+    fineIndex = index
+  }
+  const coarseIndex = Math.min(FLEET_TIMELINE_INTERVALS.length - 1, fineIndex + 1)
+  const fine = FLEET_TIMELINE_INTERVALS[fineIndex]!
+  const coarse = FLEET_TIMELINE_INTERVALS[coarseIndex]!
+  if (fineIndex === coarseIndex) return { fine, coarse, progress: 0 }
+  const linear = Math.max(0, Math.min(1, (maxSpacing - fine.approximateMs / millisecondsPerPixel) / (maxSpacing - minSpacing)))
+  const progress = linear * linear * (3 - 2 * linear)
+  return { fine, coarse, progress }
+}
+
+function fleetTimelineGrid(step: number): FleetTimelineGrid {
+  const millisecondsPerPixel = step / FLEET_TIMELINE_TICK_SPACING
+  const minor = fleetTimelineIntervalBlend(millisecondsPerPixel, FLEET_TIMELINE_MINOR_MIN_SPACING, FLEET_TIMELINE_MINOR_MAX_SPACING)
+  const major = fleetTimelineIntervalBlend(millisecondsPerPixel, FLEET_TIMELINE_MAJOR_MIN_SPACING, FLEET_TIMELINE_MAJOR_MAX_SPACING)
+  return {
+    minor,
+    major,
+    dominantMinor: minor.progress < .5 ? minor.fine : minor.coarse,
+    dominantMajor: major.progress < .5 ? major.fine : major.coarse,
+  }
+}
+
+function floorFleetTimelineTimestamp(timestamp: number, interval: FleetTimelineInterval): number {
+  const date = new Date(timestamp)
+  if (interval.unit === 'second') {
+    date.setMilliseconds(0)
+    date.setSeconds(Math.floor(date.getSeconds() / interval.amount) * interval.amount)
+    return date.getTime()
+  }
+  if (interval.unit === 'minute') {
+    date.setSeconds(0, 0)
+    date.setMinutes(Math.floor(date.getMinutes() / interval.amount) * interval.amount)
+    return date.getTime()
+  }
+  if (interval.unit === 'hour') {
+    date.setMinutes(0, 0, 0)
+    date.setHours(Math.floor(date.getHours() / interval.amount) * interval.amount)
+    return date.getTime()
+  }
+  if (interval.unit === 'day' || interval.unit === 'week') {
+    const dayIndex = Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / FLEET_TIMELINE_DAY)
+    const span = interval.amount * (interval.unit === 'week' ? 7 : 1)
+    const origin = interval.unit === 'week' ? 4 : 0
+    const aligned = origin + Math.floor((dayIndex - origin) / span) * span
+    const utc = new Date(aligned * FLEET_TIMELINE_DAY)
+    return new Date(utc.getUTCFullYear(), utc.getUTCMonth(), utc.getUTCDate()).getTime()
+  }
+  if (interval.unit === 'month') {
+    const monthIndex = date.getFullYear() * 12 + date.getMonth()
+    const aligned = Math.floor(monthIndex / interval.amount) * interval.amount
+    return new Date(Math.floor(aligned / 12), aligned % 12, 1).getTime()
+  }
+  return new Date(Math.floor(date.getFullYear() / interval.amount) * interval.amount, 0, 1).getTime()
+}
+
+function offsetFleetTimelineTimestamp(timestamp: number, interval: FleetTimelineInterval, count: number): number {
+  const date = new Date(timestamp)
+  if (interval.unit === 'second') date.setSeconds(date.getSeconds() + interval.amount * count)
+  else if (interval.unit === 'minute') date.setMinutes(date.getMinutes() + interval.amount * count)
+  else if (interval.unit === 'hour') date.setHours(date.getHours() + interval.amount * count)
+  else if (interval.unit === 'day') date.setDate(date.getDate() + interval.amount * count)
+  else if (interval.unit === 'week') date.setDate(date.getDate() + 7 * interval.amount * count)
+  else if (interval.unit === 'month') date.setMonth(date.getMonth() + interval.amount * count)
+  else date.setFullYear(date.getFullYear() + interval.amount * count)
+  return date.getTime()
+}
+
+function fleetTimelineIntervalTimestamps(anchor: number, interval: FleetTimelineInterval, millisecondsPerPixel: number): readonly number[] {
+  const base = floorFleetTimelineTimestamp(anchor, interval)
+  const timestamps: number[] = []
+  for (let offset = 0; offset < 200; offset += 1) {
+    const timestamp = offsetFleetTimelineTimestamp(base, interval, offset)
+    if ((timestamp - anchor) / millisecondsPerPixel > FLEET_TIMELINE_RENDER_RADIUS) break
+    timestamps.push(timestamp)
+  }
+  for (let offset = -1; offset > -200; offset -= 1) {
+    const timestamp = offsetFleetTimelineTimestamp(base, interval, offset)
+    if ((timestamp - anchor) / millisecondsPerPixel < -FLEET_TIMELINE_RENDER_RADIUS) break
+    timestamps.push(timestamp)
+  }
+  return timestamps
+}
+
+export function fleetTimelineTicks(anchor: number, step: number): readonly FleetTimelineTick[] {
+  const millisecondsPerPixel = step / FLEET_TIMELINE_TICK_SPACING
+  const grid = fleetTimelineGrid(step)
+  const ticks = new Map<number, { strength: number; opacity: number }>()
+  const add = (interval: FleetTimelineInterval, weight: number, kind: 'minor' | 'major'): void => {
+    if (weight <= .001) return
+    for (const timestamp of fleetTimelineIntervalTimestamps(anchor, interval, millisecondsPerPixel)) {
+      const current = ticks.get(timestamp) ?? { strength: 0, opacity: 0 }
+      if (kind === 'major') current.strength = Math.min(1, current.strength + weight)
+      else current.opacity = Math.min(1, current.opacity + weight)
+      ticks.set(timestamp, current)
+    }
+  }
+  add(grid.minor.fine, 1 - grid.minor.progress, 'minor')
+  add(grid.minor.coarse, grid.minor.progress, 'minor')
+  add(grid.major.fine, 1 - grid.major.progress, 'major')
+  add(grid.major.coarse, grid.major.progress, 'major')
+  return [...ticks.entries()]
+    .map(([timestamp, tick]) => ({
+      timestamp,
+      position: (timestamp - anchor) / millisecondsPerPixel,
+      strength: tick.strength,
+      opacity: Math.max(tick.opacity, tick.strength),
+    }))
+    .filter(tick => tick.opacity > .001)
+    .sort((left, right) => left.timestamp - right.timestamp)
+}
+
+export function clampFleetTimelineTime(value: number, first: number | undefined, last: number | undefined): number {
+  if (first === undefined || last === undefined) return value
+  return Math.max(first, Math.min(last, value))
+}
+
+function fleetTimelineHasNearbyEvent(timestamp: number, interval: FleetTimelineInterval, eventTimestamps: readonly number[]): boolean {
+  const previous = offsetFleetTimelineTimestamp(timestamp, interval, -1)
+  const next = offsetFleetTimelineTimestamp(timestamp, interval, 1)
+  const start = timestamp - (timestamp - previous) / 2
+  const end = timestamp + (next - timestamp) / 2
+  return eventTimestamps.some(eventTimestamp => eventTimestamp >= start && eventTimestamp <= end)
+}
+
+type FleetActivityPendingPosition =
+  | { readonly kind: 'jump'; readonly key: string; readonly behavior: ScrollBehavior }
+  | { readonly kind: 'preserve'; readonly key: string; readonly top: number }
+
+export function fleetActivityWindow(length: number, anchorIndex: number): FleetActivityWindow {
+  if (length <= 0) return { start: 0, end: 0 }
+  const anchor = Math.max(0, Math.min(length - 1, anchorIndex))
+  const start = Math.max(0, Math.min(length - FLEET_ACTIVITY_WINDOW_MAX, anchor - Math.floor(FLEET_ACTIVITY_WINDOW_MAX / 2)))
+  return { start, end: Math.min(length, start + FLEET_ACTIVITY_WINDOW_MAX) }
+}
+
+function shiftFleetActivityWindow(window: FleetActivityWindow, direction: 'previous' | 'next', length: number): FleetActivityWindow {
+  if (direction === 'previous') {
+    const start = Math.max(0, window.start - FLEET_ACTIVITY_WINDOW_PAGE)
+    return { start, end: Math.min(length, start + FLEET_ACTIVITY_WINDOW_MAX) }
+  }
+  const end = Math.min(length, window.end + FLEET_ACTIVITY_WINDOW_PAGE)
+  return { start: Math.max(0, end - FLEET_ACTIVITY_WINDOW_MAX), end }
+}
+
 function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
   const activity = owner.activeItem === 'all'
     ? owner.snapshot.activity
     : owner.snapshot.activity.filter(item => item.kind === owner.activeItem)
+  const groups = fleetActivityGroups(activity, owner.activeItem === 'all')
+  const groupKeys = groups.map(group => group.key).join('\u0000')
+  const activityScrollRef = useRef<HTMLDivElement>(null)
+  const activityNodes = useRef(new Map<string, HTMLElement>())
+  const pendingPosition = useRef<FleetActivityPendingPosition | undefined>(groups.at(-1) === undefined
+    ? undefined
+    : { kind: 'jump', key: groups.at(-1)!.key, behavior: 'auto' })
+  const previousLastTimestamp = useRef(fleetActivityGroupEnd(groups.at(-1)))
+  const timelineDrivingActivity = useRef(false)
+  const timelineReleaseFrame = useRef<number>()
+  const timelineReleaseTimer = useRef<number>()
+  const timelineDriverHoldUntil = useRef(0)
+  const timelinePanFrame = useRef<number>()
+  const timelinePanDelta = useRef(0)
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set())
+  const [visibleWindow, setVisibleWindow] = useState<FleetActivityWindow>(() => fleetActivityWindow(groups.length, groups.length - 1))
+  const [timelineScale, setTimelineScale] = useState(FLEET_TIMELINE_DEFAULT_SCALE)
+  const [currentTime, setCurrentTime] = useState(() => fleetActivityGroupEnd(groups.at(-1)) ?? Date.now())
+  const visibleGroups = groups.slice(visibleWindow.start, visibleWindow.end)
+  const timelineStep = 10 ** timelineScale
+  const timelineGridState = fleetTimelineGrid(timelineStep)
+  const eventTimestamps = activity.flatMap(item => {
+    const timestamp = activityTimestamp(item.createdAt)
+    return timestamp === undefined ? [] : [timestamp]
+  })
+  const timelineKnobTravel = (timelineScale - FLEET_TIMELINE_MIN_SCALE)
+    / (FLEET_TIMELINE_MAX_SCALE - FLEET_TIMELINE_MIN_SCALE) * 360
+  const firstTimestamp = fleetActivityGroupStart(groups[0])
+  const lastTimestamp = fleetActivityGroupEnd(groups.at(-1))
+
+  useEffect(() => {
+    if (groups.length === 0) {
+      setVisibleWindow({ start: 0, end: 0 })
+      return
+    }
+    const previousLast = previousLastTimestamp.current
+    const latestTimestamp = fleetActivityGroupEnd(groups.at(-1))
+    previousLastTimestamp.current = latestTimestamp
+    if (previousLast !== undefined && currentTime !== previousLast) return
+    const latestIndex = groups.length - 1
+    const latest = groups[latestIndex]
+    if (latest === undefined || latestTimestamp === undefined) return
+    timelineDrivingActivity.current = true
+    pendingPosition.current = { kind: 'jump', key: latest.key, behavior: 'auto' }
+    setCurrentTime(latestTimestamp)
+    setVisibleWindow(fleetActivityWindow(groups.length, latestIndex))
+  }, [groupKeys])
+
+  useEffect(() => {
+    const visibleKeys = new Set(visibleGroups.map(group => group.key))
+    setExpandedGroups(current => {
+      const retained = new Set([...current].filter(key => visibleKeys.has(key)))
+      return retained.size === current.size ? current : retained
+    })
+  }, [visibleWindow.start, visibleWindow.end])
+
+  useLayoutEffect(() => {
+    const scroller = activityScrollRef.current
+    if (scroller === null) return
+    const updatePadding = (): void => {
+      scroller.style.setProperty('--dsh-fleet-activity-center-padding', `${Math.max(24, scroller.clientHeight / 2 - 24)}px`)
+    }
+    updatePadding()
+    const observer = new ResizeObserver(updatePadding)
+    observer.observe(scroller)
+    return () => { observer.disconnect() }
+  }, [])
+
+  const releaseTimelineDriver = (): void => {
+    if (timelineReleaseFrame.current !== undefined) window.cancelAnimationFrame(timelineReleaseFrame.current)
+    if (timelineReleaseTimer.current !== undefined) window.clearTimeout(timelineReleaseTimer.current)
+    const delay = timelineDriverHoldUntil.current - performance.now()
+    if (delay > 0) {
+      timelineReleaseTimer.current = window.setTimeout(() => {
+        timelineReleaseTimer.current = undefined
+        releaseTimelineDriver()
+      }, delay)
+      return
+    }
+    timelineReleaseFrame.current = window.requestAnimationFrame(() => {
+      timelineReleaseFrame.current = window.requestAnimationFrame(() => {
+        timelineDrivingActivity.current = false
+        timelineReleaseFrame.current = undefined
+      })
+    })
+  }
+
+  useEffect(() => () => {
+    if (timelineReleaseFrame.current !== undefined) window.cancelAnimationFrame(timelineReleaseFrame.current)
+    if (timelineReleaseTimer.current !== undefined) window.clearTimeout(timelineReleaseTimer.current)
+    if (timelinePanFrame.current !== undefined) window.cancelAnimationFrame(timelinePanFrame.current)
+  }, [])
+
+  useLayoutEffect(() => {
+    const scroller = activityScrollRef.current
+    const pending = pendingPosition.current
+    if (scroller === null || pending === undefined) return
+    pendingPosition.current = undefined
+    const node = activityNodes.current.get(pending.key)
+    if (node === undefined) return
+    if (pending.kind === 'preserve') {
+      scroller.scrollBy({ top: node.getBoundingClientRect().top - pending.top })
+      return
+    }
+    const top = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+      + node.getBoundingClientRect().height / 2 - scroller.clientHeight / 2
+    scroller.scrollTo({ top, behavior: pending.behavior })
+    if (timelineDrivingActivity.current) releaseTimelineDriver()
+  }, [visibleWindow.start, visibleWindow.end])
+
+  const setWindowAtEdge = (direction: 'previous' | 'next'): void => {
+    const next = shiftFleetActivityWindow(visibleWindow, direction, groups.length)
+    if (next.start === visibleWindow.start && next.end === visibleWindow.end) return
+    const anchor = direction === 'previous' ? visibleGroups[0] : visibleGroups.at(-1)
+    const node = anchor === undefined ? undefined : activityNodes.current.get(anchor.key)
+    if (anchor !== undefined && node !== undefined) {
+      pendingPosition.current = { kind: 'preserve', key: anchor.key, top: node.getBoundingClientRect().top }
+    }
+    setVisibleWindow(next)
+  }
+
+  const syncTimelineFromActivity = (): void => {
+    const scroller = activityScrollRef.current
+    if (scroller === null || visibleGroups.length === 0) return
+    if (timelineDrivingActivity.current) return
+    if (scroller.scrollTop <= 2) {
+      setWindowAtEdge('previous')
+    }
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) {
+      setWindowAtEdge('next')
+    }
+    const anchor = scroller.getBoundingClientRect().top + scroller.clientHeight / 2
+    let closest: FleetActivityGroup | undefined
+    let closestDistance = Number.POSITIVE_INFINITY
+    for (const group of visibleGroups) {
+      const node = activityNodes.current.get(group.key)
+      if (node === undefined) continue
+      const rect = node.getBoundingClientRect()
+      const distance = Math.abs(rect.top + rect.height / 2 - anchor)
+      if (distance < closestDistance) {
+        closestDistance = distance
+        closest = group
+      }
+    }
+    const timestamp = fleetActivityGroupCenter(closest)
+    if (timestamp !== undefined) setCurrentTime(timestamp)
+  }
+
+  const centerActivityAtTime = (timestamp: number, behavior: ScrollBehavior = 'auto'): void => {
+    const index = nearestFleetActivityGroupIndex(groups, timestamp)
+    const group = groups[index]
+    if (group === undefined) return
+    const node = activityNodes.current.get(group.key)
+    const scroller = activityScrollRef.current
+    if (node !== undefined && scroller !== null) {
+      const rect = node.getBoundingClientRect()
+      const top = rect.top - scroller.getBoundingClientRect().top + scroller.scrollTop
+        + rect.height / 2 - scroller.clientHeight / 2
+      scroller.scrollTo({ top, behavior })
+      if (timelineDrivingActivity.current) releaseTimelineDriver()
+      return
+    }
+    pendingPosition.current = { kind: 'jump', key: group.key, behavior }
+    setVisibleWindow(fleetActivityWindow(groups.length, index))
+  }
+
+  useLayoutEffect(() => {
+    if (timelineDrivingActivity.current) centerActivityAtTime(currentTime)
+  }, [currentTime])
+
+  const syncTimelineFromActivityClick = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    if (!(event.target instanceof Element)) return
+    const item = event.target.closest<HTMLElement>('[data-activity-key]')
+    if (item === null || !event.currentTarget.contains(item)) return
+    const group = groups.find(candidate => candidate.key === item.dataset.activityKey)
+    const timestamp = fleetActivityGroupCenter(group)
+    if (timestamp === undefined) return
+    setCurrentTime(timestamp)
+    centerActivityAtTime(timestamp, 'smooth')
+  }
+
+  const toggleGroup = (key: string): void => {
+    setExpandedGroups(current => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const clampCurrentTime = (value: number): number => {
+    return clampFleetTimelineTime(value, firstTimestamp, lastTimestamp)
+  }
+
+  const adjustTimelineScale = (delta: number): void => {
+    setTimelineScale(current => Math.max(FLEET_TIMELINE_MIN_SCALE, Math.min(FLEET_TIMELINE_MAX_SCALE, current + delta)))
+  }
+
+  const zoomTimeline = (event: ReactWheelEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    adjustTimelineScale(event.deltaY * .0025)
+  }
+
+  const zoomTimelineByKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown' && event.key !== 'PageUp' && event.key !== 'PageDown') return
+    event.preventDefault()
+    const coarse = event.key === 'PageUp' || event.key === 'PageDown'
+    const direction = event.key === 'ArrowUp' || event.key === 'PageUp' ? -1 : 1
+    adjustTimelineScale(direction * (coarse ? .5 : .1))
+  }
+
+  const panTimeline = (event: ReactWheelEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    timelineDrivingActivity.current = true
+    timelineDriverHoldUntil.current = performance.now() + FLEET_TIMELINE_WHEEL_IDLE_MS
+    const delta = event.deltaMode === 1
+      ? event.deltaY * 16
+      : event.deltaMode === 2
+        ? event.deltaY * FLEET_TIMELINE_SCROLL_DISTANCE
+        : event.deltaY
+    timelinePanDelta.current += delta
+    if (timelinePanFrame.current === undefined) timelinePanFrame.current = window.requestAnimationFrame(() => {
+      const panDelta = timelinePanDelta.current
+      timelinePanDelta.current = 0
+      timelinePanFrame.current = undefined
+      setCurrentTime(current => clampCurrentTime(current + panDelta / FLEET_TIMELINE_SCROLL_DISTANCE * timelineStep))
+    })
+    releaseTimelineDriver()
+  }
+
+  const jumpToTimelineTime = (timestamp: number): void => {
+    const target = clampCurrentTime(timestamp)
+    timelineDrivingActivity.current = true
+    timelineDriverHoldUntil.current = performance.now() + FLEET_TIMELINE_JUMP_IDLE_MS
+    if (target === currentTime) centerActivityAtTime(target, 'smooth')
+    else setCurrentTime(target)
+  }
+
+  const letActivityDriveTimeline = (): void => {
+    timelineDriverHoldUntil.current = 0
+    timelineDrivingActivity.current = false
+    if (timelineReleaseTimer.current !== undefined) {
+      window.clearTimeout(timelineReleaseTimer.current)
+      timelineReleaseTimer.current = undefined
+    }
+  }
+
+  const timelineTicks = fleetTimelineTicks(currentTime, timelineStep)
+
   return jsx(DetailShell, {
-    title: '团队动态',
-    meta: `${activity.length} 条记录`,
+    title: panelText('团队动态', 'Team activity'),
+    meta: panelText(`${activity.length} 条记录`, `${activity.length} records`),
     owner,
-    children: jsx('div', {
-      className: 'dsh-fleet-panel-overview',
-      children: activity.length === 0
-        ? jsx('div', { className: 'dsh-fleet-panel-empty', children: '当前筛选下没有动态' })
-        : activity.map(item => jsxs('div', {
-            className: 'dsh-fleet-panel-activity-row',
-            'data-kind': item.kind,
+    bodyClassName: 'dsh-fleet-panel-activity-layout',
+    children: [
+      jsx('div', {
+        ref: activityScrollRef,
+        className: 'dsh-fleet-panel-activity-scroll',
+        onScroll: syncTimelineFromActivity,
+        onWheelCapture: letActivityDriveTimeline,
+        onClickCapture: syncTimelineFromActivityClick,
+        children: jsx('div', {
+          className: 'dsh-fleet-panel-activity-list',
+          'data-window-start': visibleWindow.start,
+          'data-window-end': visibleWindow.end,
+          'data-window-total': groups.length,
+          children: activity.length === 0
+            ? jsx('div', { className: 'dsh-fleet-panel-empty', children: panelText('当前筛选下没有动态', 'No activity matches this filter') })
+            : visibleGroups.map(group => {
+                const captureNode = (node: HTMLElement | null): void => {
+                  if (node === null) activityNodes.current.delete(group.key)
+                  else activityNodes.current.set(group.key, node)
+                }
+                if (group.items.length === 1) return jsx(ActivityRow, {
+                  item: group.items[0],
+                  activityKey: group.key,
+                  containerRef: captureNode,
+                }, group.key)
+                const expanded = expandedGroups.has(group.key)
+                return jsxs('div', {
+                  className: 'dsh-fleet-panel-activity-group',
+                  'data-activity-key': group.key,
+                  children: [
+                    jsxs('button', {
+                      ref: captureNode,
+                      type: 'button',
+                      className: 'dsh-fleet-panel-activity-group-toggle',
+                      'aria-expanded': expanded,
+                      onClick: () => { toggleGroup(group.key) },
+                      children: [
+                        jsx('span', { className: 'dsh-fleet-panel-activity-dot', 'data-kind': group.items[0]!.kind }),
+                        jsxs('span', {
+                          className: 'dsh-fleet-panel-activity-group-copy',
+                          children: [
+                            jsx('span', { className: 'dsh-fleet-panel-activity-group-label', children: activityTypeLabel(group.items[0]!) }),
+                            jsx('span', {
+                              className: 'dsh-fleet-panel-activity-group-count',
+                              children: panelText(`${group.items.length} 条`, `${group.items.length} events`),
+                            }),
+                          ],
+                        }),
+                        jsx('span', { className: 'dsh-fleet-panel-activity-time', children: activityTimeRange(group.items) }),
+                        jsx('span', {
+                          className: 'dsh-fleet-panel-activity-group-chevron',
+                          'aria-hidden': 'true',
+                          children: jsx(PanelIcon, { name: 'chevron', size: 12 }),
+                        }),
+                      ],
+                    }),
+                    expanded && jsx('div', {
+                      className: 'dsh-fleet-panel-activity-group-items',
+                      children: group.items.map(item => jsx(ActivityRow, { item }, item.id)),
+                    }),
+                  ],
+                }, group.key)
+              }),
+        }),
+      }),
+      activity.length > 0 && jsxs('aside', {
+        className: 'dsh-fleet-panel-activity-timeline',
+        'aria-label': panelText('动态时间轴', 'Activity timeline'),
+        children: [
+          jsx('div', {
+            className: 'dsh-fleet-panel-activity-timeline-wheel',
+            style: { backgroundPosition: `${timelineKnobTravel}px 0` },
+            role: 'slider',
+            tabIndex: 0,
+            'aria-label': panelText('调整时间尺度', 'Adjust time scale'),
+            'aria-valuemin': 1_000,
+            'aria-valuemax': Math.round(10 ** FLEET_TIMELINE_MAX_SCALE),
+            'aria-valuenow': Math.round(timelineStep),
+            'aria-valuetext': fleetTimelineScaleLabel(timelineGridState.dominantMajor),
+            onWheel: zoomTimeline,
+            onKeyDown: zoomTimelineByKeyboard,
+          }),
+          jsx('div', {
+            className: 'dsh-fleet-panel-activity-timeline-ruler',
+            onWheel: panTimeline,
             children: [
-              jsx('span', { className: 'dsh-fleet-panel-activity-dot', 'data-kind': item.kind }),
-              jsxs('span', {
-                className: 'dsh-fleet-panel-activity-copy',
+              ...timelineTicks.map(({ timestamp, position, strength, opacity }) => {
+                const label = fleetTimelineTickLabel(timestamp, timelineGridState.dominantMajor.approximateMs)
+                const hasNearbyEvent = fleetTimelineHasNearbyEvent(timestamp, timelineGridState.dominantMinor, eventTimestamps)
+                return jsxs('button', {
+                  type: 'button',
+                  className: 'dsh-fleet-panel-activity-timeline-marker',
+                  style: {
+                    '--dsh-fleet-timeline-position': `${position}px`,
+                    '--dsh-fleet-timeline-strength': strength,
+                    '--dsh-fleet-timeline-opacity': opacity,
+                  } as CSSProperties,
+                  'data-has-event': hasNearbyEvent ? 'true' : undefined,
+                  'aria-label': panelText(`跳转到 ${fleetTimelineFullLabel(timestamp)}`, `Jump to ${fleetTimelineFullLabel(timestamp)}`),
+                  title: fleetTimelineFullLabel(timestamp),
+                  onClick: () => { jumpToTimelineTime(timestamp) },
+                  children: [
+                    jsx('time', {
+                      className: 'dsh-fleet-panel-activity-timeline-label',
+                      dateTime: new Date(timestamp).toISOString(),
+                      children: label,
+                    }),
+                    jsx('span', { className: 'dsh-fleet-panel-activity-timeline-tick', 'aria-hidden': 'true' }),
+                  ],
+                }, `${timestamp}`)
+              }),
+              jsxs('button', {
+                type: 'button',
+                className: 'dsh-fleet-panel-activity-timeline-marker dsh-fleet-panel-activity-timeline-cursor',
+                'aria-current': 'true',
+                'aria-label': panelText(`跳转到 ${fleetTimelineFullLabel(currentTime)}`, `Jump to ${fleetTimelineFullLabel(currentTime)}`),
+                title: fleetTimelineFullLabel(currentTime),
+                onClick: () => { jumpToTimelineTime(currentTime) },
                 children: [
-                  item.type === 'memory.stored' && jsx('span', {
-                    className: 'dsh-fleet-panel-activity-memory-operation',
-                    children: '记忆写入',
+                  jsx('time', {
+                    className: 'dsh-fleet-panel-activity-timeline-label',
+                    dateTime: new Date(currentTime).toISOString(),
+                    children: fleetTimelineTickLabel(currentTime, timelineGridState.dominantMajor.approximateMs),
                   }),
-                  item.type === 'memory.recalled' && jsx('span', {
-                    className: 'dsh-fleet-panel-activity-memory-operation',
-                    children: '记忆召回',
-                  }),
-                  jsx('span', { children: item.text }),
+                  jsx('span', { className: 'dsh-fleet-panel-activity-timeline-tick', 'aria-hidden': 'true' }),
                 ],
               }),
-              jsx('time', {
-                className: 'dsh-fleet-panel-activity-time',
-                dateTime: item.createdAt,
-                children: new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              }),
             ],
-          }, item.id)),
-    }),
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+interface FleetActivityGroup {
+  readonly key: string
+  readonly type: string
+  readonly items: readonly [FleetPanelActivity, ...FleetPanelActivity[]]
+}
+
+export function groupFleetActivity(activity: readonly FleetPanelActivity[]): readonly FleetActivityGroup[] {
+  const groups: { key: string; type: string; items: [FleetPanelActivity, ...FleetPanelActivity[]] }[] = []
+  for (const item of activity) {
+    const type = item.type ?? `kind:${item.kind}`
+    const current = groups.at(-1)
+    if (current?.type === type) current.items.push(item)
+    else groups.push({ key: `${type}:${item.id}`, type, items: [item] })
+  }
+  return groups
+}
+
+export function fleetActivityGroups(activity: readonly FleetPanelActivity[], collapse: boolean): readonly FleetActivityGroup[] {
+  if (collapse) return groupFleetActivity(activity)
+  return activity.map(item => ({
+    key: `item:${item.id}`,
+    type: item.type ?? `kind:${item.kind}`,
+    items: [item],
+  }))
+}
+
+function activityTimestamp(createdAt: string | undefined): number | undefined {
+  if (createdAt === undefined) return undefined
+  const timestamp = Date.parse(createdAt)
+  return Number.isFinite(timestamp) ? timestamp : undefined
+}
+
+function fleetActivityGroupStart(group: FleetActivityGroup | undefined): number | undefined {
+  return activityTimestamp(group?.items[0]?.createdAt)
+}
+
+function fleetActivityGroupEnd(group: FleetActivityGroup | undefined): number | undefined {
+  return activityTimestamp(group?.items.at(-1)?.createdAt)
+}
+
+function fleetActivityGroupCenter(group: FleetActivityGroup | undefined): number | undefined {
+  const start = fleetActivityGroupStart(group)
+  const end = fleetActivityGroupEnd(group)
+  if (start === undefined || end === undefined) return start ?? end
+  return start + (end - start) / 2
+}
+
+export function nearestFleetActivityGroupIndex(groups: readonly FleetActivityGroup[], timestamp: number): number {
+  if (groups.length === 0) return -1
+  let low = 0
+  let high = groups.length - 1
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    const middleEnd = fleetActivityGroupEnd(groups[middle]) ?? Number.NEGATIVE_INFINITY
+    if (middleEnd < timestamp) low = middle + 1
+    else high = middle
+  }
+  const start = fleetActivityGroupStart(groups[low]) ?? Number.POSITIVE_INFINITY
+  const end = fleetActivityGroupEnd(groups[low]) ?? Number.NEGATIVE_INFINITY
+  if (timestamp >= start && timestamp <= end) return low
+  if (low === 0 || timestamp > end) return low
+  const previousEnd = fleetActivityGroupEnd(groups[low - 1]) ?? Number.NEGATIVE_INFINITY
+  return timestamp - previousEnd <= start - timestamp ? low - 1 : low
+}
+
+function fleetTimelineScaleLabel(interval: FleetTimelineInterval): string {
+  const units: Record<FleetTimelineIntervalUnit, readonly [string, string, string]> = {
+    second: ['秒', 'second', 'seconds'],
+    minute: ['分钟', 'minute', 'minutes'],
+    hour: ['小时', 'hour', 'hours'],
+    day: ['天', 'day', 'days'],
+    week: ['周', 'week', 'weeks'],
+    month: ['个月', 'month', 'months'],
+    year: ['年', 'year', 'years'],
+  }
+  const unit = units[interval.unit]
+  return panelText(
+    `主刻度 ${interval.amount} ${unit[0]}`,
+    `Major ticks every ${interval.amount} ${interval.amount === 1 ? unit[1] : unit[2]}`,
+  )
+}
+
+function fleetTimelineTickLabel(timestamp: number, step: number): string {
+  const minute = 60_000
+  const day = 24 * 60 * minute
+  const year = 365.25 * day
+  const date = new Date(timestamp)
+  if (step < minute) return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  if (step < day) return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (step < 45 * day) return date.toLocaleDateString([], { month: 'numeric', day: 'numeric' })
+  if (step < year) return date.toLocaleDateString([], { year: 'numeric', month: 'numeric' })
+  return date.toLocaleDateString([], { year: 'numeric' })
+}
+
+function fleetTimelineFullLabel(timestamp: number): string {
+  return new Date(timestamp).toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function activityTypeLabel(item: FleetPanelActivity): string {
+  const type = item.type ?? ''
+  if (type === 'coordination.message') return panelText('会话消息', 'Conversation messages')
+  if (type === 'memory.stored') return panelText('记忆写入', 'Memory stored')
+  if (type === 'memory.recalled') return panelText('记忆召回', 'Memory recalled')
+  if (type === 'resource.resource_added') return panelText('添加共享资源', 'Resources added')
+  if (type === 'resource.resource_removed') return panelText('删除共享资源', 'Resources removed')
+  if (type === 'resource.resource_revised') return panelText('更新共享资源', 'Resources updated')
+  if (type.startsWith('resource.document_')) return panelText('团队文档更新', 'Team document updates')
+  if (type.startsWith('workspace.')) return panelText('工作区变更', 'Workspace changes')
+  if (type.startsWith('task.')) return panelText('任务变更', 'Task changes')
+  if (type.startsWith('schedule.')) return panelText('计划变更', 'Schedule changes')
+  if (type.startsWith('calendar.')) return panelText('日程变更', 'Calendar changes')
+  if (type === 'coordination.vote') return panelText('投票更新', 'Vote updates')
+  if (type.startsWith('member_status.')) return panelText('成员自述', 'Member status updates')
+  if (type.startsWith('member_') || type.startsWith('assistant_')) return panelText('成员状态', 'Member activity')
+  if (type.startsWith('work_') || type === 'team_status') return panelText('团队状态', 'Team status')
+  return ({
+    message: panelText('消息动态', 'Message activity'),
+    resource: panelText('资源动态', 'Resource activity'),
+    decision: panelText('决策动态', 'Decision activity'),
+    member: panelText('成员动态', 'Member activity'),
+    memory: panelText('记忆动态', 'Memory activity'),
+  } as const)[item.kind]
+}
+
+function activityTime(createdAt: string): string {
+  return new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function activityTimeRange(items: readonly FleetPanelActivity[]): string {
+  const first = items[0]
+  const last = items.at(-1)
+  if (first === undefined || last === undefined) return ''
+  const start = activityTime(first.createdAt)
+  const end = activityTime(last.createdAt)
+  return start === end ? start : `${start}–${end}`
+}
+
+function ActivityRow({ item, activityKey, containerRef }: {
+  readonly item: FleetPanelActivity
+  readonly activityKey?: string
+  readonly containerRef?: (node: HTMLDivElement | null) => void
+}): ReactElement {
+  return jsxs('div', {
+    ref: containerRef,
+    className: 'dsh-fleet-panel-activity-row',
+    'data-kind': item.kind,
+    'data-activity-key': activityKey,
+    children: [
+      jsx('span', { className: 'dsh-fleet-panel-activity-dot', 'data-kind': item.kind }),
+      jsxs('span', {
+        className: 'dsh-fleet-panel-activity-copy',
+        children: [
+          item.type === 'memory.stored' && jsx('span', {
+            className: 'dsh-fleet-panel-activity-memory-operation',
+            children: panelText('记忆写入', 'Memory stored'),
+          }),
+          item.type === 'memory.recalled' && jsx('span', {
+            className: 'dsh-fleet-panel-activity-memory-operation',
+            children: panelText('记忆召回', 'Memory recalled'),
+          }),
+          jsx('span', { children: item.text }),
+        ],
+      }),
+      jsx('time', {
+        className: 'dsh-fleet-panel-activity-time',
+        dateTime: item.createdAt,
+        children: activityTime(item.createdAt),
+      }),
+    ],
   })
 }
 
@@ -9332,6 +15861,8 @@ interface FleetPanelSlots {
 interface FleetMarkdownRenderer {
   render(request: { readonly markdown: string; readonly mode?: 'gfm' | 'render-friendly' }): Promise<{ readonly html: string }>
 }
+
+let fleetMarkdownRenderer: FleetMarkdownRenderer | undefined
 
 interface FleetRenderEngineMessageTextProps extends FleetPanelMessageTextOwner {
   readonly markdownRenderer: FleetMarkdownRenderer
@@ -9380,7 +15911,7 @@ function decorateFleetMarkdownMentions(root: DocumentFragment, members: readonly
         button.type = 'button'
         button.className = 'dsh-fleet-panel-member-mention'
         button.dataset.memberId = segment.member.id
-        button.setAttribute('aria-label', `${segment.text}，查看 ${segment.member.name} 的成员信息`)
+        button.setAttribute('aria-label', panelText(`${segment.text}，查看 ${segment.member.name} 的成员信息`, `${segment.text}, view member details for ${segment.member.name}`))
         button.textContent = segment.text
         fragment.append(button)
       }
@@ -9418,20 +15949,27 @@ function installFleetRenderEngineStyles(css: string): void {
   if (style.textContent !== css) style.textContent = css
 }
 
-function FleetRenderEngineMessageText({ panel, text, markdownRenderer }: FleetRenderEngineMessageTextProps): ReactElement {
+function FleetMessageText({
+  text,
+  members,
+  markdownRenderer,
+  showMemberDetails,
+  showMemberContext,
+}: FleetMessageTextProps): ReactElement {
   const [html, setHtml] = useState<string>()
   const [memberId, setMemberId] = useState<string>()
-  const controller = useFleetMemberPopover()
-  const mentionSignature = panel.snapshot.members.map(candidate => `${candidate.id}\u0000${candidate.name}`).join('\u0001')
-  const member = panel.snapshot.members.find(candidate => candidate.id === memberId)
+  const controller = useFleetAnchoredPopover()
+  const mentionSignature = members.map(candidate => `${candidate.id}\u0000${candidate.name}`).join('\u0001')
+  const member = members.find(candidate => candidate.id === memberId)
 
   useEffect(() => {
     let active = true
     setHtml(undefined)
+    if (markdownRenderer === undefined) return () => { active = false }
     void markdownRenderer.render({ markdown: text, mode: 'render-friendly' }).then(
       rendered => {
         if (!active) return
-        const prepared = prepareFleetMarkdown(rendered.html, panel.snapshot.members)
+        const prepared = prepareFleetMarkdown(rendered.html, members)
         installFleetRenderEngineStyles(prepared.css)
         setHtml(prepared.html)
       },
@@ -9442,7 +15980,12 @@ function FleetRenderEngineMessageText({ panel, text, markdownRenderer }: FleetRe
     return () => { active = false }
   }, [markdownRenderer, mentionSignature, text])
 
-  if (html === undefined) return jsx(FleetPlainMessageText, { owner: panel, text })
+  if (html === undefined) return jsx(FleetPlainMessageText, {
+    text,
+    members,
+    ...(showMemberDetails === undefined ? {} : { showMemberDetails }),
+    ...(showMemberContext === undefined ? {} : { showMemberContext }),
+  })
   return jsxs(Fragment, {
     children: [
       jsx('div', {
@@ -9452,20 +15995,31 @@ function FleetRenderEngineMessageText({ panel, text, markdownRenderer }: FleetRe
             ? event.target.closest<HTMLElement>('[data-member-id].dsh-fleet-panel-member-mention')
             : null
           if (target === null) return
-          const selected = panel.snapshot.members.find(candidate => candidate.id === target.dataset.memberId)
+          const selected = members.find(candidate => candidate.id === target.dataset.memberId)
           if (selected === undefined) return
           setMemberId(selected.id)
           window.requestAnimationFrame(() => { controller.openAt(target) })
         },
         dangerouslySetInnerHTML: { __html: html },
       }),
-      member !== undefined && jsx(FleetMemberPopoverCard, {
+      member !== undefined && controller.mounted && jsx(FleetMemberPopoverCard, {
         member,
         controller,
-        showDetails: panel.showMemberDetails,
-        showContext: panel.showMemberContext,
+        showStatusText: true,
+        ...(showMemberDetails === undefined ? {} : { showDetails: showMemberDetails }),
+        ...(showMemberContext === undefined ? {} : { showContext: showMemberContext }),
       }),
     ],
+  })
+}
+
+function FleetRenderEngineMessageText({ panel, text, markdownRenderer }: FleetRenderEngineMessageTextProps): ReactElement {
+  return jsx(FleetMessageText, {
+    text,
+    members: panel.snapshot.members,
+    markdownRenderer,
+    showMemberDetails: panel.showMemberDetails,
+    showMemberContext: panel.showMemberContext,
   })
 }
 
@@ -9548,12 +16102,30 @@ class FleetWebPeerRemote extends TypertRemoteService {
     if ('invalidate' in this.source && typeof this.source.invalidate === 'function') void this.source.invalidate()
     return true
   }
+
+  invalidateTraces(input: { readonly traces: readonly { readonly teamId: string; readonly memberId: string }[] }, signal: AbortSignal): boolean {
+    signal.throwIfAborted()
+    if ('invalidateTraces' in this.source && typeof this.source.invalidateTraces === 'function') {
+      this.source.invalidateTraces(input.traces)
+    }
+    return true
+  }
 }
 
 export interface FleetModelCatalogModel {
   readonly id: string
   readonly name: string
   readonly description?: string
+  readonly reasoning?: {
+    readonly defaultEffort?: string
+    readonly efforts: readonly { readonly id: string; readonly name: string }[]
+  }
+}
+
+export interface FleetModelCatalogFailure {
+  readonly id: string
+  readonly name: string
+  readonly message: string
 }
 
 export interface FleetModelProviderGroup {
@@ -9563,10 +16135,10 @@ export interface FleetModelProviderGroup {
 }
 
 export interface FleetModelDirectoryState {
-  readonly current: { readonly provider: string; readonly model: string } | null
+  readonly current: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | null
   readonly routable: boolean | null
   readonly groups: readonly FleetModelProviderGroup[]
-  readonly failures: readonly unknown[]
+  readonly failures: readonly FleetModelCatalogFailure[]
   readonly status: 'idle' | 'loading' | 'ready' | 'selecting' | 'error'
   readonly error: string | null
 }
@@ -9577,6 +16149,11 @@ export interface FleetModelDirectory {
     subscribe(listener: () => void): () => void
   }
   load(): Promise<unknown>
+  select(selection: {
+    readonly provider: string
+    readonly model: string
+    readonly reasoningEffort?: string
+  }): Promise<void>
 }
 
 interface FleetModelDirectoryResolver {
@@ -9585,6 +16162,15 @@ interface FleetModelDirectoryResolver {
 
 let fleetModelDirectoryResolver: FleetModelDirectoryResolver | undefined
 
+const EMPTY_FLEET_MODEL_DIRECTORY: FleetModelDirectoryState = {
+  current: null,
+  routable: null,
+  groups: [],
+  failures: [],
+  status: 'idle',
+  error: null,
+}
+
 export function getFleetModelDirectory(sessionId: string | undefined): FleetModelDirectory | undefined {
   if (sessionId === undefined || fleetModelDirectoryResolver === undefined) return undefined
   try {
@@ -9592,6 +16178,18 @@ export function getFleetModelDirectory(sessionId: string | undefined): FleetMode
   } catch {
     return undefined
   }
+}
+
+function useFleetPanelModelDirectory(sessionId: string | undefined): readonly [FleetModelDirectory | undefined, FleetModelDirectoryState] {
+  const directory = getFleetModelDirectory(sessionId)
+  const subscribe = useCallback((listener: () => void) => directory?.store.subscribe(listener) ?? (() => undefined), [directory])
+  const snapshot = useCallback(() => directory?.store.getSnapshot() ?? EMPTY_FLEET_MODEL_DIRECTORY, [directory])
+  const state = useSyncExternalStore(subscribe, snapshot, snapshot)
+  useEffect(() => {
+    if (directory === undefined || state.status !== 'idle') return
+    void directory.load().catch(() => undefined)
+  }, [directory, state.status])
+  return [directory, state]
 }
 
 function resolveMemberFilePath(cwd: string | undefined, path: string): string {
@@ -9607,14 +16205,58 @@ function createFleetNativeContext(ctx: FleetPanelClientContext): FleetNativeCont
     fork?(options: { readonly sessionId: string }): Promise<string>
   } | undefined
   const workspaces = ctx.workspaces as unknown as { openPath(path: string): Promise<void> } | undefined
+  const commandRemote = (ctx.remote as unknown as {
+    readonly commands?: {
+      execute(sessionId: string, line: string, images: readonly unknown[]): Promise<{
+        readonly ok: boolean
+        readonly value?: {
+          readonly result: { readonly kind: 'success' | 'error'; readonly text?: string }
+        }
+        readonly error?: { readonly code?: string; readonly message?: string }
+      }>
+    }
+  } | undefined)?.commands
+  const events = (ctx as unknown as {
+    readonly events?: { dispatch(type: string, args: readonly unknown[]): ((...args: any[]) => unknown)[] }
+  }).events
   return {
     session: sessionId => sessions?.binding(sessionId)?.session,
+    executeSessionCommand: async (sessionId, line) => {
+      if (commandRemote === undefined) {
+        throw new Error(panelText('DSH Session 命令服务不可用', 'The DSH Session command service is unavailable'))
+      }
+      const response = await commandRemote.execute(sessionId, line, [])
+      if (!response.ok) {
+        throw new Error(response.error?.message ?? panelText('Session 命令请求失败', 'The Session command request failed'))
+      }
+      const execution = response.value
+      if (execution === undefined) {
+        throw new Error(panelText(`未知或格式错误的命令：${line}`, `Unknown or malformed command: ${line}`))
+      }
+      const trimmed = line.trim()
+      const separator = trimmed.search(/\s/u)
+      const commandName = (separator === -1 ? trimmed : trimmed.slice(0, separator)).slice(1)
+      for (const listener of events?.dispatch('emit', [
+        'command/executed',
+        sessionId,
+        commandName,
+        execution.result,
+      ]) ?? []) {
+        try {
+          const returned = listener(sessionId, commandName, execution.result)
+          if (returned !== null && typeof returned === 'object' && 'then' in returned) {
+            void Promise.resolve(returned).catch(() => undefined)
+          }
+        } catch {}
+      }
+      return execution.result
+    },
     activateAssistant: async (sessionId, teamId, assistantId) => {
       const targetSessionId = sessions?.fork === undefined
         ? sessionId
         : await sessions.fork({ sessionId })
       const session = sessions?.binding(targetSessionId)?.session
-      if (session?.prompt === undefined) throw new Error('团队助理 Session 当前不可加载')
+      if (session?.prompt === undefined) throw new Error(panelText('团队助理 Session 当前不可加载', 'The Team assistant Session cannot be loaded right now'))
       const result = await session.prompt([{
         type: 'text',
         text: encodeFleetActivation(
@@ -9622,21 +16264,21 @@ function createFleetNativeContext(ctx: FleetPanelClientContext): FleetNativeCont
           '重新连接到现有 Fleet 团队助理身份；完成连接后等待用户下一条消息，不要主动发送用户可见回复。',
         ),
       }], 'queue')
-      if (!result.ok) throw new Error(result.error?.message ?? '团队助理 Session 加载失败')
+      if (!result.ok) throw new Error(result.error?.message ?? panelText('团队助理 Session 加载失败', 'The Team assistant Session could not be loaded'))
     },
     openPath: path => workspaces?.openPath(path)
-      ?? Promise.reject(new Error('DSH 工作区文件服务不可用')),
+      ?? Promise.reject(new Error(panelText('DSH 工作区文件服务不可用', 'DSH workspace file service is unavailable'))),
     openFile: (sessionId, path) => {
       const cwd = sessions?.list.getSnapshot().byId[sessionId]?.cwd
       return workspaces?.openPath(resolveMemberFilePath(cwd, path))
-        ?? Promise.reject(new Error('DSH 工作区文件服务不可用'))
+        ?? Promise.reject(new Error(panelText('DSH 工作区文件服务不可用', 'DSH workspace file service is unavailable')))
     },
     loadImage: (sessionId, attachment) => {
       const conversation = ctx.get?.('conversation') as {
         resolveImage(sessionId: string, attachment: unknown): Promise<string>
       } | undefined
       return conversation?.resolveImage(sessionId, attachment)
-        ?? Promise.reject(new Error('DSH 会话图片服务不可用'))
+        ?? Promise.reject(new Error(panelText('DSH 会话图片服务不可用', 'DSH Session image service is unavailable')))
     },
     fileMentions: owner => {
       const mentions = ctx.get?.('chatFileMentions') as { forClosing(owner: unknown): unknown } | undefined
@@ -9645,7 +16287,7 @@ function createFleetNativeContext(ctx: FleetPanelClientContext): FleetNativeCont
   }
 }
 
-export const inject = ['slots', 'locale', 'sessions', 'workspaces', 'remote', 'typert'] as const
+export const inject = ['slots', 'locale', 'sessions', 'workspaces', 'remote', 'remote.commands', 'typert'] as const
 
 export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise<void>> {
   const disposeConfigurationModules = ctx.provide?.('fleetConfigurationModules', fleetConfigurationModules)
@@ -9653,9 +16295,9 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
     configureFleetJoyride(joyrideCtx.joyride)
     const disposeOpen = joyrideCtx.joyride.register({
       id: 'fleet.open',
-      label: '打开 Agent Fleet 团队选项卡',
+      label: panelText('打开 Agent Fleet 团队选项卡', 'Open the Agent Fleet Team tab'),
       scope: 'fleet',
-      description: '从 DSH 顶层对话或轨迹页面切换到 Agent Fleet 团队面板。',
+      description: panelText('从 DSH 顶层对话或轨迹页面切换到 Agent Fleet 团队面板。', 'Switch from a top-level DSH conversation or trace page to the Agent Fleet Team panel.'),
       target: fleetShellTabTarget,
       perform: async () => {
         const target = fleetShellTabTarget()
@@ -9674,6 +16316,9 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
   fleetModelDirectoryResolver = modelDirectoryResolver
   configureFleetActivationSessions(
     (ctx.sessions ?? ctx.get?.('sessions')) as FleetActivationClientSessions | undefined,
+  )
+  configureFleetActivationWorkspaces(
+    (ctx.workspaces ?? ctx.get?.('workspaces')) as FleetActivationClientWorkspaces | undefined,
   )
   configureFleetMetaAssistantClient(
     ctx.sessions ?? ctx.get?.('sessions') as FleetMetaClientSessions | undefined,
@@ -9707,7 +16352,7 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
     name: 'conversation.view',
     id: 'fleet',
     order: 20,
-    label: () => '团队',
+    label: () => panelText('团队', 'Team'),
     locale: 'conversation',
     children: {
       [FLEET_PANEL_SLOTS.tool]: { kind: 'list', scope: 'session' },
@@ -9725,11 +16370,13 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
     inject: (sessionId: string) => ({
       sessionId,
       source,
+      markdownRendererAvailable: ctx.get?.('markdownRenderer') !== undefined,
       nativeContext,
     }),
   }, FleetTeamPanel))
 
   ctx.inject<{ readonly markdownRenderer: FleetMarkdownRenderer }>(['markdownRenderer'], rendererCtx => {
+    fleetMarkdownRenderer = rendererCtx.markdownRenderer
     rendererCtx.slots.inject(FLEET_PANEL_SLOTS.messageText, () => rendererCtx.slots.register({
       name: FLEET_PANEL_SLOTS.messageText,
       key: 'markdown',
@@ -9787,6 +16434,8 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
     ctx.slots.inject(FLEET_PANEL_SLOTS.main, () => ctx.slots.register({ name: FLEET_PANEL_SLOTS.main, key }, component))
   }
   return async () => {
+    configureFleetActivationSessions(undefined)
+    configureFleetActivationWorkspaces(undefined)
     configureFleetMetaAssistantTeams(undefined)
     configureFleetMetaAssistantLocale(undefined)
     disposeLocale()

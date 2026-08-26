@@ -8,6 +8,7 @@ import * as Authorization from './authorization/index.js'
 import * as Data from './data/index.js'
 import { FleetArchiveRegistry } from './archive.js'
 import { FleetAssistantRuntime } from './assistant.js'
+import { activateResidentFleetAssistants } from './resident-assistants.js'
 import { FleetAuthorizationService } from './authorization.js'
 import { installFleetActivationBridge } from './activation.js'
 import { FleetCollaborationService } from './collaboration.js'
@@ -46,6 +47,8 @@ async function installFleetWebNotifications(ctx: FleetWebBindingContext, runs: F
   const disposeRemote = await ctx.remote.$mount(FLEET_WEB_PEER_REMOTE)
   let active = true
   let scheduled: ReturnType<typeof setTimeout> | undefined
+  let traceScheduled: ReturnType<typeof setTimeout> | undefined
+  const pendingTraces = new Map<string, { readonly teamId: string; readonly memberId: string }>()
   const notifyPeer = (peer: ReturnType<HostConnectionPeers['list']>[number]): void => {
     if (!active || peer.kind !== 'browser') return
     const client = (ctx.remote.for(peer) as unknown as { fleetWebPeer: FleetWebPeerClient }).fleetWebPeer
@@ -59,15 +62,34 @@ async function installFleetWebNotifications(ctx: FleetWebBindingContext, runs: F
       for (const peer of ctx.connection.peers.list()) notifyPeer(peer)
     }, 500)
   }
+  const notifyTrace = (teamId: string, memberId: string): void => {
+    if (!active) return
+    pendingTraces.set(`${teamId}\0${memberId}`, { teamId, memberId })
+    if (traceScheduled !== undefined) return
+    traceScheduled = setTimeout(() => {
+      traceScheduled = undefined
+      if (!active || pendingTraces.size === 0) return
+      const traces = [...pendingTraces.values()]
+      pendingTraces.clear()
+      for (const peer of ctx.connection.peers.list()) {
+        if (peer.kind !== 'browser') continue
+        const client = (ctx.remote.for(peer) as unknown as { fleetWebPeer: FleetWebPeerClient }).fleetWebPeer
+        void client.invalidateTraces({ traces }).catch(() => undefined)
+      }
+    }, 250)
+  }
   const unsubscribeChanges = runs.subscribeChanges(notifyAll)
+  const unsubscribeTraceChanges = runs.subscribeTraceChanges(notifyTrace)
   const unsubscribePeers = ctx.connection.peers.subscribe(change => {
     if (change.type === 'added') notifyPeer(change.peer)
   })
   return async () => {
     active = false
     if (scheduled !== undefined) clearTimeout(scheduled)
+    if (traceScheduled !== undefined) clearTimeout(traceScheduled)
     unsubscribePeers()
     unsubscribeChanges()
+    unsubscribeTraceChanges()
     await disposeRemote()
   }
 }
@@ -95,9 +117,11 @@ export function apply(ctx: Context): void {
     installSetupTool(scope, setups)
     installFleetActivationBridge(scope, setups, service, assistant, meta)
     installRunTools(scope, service, assistant)
+    let residentAssistants: Awaited<ReturnType<typeof activateResidentFleetAssistants>> | undefined
     scope.on('agent/disposed', ({ agent }) => {
       service.agentDisconnected(String(agent.id))
       assistant.disposed(String(agent.id))
+      residentAssistants?.agentDisposed(String(agent.id))
     })
     scope.on('agent/session-start', ({ agent }) => {
       if (meta.restore(agent) === undefined) setups.restore(agent)
@@ -108,6 +132,16 @@ export function apply(ctx: Context): void {
     scope.on('agent/status', ({ agent }) => {
       service.agentStatusChanged(agent)
     })
+    scope.inject(['agentLoop'], async (residentScope) => {
+      const controller = await activateResidentFleetAssistants(residentScope, service, assistant)
+      residentAssistants = controller
+      service.setResidentAssistantController(controller)
+      return async () => {
+        residentAssistants = undefined
+        service.setResidentAssistantController(undefined)
+        await controller.dispose()
+      }
+    })
     scope.effect(() => () => {
       assistant.close()
       service.close()
@@ -115,8 +149,15 @@ export function apply(ctx: Context): void {
   })
   Authorization.apply(ctx)
   Data.apply(ctx)
-  ctx.inject(['fleetRuns', 'fleetSetups', 'fleetPermissions', 'fleetAssistant', 'typert', 'agents'], (scope) => {
-    new FleetWebRemote(scope, scope.fleetRuns, scope.fleetSetups, scope.fleetPermissions, scope.fleetAssistant)
+  ctx.inject(['fleetRuns', 'fleetSetups', 'fleetPermissions', 'fleetAssistant', 'fleetAccess', 'typert', 'agents'], (scope) => {
+    new FleetWebRemote(
+      scope,
+      scope.fleetRuns,
+      scope.fleetSetups,
+      scope.fleetPermissions,
+      scope.fleetAssistant,
+      scope.fleetAccess,
+    )
     return scope.typert.register(FLEET_WEB_LOCAL)
   })
   ctx.inject(['fleetRuns', 'remote', 'connection'], raw => {

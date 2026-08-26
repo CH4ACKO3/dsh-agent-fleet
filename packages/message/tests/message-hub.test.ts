@@ -42,6 +42,10 @@ class FakeAgent implements MessageAgent {
     return this.injectedMessages.map(message => message.content[0]?.type === 'text' ? message.content[0].text : '')
   }
 
+  get injectedContext(): readonly Parameters<MessageAgent['inject']>[0][] {
+    return this.injectedMessages
+  }
+
   inject(message: Parameters<MessageAgent['inject']>[0]): void {
     this.injectedMessages.push(message)
     this.pendingMessages.push(message)
@@ -80,6 +84,7 @@ function setup(): {
   const agents = new Map([lead, reviewer, qa, observer].map(agent => [agent.id, agent]))
   const directory: AgentDirectory = {
     get: id => agents.get(id),
+    participantIds: () => [...agents.keys()],
     list: () => [...agents.values()],
   }
   return { hub: new MessageHub(directory), agents, lead, reviewer, qa, observer }
@@ -106,12 +111,151 @@ describe('MessageHub', () => {
     })
   })
 
+  it('preserves direct-human origin for trusted host messages without changing ordinary relays', () => {
+    const { hub, lead, reviewer } = setup()
+
+    const human = hub.sendHuman(lead, {
+      to: '@reviewer',
+      text: 'Create a native goal for this work.',
+      delivery: 'quiet',
+    })
+    expect(reviewer.injectedContext[0]?.source).toEqual({ kind: 'user' })
+    expect(reviewer.injected[0]).toContain('must-reply')
+    expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
+      id: human.messageId,
+      origin: 'user',
+      mustReply: true,
+    })
+
+    hub.send(lead, {
+      to: '@reviewer',
+      text: 'This remains an Agent relay.',
+      delivery: 'quiet',
+    })
+    expect(reviewer.injectedContext[1]?.source).toMatchObject({
+      kind: 'plugin',
+      plugin: 'dsh-agent-fleet',
+      form: 'relay',
+    })
+  })
+
+  it('keeps required replies pending until each recipient posts in the same conversation', () => {
+    const { hub, lead, reviewer, qa } = setup()
+
+    const direct = hub.sendHuman(lead, {
+      to: '@reviewer',
+      text: 'Please confirm this direct request.',
+      delivery: 'quiet',
+    })
+    hub.read(reviewer, { conversation: '@lead' })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({
+      id: direct.messageId,
+      mustReply: true,
+    })
+
+    hub.send(reviewer, {
+      to: '#general',
+      text: 'An unrelated Channel update.',
+      delivery: 'quiet',
+    })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: direct.messageId })
+
+    hub.send(reviewer, {
+      to: '@lead',
+      text: 'Direct request confirmed.',
+      delivery: 'quiet',
+    })
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+
+    const userChannel = hub.sendHuman(lead, {
+      to: '#general',
+      text: 'User Channel updates do not require replies.',
+      mustReply: true,
+      delivery: 'quiet',
+    })
+    hub.read(reviewer, { conversation: '#general' })
+    expect(hub.getMessage(reviewer, userChannel.messageId).mustReply).toBeUndefined()
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+
+    const channel = hub.send(lead, {
+      to: '#general',
+      text: 'Everyone must acknowledge this Channel update.',
+      mustReply: true,
+      delivery: 'quiet',
+    })
+    hub.read(reviewer, { conversation: '#general' })
+    hub.read(qa, { conversation: '#general' })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: channel.messageId })
+    expect(hub.pendingRequiredReply(qa.id)).toMatchObject({ id: channel.messageId })
+
+    hub.send(reviewer, {
+      to: '@lead',
+      text: 'Another direct message does not satisfy the Channel.',
+      delivery: 'quiet',
+    })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: channel.messageId })
+
+    hub.send(reviewer, {
+      to: '#general',
+      text: 'Channel update acknowledged.',
+      delivery: 'quiet',
+    })
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+    expect(hub.pendingRequiredReply(qa.id)).toMatchObject({ id: channel.messageId })
+  })
+
+  it('restores required-reply state from durable message history', () => {
+    const first = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    first.hub.onEvent(event => { events.push(event) })
+    const sent = first.hub.send(first.lead, {
+      to: '@reviewer',
+      text: 'Reply after restart.',
+      mustReply: true,
+      delivery: 'quiet',
+    })
+    first.hub.read(first.reviewer, { conversation: '@lead' })
+
+    const second = setup()
+    second.hub.restore(events)
+    expect(second.hub.pendingRequiredReply(second.reviewer.id)).toMatchObject({
+      id: sent.messageId,
+      mustReply: true,
+    })
+    second.hub.send(second.reviewer, {
+      to: '@lead',
+      text: 'Reply restored and completed.',
+      delivery: 'quiet',
+    })
+    expect(second.hub.pendingRequiredReply(second.reviewer.id)).toBeUndefined()
+  })
+
+  it('rejects mustReply on Meeting messages', () => {
+    const { hub, lead, reviewer } = setup()
+    hub.openMeeting(lead, {
+      id: 'review',
+      title: 'Review',
+      agenda: 'Inspect the change.',
+      participants: ['@reviewer'],
+    })
+    expect(() => hub.send(lead, {
+      to: 'meeting:review',
+      text: 'This marker is conversation-only.',
+      mustReply: true,
+      delivery: 'quiet',
+    })).toThrow('mustReply is supported only for direct messages and Channels')
+  })
+
   it('applies the send admission hook before validation and persistence', () => {
     const lead = new FakeAgent('lead')
     const reviewer = new FakeAgent('reviewer')
     const agents = new Map([lead, reviewer].map(agent => [agent.id, agent]))
     let reject = false
-    const hub = new MessageHub({ get: id => agents.get(id), list: () => [...agents.values()] }, {
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    }, {
       beforeSend: (_sender, input) => reject
         ? { kind: 'reject', reason: 'Messages are paused for review.' }
         : { kind: 'send', input: { ...input, text: `[reviewed] ${input.text}` } },
@@ -184,6 +328,123 @@ describe('MessageHub', () => {
     expect(events).toContainEqual({
       type: 'inbox', action: 'read', agentId: qa.id, messageId: channel.messageId,
       through: 'General progress update.'.length,
+    })
+  })
+
+  it('records an unavailable recipient as blocked and delivers after the participant binds', () => {
+    const lead = new FakeAgent('lead')
+    const reviewer = new FakeAgent('reviewer')
+    const agents = new Map<string, FakeAgent>([[lead.id, lead]])
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [lead.id, reviewer.id],
+      list: () => [...agents.values()],
+    })
+    hub.onEvent(event => { events.push(event) })
+
+    const sent = hub.send(lead, {
+      to: '@reviewer',
+      text: 'This message should wait for a live Session.',
+      delivery: 'quiet',
+    })
+
+    expect(sent).toMatchObject({ recipients: 1, delivered: 0, woken: 0 })
+    expect(hub.receipt(sent.messageId)).toMatchObject({
+      recipientIds: [reviewer.id],
+      deliveredParticipantIds: [],
+      pendingParticipantIds: [reviewer.id],
+      pendingDeliveries: [{ participantId: reviewer.id, reason: 'no_active_session' }],
+    })
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'inbox',
+      action: 'blocked',
+      agentId: reviewer.id,
+      messageId: sent.messageId,
+      reason: 'no_active_session',
+    }))
+
+    agents.set(reviewer.id, reviewer)
+    expect(hub.refreshAgent(reviewer.id)).toBe(1)
+    expect(reviewer.injected[0]).toContain('This message should wait for a live Session.')
+    expect(hub.receipt(sent.messageId)).toMatchObject({
+      deliveredParticipantIds: [reviewer.id],
+      pendingParticipantIds: [],
+      pendingDeliveries: [],
+    })
+
+    const restored = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [lead.id, reviewer.id],
+      list: () => [...agents.values()],
+    })
+    restored.restore(events)
+    expect(restored.receipt(sent.messageId)).toMatchObject({
+      recipientIds: [reviewer.id],
+      deliveredParticipantIds: [reviewer.id],
+      pendingParticipantIds: [],
+    })
+  })
+
+  it('records the native inbox error when delivery fails', () => {
+    const lead = new FakeAgent('lead')
+    const failing: MessageAgent = {
+      id: 'reviewer',
+      inject: () => { throw new Error('native inbox is closed') },
+      followup: () => { throw new Error('native inbox is closed') },
+      steer: () => { throw new Error('native inbox is closed') },
+      cancel: () => {},
+    }
+    const agents = new Map<string, MessageAgent>([[lead.id, lead], [failing.id, failing]])
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    })
+
+    const sent = hub.send(lead, {
+      to: '@reviewer',
+      text: 'Record the actual delivery failure.',
+      delivery: 'quiet',
+    })
+
+    expect(sent.delivered).toBe(0)
+    expect(hub.receipt(sent.messageId).pendingDeliveries).toEqual([
+      expect.objectContaining({
+        participantId: 'reviewer',
+        reason: 'inbox_delivery_failed',
+        detail: 'native inbox is closed',
+      }),
+    ])
+  })
+
+  it('keeps the send-time Channel audience when membership availability changes', () => {
+    const lead = new FakeAgent('lead')
+    const reviewer = new FakeAgent('reviewer')
+    const agents = new Map<string, FakeAgent>([[lead.id, lead], [reviewer.id, reviewer]])
+    const participants = [lead.id, reviewer.id, 'qa']
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...participants],
+      list: () => [...agents.values()],
+    })
+
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: 'Keep the original broadcast audience.',
+      delivery: 'quiet',
+    })
+    participants.splice(participants.indexOf('qa'), 1, 'observer')
+
+    expect(sent).toMatchObject({ recipients: 2, delivered: 1 })
+    expect(hub.receipt(sent.messageId)).toMatchObject({
+      recipientIds: [reviewer.id, 'qa'],
+      deliveredParticipantIds: [reviewer.id],
+      pendingParticipantIds: ['qa'],
+      pendingDeliveries: [expect.objectContaining({
+        participantId: 'qa',
+        reason: 'no_active_session',
+      })],
     })
   })
 
@@ -302,6 +563,30 @@ describe('MessageHub', () => {
     expect(second.hub.inbox(second.reviewer, { unreadOnly: true })).toEqual([])
   })
 
+  it('preserves an absent recipient snapshot when replaying legacy messages', () => {
+    const { hub } = setup()
+    hub.restore([
+      {
+        type: 'message',
+        message: {
+          id: 'legacy-message', sequence: 1, kind: 'text', conversation: '@reviewer', from: 'lead',
+          text: 'Legacy delivery.', resources: [], mentions: [], delivery: 'quiet',
+          createdAt: '2026-08-26T00:00:00.000Z',
+        },
+      },
+      {
+        type: 'inbox', action: 'delivered', agentId: 'reviewer', messageId: 'legacy-message',
+        contextMessageId: 'legacy-context', content: 'full',
+      },
+    ])
+
+    expect(hub.receipt('legacy-message')).toMatchObject({
+      recipientIds: ['reviewer'],
+      deliveredParticipantIds: ['reviewer'],
+      pendingParticipantIds: [],
+    })
+  })
+
   it('bounds live and restored message history while continuing to emit every persisted event', () => {
     const first = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []
@@ -383,6 +668,7 @@ describe('MessageHub', () => {
     const members = new Map([lead, reviewer].map(agent => [agent.id, agent]))
     const hub = new MessageHub({
       get: id => members.get(id),
+      participantIds: () => [...members.keys()],
       list: () => [...members.values()],
       displayName: id => id === 'lead-id' ? 'tech-lead' : 'reviewer',
     })
@@ -405,6 +691,7 @@ describe('MessageHub', () => {
     const outsider = new FakeAgent('outsider')
     const hub = new MessageHub({
       get: id => id === member.id ? member : undefined,
+      participantIds: () => [member.id],
       list: () => [member],
     })
 
@@ -422,6 +709,7 @@ describe('MessageHub', () => {
     const agents = new Map([lead, reviewer, qa].map(agent => [agent.id, agent]))
     const hub = new MessageHub({
       get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
       list: () => [...agents.values()],
       canContact: (sender, recipient) => sender !== 'lead' || recipient === 'reviewer',
       canAccessChannel: (agent, channel) => agent !== 'lead' || channel === 'decisions',
@@ -703,6 +991,7 @@ describe('MessageHub', () => {
 
     const restored = new MessageHub({
       get: id => first.agents.get(id),
+      participantIds: () => [...first.agents.keys()],
       list: () => [...first.agents.values()],
     })
     restored.restore(events)
@@ -1005,6 +1294,7 @@ describe('MessageHub', () => {
     const { agents, lead, reviewer, qa, observer } = setup()
     const hub = new MessageHub({
       get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
       list: () => [...agents.values()],
       defaultVoter: id => id !== observer.id,
     })
@@ -1022,6 +1312,7 @@ describe('MessageHub', () => {
     const { agents, lead, observer } = setup()
     const hub = new MessageHub({
       get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
       list: () => [...agents.values()],
       defaultVoter: id => id !== observer.id,
       canVote: id => id !== observer.id,
@@ -1275,7 +1566,7 @@ describe('MessageHub', () => {
       to: 'meeting:design-review',
       text: 'The review can continue.',
       delivery: 'wakeup',
-    })).toMatchObject({ recipients: 1, woken: 1 })
+    })).toMatchObject({ recipients: 2, delivered: 1, woken: 1 })
     expect(lead.followedUp.at(-1)).toContain('The review can continue.')
     expect(hub.closeMeeting(lead, 'design-review')).toMatchObject({ status: 'closed' })
   })
@@ -1311,7 +1602,11 @@ describe('MessageHub', () => {
 
   it('validates linked action-item tasks when the Team supplies a task resolver', () => {
     const { agents, lead, reviewer } = setup()
-    const hub = new MessageHub({ get: id => agents.get(id), list: () => [...agents.values()] }, {
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    }, {
       validateTaskReference: (taskId, assignee) => {
         if (taskId !== 'task-review' || assignee !== reviewer.id) throw new Error('invalid linked task')
       },

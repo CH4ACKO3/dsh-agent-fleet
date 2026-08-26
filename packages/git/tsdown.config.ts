@@ -24,8 +24,8 @@ export default defineConfig({
   sourcemap: true,
   dts: false,
   deps: {
-    alwaysBundle: ['simple-icons', 'zod'],
-    onlyBundle: ['simple-icons', 'zod'],
+    alwaysBundle: ['@deepseek-ai/dsh-typert-protocol', 'simple-icons', 'zod'],
+    onlyBundle: ['@deepseek-ai/dsh-typert-protocol', 'simple-icons', 'zod'],
   },
   banner: { js: moduleHeader },
   footer: { js: moduleFooter },

@@ -19,13 +19,26 @@ import {
 
 import type { FleetMemberView } from './member-view.js'
 import type { FleetAssistantRuntime } from './assistant.js'
-import type { FleetPermissionService } from './authorization/permissions.js'
-import type { FleetMemberRequestPatch, FleetRunService, FleetWorkStatus } from './run.js'
+import type {
+  FleetAccessEffect,
+  FleetAccessLevel,
+  FleetAccessScope,
+  FleetAccessService,
+} from './authorization/access.js'
+import { fleetPrivateGroupId } from './authorization/groups.js'
+import type { FleetMemberAccess, FleetPermissionService } from './authorization/permissions.js'
+import type {
+  ConfigureFleetBudgetInput,
+  FleetMemberRequestPatch,
+  FleetRunService,
+  FleetTeamSettings,
+  FleetWorkStatus,
+} from './run.js'
 import type { FleetSetupService } from './setup.js'
 
 export interface FleetWebProjectInput {
   readonly teamId: string
-  readonly view?: 'team' | 'member' | 'trace' | 'conversation' | 'resource' | 'configuration'
+  readonly view?: 'team' | 'member' | 'trace' | 'conversation' | 'resource' | 'configuration' | 'settings'
   readonly member?: string
   readonly conversation?: string
   readonly resource?: string
@@ -54,20 +67,32 @@ export interface FleetWebSendInput {
 export interface FleetWebMemberInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'add' | 'update' | 'configure' | 'configure_assistant' | 'configure_all' | 'pause' | 'resume' | 'remove' | 'permissions' | 'reset_permissions'
+  readonly action: 'add' | 'update' | 'configure' | 'configure_assistant' | 'configure_all' | 'pause' | 'resume' | 'wake' | 'remove' | 'permissions' | 'reset_permissions' | 'get_access' | 'set_access_mode' | 'add_access_rule' | 'remove_access_rule'
   readonly member?: string
   readonly view?: FleetMemberView
   readonly request?: FleetMemberRequestPatch
-  readonly groups?: readonly string[]
+  readonly assignment?: FleetMemberAccess
+  readonly resourceKind?: string
+  readonly accessMode?: 'inherit' | 'restricted'
+  readonly accessRule?: {
+    readonly resourceKind: string
+    readonly resourceId: string
+    readonly scope: FleetAccessScope
+    readonly effect: FleetAccessEffect
+    readonly levels: readonly FleetAccessLevel[]
+  }
+  readonly accessRuleId?: string
 }
 
 export interface FleetWebControlInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'start' | 'finish' | 'pause' | 'resume' | 'wake' | 'close'
+  readonly action: 'start' | 'finish' | 'load' | 'pause' | 'resume' | 'wake' | 'close' | 'configure' | 'budget'
   readonly taskPath?: string
   readonly status?: Exclude<FleetWorkStatus, 'running'>
   readonly summary?: string
+  readonly settings?: FleetTeamSettings
+  readonly budget?: Omit<ConfigureFleetBudgetInput, 'runId'>
 }
 
 export interface FleetWebUploadInput {
@@ -77,6 +102,12 @@ export interface FleetWebUploadInput {
   readonly base64: string
   readonly label?: string
   readonly mediaType?: string
+}
+
+export interface FleetWebRemoveResourceInput {
+  readonly sessionId: string
+  readonly teamId: string
+  readonly resourceId: string
 }
 
 export interface FleetWebArchiveInput {
@@ -127,6 +158,7 @@ export class FleetWebRemote extends TypertRemoteService {
     private readonly setups: FleetSetupService,
     private readonly permissions?: FleetPermissionService,
     private readonly assistant?: FleetAssistantRuntime,
+    private readonly access?: FleetAccessService,
   ) {
     super(host, 'fleetWeb', { namespace: 'fleet' })
     host.effect(() => () => {
@@ -154,6 +186,7 @@ export class FleetWebRemote extends TypertRemoteService {
       return this.runs.readResourcePreview(teamId, required(input.resource, 'resource'), signal, input.revision)
     }
     if (input.view === 'configuration') return this.runs.exportConfiguration(teamId)
+    if (input.view === 'settings') return this.runs.teamSettings(teamId)
     if (input.view === 'trace') {
       const member = required(input.member, 'member')
       if (input.sourceSessionId !== undefined || input.contextMessageId !== undefined) {
@@ -237,13 +270,62 @@ export class FleetWebRemote extends TypertRemoteService {
     signal.throwIfAborted()
     const caller = this.caller(input.sessionId)
     const teamId = required(input.teamId, 'teamId')
-    if (input.action === 'resume' && this.runs.status(teamId).status === 'paused') {
-      throw new Error('resume the Fleet Team before resuming an individual member')
-    }
     if (input.action === 'resume') {
       return this.runs.resumeMemberAsExternal(caller, teamId, required(input.member, 'member'))
     }
-    const assistant = this.runs.requireAssistantConnection(caller, teamId)
+    if (input.action === 'wake') {
+      return this.runs.wakeMemberAsExternal(caller, teamId, required(input.member, 'member'))
+    }
+    if (input.action === 'pause') {
+      return this.runs.pauseMemberAsExternal(caller, teamId, required(input.member, 'member'))
+    }
+    if (input.action === 'permissions' || input.action === 'reset_permissions') {
+      if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
+      const member = required(input.member, 'member')
+      if (input.action === 'permissions') {
+        if (input.assignment === undefined) throw new Error('member permissions requires assignment')
+        this.permissions.setMember(teamId, member, input.assignment)
+      } else {
+        this.permissions.resetMember(teamId, member)
+      }
+      return this.permissions.inspectMember(teamId, member)
+    }
+    if (input.action === 'get_access') {
+      return this.memberAccess(teamId, required(input.member, 'member'))
+    }
+    if (input.action === 'set_access_mode') {
+      const member = required(input.member, 'member')
+      if (this.access === undefined) throw new Error('Fleet Access is unavailable')
+      if (input.accessMode === undefined) throw new Error('member Access mode requires accessMode')
+      this.access.setMode(teamId, { kind: 'group', id: fleetPrivateGroupId(member) },
+        required(input.resourceKind, 'resourceKind'), input.accessMode)
+      return this.memberAccess(teamId, member)
+    }
+    if (input.action === 'add_access_rule') {
+      const member = required(input.member, 'member')
+      if (this.access === undefined) throw new Error('Fleet Access is unavailable')
+      if (input.accessRule === undefined) throw new Error('member Access rule requires accessRule')
+      this.access.putRule(teamId, {
+        principal: { kind: 'group', id: fleetPrivateGroupId(member) },
+        resource: { kind: input.accessRule.resourceKind, id: input.accessRule.resourceId },
+        scope: input.accessRule.scope,
+        effect: input.accessRule.effect,
+        levels: input.accessRule.levels,
+      })
+      return this.memberAccess(teamId, member)
+    }
+    if (input.action === 'remove_access_rule') {
+      const member = required(input.member, 'member')
+      if (this.access === undefined) throw new Error('Fleet Access is unavailable')
+      const id = required(input.accessRuleId, 'accessRuleId')
+      const principal = { kind: 'group' as const, id: fleetPrivateGroupId(member) }
+      if (!this.access.rules(teamId, principal).some(rule => rule.id === id)) {
+        throw new Error(`unknown Fleet Access rule ${id} for member ${member}`)
+      }
+      this.access.removeRule(teamId, id)
+      return this.memberAccess(teamId, member)
+    }
+    this.runs.requireAssistantConnection(caller, teamId)
     switch (input.action) {
       case 'add':
         if (input.view === undefined) throw new Error('member add requires view')
@@ -260,29 +342,41 @@ export class FleetWebRemote extends TypertRemoteService {
         })
       case 'configure_assistant':
         if (input.request === undefined) throw new Error('assistant configure requires request')
-        return this.runs.configureAssistant(caller, { runId: teamId, request: input.request })
+        return this.runs.configureAssistant(caller, {
+          runId: teamId,
+          ...(input.member === undefined ? {} : { assistant: input.member }),
+          request: input.request,
+        })
       case 'configure_all':
         if (input.request === undefined) throw new Error('Team configure requires request')
         return this.runs.configureTeam(caller, { runId: teamId, request: input.request })
-      case 'pause': return this.runs.pauseMember(caller, teamId, required(input.member, 'member'))
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))
-      case 'permissions': {
-        if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
-        if (!this.permissions.canManage(teamId, assistant.view)) {
-          throw new Error(`Fleet assistant ${assistant.view.id} cannot manage permissions`)
-        }
-        return this.permissions.setMemberGroups(teamId, required(input.member, 'member'), input.groups ?? [])
-      }
-      case 'reset_permissions': {
-        if (this.permissions === undefined) throw new Error('Fleet permissions are unavailable')
-        if (!this.permissions.canManage(teamId, assistant.view)) {
-          throw new Error(`Fleet assistant ${assistant.view.id} cannot manage permissions`)
-        }
-        const member = required(input.member, 'member')
-        this.permissions.resetMember(teamId, member)
-        return this.permissions.inspectMember(teamId, member)
-      }
       default: throw new Error(`unknown Fleet member action ${String(input.action)}`)
+    }
+  }
+
+  private memberAccess(teamId: string, member: string) {
+    const access = this.access
+    if (access === undefined) throw new Error('Fleet Access is unavailable')
+    if (!this.runs.memberViews(teamId).some(view => view.id === member)) {
+      throw new Error(`unknown Fleet member ${member}`)
+    }
+    const principal = { kind: 'group' as const, id: fleetPrivateGroupId(member) }
+    const resourceKinds = access.adapterKinds()
+    return {
+      resourceKinds,
+      modes: resourceKinds.map(resourceKind => ({
+        resourceKind,
+        mode: access.mode(teamId, principal, resourceKind),
+      })),
+      rules: access.rules(teamId, principal).map(rule => ({
+        id: rule.id,
+        resourceKind: rule.resource.kind,
+        resourceId: rule.resource.id,
+        scope: rule.scope,
+        effect: rule.effect,
+        levels: rule.levels,
+      })),
     }
   }
 
@@ -290,13 +384,20 @@ export class FleetWebRemote extends TypertRemoteService {
     signal.throwIfAborted()
     const caller = this.caller(input.sessionId)
     const team = this.runs.status(required(input.teamId, 'teamId'))
-    if (input.action === 'wake') return this.runs.wakeTeamAsExternal(team.id)
-    this.runs.requireAssistantConnection(caller, team.id, input.action === 'resume')
+    if (input.action === 'configure') {
+      if (input.settings === undefined) throw new Error('Team configure requires settings')
+      return this.runs.configureTeamSettings(caller, { runId: team.id, settings: input.settings })
+    }
+    if (input.action === 'budget') {
+      if (input.budget === undefined) throw new Error('Team budget update requires budget')
+      return this.runs.configureBudget(caller, { runId: team.id, ...input.budget })
+    }
+    if (input.action === 'wake') return this.runs.wakeTeamAsExternal(caller, team.id)
+    if (input.action === 'load') return this.runs.loadTeamMembersAsExternal(caller, team.id)
+    if (input.action === 'pause') return this.runs.pauseTeamAsExternal(caller, team.id)
+    this.runs.requireAssistantConnection(caller, team.id)
     switch (input.action) {
-      case 'pause': return this.runs.pauseTeam(caller, team.id)
-      case 'resume': return team.status === 'paused' && team.runtimeState === 'active'
-        ? this.runs.resumeTeam(caller, team.id)
-        : this.runs.resume(caller, { runId: team.id, projectRoot: team.projectRoot })
+      case 'resume': return this.runs.resumeTeam(caller, team.id)
       case 'start': return Promise.resolve(this.runs.start(caller, {
         runId: team.id, projectRoot: team.projectRoot, taskPath: required(input.taskPath, 'taskPath'),
       }))
@@ -319,6 +420,17 @@ export class FleetWebRemote extends TypertRemoteService {
       base64: input.base64,
       ...(input.label === undefined ? {} : { label: input.label }),
       ...(input.mediaType === undefined ? {} : { mediaType: input.mediaType }),
+    })
+  }
+
+  removeResource(input: FleetWebRemoveResourceInput, signal: AbortSignal) {
+    signal.throwIfAborted()
+    const caller = this.caller(input.sessionId)
+    const teamId = required(input.teamId, 'teamId')
+    this.runs.requireAssistantConnection(caller, teamId)
+    return this.runs.removeResource(caller, {
+      runId: teamId,
+      resourceId: required(input.resourceId, 'resourceId'),
     })
   }
 

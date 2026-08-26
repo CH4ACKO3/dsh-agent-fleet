@@ -1,6 +1,30 @@
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, it } from 'vitest'
 
 import { FULL_TEAM_TEMPLATES } from '../packages/ui/src/team-templates.generated.js'
+
+interface TemplateParticipant {
+  readonly id: string
+  readonly prompt: string
+  readonly provider: string
+  readonly model: string
+  readonly canVote?: boolean
+  readonly toolGroups: readonly string[]
+  readonly permissions: readonly string[]
+  readonly contacts?: { readonly members?: readonly string[]; readonly channels?: readonly string[] }
+}
+
+const LIVESTREAM_LOCAL_TEMPLATE = JSON.parse(readFileSync(
+  new URL('../examples/frontal-team/teams/research-livestream.local.json', import.meta.url),
+  'utf8',
+)) as {
+  readonly core: {
+    readonly assistant: TemplateParticipant
+    readonly members: readonly TemplateParticipant[]
+  }
+}
+
 describe('complete Team template locales', () => {
   it('contains syntactically valid static actions without requiring the permissions plugin', () => {
     for (const template of FULL_TEAM_TEMPLATES) {
@@ -21,8 +45,7 @@ describe('complete Team template locales', () => {
         const participants = [configuration.core.assistant, ...configuration.core.members]
         const maintainers = participants.filter(member => member.permissions.includes('team.manage'))
         const contributors = configuration.core.members.filter(member => member.permissions.includes('resource.write'))
-        if (template.id === 'research-livestream') expect(maintainers).toEqual([])
-        else expect(maintainers.length).toBeGreaterThan(0)
+        expect(maintainers.length).toBeGreaterThan(0)
         expect(contributors.some(member => !member.permissions.includes('team.manage'))).toBe(true)
       }
     }
@@ -57,40 +80,38 @@ describe('complete Team template locales', () => {
     }
   })
 
-  it('uses the backstage Team assistant for the conversation and lists the VTuber as a member', () => {
-    const livestream = FULL_TEAM_TEMPLATES.find(template => template.id === 'research-livestream')
-    if (livestream === undefined) throw new Error('missing livestream research Team template')
-    for (const configuration of [livestream.configuration.en, livestream.configuration.zh]) {
-      expect(configuration.core.assistant).toMatchObject({
-        id: 'team-assistant',
-        canVote: false,
-        permissions: ['message.wakeup'],
-      })
-      const participants = [configuration.core.assistant, ...configuration.core.members]
-      expect(participants.every(member => member.provider.length > 0 && member.model.length > 0)).toBe(true)
-      expect(new Set(participants.map(member => `${member.provider}/${member.model}`)).size).toBe(1)
-      const vtuber = configuration.core.members.find(member => member.id === 'livestream-vtuber')
-      expect(vtuber).toMatchObject({
-        permissions: ['joyride.control', 'livestream.host'],
-        contacts: { members: ['team-assistant'], channels: ['main'] },
-      })
-      expect(configuration.core.assistant.toolGroups).not.toContain('coordination')
-      expect(configuration.core.assistant.permissions).not.toContain('joyride.control')
-      expect(configuration.core.assistant.permissions).not.toContain('livestream.host')
-      expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
-        .every(member => !member.permissions.includes('joyride.control'))).toBe(true)
-      expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
-        .every(member => !member.permissions.includes('livestream.host'))).toBe(true)
-      const sharedPersona = vtuber?.prompt.split(/\n\n## Onstage surface|\n\n## 前台界面/u)[0]
-      expect(configuration.core.assistant.prompt.startsWith(sharedPersona ?? '')).toBe(true)
-      expect([...configuration.core.members.map(member => member.id)].sort()).toEqual([
-        'livestream-vtuber',
-        'theory-lead',
-        'data-evaluation-scientist',
-        'literature-researcher',
-        'experiment-model-researcher',
-        'reproducibility-engineer',
-      ].sort())
-    }
+  it('keeps the livestream research configuration as a standalone local template', () => {
+    const configuration = LIVESTREAM_LOCAL_TEMPLATE
+    expect(FULL_TEAM_TEMPLATES.some(template => template.id === 'research-livestream')).toBe(false)
+    expect(configuration.core.assistant).toMatchObject({
+      id: 'team-assistant',
+      canVote: false,
+      permissions: ['message.wakeup'],
+    })
+    const participants = [configuration.core.assistant, ...configuration.core.members]
+    expect(participants.every(member => member.provider.length > 0 && member.model.length > 0)).toBe(true)
+    expect(new Set(participants.map(member => `${member.provider}/${member.model}`)).size).toBe(1)
+    const vtuber = configuration.core.members.find(member => member.id === 'livestream-vtuber')
+    expect(vtuber).toMatchObject({
+      permissions: ['joyride.control', 'livestream.host'],
+      contacts: { members: ['team-assistant'], channels: ['main'] },
+    })
+    expect(configuration.core.assistant.toolGroups).not.toContain('coordination')
+    expect(configuration.core.assistant.permissions).not.toContain('joyride.control')
+    expect(configuration.core.assistant.permissions).not.toContain('livestream.host')
+    expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
+      .every(member => !member.permissions.includes('joyride.control'))).toBe(true)
+    expect(configuration.core.members.filter(member => member.id !== 'livestream-vtuber')
+      .every(member => !member.permissions.includes('livestream.host'))).toBe(true)
+    const sharedPersona = vtuber?.prompt.split(/\n\n## 前台界面/u)[0]
+    expect(configuration.core.assistant.prompt.startsWith(sharedPersona ?? '')).toBe(true)
+    expect([...configuration.core.members.map(member => member.id)].sort()).toEqual([
+      'livestream-vtuber',
+      'theory-lead',
+      'data-evaluation-scientist',
+      'literature-researcher',
+      'experiment-model-researcher',
+      'reproducibility-engineer',
+    ].sort())
   })
 })

@@ -311,6 +311,7 @@ export class FleetCollaborationService {
         if (id === productivity.id) return productivity
         return participantAgent(id)
       },
+      participantIds: () => [...memberViews.keys()],
       list: () => [...memberIdsByName.keys()].flatMap(id => {
         const agent = participantAgent(id)
         return agent === undefined ? [] : [agent]
@@ -700,7 +701,7 @@ export class FleetCollaborationService {
       },
       sendUserMessage: message => {
         if (message.to.startsWith('#')) messages.connectAgent(user.id, [message.to.slice(1)])
-        return messages.send(user, message)
+        return messages.sendHuman(user, message)
       },
       installTools: (ctx, member, options = {}) => {
         const binding: ToolBinding = {

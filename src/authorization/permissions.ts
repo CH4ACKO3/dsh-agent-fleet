@@ -54,6 +54,8 @@ export interface FleetMemberPermissionProjection {
   readonly configured: boolean
   readonly effective: FleetEffectiveAuthorization
   readonly groups: readonly FleetPermissionGroup[]
+  readonly availableActions: readonly string[]
+  readonly availableToolGroups: readonly string[]
 }
 
 const EMPTY_STATE: FleetPermissionState = { version: 1, groups: {} }
@@ -298,6 +300,8 @@ export class FleetPermissionService implements FleetActionPolicy {
       configured,
       effective: this.authorization.resolve(teamId, view),
       groups: this.groups(teamId),
+      availableActions: this.authorization.actionIds(),
+      availableToolGroups: [...FLEET_MEMBER_TOOL_GROUPS],
     }
   }
 

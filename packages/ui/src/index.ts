@@ -21,8 +21,10 @@ import {
 import {
   clearFleetActivation,
   consumeFleetActivation,
+  fleetExistingAssistantRoute,
   getCurrentFleetSessionId,
   getFleetActivationSnapshot,
+  openFleetSession,
   recoverFleetActivationDraft,
   stageFleetActivation,
   subscribeFleetActivation,
@@ -35,7 +37,7 @@ import {
   mergeFieldPresetImport,
   parseFieldPresetImport,
 } from './field-presets.js'
-import { isChineseLocale } from './locale.js'
+import { fleetText, isChineseLocale } from './locale.js'
 import { FleetMark } from './fleet-mark.js'
 import { FULL_TEAM_TEMPLATES } from './team-templates.generated.js'
 import {
@@ -45,8 +47,14 @@ import {
   fleetConfigurationModules,
 } from './configuration-modules.js'
 import {
+  captureFleetOfficialComposer,
+  configureFleetAssistantSessionModel,
+  fleetPrivateConversationCommands,
+  FleetBudgetMeter,
+  getFleetAssistantDisplayName,
   getFleetModelDirectory,
   getFleetTeamDirectorySnapshot,
+  parseFleetConversationCommand,
   sendFleetAssistantMailboxMessage,
   subscribeFleetTeamDirectory,
   type FleetModelDirectory,
@@ -55,6 +63,11 @@ import {
 } from './team-panel.js'
 import { useFleetMetaAssistantSession } from './meta-assistant.js'
 import { uploadFleetSetupFile } from './web-client.js'
+import {
+  FleetComposerAttachmentButton,
+  FleetComposerAttachmentList,
+  useFleetComposerAttachments,
+} from './composer-attachments.js'
 
 const STYLE_ID = 'dsh-agent-fleet-team-entry'
 
@@ -65,6 +78,41 @@ const styles = `
 
 .dsh-fleet-meta-composer-marker {
   display: none;
+}
+
+.dsh-fleet-assistant-composer-attachment-dropzone {
+  display: contents;
+}
+
+.dsh-fleet-assistant-composer-urgent {
+  height: 28px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 7px;
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-assistant-composer-urgent:hover,
+.dsh-fleet-assistant-composer-urgent[aria-pressed="true"] {
+  color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
+}
+
+.dsh-fleet-assistant-composer-urgent:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.dsh-fleet-assistant-composer-status {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xs-13);
+}
+
+.dsh-fleet-assistant-composer-status[data-error="true"] {
+  color: var(--dsw-alias-state-error-primary);
 }
 
 body:has(.dsh-fleet-meta-composer-marker) [class*="_heroWorkspaceRow"] {
@@ -237,6 +285,7 @@ button[data-dsh-fleet-workspace-required="true"] {
 
 @media (prefers-reduced-motion: reduce) {
   .dsh-fleet-team-active,
+  .dsh-fleet-assistant-notice,
   .dsh-fleet-workspace-warning,
   button[data-dsh-fleet-workspace-required="true"] {
     animation: none;
@@ -408,6 +457,98 @@ button[data-dsh-fleet-workspace-required="true"] {
 .dsh-fleet-team-submenu-empty {
   min-height: 0;
   cursor: default;
+}
+
+.dsh-fleet-assistant-notice {
+  box-sizing: border-box;
+  z-index: 1102;
+  max-width: calc(100vw - 16px);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-menu);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  box-shadow: var(--dsw-shadow-lv3);
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  display: flex;
+  position: fixed;
+  overflow-y: auto;
+  animation: dsh-fleet-assistant-notice-in 160ms cubic-bezier(.16, 1, .3, 1) both;
+}
+
+.dsh-fleet-assistant-notice-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.dsh-fleet-assistant-notice-copy,
+.dsh-fleet-assistant-notice-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-fleet-assistant-notice-copy {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-fleet-assistant-notice-error {
+  color: var(--dsw-alias-state-error-primary, #d83a3a);
+}
+
+.dsh-fleet-assistant-notice-actions {
+  flex-direction: column;
+  gap: 6px;
+  display: flex;
+}
+
+.dsh-fleet-assistant-notice-action {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.dsh-fleet-assistant-notice-action:hover,
+.dsh-fleet-assistant-notice-action:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+  outline: none;
+}
+
+.dsh-fleet-assistant-notice-action[data-primary="true"] {
+  color: var(--dsw-alias-label-on-primary, white);
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.dsh-fleet-assistant-notice-action[data-primary="true"]:hover,
+.dsh-fleet-assistant-notice-action[data-primary="true"]:focus-visible {
+  background: var(--dsw-alias-state-business-primary-hover, var(--dsw-alias-state-business-primary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, white 28%, transparent);
+}
+
+@keyframes dsh-fleet-assistant-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .dsh-fleet-config-overlay {
@@ -1903,6 +2044,258 @@ button[data-dsh-fleet-workspace-required="true"] {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+.dsh-fleet-member-auth {
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  padding-top: 20px;
+}
+
+.dsh-fleet-member-auth-head {
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  display: flex;
+}
+
+.dsh-fleet-member-auth-head h3,
+.dsh-fleet-member-auth-section-title {
+  color: var(--dsw-alias-label-primary);
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.dsh-fleet-member-auth-head p,
+.dsh-fleet-member-auth-note {
+  max-width: 68ch;
+  color: var(--dsw-alias-label-secondary);
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-fleet-member-auth-mode {
+  flex: none;
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 8px;
+  padding: 2px;
+  display: flex;
+}
+
+.dsh-fleet-member-auth-mode button {
+  height: 28px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.dsh-fleet-member-auth-mode button[aria-pressed="true"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 10%);
+}
+
+.dsh-fleet-member-auth-mode button:focus-visible,
+.dsh-fleet-member-auth-option:focus-visible,
+.dsh-fleet-member-access-rules button:focus-visible,
+.dsh-fleet-member-access-rule-form > button:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.dsh-fleet-member-auth-section-title {
+  margin-top: 22px;
+  margin-bottom: 8px;
+}
+
+.dsh-fleet-member-auth-options {
+  gap: 2px;
+  display: grid;
+}
+
+.dsh-fleet-member-auth-option {
+  width: 100%;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 9px 11px;
+  display: grid;
+}
+
+.dsh-fleet-member-auth-option:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-member-auth-option[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 34%, transparent);
+}
+
+.dsh-fleet-member-auth-option strong,
+.dsh-fleet-member-access-category strong,
+.dsh-fleet-member-access-kinds strong,
+.dsh-fleet-member-access-rules strong {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.dsh-fleet-member-auth-option span,
+.dsh-fleet-member-access-category small,
+.dsh-fleet-member-access-kinds small,
+.dsh-fleet-member-access-rules small {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.dsh-fleet-member-access-categories,
+.dsh-fleet-member-access-kinds,
+.dsh-fleet-member-access-rules {
+  gap: 1px;
+  display: grid;
+}
+
+.dsh-fleet-member-access-category,
+.dsh-fleet-member-access-kinds > label,
+.dsh-fleet-member-access-rules > div {
+  min-height: 48px;
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+  display: flex;
+}
+
+.dsh-fleet-member-access-category > span,
+.dsh-fleet-member-access-kinds > label > span,
+.dsh-fleet-member-access-rules > div > span {
+  min-width: 0;
+  display: grid;
+}
+
+.dsh-fleet-member-access-category select,
+.dsh-fleet-member-access-kinds select,
+.dsh-fleet-member-access-rule-form select,
+.dsh-fleet-member-access-rule-form input {
+  box-sizing: border-box;
+  min-width: 132px;
+  height: 32px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.dsh-fleet-member-auth-technical {
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  display: grid;
+}
+
+.dsh-fleet-member-auth-technical > label {
+  min-width: 0;
+  gap: 6px;
+  display: grid;
+}
+
+.dsh-fleet-member-auth-technical > label > strong {
+  font-size: 12px;
+}
+
+.dsh-fleet-member-auth-technical > label > span {
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-line;
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.dsh-fleet-member-access-rules button {
+  color: var(--dsw-alias-state-danger-primary, #d84a4a);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.dsh-fleet-member-access-rule-form {
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+  margin-top: 12px;
+  display: grid;
+}
+
+.dsh-fleet-member-access-rule-form > label {
+  gap: 5px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  display: grid;
+}
+
+.dsh-fleet-member-access-rule-form input,
+.dsh-fleet-member-access-rule-form select {
+  width: 100%;
+}
+
+.dsh-fleet-member-access-rule-form fieldset {
+  border: 0;
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0;
+}
+
+.dsh-fleet-member-access-rule-form legend {
+  color: var(--dsw-alias-label-secondary);
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.dsh-fleet-member-access-rule-form fieldset > div {
+  flex-wrap: wrap;
+  gap: 12px;
+  display: flex;
+}
+
+.dsh-fleet-member-access-rule-form fieldset label {
+  align-items: center;
+  gap: 5px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  display: flex;
+}
+
+.dsh-fleet-member-access-rule-form > button {
+  width: fit-content;
+  height: 32px;
+  color: white;
+  cursor: pointer;
+  background: var(--dsw-alias-state-business-primary);
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.dsh-fleet-member-access-rule-form > button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
 .dsh-fleet-member-editor-remove {
   color: var(--dsw-alias-state-danger-primary, #d84a4a);
   cursor: pointer;
@@ -1977,6 +2370,22 @@ button[data-dsh-fleet-workspace-required="true"] {
 
   .dsh-fleet-config-field-wide {
     grid-column: 1;
+  }
+
+  .dsh-fleet-member-auth-head,
+  .dsh-fleet-member-access-category,
+  .dsh-fleet-member-access-kinds > label {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dsh-fleet-member-auth-mode {
+    align-self: flex-start;
+  }
+
+  .dsh-fleet-member-auth-technical,
+  .dsh-fleet-member-access-rule-form {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -2058,6 +2467,14 @@ interface MenuPosition {
 interface FloatingMenuPosition extends MenuPosition {
   width: number
   maxHeight: number
+}
+
+interface FleetAssistantConnectionNotice {
+  readonly kind: 'open' | 'reconnect'
+  readonly team: FleetPanelTeamSummary
+  readonly assistants: NonNullable<FleetPanelTeamSummary['assistantConnections']>
+  readonly position: FloatingMenuPosition
+  readonly error?: string
 }
 
 function floatingMenuPosition(anchor: DOMRect, preferredWidth: number, preferredHeight: number): FloatingMenuPosition {
@@ -2159,9 +2576,27 @@ interface MemberDraft {
   readonly canVote?: boolean
   readonly toolGroups?: unknown
   readonly permissions?: unknown
+  readonly access: MemberAccessDraft
   readonly contacts?: unknown
   readonly sourcePresetId: string | null
   readonly modified: boolean
+}
+
+type MemberAccessLevel = 'read' | 'write' | 'use' | 'manage'
+type MemberAccessMode = 'inherit' | 'restricted'
+
+interface MemberAccessRuleDraft {
+  readonly id: string
+  readonly resourceKind: string
+  readonly resourceId: string
+  readonly scope: 'self' | 'tree'
+  readonly effect: 'allow' | 'deny'
+  readonly levels: readonly MemberAccessLevel[]
+}
+
+interface MemberAccessDraft {
+  readonly restrictedKinds: readonly string[]
+  readonly rules: readonly MemberAccessRuleDraft[]
 }
 
 type FieldPresetSelections = Readonly<Record<FieldPresetTarget, readonly string[]>>
@@ -2425,6 +2860,9 @@ const DEFAULT_MEMBER_PERMISSIONS = [
   'channel.manage', 'meeting.manage', 'vote.create', 'resource.write', 'team.manage',
 ] as const
 
+const FLEET_ACCESS_CONFIGURATION_MODULE = 'dsh-agent-fleet/authorization/access'
+const EMPTY_MEMBER_ACCESS: MemberAccessDraft = { restrictedKinds: [], rules: [] }
+
 function newMember(seed: Partial<Omit<MemberDraft, 'key'>> = {}): MemberDraft {
   memberKey += 1
   return {
@@ -2439,6 +2877,7 @@ function newMember(seed: Partial<Omit<MemberDraft, 'key'>> = {}): MemberDraft {
     model: '',
     toolGroups: [...DEFAULT_MEMBER_TOOL_GROUPS],
     permissions: [],
+    access: structuredClone(EMPTY_MEMBER_ACCESS),
     sourcePresetId: null,
     modified: false,
     ...seed,
@@ -2521,6 +2960,86 @@ function configuredActor(member: MemberDraft): Record<string, unknown> {
   }
 }
 
+interface FleetAccessConfigurationShape {
+  readonly version: 1
+  readonly modes: readonly {
+    readonly principal: { readonly kind: 'group'; readonly id: string }
+    readonly resourceKind: string
+    readonly mode: 'restricted'
+  }[]
+  readonly rules: readonly {
+    readonly id: string
+    readonly principal: { readonly kind: 'group'; readonly id: string }
+    readonly resource: { readonly kind: string; readonly id: string }
+    readonly scope: 'self' | 'tree'
+    readonly effect: 'allow' | 'deny'
+    readonly levels: readonly MemberAccessLevel[]
+  }[]
+}
+
+function accessConfiguration(value: unknown): FleetAccessConfigurationShape {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { version: 1, modes: [], rules: [] }
+  }
+  const input = value as Readonly<Record<string, unknown>>
+  if (input.version !== 1 || !Array.isArray(input.modes) || !Array.isArray(input.rules)) {
+    return { version: 1, modes: [], rules: [] }
+  }
+  return structuredClone(input) as unknown as FleetAccessConfigurationShape
+}
+
+function memberAccessFromConfiguration(value: unknown, memberId: string): MemberAccessDraft {
+  const configuration = accessConfiguration(value)
+  const principalId = `member:${memberId}`
+  return {
+    restrictedKinds: configuration.modes.flatMap(mode => (
+      mode.principal?.kind === 'group' && mode.principal.id === principalId && mode.mode === 'restricted'
+        ? [mode.resourceKind]
+        : []
+    )),
+    rules: configuration.rules.flatMap(rule => (
+      rule.principal?.kind === 'group' && rule.principal.id === principalId
+        ? [{
+          id: rule.id,
+          resourceKind: rule.resource.kind,
+          resourceId: rule.resource.id,
+          scope: rule.scope,
+          effect: rule.effect,
+          levels: [...rule.levels],
+        }]
+        : []
+    )),
+  }
+}
+
+function configuredAccess(draft: FleetConfigurationDraft): FleetAccessConfigurationShape {
+  const base = accessConfiguration(draft.extensionModules[FLEET_ACCESS_CONFIGURATION_MODULE])
+  const actors = [draft.assistant, ...draft.members.filter(memberHasData)]
+  const privatePrincipals = new Set(actors.map(actor => `member:${actor.id.trim()}`))
+  return {
+    version: 1,
+    modes: [
+      ...base.modes.filter(mode => !privatePrincipals.has(mode.principal.id)),
+      ...actors.flatMap(actor => actor.access.restrictedKinds.map(resourceKind => ({
+        principal: { kind: 'group' as const, id: `member:${actor.id.trim()}` },
+        resourceKind,
+        mode: 'restricted' as const,
+      }))),
+    ],
+    rules: [
+      ...base.rules.filter(rule => !privatePrincipals.has(rule.principal.id)),
+      ...actors.flatMap(actor => actor.access.rules.map((rule, index) => ({
+        id: rule.id || `setup-${actor.id.trim().replace(/[^a-zA-Z0-9._-]/gu, '-')}-${String(index + 1)}`,
+        principal: { kind: 'group' as const, id: `member:${actor.id.trim()}` },
+        resource: { kind: rule.resourceKind, id: rule.resourceId },
+        scope: rule.scope,
+        effect: rule.effect,
+        levels: [...rule.levels],
+      }))),
+    ],
+  }
+}
+
 function configurationForHost(
   draft: FleetConfigurationDraft,
   library: PresetLibrary = readPresetLibrary(),
@@ -2551,6 +3070,7 @@ function configurationForHost(
     },
     modules: {
       ...fleetConfigurationModules.valuesWithDefaults(draft.extensionModules),
+      [FLEET_ACCESS_CONFIGURATION_MODULE]: configuredAccess(draft),
       [FLEET_MESSAGE_CONFIGURATION_MODULE]: {
         defaultChannel: {
           id: draft.channelId.trim(),
@@ -2595,6 +3115,7 @@ function configurationFromPreset(value: unknown): FleetConfigurationDraft {
   const messageValue = modules[FLEET_MESSAGE_CONFIGURATION_MODULE]
   const resourcesValue = modules[FLEET_RESOURCES_CONFIGURATION_MODULE]
   const uiValue = modules[FLEET_UI_CONFIGURATION_MODULE]
+  const accessValue = modules[FLEET_ACCESS_CONFIGURATION_MODULE]
   if (typeof messageValue !== 'object' || messageValue === null || Array.isArray(messageValue)) throw new Error('Invalid Team message settings')
   if (typeof resourcesValue !== 'object' || resourcesValue === null || Array.isArray(resourcesValue)) throw new Error('Invalid Team resource settings')
   if (typeof uiValue !== 'object' || uiValue === null || Array.isArray(uiValue)) throw new Error('Invalid Team UI settings')
@@ -2630,6 +3151,7 @@ function configurationFromPreset(value: unknown): FleetConfigurationDraft {
       ...(member.canVote === undefined ? {} : { canVote: member.canVote }),
       ...(member.toolGroups === undefined ? {} : { toolGroups: structuredClone(member.toolGroups) }),
       ...(member.permissions === undefined ? {} : { permissions: structuredClone(member.permissions) }),
+      access: memberAccessFromConfiguration(accessValue, presetString(member.id, 'member id')),
       ...(member.contacts === undefined ? {} : { contacts: structuredClone(member.contacts) }),
       sourcePresetId: typeof member.sourcePresetId === 'string' ? member.sourcePresetId : null,
       modified: typeof member.modified === 'boolean' ? member.modified : true,
@@ -2658,6 +3180,7 @@ function configurationFromPreset(value: unknown): FleetConfigurationDraft {
           model: presetString(value.model, 'assistant model'),
           ...(value.toolGroups === undefined ? {} : { toolGroups: structuredClone(value.toolGroups) }),
           ...(value.permissions === undefined ? {} : { permissions: structuredClone(value.permissions) }),
+          access: memberAccessFromConfiguration(accessValue, presetString(value.id, 'assistant id', assistantSeed.id)),
           ...(value.contacts === undefined ? {} : { contacts: structuredClone(value.contacts) }),
           sourcePresetId: null,
           modified: typeof value.modified === 'boolean' ? value.modified : true,
@@ -2718,10 +3241,15 @@ function configurationPreset(draft: FleetConfigurationDraft, library: PresetLibr
       name: draft.name,
       positioning: resolvedPresetText(draft, 'positioning', draft.positioning, library, chinese),
       assistant: { ...configuredActor(draft.assistant), modified: draft.assistant.modified },
-      members: draft.members.map(({ key: _key, ...member }) => member),
+      members: draft.members.map(member => ({
+        ...configuredActor(member),
+        sourcePresetId: member.sourcePresetId,
+        modified: member.modified,
+      })),
     },
     modules: {
       ...fleetConfigurationModules.valuesWithDefaults(draft.extensionModules),
+      [FLEET_ACCESS_CONFIGURATION_MODULE]: configuredAccess(draft),
       [FLEET_MESSAGE_CONFIGURATION_MODULE]: {
         defaultChannel: { id: draft.channelId, name: draft.channelName },
         rules: resolvedPresetText(draft, 'rules', draft.rules, library, chinese),
@@ -2916,6 +3444,7 @@ function memberConfigurationChanged(member: MemberDraft, initial: MemberDraft): 
     || member.model !== initial.model
     || JSON.stringify(member.toolGroups) !== JSON.stringify(initial.toolGroups)
     || JSON.stringify(member.permissions) !== JSON.stringify(initial.permissions)
+    || JSON.stringify(member.access) !== JSON.stringify(initial.access)
 }
 
 function memberPermissionEntries(value: unknown): readonly string[] {
@@ -2924,6 +3453,285 @@ function memberPermissionEntries(value: unknown): readonly string[] {
 
 function parseMemberPermissionEntries(value: string): readonly string[] {
   return [...new Set(value.split(/[\n,]/u).map(item => item.trim()).filter(Boolean))]
+}
+
+const SETUP_PERMISSION_PROFILES = [
+  {
+    id: 'observe', name: ['只查看', 'View only'],
+    description: ['可以阅读消息、状态和共享内容，不能推进工作或管理团队。', 'Can read messages, status, and shared content, but cannot advance work or manage the Team.'],
+    toolGroups: ['messages', 'resources', 'status'], permissions: [],
+  },
+  {
+    id: 'collaborate', name: ['参与工作', 'Collaborate'],
+    description: ['可以发消息、加入协作并领取工作，但不能修改团队设置。', 'Can message, collaborate, and claim work, but cannot change Team settings.'],
+    toolGroups: [...DEFAULT_MEMBER_TOOL_GROUPS], permissions: [],
+  },
+  {
+    id: 'lead', name: ['负责工作', 'Lead work'],
+    description: ['可以写共享资源、管理频道和会议并发起投票。', 'Can write shared resources, manage channels and meetings, and create votes.'],
+    toolGroups: [...DEFAULT_MEMBER_TOOL_GROUPS],
+    permissions: ['channel.manage', 'meeting.manage', 'vote.create', 'resource.write'],
+  },
+  {
+    id: 'admin', name: ['管理团队', 'Manage Team'],
+    description: ['拥有内置 Fleet 能力的完整管理权限，包括调整团队。', 'Has full management access to built-in Fleet capabilities, including Team changes.'],
+    toolGroups: [...DEFAULT_MEMBER_TOOL_GROUPS], permissions: [...DEFAULT_MEMBER_PERMISSIONS],
+  },
+] as const
+
+const SETUP_ACCESS_CATEGORIES = [
+  {
+    id: 'conversations', name: ['团队会话', 'Team conversations'],
+    description: ['控制频道和成员私聊的查看、发言与管理范围。', 'Controls which channels and direct conversations can be read, posted to, or managed.'],
+    kinds: ['conversation'],
+  },
+  {
+    id: 'content', name: ['文件与工作内容', 'Files and work content'],
+    description: ['控制文件、文档、工作区、Git 仓库和共享资源。', 'Controls files, documents, workspaces, Git repositories, and shared resources.'],
+    kinds: ['document', 'file', 'git-repository', 'lark-resource', 'resource', 'workspace'],
+  },
+  {
+    id: 'team', name: ['团队本身', 'The Team itself'],
+    description: ['控制针对团队整体的查看和管理操作。', 'Controls viewing and management actions aimed at the Team itself.'],
+    kinds: ['team'],
+  },
+] as const
+
+const SETUP_ACCESS_KIND_NAMES: Readonly<Record<string, readonly [string, string]>> = {
+  conversation: ['会话', 'Conversation'],
+  document: ['文档', 'Document'],
+  file: ['文件', 'File'],
+  'git-repository': ['Git 仓库', 'Git repository'],
+  'lark-resource': ['飞书资源', 'Lark resource'],
+  resource: ['共享资源', 'Shared resource'],
+  team: ['团队', 'Team'],
+  workspace: ['工作区', 'Workspace'],
+}
+
+const SETUP_PERMISSION_DESCRIPTIONS: Readonly<Record<string, readonly [string, string]>> = {
+  messages: ['读取和发送团队消息。', 'Read and send Team messages.'],
+  coordination: ['加入会议和使用团队协作能力。', 'Join meetings and use Team coordination tools.'],
+  resources: ['读取共享资源、查看和领取工作。', 'Read shared resources and view or claim work.'],
+  status: ['读取并更新成员状态。', 'Read and update member status.'],
+  'channel.manage': ['创建和调整频道。', 'Create and change channels.'],
+  'meeting.manage': ['创建、更新和结束会议。', 'Create, update, and end meetings.'],
+  'vote.create': ['发起团队投票。', 'Create Team votes.'],
+  'resource.write': ['创建和修改共享资源。', 'Create and modify shared resources.'],
+  'team.manage': ['调整团队成员和团队设置。', 'Change Team members and Team settings.'],
+}
+
+function sameMemberPermissionValues(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every(value => right.includes(value))
+}
+
+function setupPermissionProfile(member: MemberDraft): string | undefined {
+  const tools = memberPermissionEntries(member.toolGroups)
+  const actions = memberPermissionEntries(member.permissions)
+  return SETUP_PERMISSION_PROFILES.find(profile => (
+    sameMemberPermissionValues(tools, profile.toolGroups)
+      && sameMemberPermissionValues(actions, profile.permissions)
+  ))?.id
+}
+
+function setupPermissionDescription(value: string, chinese: boolean): string {
+  const copy = SETUP_PERMISSION_DESCRIPTIONS[value]
+  return copy === undefined
+    ? (chinese ? `扩展能力 ${value}，具体范围由提供它的插件定义。` : `Extension capability ${value}; its provider plugin defines the exact scope.`)
+    : copy[chinese ? 0 : 1]
+}
+
+function MemberSetupAuthorization({ member, onChange }: {
+  readonly member: MemberDraft
+  readonly onChange: (member: MemberDraft) => void
+}): ReactElement {
+  const chinese = isChineseLocale()
+  const text = (zh: string, en: string): string => chinese ? zh : en
+  const [mode, setMode] = useState<'simple' | 'detailed'>('simple')
+  const [ruleDraft, setRuleDraft] = useState<{
+    resourceKind: string
+    resourceId: string
+    effect: 'allow' | 'deny'
+    scope: 'self' | 'tree'
+    levels: readonly MemberAccessLevel[]
+  }>({ resourceKind: 'conversation', resourceId: '', effect: 'allow', scope: 'self', levels: ['read'] })
+  const selectedProfile = setupPermissionProfile(member)
+  const setCategoryMode = (kinds: readonly string[], value: MemberAccessMode): void => {
+    const restricted = new Set(member.access.restrictedKinds)
+    for (const kind of kinds) value === 'restricted' ? restricted.add(kind) : restricted.delete(kind)
+    onChange({ ...member, access: { ...member.access, restrictedKinds: [...restricted] } })
+  }
+  const addRule = (): void => {
+    const resourceId = ruleDraft.resourceId.trim()
+    if (resourceId.length === 0 || ruleDraft.levels.length === 0) return
+    onChange({
+      ...member,
+      access: {
+        ...member.access,
+        rules: [...member.access.rules, {
+          id: `setup-${Date.now().toString(36)}-${member.access.rules.length + 1}`,
+          resourceKind: ruleDraft.resourceKind,
+          resourceId,
+          effect: ruleDraft.effect,
+          scope: ruleDraft.scope,
+          levels: ruleDraft.levels,
+        }],
+      },
+    })
+    setRuleDraft({ ...ruleDraft, resourceId: '' })
+  }
+  return jsxs('section', {
+    className: 'dsh-fleet-member-auth',
+    children: [
+      jsxs('div', {
+        className: 'dsh-fleet-member-auth-head',
+        children: [
+          jsxs('div', { children: [
+            jsx('h3', { children: text('权限与访问', 'Permissions and access') }),
+            jsx('p', { children: text('权限决定能做什么；资源访问决定能对哪些内容做。', 'Permissions decide what this member can do; resource access decides which content they can do it to.') }),
+          ] }),
+          jsxs('div', {
+            className: 'dsh-fleet-member-auth-mode',
+            role: 'group',
+            'aria-label': text('配置精细程度', 'Configuration detail'),
+            children: [
+              jsx('button', { type: 'button', 'aria-pressed': mode === 'simple', onClick: () => setMode('simple'), children: text('简单', 'Simple') }),
+              jsx('button', { type: 'button', 'aria-pressed': mode === 'detailed', onClick: () => setMode('detailed'), children: text('详细', 'Detailed') }),
+            ],
+          }),
+        ],
+      }),
+      mode === 'simple'
+        ? jsxs(Fragment, { children: [
+          jsx('h4', { className: 'dsh-fleet-member-auth-section-title', children: text('能做什么', 'What they can do') }),
+          jsx('div', {
+            className: 'dsh-fleet-member-auth-options',
+            children: [
+              ...SETUP_PERMISSION_PROFILES.map(profile => jsxs('button', {
+                type: 'button',
+                className: 'dsh-fleet-member-auth-option',
+                'aria-pressed': selectedProfile === profile.id,
+                onClick: () => onChange({ ...member, toolGroups: [...profile.toolGroups], permissions: [...profile.permissions] }),
+                children: [
+                  jsx('strong', { children: profile.name[chinese ? 0 : 1] }),
+                  jsx('span', { children: profile.description[chinese ? 0 : 1] }),
+                ],
+              }, profile.id)),
+              selectedProfile === undefined && jsxs('button', {
+                type: 'button', className: 'dsh-fleet-member-auth-option', 'aria-pressed': 'true',
+                onClick: () => setMode('detailed'),
+                children: [
+                  jsx('strong', { children: text('自定义设置', 'Custom setup') }),
+                  jsx('span', { children: text('当前使用了单独配置；切到详细档查看或修改。', 'Individual settings are active; switch to Detailed to inspect or change them.') }),
+                ],
+              }),
+            ],
+          }),
+          jsx('h4', { className: 'dsh-fleet-member-auth-section-title', children: text('能访问哪些内容', 'Which content they can access') }),
+          jsx('div', {
+            className: 'dsh-fleet-member-access-categories',
+            children: SETUP_ACCESS_CATEGORIES.map(category => {
+              const restrictedCount = category.kinds.filter(kind => member.access.restrictedKinds.includes(kind)).length
+              const categoryMode = restrictedCount === 0 ? 'inherit' : restrictedCount === category.kinds.length ? 'restricted' : 'mixed'
+              return jsxs('label', {
+                className: 'dsh-fleet-member-access-category',
+                children: [
+                  jsxs('span', { children: [
+                    jsx('strong', { children: category.name[chinese ? 0 : 1] }),
+                    jsx('small', { children: category.description[chinese ? 0 : 1] }),
+                  ] }),
+                  jsxs('select', {
+                    value: categoryMode,
+                    onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+                      if (event.currentTarget.value !== 'mixed') setCategoryMode(category.kinds, event.currentTarget.value as MemberAccessMode)
+                    },
+                    children: [
+                      jsx('option', { value: 'inherit', children: text('按团队默认范围', 'Use Team defaults') }),
+                      jsx('option', { value: 'restricted', children: text('仅限允许清单', 'Allow-list only') }),
+                      categoryMode === 'mixed' && jsx('option', { value: 'mixed', children: text('混合设置', 'Mixed setup') }),
+                    ],
+                  }),
+                ],
+              }, category.id)
+            }),
+          }),
+          jsx('p', {
+            className: 'dsh-fleet-member-auth-note',
+            children: member.access.rules.length === 0
+              ? text('当前没有具体资源例外。需要只开放或禁止某个会话、文件或工作区时，请使用详细档。', 'There are no resource exceptions. Use Detailed to allow or deny a specific conversation, file, or workspace.')
+              : text(`另有 ${member.access.rules.length} 条具体资源例外；可在详细档查看。`, `${member.access.rules.length} specific resource exceptions are also active; inspect them in Detailed.`),
+          }),
+        ] })
+        : jsxs(Fragment, { children: [
+          jsx('h4', { className: 'dsh-fleet-member-auth-section-title', children: text('工具与操作', 'Tools and actions') }),
+          jsx('p', { className: 'dsh-fleet-member-auth-note', children: text('工具组决定成员能看到哪些工具；操作权限决定这些工具能执行哪些高影响动作。每行一项。', 'Tool groups decide which tools are visible; action permissions decide which high-impact actions those tools can perform. Use one item per line.') }),
+          jsxs('div', { className: 'dsh-fleet-member-auth-technical', children: [
+            jsxs('label', { children: [
+              jsx('strong', { children: text('工具组', 'Tool groups') }),
+              jsx('textarea', {
+                className: 'dsh-fleet-config-textarea',
+                value: memberPermissionEntries(member.toolGroups).join('\n'), spellCheck: false,
+                onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...member, toolGroups: parseMemberPermissionEntries(event.target.value) }),
+              }),
+              jsx('span', { children: memberPermissionEntries(member.toolGroups).map(value => `${value} — ${setupPermissionDescription(value, chinese)}`).join('\n') || text('没有工具组：成员看不到 Fleet 工具。', 'No tool groups: the member sees no Fleet tools.') }),
+            ] }),
+            jsxs('label', { children: [
+              jsx('strong', { children: text('额外操作权限', 'Additional action permissions') }),
+              jsx('textarea', {
+                className: 'dsh-fleet-config-textarea',
+                value: memberPermissionEntries(member.permissions).join('\n'), spellCheck: false,
+                onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...member, permissions: parseMemberPermissionEntries(event.target.value) }),
+              }),
+              jsx('span', { children: memberPermissionEntries(member.permissions).map(value => `${value} — ${setupPermissionDescription(value, chinese)}`).join('\n') || text('没有额外操作权限。', 'No additional action permissions.') }),
+            ] }),
+          ] }),
+          jsx('h4', { className: 'dsh-fleet-member-auth-section-title', children: text('各类资源的默认方式', 'Default access by resource type') }),
+          jsx('div', {
+            className: 'dsh-fleet-member-access-kinds',
+            children: Object.entries(SETUP_ACCESS_KIND_NAMES).map(([kind, copy]) => jsxs('label', {
+              children: [
+                jsxs('span', { children: [
+                  jsx('strong', { children: copy[chinese ? 0 : 1] }),
+                  jsx('small', { children: member.access.restrictedKinds.includes(kind)
+                    ? text('没有匹配的允许规则时，拒绝访问。', 'Deny access when no allow rule matches.')
+                    : text('没有匹配规则时，沿用团队和资源的默认范围。', 'Use Team and resource defaults when no rule matches.') }),
+                ] }),
+                jsxs('select', {
+                  value: member.access.restrictedKinds.includes(kind) ? 'restricted' : 'inherit',
+                  onChange: (event: ChangeEvent<HTMLSelectElement>) => setCategoryMode([kind], event.currentTarget.value as MemberAccessMode),
+                  children: [
+                    jsx('option', { value: 'inherit', children: text('沿用默认', 'Use defaults') }),
+                    jsx('option', { value: 'restricted', children: text('仅限允许规则', 'Allow-list only') }),
+                  ],
+                }),
+              ],
+            }, kind)),
+          }),
+          jsx('h4', { className: 'dsh-fleet-member-auth-section-title', children: text('具体资源例外', 'Specific resource exceptions') }),
+          member.access.rules.length === 0
+            ? jsx('p', { className: 'dsh-fleet-member-auth-note', children: text('没有例外规则。', 'No exception rules.') })
+            : jsx('div', { className: 'dsh-fleet-member-access-rules', children: member.access.rules.map(rule => jsxs('div', {
+              children: [
+                jsxs('span', { children: [
+                  jsx('strong', { children: `${rule.effect === 'allow' ? text('允许', 'Allow') : text('禁止', 'Deny')} · ${SETUP_ACCESS_KIND_NAMES[rule.resourceKind]?.[chinese ? 0 : 1] ?? rule.resourceKind}` }),
+                  jsx('small', { children: `${rule.resourceId} · ${rule.scope === 'tree' ? text('包含下级', 'includes children') : text('仅此资源', 'this resource only')} · ${rule.levels.join(', ')}` }),
+                ] }),
+                jsx('button', { type: 'button', onClick: () => onChange({ ...member, access: { ...member.access, rules: member.access.rules.filter(candidate => candidate.id !== rule.id) } }), children: text('删除', 'Delete') }),
+              ],
+            }, rule.id)) }),
+          jsxs('div', { className: 'dsh-fleet-member-access-rule-form', children: [
+            jsxs('label', { children: [jsx('span', { children: text('资源类型', 'Resource type') }), jsx('select', { value: ruleDraft.resourceKind, onChange: (event: ChangeEvent<HTMLSelectElement>) => setRuleDraft({ ...ruleDraft, resourceKind: event.currentTarget.value }), children: Object.entries(SETUP_ACCESS_KIND_NAMES).map(([kind, copy]) => jsx('option', { value: kind, children: copy[chinese ? 0 : 1] }, kind)) })] }),
+            jsxs('label', { children: [jsx('span', { children: text('资源标识', 'Resource identifier') }), jsx('input', { value: ruleDraft.resourceId, placeholder: text('会话 ID、路径或资源 ID', 'Conversation ID, path, or resource ID'), onChange: (event: ChangeEvent<HTMLInputElement>) => setRuleDraft({ ...ruleDraft, resourceId: event.currentTarget.value }) })] }),
+            jsxs('label', { children: [jsx('span', { children: text('效果', 'Effect') }), jsx('select', { value: ruleDraft.effect, onChange: (event: ChangeEvent<HTMLSelectElement>) => setRuleDraft({ ...ruleDraft, effect: event.currentTarget.value as 'allow' | 'deny' }), children: [jsx('option', { value: 'allow', children: text('允许', 'Allow') }), jsx('option', { value: 'deny', children: text('禁止', 'Deny') })] })] }),
+            jsxs('label', { children: [jsx('span', { children: text('范围', 'Scope') }), jsx('select', { value: ruleDraft.scope, onChange: (event: ChangeEvent<HTMLSelectElement>) => setRuleDraft({ ...ruleDraft, scope: event.currentTarget.value as 'self' | 'tree' }), children: [jsx('option', { value: 'self', children: text('仅此资源', 'This resource only') }), jsx('option', { value: 'tree', children: text('包含下级', 'Include children') })] })] }),
+            jsxs('fieldset', { children: [
+              jsx('legend', { children: text('允许或禁止哪些动作', 'Actions to allow or deny') }),
+              jsx('div', { children: (['read', 'write', 'use', 'manage'] as const).map(level => jsxs('label', { children: [jsx('input', { type: 'checkbox', checked: ruleDraft.levels.includes(level), onChange: () => setRuleDraft({ ...ruleDraft, levels: ruleDraft.levels.includes(level) ? ruleDraft.levels.filter(value => value !== level) : [...ruleDraft.levels, level] }) }), text(level === 'read' ? '查看' : level === 'write' ? '编辑' : level === 'use' ? '使用' : '管理', level === 'read' ? 'Read' : level === 'write' ? 'Write' : level === 'use' ? 'Use' : 'Manage')] }, level)) }),
+            ] }),
+            jsx('button', { type: 'button', disabled: ruleDraft.resourceId.trim().length === 0 || ruleDraft.levels.length === 0, onClick: addRule, children: text('添加例外', 'Add exception') }),
+          ] }),
+        ] }),
+    ],
+  })
 }
 
 function memberHasData(member: MemberDraft): boolean {
@@ -3098,70 +3906,18 @@ function FleetLibraryRemovalDialog({
 }
 
 function FleetMemberRemovalDialog({ member, onCancel, onConfirm }: MemberRemovalDialogProps): ReactElement {
-  const titleId = useId()
-  const cancelButton = useRef<HTMLButtonElement>(null)
   const chinese = isChineseLocale()
   const text = (zh: string, en: string): string => chinese ? zh : en
-
-  useEffect(() => {
-    cancelButton.current?.focus()
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onCancel()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [onCancel])
-
-  return jsxs('div', {
-    className: 'dsh-fleet-member-editor-overlay',
-    role: 'presentation',
-    children: [
-      jsx('div', { className: 'dsh-fleet-config-mask', 'aria-hidden': 'true', onClick: onCancel }),
-      jsxs('section', {
-        className: 'dsh-fleet-member-editor-panel dsh-fleet-member-remove-panel',
-        role: 'alertdialog',
-        'aria-modal': 'true',
-        'aria-labelledby': titleId,
-        children: [
-          jsx('header', {
-            className: 'dsh-fleet-config-header',
-            children: jsx('h2', {
-              id: titleId,
-              className: 'dsh-fleet-config-title',
-              children: text('解雇成员', 'Dismiss member'),
-            }),
-          }),
-          jsx('div', {
-            className: 'dsh-fleet-member-editor-body',
-            children: jsx('p', {
-              className: 'dsh-fleet-member-remove-copy',
-              children: text(
-                '要解雇这个团队成员吗？ta 将会回到人才市场（可能不会再回来了）',
-                'Dismiss this Team member? They will return to the talent market (and may never come back).',
-              ),
-            }),
-          }),
-          jsxs('footer', {
-            className: 'dsh-fleet-config-footer',
-            children: [
-              jsx('button', {
-                ref: cancelButton,
-                type: 'button',
-                className: 'dsh-fleet-config-action dsh-fleet-config-cancel',
-                onClick: onCancel,
-                children: text('取消', 'Cancel'),
-              }),
-              jsx('button', {
-                type: 'button',
-                className: 'dsh-fleet-config-action dsh-fleet-member-remove-confirm',
-                onClick: onConfirm,
-                children: text('解雇', 'Dismiss'),
-              }),
-            ],
-          }),
-        ],
-      }),
-    ],
+  return jsx(FleetLibraryRemovalDialog, {
+    title: text('解雇成员', 'Dismiss member'),
+    copy: text(
+      `要解雇 ${member.name} 吗？ta 将会回到人才市场（可能不会再回来了）`,
+      `Dismiss ${member.name}? They will return to the talent market (and may never come back).`,
+    ),
+    cancelLabel: text('取消', 'Cancel'),
+    confirmLabel: text('解雇', 'Dismiss'),
+    onCancel,
+    onConfirm,
   })
 }
 
@@ -3368,55 +4124,9 @@ function FleetMemberEditor({
                     onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setMember({ ...member, prompt: event.target.value }),
                   }),
                 }),
-                !preset && jsx(ConfigurationField, {
-                  label: text('工具组', 'Tool groups'),
-                  wide: true,
-                  children: jsxs('div', {
-                    children: [
-                      jsx('textarea', {
-                        className: 'dsh-fleet-config-textarea',
-                        value: memberPermissionEntries(member.toolGroups).join('\n'),
-                        placeholder: 'messages\nresources\ncoordination',
-                        spellCheck: false,
-                        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setMember({
-                          ...member,
-                          toolGroups: parseMemberPermissionEntries(event.target.value),
-                        }),
-                      }),
-                      jsx('p', {
-                        className: 'dsh-fleet-config-model-status',
-                        children: text(
-                          '每行一个工具组；留空表示不暴露 Fleet 工具。',
-                          'One tool group per line; leave empty to expose no Fleet tools.',
-                        ),
-                      }),
-                    ],
-                  }),
-                }),
-                !preset && jsx(ConfigurationField, {
-                  label: text('操作权限', 'Action permissions'),
-                  wide: true,
-                  children: jsxs('div', {
-                    children: [
-                      jsx('textarea', {
-                        className: 'dsh-fleet-config-textarea',
-                        value: memberPermissionEntries(member.permissions).join('\n'),
-                        placeholder: 'resource.write\nmeeting.manage',
-                        spellCheck: false,
-                        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setMember({
-                          ...member,
-                          permissions: parseMemberPermissionEntries(event.target.value),
-                        }),
-                      }),
-                      jsx('p', {
-                        className: 'dsh-fleet-config-model-status',
-                        children: text(
-                          '每行一个 namespace.action；扩展插件注册的权限也可以在这里填写。',
-                          'One namespace.action per line; permissions registered by extensions are accepted here too.',
-                        ),
-                      }),
-                    ],
-                  }),
+                !preset && jsx('div', {
+                  className: 'dsh-fleet-config-field-wide',
+                  children: jsx(MemberSetupAuthorization, { member, onChange: setMember }),
                 }),
                 jsx(ConfigurationField, {
                   label: text('模型', 'Model'),
@@ -5518,6 +6228,7 @@ function teamStatusLabel(status: FleetPanelTeamSummary['status'], chinese: boole
 }
 
 export function FleetTeamButton({ sessionId: propSessionId }: { readonly sessionId?: string } = {}): ReactElement {
+  installStyles()
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<FleetMode | null>(null)
   const [connectionOpen, setConnectionOpen] = useState(false)
@@ -5535,9 +6246,11 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   const [menuPosition, setMenuPosition] = useState<MenuPosition>({ left: 0, top: 0 })
   const [connectionPosition, setConnectionPosition] = useState<MenuPosition>({ left: 0, top: 0 })
   const [workspaceWarningPosition, setWorkspaceWarningPosition] = useState<MenuPosition | null>(null)
+  const [assistantNotice, setAssistantNotice] = useState<FleetAssistantConnectionNotice | null>(null)
   const root = useRef<HTMLDivElement>(null)
   const anchor = useRef<HTMLButtonElement>(null)
   const connectionAnchor = useRef<HTMLButtonElement>(null)
+  const assistantNoticeAction = useRef<HTMLButtonElement>(null)
   const workspaceWarningTarget = useRef<HTMLButtonElement | null>(null)
   const workspaceWarningTimer = useRef<number | null>(null)
   const menuId = useId()
@@ -5586,6 +6299,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
 
   useEffect(() => {
     if (sessionId === undefined) return
+    setAssistantNotice(null)
     setWorkspaceWarningPosition(null)
     workspaceWarningTarget.current?.removeAttribute('data-dsh-fleet-workspace-required')
     workspaceWarningTarget.current = null
@@ -5594,6 +6308,12 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
       workspaceWarningTimer.current = null
     }
   }, [sessionId])
+
+  useEffect(() => {
+    if (assistantNotice === null) return
+    const frame = window.requestAnimationFrame(() => assistantNoticeAction.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [assistantNotice?.kind, assistantNotice?.team.teamId])
 
   useLayoutEffect(() => {
     if (mode === null) return
@@ -5613,20 +6333,23 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   }, [mode, chinese])
 
   useEffect(() => {
-    if (!open) return
+    if (!open && assistantNotice === null) return
 
     const closeOnOutsidePointer = (event: PointerEvent): void => {
       if (event.target instanceof Node && !root.current?.contains(event.target)) {
+        setAssistantNotice(null)
         setConnectionOpen(false)
         setOpen(false)
       }
     }
     const closeOnEscape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      if (connectionOpen) setConnectionOpen(false)
+      if (assistantNotice !== null) setAssistantNotice(null)
+      else if (connectionOpen) setConnectionOpen(false)
       else setOpen(false)
     }
     const close = (): void => {
+      setAssistantNotice(null)
       setConnectionOpen(false)
       setOpen(false)
     }
@@ -5645,7 +6368,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
       window.removeEventListener('resize', close)
       window.removeEventListener('scroll', closeOnOuterScroll, true)
     }
-  }, [connectionOpen, open])
+  }, [assistantNotice, connectionOpen, open])
 
   const toggleMenu = (): void => {
     if (sessionId === undefined) {
@@ -5706,6 +6429,51 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
       }
     }
     setConnectionOpen(current => !current)
+  }
+
+  const stageTeamConnection = (team: FleetPanelTeamSummary, assistantId?: string): void => {
+    if (sessionId === undefined) return
+    stageFleetActivation(sessionId, {
+      mode: 'connection',
+      teamId: team.teamId,
+      ...(assistantId === undefined ? {} : { assistantId }),
+    })
+    setConnectedTeam(team)
+    setMode('connection')
+    setAssistantNotice(null)
+    setConnectionOpen(false)
+    setOpen(false)
+  }
+
+  const chooseExistingTeam = (team: FleetPanelTeamSummary, target: HTMLButtonElement): void => {
+    const route = fleetExistingAssistantRoute(team.assistantConnections ?? [])
+    if (route.kind === 'create') {
+      stageTeamConnection(team)
+      return
+    }
+    setAssistantNotice({
+      kind: route.kind,
+      team,
+      assistants: route.assistants,
+      position: floatingMenuPosition(
+        target.getBoundingClientRect(),
+        320,
+        Math.min(340, 150 + route.assistants.length * 38),
+      ),
+    })
+    setConnectionOpen(false)
+    setOpen(false)
+  }
+
+  const jumpToAssistant = (targetSessionId: string): void => {
+    try {
+      openFleetSession(targetSessionId)
+      setAssistantNotice(null)
+    } catch (error) {
+      setAssistantNotice(current => current === null
+        ? null
+        : { ...current, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   const trigger = mode !== null
@@ -5897,13 +6665,8 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
                 style: team.color === undefined
                   ? undefined
                   : { '--dsh-fleet-team-color': team.color } as CSSProperties,
-                onClick: () => {
-                  if (sessionId === undefined) return
-                  stageFleetActivation(sessionId, { mode: 'connection', teamId: team.teamId })
-                  setConnectedTeam(team)
-                  setMode('connection')
-                  setConnectionOpen(false)
-                  setOpen(false)
+                onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
+                  chooseExistingTeam(team, event.currentTarget)
                 },
                 children: [
                   jsx('span', { className: 'dsh-fleet-team-submenu-dot', 'aria-hidden': 'true' }),
@@ -5917,6 +6680,73 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
                 ],
               }, team.teamId)
             }),
+      }),
+      assistantNotice !== null && jsxs('div', {
+        className: 'dsh-fleet-assistant-notice',
+        role: 'dialog',
+        'aria-modal': false,
+        'aria-label': chinese
+          ? `${assistantNotice.team.teamName} 已有团队助理`
+          : `${assistantNotice.team.teamName} already has a Team assistant`,
+        style: assistantNotice.position,
+        children: [
+          jsx('h3', {
+            className: 'dsh-fleet-assistant-notice-title',
+            children: chinese
+              ? `“${assistantNotice.team.teamName}”已有团队助理`
+              : `“${assistantNotice.team.teamName}” already has a Team assistant`,
+          }),
+          jsx('p', {
+            className: 'dsh-fleet-assistant-notice-copy',
+            children: assistantNotice.kind === 'open'
+              ? (chinese
+                  ? assistantNotice.assistants.length === 1
+                    ? '该助理已有未归档的连接会话。请直接跳转，避免为同一个助理创建两个前台会话。'
+                    : '该团队已有未归档的助理会话。请选择要打开的助理，不会重复创建前台会话。'
+                  : assistantNotice.assistants.length === 1
+                    ? 'This assistant already has an unarchived Session. Open it instead of creating a second foreground Session.'
+                    : 'This Team has unarchived assistant Sessions. Choose an assistant to open without creating a duplicate Session.')
+              : (chinese
+                  ? assistantNotice.assistants.length === 1
+                    ? '该团队保留了助理身份，但原连接会话已归档或不可用。是否在当前会话重新连接到这个助理？'
+                    : '该团队保留了多个助理身份，但没有可用的连接会话。请选择要在当前会话重新连接的助理。'
+                  : assistantNotice.assistants.length === 1
+                    ? 'The Team still has this assistant identity, but its previous Session is archived or unavailable. Reconnect it in the current Session?'
+                    : 'The Team retains several assistant identities but has no available Session. Choose one to reconnect in the current Session.'),
+          }),
+          assistantNotice.error !== undefined && jsx('p', {
+            className: 'dsh-fleet-assistant-notice-error',
+            role: 'alert',
+            children: assistantNotice.error,
+          }),
+          jsxs('div', {
+            className: 'dsh-fleet-assistant-notice-actions',
+            children: [
+              ...assistantNotice.assistants.map((assistant, index) => {
+                const assistantName = assistant.assistantName?.trim() || assistant.assistantId
+                return jsx('button', {
+                  ref: index === 0 ? assistantNoticeAction : undefined,
+                  type: 'button',
+                  className: 'dsh-fleet-assistant-notice-action',
+                  'data-primary': true,
+                  onClick: () => {
+                    if (assistantNotice.kind === 'open') jumpToAssistant(assistant.sessionId)
+                    else stageTeamConnection(assistantNotice.team, assistant.assistantId)
+                  },
+                  children: assistantNotice.kind === 'open'
+                    ? (chinese ? `跳转到 ${assistantName}` : `Open ${assistantName}`)
+                    : (chinese ? `连接到 ${assistantName}` : `Reconnect ${assistantName}`),
+                }, assistant.assistantId)
+              }),
+              jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-assistant-notice-action',
+                onClick: () => setAssistantNotice(null),
+                children: chinese ? '取消' : 'Cancel',
+              }),
+            ],
+          }),
+        ],
       }),
       configurationChooserOpen && jsx(FleetQuickTeamDialog, {
         sessionId,
@@ -5991,6 +6821,7 @@ type NativeComponentProps = Record<string, unknown>
 interface NativeInputSnapshot {
   readonly draft: string
   readonly phase: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
+  readonly imageIds?: readonly string[]
 }
 
 interface NativeInputActions {
@@ -6002,7 +6833,15 @@ interface NativeComposerKeyboard {
   readonly snapshot: NativeInputSnapshot
   setDraft(text: string): void
   submit(mode?: unknown): void
+  arbitrate?(key: 'up' | 'down' | 'enter' | 'escape'): unknown
+  track?(): void
 }
+
+type NativeRenderSlot = (
+  name: string,
+  owner: Readonly<Record<string, unknown>>,
+  options?: Readonly<Record<string, unknown>>,
+) => ReactNode
 
 type NativeUseInput = <Selection>(
   selector: (snapshot: NativeInputSnapshot | undefined) => Selection,
@@ -6029,6 +6868,16 @@ function withSubmitOverride<T extends object>(target: T, submit: (...args: reado
   })
 }
 
+function withComposerOverrides<T extends object>(target: T, overrides: Readonly<Record<string, unknown>>): T {
+  return new Proxy(target, {
+    get(value, property) {
+      if (typeof property === 'string' && Object.hasOwn(overrides, property)) return overrides[property]
+      const member: unknown = Reflect.get(value, property, value)
+      return typeof member === 'function' ? member.bind(value) : member
+    },
+  })
+}
+
 /** Decorate the native composer without replacing its visuals or input-machine behavior. */
 export function withFleetComposerActivation(
   InputBar: ComponentType<NativeComponentProps>,
@@ -6042,31 +6891,104 @@ export function withFleetComposerActivation(
       getCurrentFleetSessionId,
     )
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : currentSessionId
+    if (sessionId !== undefined) captureFleetOfficialComposer(sessionId, InputBar, props)
     const fleetAssistant = useFleetMetaAssistantSession(sessionId)
+    const assistantTeam = useSyncExternalStore(
+      subscribeFleetTeamDirectory,
+      () => getFleetTeamDirectorySnapshot().teams.find(team =>
+        sessionId !== undefined && team.status !== 'closed'
+          && team.assistantSessionIds?.includes(sessionId) === true),
+      () => undefined,
+    )
+    const assistantName = useSyncExternalStore(
+      subscribeFleetTeamDirectory,
+      () => getFleetAssistantDisplayName(sessionId),
+      () => undefined,
+    )
     const activation = useSyncExternalStore(
       subscribeFleetActivation,
       () => getFleetActivationSnapshot(sessionId),
       () => getFleetActivationSnapshot(sessionId),
     )
     const meta = activation?.request.mode === 'meta'
+    const teamAssistant = fleetAssistant && assistantTeam !== undefined
     const inputActions = props.inputActions as NativeInputActions | undefined
     const keyboard = props.keyboard as NativeComposerKeyboard | undefined
-    const latestDraft = useRef(input?.draft ?? '')
-    latestDraft.current = input?.draft ?? ''
-    const mailboxSending = useRef(false)
+    const [assistantSending, setAssistantSending] = useState(false)
+    const [assistantUrgent, setAssistantUrgent] = useState(false)
+    const [assistantError, setAssistantError] = useState<string>()
+    const [assistantCommandOpen, setAssistantCommandOpen] = useState(false)
+    const [assistantCommandHighlight, setAssistantCommandHighlight] = useState(0)
+    const assistantAttachments = useFleetComposerAttachments(sessionId ?? '')
+    const assistantComposer = useRef<HTMLDivElement>(null)
+    const assistantCommandMenu = useRef<HTMLDivElement>(null)
+    const [assistantComposerVisible, setAssistantComposerVisible] = useState(false)
+    const [, assistantModelState] = useFleetModelDirectory(teamAssistant ? sessionId : undefined)
+    const assistantModelSignature = assistantModelState.current === null
+      ? undefined
+      : JSON.stringify(assistantModelState.current)
+    const previousAssistantModelSignature = useRef<string>()
+    const previousAssistantModelSession = useRef<string>()
+    const assistantModelSyncGeneration = useRef(0)
 
-    const submitMailbox = (draft: string, setDraft: (text: string) => void): void => {
-      const text = draft.trim()
-      if (sessionId === undefined || text.length === 0 || mailboxSending.current) return
-      mailboxSending.current = true
-      latestDraft.current = ''
-      setDraft('')
-      void sendFleetAssistantMailboxMessage(sessionId, text).catch(() => {
-        if (latestDraft.current.length === 0) setDraft(draft)
-      }).finally(() => {
-        mailboxSending.current = false
+    useEffect(() => {
+      if (!teamAssistant || sessionId === undefined || assistantModelSignature === undefined) {
+        previousAssistantModelSignature.current = undefined
+        previousAssistantModelSession.current = undefined
+        return
+      }
+      if (previousAssistantModelSession.current !== sessionId
+        || previousAssistantModelSignature.current === undefined) {
+        previousAssistantModelSession.current = sessionId
+        previousAssistantModelSignature.current = assistantModelSignature
+        return
+      }
+      if (previousAssistantModelSignature.current === assistantModelSignature) return
+      previousAssistantModelSignature.current = assistantModelSignature
+      const current = assistantModelState.current
+      if (current === null) return
+      const generation = ++assistantModelSyncGeneration.current
+      void configureFleetAssistantSessionModel(sessionId, {
+        provider: current.provider,
+        model: current.model,
+        ...(current.reasoningEffort === undefined ? {} : { reasoningEffort: current.reasoningEffort }),
+      }).catch((error: unknown) => {
+        if (assistantModelSyncGeneration.current !== generation) return
+        setAssistantError(error instanceof Error
+          ? error.message
+          : isChineseLocale() ? '团队助理模型配置同步失败' : 'Team assistant model configuration could not be synchronized')
       })
-    }
+    }, [assistantModelSignature, assistantModelState.current, sessionId, teamAssistant])
+
+    useEffect(() => {
+      if (!assistantCommandOpen) return
+      const close = (event: globalThis.PointerEvent): void => {
+        if (!(event.target instanceof Node)) return
+        const card = assistantCommandMenu.current?.closest('[data-composer-card="true"]')
+        if (card?.contains(event.target) === true) return
+        setAssistantCommandOpen(false)
+      }
+      document.addEventListener('pointerdown', close, true)
+      return () => { document.removeEventListener('pointerdown', close, true) }
+    }, [assistantCommandOpen])
+
+    useEffect(() => {
+      setAssistantCommandOpen(false)
+      setAssistantCommandHighlight(0)
+    }, [sessionId])
+
+    useLayoutEffect(() => {
+      const card = assistantComposer.current?.querySelector<HTMLElement>('[data-composer-card="true"]')
+      if (card === undefined || card === null) return
+      const update = (): void => {
+        const rect = card.getBoundingClientRect()
+        setAssistantComposerVisible(rect.width > 0 && rect.height > 0)
+      }
+      update()
+      const observer = new ResizeObserver(update)
+      observer.observe(card)
+      return () => { observer.disconnect() }
+    }, [sessionId, teamAssistant])
 
     useEffect(() => {
       if (input?.phase !== 'plain' || inputActions === undefined) return
@@ -6077,9 +6999,7 @@ export function withFleetComposerActivation(
 
     const decoratedActions = inputActions === undefined
       ? undefined
-      : withSubmitOverride(inputActions, () => fleetAssistant
-        ? submitMailbox(input?.draft ?? '', text => inputActions.setDraft(text))
-        : submitWithFleetActivation(
+      : withSubmitOverride(inputActions, () => submitWithFleetActivation(
           sessionId,
           input?.draft ?? '',
           text => inputActions.setDraft(text),
@@ -6087,14 +7007,242 @@ export function withFleetComposerActivation(
         ))
     const decoratedKeyboard = keyboard === undefined
       ? undefined
-      : withSubmitOverride(keyboard, (mode?: unknown) => fleetAssistant
-        ? submitMailbox(keyboard.snapshot.draft, text => keyboard.setDraft(text))
-        : submitWithFleetActivation(
+      : withSubmitOverride(keyboard, (mode?: unknown) => submitWithFleetActivation(
           sessionId,
           keyboard.snapshot.draft,
           text => keyboard.setDraft(text),
           () => keyboard.submit(mode),
         ))
+
+    if (teamAssistant && sessionId !== undefined) {
+      const command = props.command as ((line: string) => Promise<boolean>) | undefined
+      const renderSlot = props.renderSlot as NativeRenderSlot
+      const commandEntries = fleetPrivateConversationCommands(assistantName ?? (isChineseLocale() ? '团队助理' : 'Team assistant'))
+      const runAssistantCommand = (name: typeof commandEntries[number]['name']): void => {
+        if (assistantSending || inputActions === undefined) return
+        const entry = commandEntries.find(candidate => candidate.name === name)
+        if (entry === undefined) return
+        if (entry.behavior === 'input') {
+          inputActions.setDraft(`/${entry.name} `)
+          setAssistantCommandOpen(false)
+          return
+        }
+        if (command === undefined) {
+          setAssistantError(isChineseLocale() ? 'DSH Session 命令服务不可用' : 'The DSH Session command service is unavailable')
+          return
+        }
+        setAssistantCommandOpen(false)
+        setAssistantError(undefined)
+        void command(`/${entry.name}`).then(matched => {
+          if (!matched) throw new Error(isChineseLocale()
+            ? `命令 /${entry.name} 当前不可用`
+            : `Command /${entry.name} is not currently available`)
+        }).catch((error: unknown) => {
+          setAssistantError(error instanceof Error
+            ? error.message
+            : isChineseLocale() ? 'Session 命令执行失败' : 'Session command failed')
+        })
+      }
+      const submitAssistant = (): void => {
+        if (assistantSending || inputActions === undefined) return
+        const draft = input?.draft ?? ''
+        const files = assistantAttachments.files
+        if (draft.trim() === '' && files.length === 0) return
+        if (files.length === 0 && (draft.trim() === '/goal' || draft.trim() === '/plan')) {
+          inputActions.setDraft(`${draft.trim()} `)
+          return
+        }
+        setAssistantSending(true)
+        setAssistantError(undefined)
+        void (async () => {
+          if (files.length === 0
+            && parseFleetConversationCommand(draft, 'direct') !== undefined
+            && command !== undefined) {
+            const matched = await command(draft.trim())
+            if (matched) {
+              inputActions.setDraft('')
+              return
+            }
+          }
+          await sendFleetAssistantMailboxMessage(
+            sessionId,
+            draft,
+            files,
+            assistantUrgent ? 'interrupt' : 'wakeup',
+          )
+          inputActions.setDraft('')
+          assistantAttachments.clearFiles()
+          setAssistantUrgent(false)
+        })().catch((error: unknown) => {
+          setAssistantError(error instanceof Error
+            ? error.message
+            : isChineseLocale() ? '消息发送失败' : 'Message could not be sent')
+        }).finally(() => { setAssistantSending(false) })
+      }
+      const assistantActions = inputActions === undefined
+        ? undefined
+        : withSubmitOverride(inputActions, submitAssistant)
+      const assistantKeyboardBase = keyboard === undefined
+        ? undefined
+        : withSubmitOverride(keyboard, submitAssistant)
+      const assistantKeyboard = assistantKeyboardBase === undefined
+        ? undefined
+        : withComposerOverrides(assistantKeyboardBase, {
+            arbitrate: (key: 'up' | 'down' | 'enter' | 'escape') => {
+              if (!assistantCommandOpen) return assistantKeyboardBase.arbitrate?.(key)
+              if (key === 'escape') {
+                setAssistantCommandOpen(false)
+                return 'consumed'
+              }
+              if (key === 'up' || key === 'down') {
+                setAssistantCommandHighlight(current =>
+                  (current + (key === 'up' ? -1 : 1) + commandEntries.length) % commandEntries.length)
+                return 'consumed'
+              }
+              const entry = commandEntries[assistantCommandHighlight]
+              if (entry !== undefined) runAssistantCommand(entry.name)
+              return 'pick-highlighted'
+            },
+            track: () => {
+              setAssistantCommandOpen(false)
+              assistantKeyboardBase.track?.()
+            },
+          })
+      const nativeUseMenuLauncher = props.useMenuLauncher as (<Selection>(
+        selector: (snapshot: string | null) => Selection,
+      ) => Selection) | undefined
+      const assistantUseMenuLauncher = <Selection,>(selector: (snapshot: string | null) => Selection): Selection => {
+        if (nativeUseMenuLauncher === undefined) return selector(assistantCommandOpen ? 'command' : null)
+        return nativeUseMenuLauncher(current => selector(assistantCommandOpen ? 'command' : current))
+      }
+      const assistantCommandOverlay = assistantCommandOpen && jsx('div', {
+        ref: assistantCommandMenu,
+        className: 'dsh-fleet-conversation-command-menu',
+        role: 'listbox',
+        'aria-label': isChineseLocale() ? '助理私聊命令' : 'Assistant private conversation commands',
+        'aria-activedescendant': `dsh-fleet-assistant-command-${commandEntries[assistantCommandHighlight]?.name ?? 'compact'}`,
+        children: [
+          jsx('div', {
+            className: 'dsh-fleet-conversation-command-menu-title',
+            role: 'presentation',
+            children: isChineseLocale() ? '命令' : 'Commands',
+          }),
+          ...commandEntries.map((entry, index) => jsxs('button', {
+            id: `dsh-fleet-assistant-command-${entry.name}`,
+            type: 'button',
+            role: 'option',
+            'aria-selected': assistantCommandHighlight === index,
+            className: 'dsh-fleet-conversation-command-menu-item',
+            onMouseEnter: () => { setAssistantCommandHighlight(index) },
+            onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+              event.preventDefault()
+              runAssistantCommand(entry.name)
+            },
+            children: [
+              jsx('span', { className: 'dsh-fleet-conversation-command-menu-name', children: entry.name }),
+              jsx('span', { className: 'dsh-fleet-conversation-command-menu-description', children: entry.description }),
+            ],
+          }, entry.name)),
+        ],
+      })
+      const assistantUseInput: NativeUseInput = selector => useInput(snapshot => selector(snapshot === undefined
+        ? undefined
+        : { ...snapshot, imageIds: assistantAttachments.items.map(item => item.id) }))
+      return jsx('div', {
+        ref: assistantComposer,
+        className: 'dsh-fleet-assistant-composer-attachment-dropzone',
+        children: jsx(InputBar, {
+          ...props,
+          disabled: assistantSending,
+          blocked: undefined,
+          workspacePickerOpen: false,
+          onRequestWorkspace: undefined,
+          placeholder: isChineseLocale()
+            ? `发送消息给 ${assistantName ?? '团队助理'}`
+            : `Send a message to ${assistantName ?? 'Team assistant'}`,
+          useInput: assistantUseInput,
+          useMenuLauncher: assistantUseMenuLauncher,
+          inputActions: assistantActions,
+          keyboard: assistantKeyboard,
+          command: undefined,
+          toggleCommandMenu: () => {
+            setAssistantCommandHighlight(0)
+            setAssistantCommandOpen(current => !current)
+          },
+          overlay: jsxs(Fragment, {
+            children: [
+              props.overlay as ReactNode,
+              assistantCommandOverlay,
+            ],
+          }),
+          renderSlot: (name: string, owner: Readonly<Record<string, unknown>>, options?: Readonly<Record<string, unknown>>) => {
+            if (name === 'conversation.input.model') return null
+            if (name !== 'conversation.input.attachments') return renderSlot(name, owner, options)
+            return jsxs(Fragment, {
+              children: [
+                renderSlot(name, {
+                  ...owner,
+                  attachments: assistantAttachments.imageItems,
+                  canAcceptDrop: owner.canAcceptDrop === true && assistantComposerVisible,
+                }, options),
+                jsx(FleetComposerAttachmentList, { attachments: assistantAttachments }),
+              ],
+            })
+          },
+          leftItems: jsxs('span', {
+            className: 'dsh-fleet-official-composer-actions',
+            children: [
+              props.leftItems as ReactNode,
+              jsx(FleetComposerAttachmentButton, {
+                attachments: assistantAttachments,
+                disabled: assistantSending,
+              }),
+              jsx('button', {
+                type: 'button',
+                className: 'dsh-fleet-assistant-composer-urgent',
+                'aria-pressed': assistantUrgent,
+                title: isChineseLocale()
+                  ? '紧急消息会打断助理当前步骤'
+                  : 'An urgent message interrupts the assistant’s current step',
+                onClick: () => { setAssistantUrgent(current => !current) },
+                children: isChineseLocale() ? '紧急' : 'Urgent',
+              }),
+            ],
+          }),
+          addImages: (files: readonly File[]) => {
+            if (!assistantSending) assistantAttachments.addFiles(files)
+            return null
+          },
+          removeImage: assistantAttachments.removeFile,
+          draftImages: (ids: readonly string[]) => ids.flatMap(id => assistantAttachments.items.filter(item => item.id === id)),
+          accessory: props.accessory,
+          usageMeter: jsx(FleetBudgetMeter, { teamId: assistantTeam.teamId }),
+          footer: !assistantSending && assistantError === undefined ? undefined : jsx('span', {
+            className: 'dsh-fleet-assistant-composer-status',
+            'data-error': assistantError === undefined ? undefined : 'true',
+            role: assistantError === undefined ? 'status' : 'alert',
+            'aria-live': 'polite',
+            children: assistantSending
+              ? isChineseLocale() ? '发送中…' : 'Sending…'
+              : assistantError,
+          }),
+        }),
+      })
+    }
+
+    const inputBar = jsx(InputBar, {
+      ...props,
+      ...(meta ? {
+        disabled: false,
+        workspacePickerOpen: false,
+        onRequestWorkspace: undefined,
+        placeholder: isChineseLocale()
+          ? '询问 Agent Fleet 关于团队插件的问题'
+          : 'Ask Agent Fleet about the Team plugin',
+      } : {}),
+      inputActions: decoratedActions,
+      keyboard: decoratedKeyboard,
+    })
 
     return jsxs(Fragment, {
       children: [
@@ -6102,24 +7250,7 @@ export function withFleetComposerActivation(
           className: 'dsh-fleet-meta-composer-marker',
           'aria-hidden': 'true',
         }),
-        jsx(InputBar, {
-          ...props,
-          ...(meta ? {
-            disabled: false,
-            workspacePickerOpen: false,
-            onRequestWorkspace: undefined,
-            placeholder: isChineseLocale()
-              ? '询问 Agent Fleet 关于团队插件的问题'
-              : 'Ask Agent Fleet about the Team plugin',
-          } : fleetAssistant ? {
-            disabled: false,
-            placeholder: isChineseLocale()
-              ? '发送私聊消息给团队助理'
-              : 'Send a private message to the Team assistant',
-          } : {}),
-          inputActions: decoratedActions,
-          keyboard: decoratedKeyboard,
-        }),
+        inputBar,
       ],
     })
   }
@@ -6162,6 +7293,9 @@ export {
   FLEET_PANEL_SOURCE_SERVICE,
   FLEET_PANEL_SLOTS,
   FleetPanelToolButton,
+  FleetPanelTeamSwitcher,
+  ListRow as FleetPanelListRow,
+  SectionTitle as FleetPanelSectionTitle,
   FleetNativeChatRuntimePrimer,
   FleetTeamPanel,
   inject,
@@ -6193,7 +7327,26 @@ export type {
   FleetPanelTeamSummary,
   FleetPanelToolId,
   FleetPanelToolOwner,
+  FleetPanelToolButtonProps,
+  FleetPanelTeamOption,
+  FleetPanelTeamSwitcherProps,
+  FleetPanelListRowProps,
+  FleetPanelUi,
 } from './team-panel.js'
+
+export {
+  FleetMemberPopover,
+  FleetMemberPopoverCard,
+  FleetMemberStatusUpdatedAt,
+} from './member-popover.js'
+export type {
+  FleetMemberPopoverCardProps,
+  FleetMemberPopoverMember,
+  FleetMemberPopoverProps,
+  FleetMemberPopoverTriggerProps,
+} from './member-popover.js'
+export { useFleetAnchoredPopover } from './anchored-popover.js'
+export type { FleetAnchoredPopoverController, FleetPopoverPlacement } from './anchored-popover.js'
 
 export {
   FleetChatAvatar,
@@ -6204,6 +7357,9 @@ export {
   FleetChatReadReceipt,
   FleetPresenceLabel,
   FleetConversationHeader,
+  fleetMemberPresence,
+  fleetMemberPresenceLabel,
+  fleetPresenceLabel,
 } from './runtime-chat.js'
 export {
   FLEET_MESSAGE_CONFIGURATION_MODULE,
@@ -6212,6 +7368,7 @@ export {
   FleetConfigurationModuleRegistry,
   fleetConfigurationModules,
 } from './configuration-modules.js'
+export { fleetText, isChineseLocale, resolveChineseLocale } from './locale.js'
 export type {
   FleetConfigurationModuleContribution,
   FleetConfigurationModuleEditorProps,
@@ -6234,4 +7391,5 @@ export type {
   FleetConversationKind,
   FleetMessageDeliveryState,
   FleetPresence,
+  FleetRuntimeMember,
 } from './runtime-chat.js'

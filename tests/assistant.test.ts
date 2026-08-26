@@ -1,4 +1,5 @@
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
@@ -9,6 +10,7 @@ import {
   FLEET_TEAM_BUILDER_PROMPT,
   FleetAssistantRuntime,
 } from '../src/assistant.js'
+import { activateResidentFleetAssistants } from '../src/resident-assistants.js'
 
 function fakeAgent(options?: { readonly restrictError?: Error }): {
   readonly agent: Agent
@@ -185,5 +187,114 @@ describe('FleetAssistantRuntime', () => {
     expect(() => runtime.activateMeta(failed.agent)).toThrow('tool restriction failed')
     expect(failed.removePersona).toHaveBeenCalledOnce()
     expect(runtime.status(failed.agent).active).toBe(false)
+  })
+})
+
+describe('resident Fleet assistants', () => {
+  const view = (id: string, name: string) => ({
+    id,
+    name,
+    role: 'Team assistant',
+    prompt: '',
+    provider: 'provider-team',
+    model: 'model-team',
+    maxTokens: 2_048,
+    toolGroups: ['messages'],
+    permissions: [],
+    contacts: { members: '*' as const, channels: '*' as const },
+  })
+
+  it('activates live and persisted assistants while owning only resumed Sessions', async () => {
+    const live = { id: 'session-live' } as Agent
+    const resumed = { id: 'session-resumed' } as Agent
+    const dispose = vi.fn(() => Promise.resolve())
+    const resume = vi.fn(async (options: ResumeAgentOptions) => {
+      await options.setup?.({ agent: resumed } as unknown as Context)
+      return { agent: resumed, dispose }
+    })
+    const warn = vi.fn()
+    const ctx = {
+      agents: {
+        get: (id: string) => id === 'session-live' ? live : undefined,
+        resume,
+      },
+      logger: () => ({ warn }),
+    } as unknown as Context
+    const assistants = [
+      { sessionId: 'session-live', view: view('assistant-live', 'Hailey') },
+      { sessionId: 'session-resumed', view: view('assistant-resumed', 'Maya') },
+      { sessionId: 'session-paused', view: view('assistant-paused', 'Paused'), status: 'paused' as const },
+    ]
+    const run = {
+      id: 'team-one',
+      agentOptions: { provider: 'provider-fallback', model: 'model-fallback', maxTokens: 512 },
+      assistants,
+    }
+    const attachAssistant = vi.fn(async (agent: Agent, input: { readonly assistantId?: string }) => ({
+      run,
+      assistant: assistants.find(assistant => assistant.view.id === input.assistantId) ?? assistants[0]!,
+    }))
+    const activate = vi.fn()
+
+    const residents = await activateResidentFleetAssistants(
+      ctx,
+      { list: () => [run], attachAssistant } as never,
+      { activate } as never,
+    )
+
+    expect(attachAssistant).toHaveBeenCalledTimes(2)
+    expect(resume).not.toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: 'session-paused' }))
+    expect(activate).toHaveBeenCalledWith(live, 'team-one', assistants[0]?.view)
+    expect(activate).toHaveBeenCalledWith(resumed, 'team-one', assistants[1]?.view)
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({
+      resumeSessionId: 'session-resumed',
+      agentOptions: { provider: 'provider-team', model: 'model-team', maxTokens: 2_048 },
+    }))
+    expect(warn).not.toHaveBeenCalled()
+
+    expect(await residents.release('session-resumed')).toBe(true)
+    expect(dispose).toHaveBeenCalledOnce()
+    await residents.restore('session-resumed')
+    expect(resume).toHaveBeenCalledTimes(2)
+
+    await residents.dispose()
+    expect(dispose).toHaveBeenCalledTimes(2)
+  })
+
+  it('continues activating other assistants when one persisted Session cannot resume', async () => {
+    const available = { id: 'session-available' } as Agent
+    const warn = vi.fn()
+    const activate = vi.fn()
+    const ctx = {
+      agents: {
+        get: () => undefined,
+        resume: vi.fn(async (options: ResumeAgentOptions) => {
+          if (String(options.resumeSessionId) === 'session-missing') throw new Error('Session is unavailable')
+          await options.setup?.({ agent: available } as unknown as Context)
+          return { agent: available, dispose: () => Promise.resolve() }
+        }),
+      },
+      logger: () => ({ warn }),
+    } as unknown as Context
+    const assistants = [
+      { sessionId: 'session-missing', view: view('assistant-missing', 'Missing') },
+      { sessionId: 'session-available', view: view('assistant-available', 'Available') },
+    ]
+    const run = { id: 'team-one', assistants }
+    const attachAssistant = vi.fn(async (_agent: Agent, input: { readonly assistantId?: string }) => ({
+      run,
+      assistant: assistants.find(assistant => assistant.view.id === input.assistantId)!,
+    }))
+
+    const residents = await activateResidentFleetAssistants(
+      ctx,
+      { list: () => [run], attachAssistant } as never,
+      { activate } as never,
+    )
+
+    expect(activate).toHaveBeenCalledOnce()
+    expect(activate).toHaveBeenCalledWith(available, 'team-one', assistants[1]?.view)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('assistant-missing'))
+    await residents.dispose()
   })
 })

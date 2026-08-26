@@ -27,6 +27,7 @@ export interface FleetWebClient {
   member(input: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>>
   control(input: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>>
   upload(input: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>>
+  removeResource?(input: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>>
   uploadSetup(
     input: FleetWebSetupUploadInput,
     signal?: AbortSignal,
@@ -36,6 +37,14 @@ export interface FleetWebClient {
 
 export interface FleetWebPeerClient {
   invalidate(signal?: AbortSignal): Promise<RemoteResult<unknown>>
+  invalidateTraces(input: FleetWebTraceInvalidation, signal?: AbortSignal): Promise<RemoteResult<unknown>>
+}
+
+export interface FleetWebTraceInvalidation {
+  readonly traces: readonly {
+    readonly teamId: string
+    readonly memberId: string
+  }[]
 }
 
 const JSON_CODEC = {
@@ -67,6 +76,7 @@ export const FLEET_WEB_INVOCATIONS = [
   invocation('member', true),
   invocation('control', true),
   invocation('upload', true),
+  invocation('removeResource', true),
   invocation('uploadSetup', true),
   invocation('archive', true),
 ] as const
@@ -76,16 +86,28 @@ export const FLEET_WEB_REMOTE: TypertRemoteContribution = {
   descriptors: FLEET_WEB_INVOCATIONS,
 }
 
-const FLEET_WEB_PEER_INVOCATIONS = [{
-  id: 'dsh-agent-fleet#web-client/invalidate',
-  service: 'fleetWebPeer',
-  namespace: 'fleetWebPeer',
-  method: 'invalidate',
-  invocation: { kind: 'direct' },
-  parameters: [],
-  cancellation: { parameter: 'signal' },
-  result: JSON_CODEC,
-}] as const satisfies readonly InvocationDescriptor[]
+const FLEET_WEB_PEER_INVOCATIONS = [
+  {
+    id: 'dsh-agent-fleet#web-client/invalidate',
+    service: 'fleetWebPeer',
+    namespace: 'fleetWebPeer',
+    method: 'invalidate',
+    invocation: { kind: 'direct' },
+    parameters: [],
+    cancellation: { parameter: 'signal' },
+    result: JSON_CODEC,
+  },
+  {
+    id: 'dsh-agent-fleet#web-client/invalidate-traces',
+    service: 'fleetWebPeer',
+    namespace: 'fleetWebPeer',
+    method: 'invalidateTraces',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'input', wire: 'input', source: 'json', codec: JSON_CODEC }],
+    cancellation: { parameter: 'signal' },
+    result: JSON_CODEC,
+  },
+] as const satisfies readonly InvocationDescriptor[]
 
 export const FLEET_WEB_PEER_REMOTE: TypertRemoteContribution = {
   package: 'dsh-agent-fleet/web-client',

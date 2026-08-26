@@ -1,4 +1,5 @@
-import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { Context } from '@deepseek-ai/cordis'
+import { TypertRemoteService, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   FleetGitBranch,
   FleetGitCommit,
@@ -47,11 +48,15 @@ import {
   type SimpleIcon,
 } from 'simple-icons'
 
-import { FLEET_GIT_WEB_REMOTE, type FleetGitWebClient } from '../contract.js'
+import {
+  FLEET_GIT_WEB_PEER_LOCAL,
+  FLEET_GIT_WEB_REMOTE,
+  type FleetGitInvalidation,
+  type FleetGitWebClient,
+} from '../contract.js'
 
 const TOOL_ID = 'git'
 const STYLE_ID = 'dsh-agent-fleet-git-style'
-const POLL_INTERVAL_MS = 5_000
 const MAX_CACHED_REPOSITORIES = 32
 const GRAPH_ROW_HEIGHT = 24
 const GRAPH_ROW_MIDPOINT = GRAPH_ROW_HEIGHT / 2
@@ -59,6 +64,13 @@ const GRAPH_LANE_WIDTH = 14
 const COMMIT_DETAILS_HEIGHT = 224
 const COMMIT_VIRTUAL_ROW_HEIGHT = GRAPH_ROW_HEIGHT
 const SHORT_COMMIT_LENGTH = 7
+
+function fleetText(chinese: string, english: string): string {
+  const locale = typeof document !== 'undefined'
+    ? document.documentElement.lang || navigator.language
+    : typeof navigator !== 'undefined' ? navigator.language : 'en'
+  return /^zh(?:-|$)/iu.test(locale) ? chinese : english
+}
 
 export interface FleetMemberFace {
   readonly id: string
@@ -68,6 +80,7 @@ export interface FleetMemberFace {
   readonly operator?: boolean
   readonly responsibility?: string
   readonly statusText?: string
+  readonly statusUpdatedAt?: string
   readonly presence?: 'active' | 'busy' | 'waiting' | 'offline' | 'error' | 'unknown'
   readonly runtimeStatus?: 'idle' | 'running' | 'waiting' | 'error' | 'offline' | 'paused' | 'unknown'
 }
@@ -82,10 +95,49 @@ interface FleetTeamFace {
   readonly teamName: string
 }
 
+interface FleetToolUi {
+  readonly ToolButton: ComponentType<{
+    readonly owner: FleetToolOwner
+    readonly tool: string
+    readonly label: string
+    readonly actionId?: string
+    readonly children: ReactNode
+  }>
+}
+
+interface FleetMemberPopoverTriggerProps {
+  readonly 'aria-haspopup': 'dialog'
+  readonly 'aria-expanded': boolean
+  readonly 'aria-controls': string
+  readonly onMouseEnter?: (event: ReactMouseEvent<HTMLButtonElement>) => void
+  readonly onFocus?: (event: ReactFocusEvent<HTMLButtonElement>) => void
+  readonly onBlur?: (event: ReactFocusEvent<HTMLButtonElement>) => void
+}
+
+interface FleetPaneUi {
+  readonly TeamSwitcher: ComponentType<{
+    readonly teams: readonly FleetTeamFace[]
+    readonly selectedTeamId?: string
+    readonly label: string
+    readonly selectTeam: (teamId: string) => void
+  }>
+  readonly MemberPopover: ComponentType<{
+    readonly member: FleetMemberFace
+    readonly mode?: 'click' | 'hover'
+    readonly placement?: 'below-start' | 'below-end' | 'right'
+    readonly className?: string
+    readonly showStatusText?: boolean
+    readonly showDetails?: (memberId: string) => void
+    readonly onOpenChange?: (open: boolean) => void
+    readonly trigger: (props: FleetMemberPopoverTriggerProps) => ReactElement
+  }>
+}
+
 interface FleetToolOwner {
   readonly activeTool: string
   readonly disabled?: boolean
   readonly selectTool: (tool: string) => void
+  readonly ui: FleetToolUi
 }
 
 interface FleetPaneOwner {
@@ -97,8 +149,11 @@ interface FleetPaneOwner {
     readonly assistants?: readonly FleetMemberFace[]
     readonly workspaces: readonly FleetWorkspaceFace[]
   }
+  readonly activeItem: string
+  readonly selectItem: (item: string) => void
   readonly selectTeam: (teamId: string) => void
   readonly showMemberDetails: (memberId: string) => void
+  readonly ui: FleetPaneUi
 }
 
 interface SlotRegistrationOptions {
@@ -114,6 +169,7 @@ interface FleetGitClientContext {
     register(options: SlotRegistrationOptions, component: ComponentType<any>): unknown
   }
   readonly remote?: { $mount(contribution: typeof FLEET_GIT_WEB_REMOTE): Promise<() => Promise<void>> }
+  readonly typert: { register(contribution: typeof FLEET_GIT_WEB_PEER_LOCAL): () => Promise<void> }
   inject?<T>(names: readonly string[], callback: (ctx: FleetGitClientContext & T) => void | (() => void)): void
   get?(name: string): unknown
 }
@@ -226,6 +282,7 @@ interface GitViewState {
 const EMPTY_STATE: GitViewState = { loading: false, diffLoading: false }
 const stateByRoot = new Map<string, GitViewState>()
 const listenersByRoot = new Map<string, Set<() => void>>()
+const dirtyRepositories = new Set<string>()
 const refreshes = new Map<string, Promise<void>>()
 let webClient: FleetGitWebClient | undefined
 let diffContext: FleetGitClientContext | undefined
@@ -340,7 +397,7 @@ async function refresh(root: string, teamId: string): Promise<void> {
   publish(root, teamId, { ...withoutError, loading: true })
   const operation = (async () => {
     try {
-      if (webClient === undefined) throw new Error('Git Remote 尚未连接')
+      if (webClient === undefined) throw new Error(localizedLabel('Git Remote 尚未连接', 'Git Remote is not connected'))
       const snapshot = unwrap(await webClient.snapshot({ root, teamId, limit: 200 }))
       const { error: _error, snapshot: _snapshot, notRepository: _notRepository, ...fresh } = stateFor(root, teamId)
       publish(root, teamId, snapshot === null
@@ -350,7 +407,7 @@ async function refresh(root: string, teamId: string): Promise<void> {
       publish(root, teamId, {
         ...stateFor(root, teamId),
         loading: false,
-        error: error instanceof Error ? error.message : 'Git 状态读取失败',
+        error: error instanceof Error ? error.message : localizedLabel('Git 状态读取失败', 'Could not read Git status'),
       })
     } finally {
       refreshes.delete(key)
@@ -364,7 +421,7 @@ async function openDiff(root: string, teamId: string, selection: DiffSelection):
   const { diff: _diff, diffError: _diffError, ...current } = stateFor(root, teamId)
   publish(root, teamId, { ...current, selection, diffLoading: true })
   try {
-    if (webClient === undefined) throw new Error('Git Remote 尚未连接')
+    if (webClient === undefined) throw new Error(localizedLabel('Git Remote 尚未连接', 'Git Remote is not connected'))
     const diff = unwrap(await webClient.diff({ root, path: selection.path, staged: selection.staged }))
     const current = stateFor(root, teamId)
     if (current.selection?.path !== selection.path || current.selection.staged !== selection.staged) return
@@ -376,7 +433,7 @@ async function openDiff(root: string, teamId: string, selection: DiffSelection):
     publish(root, teamId, {
       ...current,
       diffLoading: false,
-      diffError: error instanceof Error ? error.message : 'Diff 读取失败',
+      diffError: error instanceof Error ? error.message : localizedLabel('Diff 读取失败', 'Could not read Diff'),
     })
   }
 }
@@ -394,15 +451,45 @@ function useGitState(root: string | undefined, teamId: string): GitViewState {
   )
 }
 
-function useGitRefresh(root: string | undefined, teamId: string): void {
+function refreshSubscribedTeam(teamId: string): void {
+  const prefix = `${teamId}\0`
+  for (const key of listenersByRoot.keys()) {
+    if (!key.startsWith(prefix)) continue
+    if (document.visibilityState !== 'visible') {
+      dirtyRepositories.add(key)
+      continue
+    }
+    void refresh(key.slice(prefix.length), teamId)
+  }
+}
+
+function refreshVisibleRepositories(): void {
+  if (document.visibilityState !== 'visible') return
+  for (const key of [...dirtyRepositories]) {
+    dirtyRepositories.delete(key)
+    const separator = key.indexOf('\0')
+    if (separator < 0 || !listenersByRoot.has(key)) continue
+    void refresh(key.slice(separator + 1), key.slice(0, separator))
+  }
+}
+
+function useGitLoad(root: string | undefined, teamId: string): void {
   useEffect(() => {
     if (root === undefined) return
     void refresh(root, teamId)
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refresh(root, teamId)
-    }, POLL_INTERVAL_MS)
-    return () => { window.clearInterval(timer) }
   }, [root, teamId])
+}
+
+class FleetGitWebPeerRemote extends TypertRemoteService {
+  constructor(ctx: Context) {
+    super(ctx, 'fleetGitWebPeer', { namespace: 'fleetGitWebPeer' })
+  }
+
+  invalidate(input: FleetGitInvalidation, signal: AbortSignal): boolean {
+    signal.throwIfAborted()
+    for (const teamId of input.teamIds) refreshSubscribedTeam(teamId)
+    return true
+  }
 }
 
 function repositoryRoot(owner: FleetPaneOwner): string | undefined {
@@ -415,8 +502,7 @@ function fileName(path: string): string {
 }
 
 function localizedLabel(chinese: string, english: string): string {
-  const locale = document.documentElement.lang.trim() || navigator.language.trim()
-  return locale.toLowerCase().startsWith('zh') ? chinese : english
+  return fleetText(chinese, english)
 }
 
 function parentPath(path: string): string {
@@ -516,7 +602,14 @@ function branchForMember(
 
 function statusLabel(code: string): string {
   const labels: Record<string, string> = {
-    M: '已修改', A: '已添加', D: '已删除', R: '已重命名', C: '已复制', U: '未合并', '?': '未跟踪', '!': '已忽略',
+    M: localizedLabel('已修改', 'Modified'),
+    A: localizedLabel('已添加', 'Added'),
+    D: localizedLabel('已删除', 'Deleted'),
+    R: localizedLabel('已重命名', 'Renamed'),
+    C: localizedLabel('已复制', 'Copied'),
+    U: localizedLabel('未合并', 'Unmerged'),
+    '?': localizedLabel('未跟踪', 'Untracked'),
+    '!': localizedLabel('已忽略', 'Ignored'),
   }
   return labels[code] ?? code
 }
@@ -620,12 +713,11 @@ function Icon({ name, size = 18 }: {
 
 function GitTool(owner: FleetToolOwner): ReactElement {
   const joyride = useJoyride()
-  const active = owner.activeTool === TOOL_ID
   useEffect(() => joyride?.register({
     id: 'fleet.view.git',
-    label: '打开 Fleet Git 视图',
+    label: localizedLabel('打开 Fleet Git 视图', 'Open Fleet Git view'),
     scope: 'fleet',
-    description: '只切换到当前团队的 Git 子插件视图。',
+    description: localizedLabel('只切换到当前团队的 Git 子插件视图。', 'Switch only to the current Team’s Git plugin view.'),
     target: () => document.querySelector<HTMLElement>('[data-joyride-action="fleet.view.git"]'),
     perform: () => {
       if (owner.disabled === true) throw new Error('No Fleet team is selected')
@@ -633,50 +725,24 @@ function GitTool(owner: FleetToolOwner): ReactElement {
       return { view: TOOL_ID }
     },
   }), [joyride, owner.disabled, owner.selectTool])
-  return jsx('button', {
-    type: 'button',
-    className: 'dsh-fleet-panel-tool',
-    disabled: owner.disabled === true,
-    'aria-label': '源代码管理',
-    'aria-current': active ? 'page' : undefined,
-    'data-joyride-action': 'fleet.view.git',
-    title: '源代码管理',
-    onClick: () => { owner.selectTool(TOOL_ID) },
+  return jsx(owner.ui.ToolButton, {
+    owner,
+    tool: TOOL_ID,
+    label: localizedLabel('源代码管理', 'Source control'),
+    actionId: 'fleet.view.git',
     children: jsx(Icon, { name: 'git' }),
   })
 }
 
 function TeamSelector({ owner }: { readonly owner: FleetPaneOwner }): ReactElement {
-  const [open, setOpen] = useState(false)
-  return jsxs('div', {
-    className: 'dsh-fleet-panel-sidebar-team-block dsh-fleet-git-team-block',
-    children: [
-      jsxs('button', {
-        type: 'button',
-        className: 'dsh-fleet-git-team-trigger',
-        'aria-haspopup': 'menu',
-        'aria-expanded': open ? 'true' : 'false',
-        onClick: () => { setOpen(value => !value) },
-        children: [
-          jsx('span', { className: 'dsh-fleet-git-team-name', children: owner.snapshot.teamName }),
-          jsx(Icon, { name: 'chevron', size: 14 }),
-        ],
-      }),
-      open && jsx('div', {
-        className: 'dsh-fleet-git-team-menu',
-        role: 'menu',
-        children: owner.fleet.directory.teams.map(team => jsx('button', {
-          type: 'button',
-          role: 'menuitemradio',
-          'aria-checked': team.teamId === owner.snapshot.teamId ? 'true' : 'false',
-          onClick: () => {
-            owner.selectTeam(team.teamId)
-            setOpen(false)
-          },
-          children: team.teamName,
-        }, team.teamId)),
-      }),
-    ],
+  return jsx('div', {
+    className: 'dsh-fleet-panel-sidebar-team-block',
+    children: jsx(owner.ui.TeamSwitcher, {
+      teams: owner.fleet.directory.teams,
+      selectedTeamId: owner.snapshot.teamId,
+      label: owner.snapshot.teamName,
+      selectTeam: owner.selectTeam,
+    }),
   })
 }
 
@@ -738,104 +804,41 @@ function ChangeRow({ root, teamId, path, code, staged }: {
   })
 }
 
-function memberPresence(member: FleetMemberFace): FleetMemberFace['presence'] {
-  if (member.runtimeStatus === 'paused' || member.runtimeStatus === 'offline') return 'offline'
-  if (member.runtimeStatus === 'running') return 'busy'
-  if (member.runtimeStatus === 'waiting') return 'waiting'
-  if (member.runtimeStatus === 'error') return 'error'
-  return member.presence ?? (member.runtimeStatus === 'idle' ? 'active' : 'offline')
-}
-
-function memberPresenceLabel(member: FleetMemberFace): string {
-  if (member.runtimeStatus === 'paused') return '已暂停'
-  const labels = { active: '空闲', busy: '工作中', waiting: '等待中', offline: '离线', error: '异常', unknown: '状态待同步' }
-  return labels[memberPresence(member) ?? 'offline']
-}
-
-function GitMemberRow({ member, location, teamId, selected, showDetails, onSelect }: {
+function GitMemberRow({ member, location, teamId, selected, showDetails, onSelect, ui }: {
   readonly member: FleetMemberFace
   readonly location: string
   readonly teamId: string
   readonly selected: boolean
   readonly showDetails: (memberId: string) => void
   readonly onSelect: (memberId: string) => void
+  readonly ui: FleetPaneUi
 }): ReactElement {
-  const popover = useRef<HTMLDivElement>(null)
-  const [open, setOpen] = useState(false)
-
-  useEffect(() => {
-    const node = popover.current
-    if (node === null) return
-    const syncOpen = (): void => {
-      setOpen(node.matches(':popover-open'))
-    }
-    const closeOnViewportMove = (event: Event): void => {
-      if (event.target instanceof Node && node.contains(event.target)) return
-      if (node.matches(':popover-open')) node.hidePopover()
-    }
-    node.addEventListener('toggle', syncOpen)
-    window.addEventListener('resize', closeOnViewportMove)
-    document.addEventListener('scroll', closeOnViewportMove, true)
-    return () => {
-      node.removeEventListener('toggle', syncOpen)
-      window.removeEventListener('resize', closeOnViewportMove)
-      document.removeEventListener('scroll', closeOnViewportMove, true)
-      clearMemberEmphasis(teamId, 'hovered', member.id)
-    }
-  }, [member.id, teamId])
-
+  useEffect(() => () => { clearMemberEmphasis(teamId, 'hovered', member.id) }, [member.id, teamId])
   useEffect(() => {
     if (selected) publishMemberEmphasis(teamId, 'selected', member.id)
     else clearMemberEmphasis(teamId, 'selected', member.id)
     return () => { clearMemberEmphasis(teamId, 'selected', member.id) }
   }, [member.id, selected, teamId])
-
-  const showPopover = (anchor: Element): void => {
-    const node = popover.current
-    if (node === null || node.matches(':popover-open')) return
-    const bounds = anchor.getBoundingClientRect()
-    node.style.visibility = 'hidden'
-    node.showPopover()
-    const popoverBounds = node.getBoundingClientRect()
-    const gutter = 12
-    const gap = 8
-    node.style.left = `${String(Math.round(Math.max(gutter, Math.min(window.innerWidth - popoverBounds.width - gutter, bounds.right + gap))))}px`
-    node.style.top = `${String(Math.round(Math.max(gutter, Math.min(bounds.top, window.innerHeight - popoverBounds.height - gutter))))}px`
-    node.style.visibility = ''
-  }
-  const hidePopover = (): void => {
-    const node = popover.current
-    if (node?.matches(':popover-open') === true) node.hidePopover()
-  }
-  const presence = memberPresence(member)
-  return jsxs('div', {
+  return jsx(ui.MemberPopover, {
+    member,
+    mode: 'hover',
+    placement: 'right',
     className: 'dsh-fleet-git-member-anchor',
-    onMouseLeave: () => {
-      hidePopover()
-      clearMemberEmphasis(teamId, 'hovered', member.id)
+    showStatusText: true,
+    showDetails,
+    onOpenChange: (open: boolean) => {
+      if (open) publishMemberEmphasis(teamId, 'hovered', member.id)
+      else clearMemberEmphasis(teamId, 'hovered', member.id)
     },
-    children: [
-      jsxs('button', {
+    trigger: (interaction: FleetMemberPopoverTriggerProps) => jsxs('button', {
         type: 'button',
         className: 'dsh-fleet-git-member-row',
         'data-selected': selected ? 'true' : undefined,
-        'aria-haspopup': 'dialog',
-        'aria-expanded': open ? 'true' : 'false',
+        ...interaction,
         'aria-pressed': selected,
-        'aria-label': selected ? `返回团队工作区；当前为 ${member.name} 的工作区` : `切换到 ${member.name} 的工作区`,
-        onMouseEnter: (event: ReactMouseEvent<HTMLButtonElement>) => {
-          publishMemberEmphasis(teamId, 'hovered', member.id)
-          showPopover(event.currentTarget)
-        },
-        onFocus: (event: ReactFocusEvent<HTMLButtonElement>) => {
-          publishMemberEmphasis(teamId, 'hovered', member.id)
-          showPopover(event.currentTarget)
-        },
-        onBlur: (event: ReactFocusEvent<HTMLButtonElement>) => {
-          if (event.relatedTarget instanceof Node && popover.current?.contains(event.relatedTarget) === true) return
-          hidePopover()
-          clearMemberEmphasis(teamId, 'hovered', member.id)
-        },
+        'aria-label': selected
+          ? localizedLabel(`返回团队工作区；当前为 ${member.name} 的工作区`, `Return to the Team workspace; currently viewing ${member.name}'s workspace`)
+          : localizedLabel(`切换到 ${member.name} 的工作区`, `Switch to ${member.name}'s workspace`),
         onClick: () => { onSelect(member.id) },
         children: [
           jsx('span', { className: 'dsh-fleet-git-member-dot', style: { background: member.color } }),
@@ -854,78 +857,20 @@ function GitMemberRow({ member, location, teamId, selected, showDetails, onSelec
           }),
         ],
       }),
-      jsxs('div', {
-        ref: popover,
-        popover: 'auto',
-        className: 'dsh-fleet-panel-member-popover',
-        role: 'dialog',
-        children: [
-          jsxs('header', {
-            className: 'dsh-fleet-panel-member-popover-head',
-            children: [
-              jsx('span', {
-                className: 'dsh-fleet-git-member-popover-avatar',
-                style: { background: member.color },
-                children: memberInitial(member.name),
-              }),
-              jsxs('div', {
-                className: 'dsh-fleet-panel-member-popover-copy',
-                children: [
-                  jsx('div', { className: 'dsh-fleet-panel-member-popover-name', children: member.name }),
-                  jsx('div', { className: 'dsh-fleet-panel-member-popover-role', children: member.role }),
-                ],
-              }),
-            ],
-          }),
-          jsx('p', {
-            className: 'dsh-fleet-panel-member-popover-responsibility',
-            children: member.responsibility ?? member.role,
-          }),
-          jsx('div', {
-            className: 'dsh-fleet-panel-member-popover-status',
-            'data-status': presence,
-            children: memberPresenceLabel(member),
-          }),
-          jsxs('div', {
-            className: 'dsh-fleet-panel-member-popover-self-status',
-            'data-empty': member.statusText === undefined ? 'true' : undefined,
-            children: [
-              jsx('div', { className: 'dsh-fleet-panel-member-popover-self-status-label', children: '成员自述' }),
-              jsx('p', {
-                className: 'dsh-fleet-panel-member-popover-self-status-text',
-                children: member.statusText ?? '暂未填写工作状态',
-              }),
-            ],
-          }),
-          jsx('button', {
-            type: 'button',
-            className: 'dsh-fleet-panel-member-popover-detail',
-            onClick: () => {
-              popover.current?.hidePopover()
-              showDetails(member.id)
-            },
-            children: '详细信息',
-          }),
-        ],
-      }),
-    ],
   })
 }
 
 function GitSidebar(owner: FleetPaneOwner): ReactElement {
   const root = repositoryRoot(owner)
   const teamId = owner.snapshot.teamId
-  const [selectedMemberId, setSelectedMemberId] = useState<string>()
   const teamState = useGitState(root, teamId)
-  useGitRefresh(root, teamId)
   const members = [...owner.snapshot.members, ...(owner.snapshot.assistants ?? [])]
   const teamWorktrees = teamState.snapshot?.status.worktrees ?? []
-  const selectedMember = members.find(member => member.id === selectedMemberId)
+  const selectedMember = members.find(member => member.id === owner.activeItem)
   const selectedWorktree = selectedMember === undefined ? undefined : worktreeForMember(selectedMember, teamWorktrees)
   const statusRoot = selectedWorktree?.path ?? root
   const state = useGitState(statusRoot, teamId)
-  useGitRefresh(statusRoot === root ? undefined : statusRoot, teamId)
-  useEffect(() => { setSelectedMemberId(undefined) }, [root, teamId])
+  useGitLoad(statusRoot === root ? undefined : statusRoot, teamId)
   const status = state.snapshot?.status
   const staged = status?.changes.filter(change => change.index !== ' ' && change.index !== '?') ?? []
   const working = status?.changes.filter(change => change.worktree !== ' ' || change.index === '?') ?? []
@@ -935,15 +880,18 @@ function GitSidebar(owner: FleetPaneOwner): ReactElement {
     const memberWorktree = worktreeForMember(member, worktrees)
     const branch = branchForMember(member, worktrees, teamState.snapshot?.branches ?? [])
     const location = memberWorktree === undefined
-      ? branch ?? (teamState.snapshot?.status.branch === undefined ? '尚无工作树' : `主工作树 · ${teamState.snapshot.status.branch}`)
-      : `${memberWorktree.path === root ? '主工作树' : fileName(memberWorktree.path)} · ${branch ?? 'Detached HEAD'}`
+      ? branch ?? (teamState.snapshot?.status.branch === undefined
+        ? localizedLabel('尚无工作树', 'No worktree yet')
+        : localizedLabel(`主工作树 · ${teamState.snapshot.status.branch}`, `Main worktree · ${teamState.snapshot.status.branch}`))
+      : `${memberWorktree.path === root ? localizedLabel('主工作树', 'Main worktree') : fileName(memberWorktree.path)} · ${branch ?? 'Detached HEAD'}`
     return jsx(GitMemberRow, {
       member,
       location,
       teamId,
-      selected: selectedMemberId === member.id,
+      selected: owner.activeItem === member.id,
       showDetails: owner.showMemberDetails,
-      onSelect: (memberId: string) => { setSelectedMemberId(current => current === memberId ? undefined : memberId) },
+      ui: owner.ui,
+      onSelect: (memberId: string) => { owner.selectItem(owner.activeItem === memberId ? '' : memberId) },
     }, member.id)
   }
   return jsxs('div', {
@@ -968,7 +916,9 @@ function GitSidebar(owner: FleetPaneOwner): ReactElement {
                         : localizedLabel(`${selectedMember.name} 的工作区`, `${selectedMember.name}'s workspace`),
                   }),
                   root !== undefined && jsx('span', {
-                    children: state.notRepository === true ? '当前工作区未初始化 Git' : status?.branch ?? 'Detached HEAD',
+                    children: state.notRepository === true
+                      ? localizedLabel('当前工作区未初始化 Git', 'Git is not initialized in this workspace')
+                      : status?.branch ?? 'Detached HEAD',
                   }),
                 ],
               }),
@@ -984,7 +934,7 @@ function GitSidebar(owner: FleetPaneOwner): ReactElement {
                 disabled: selectedMember === undefined && state.loading,
                 onClick: selectedMember === undefined
                   ? () => { void refresh(statusRoot, teamId) }
-                  : () => { setSelectedMemberId(undefined) },
+                  : () => { owner.selectItem('') },
                 children: jsx(Icon, { name: selectedMember === undefined ? 'refresh' : 'back', size: 15 }),
               }),
             ],
@@ -992,36 +942,36 @@ function GitSidebar(owner: FleetPaneOwner): ReactElement {
           jsx('div', {
             className: 'dsh-fleet-git-sidebar-scroll',
             children: root === undefined
-              ? jsx('div', { className: 'dsh-fleet-git-empty', children: '给团队挂载一个 Git 工作区后即可查看源码管理状态。' })
+              ? jsx('div', { className: 'dsh-fleet-git-empty', children: localizedLabel('给团队挂载一个 Git 工作区后即可查看源码管理状态。', 'Mount a Git workspace to the Team to view source-control status.') })
               : state.notRepository === true
                 ? jsx('div', {
                     className: 'dsh-fleet-git-empty',
-                    children: '这个工作区还不是 Git 仓库。Agent 可以在需要版本管理时运行 git init。',
+                    children: localizedLabel('这个工作区还不是 Git 仓库。Agent 可以在需要版本管理时运行 git init。', 'This workspace is not a Git repository yet. An Agent can run git init when version control is needed.'),
                   })
               : state.error !== undefined && state.snapshot === undefined
-                ? jsxs('div', { className: 'dsh-fleet-git-error', children: [jsx('strong', { children: '无法读取仓库' }), jsx('span', { children: state.error })] })
+                ? jsxs('div', { className: 'dsh-fleet-git-error', children: [jsx('strong', { children: localizedLabel('无法读取仓库', 'Could not read repository') }), jsx('span', { children: state.error })] })
                 : jsxs('div', {
                     children: [
                       jsx(Section, {
-                        title: '成员分支', count: members.length, defaultOpen: true,
+                        title: localizedLabel('成员分支', 'Member branches'), count: members.length, defaultOpen: true,
                         children: members.map(actorRow),
                       }),
                       jsx(Section, {
-                        title: '暂存的更改', count: staged.length,
+                        title: localizedLabel('暂存的更改', 'Staged changes'), count: staged.length,
                         children: staged.length === 0
-                          ? jsx('div', { className: 'dsh-fleet-git-section-empty', children: '没有暂存的更改' })
+                          ? jsx('div', { className: 'dsh-fleet-git-section-empty', children: localizedLabel('没有暂存的更改', 'No staged changes') })
                           : staged.map(change => jsx(ChangeRow, { root: statusRoot, teamId, path: change.path, code: change.index, staged: true }, `i:${change.path}`)),
                       }),
                       jsx(Section, {
-                        title: '更改', count: working.length,
+                        title: localizedLabel('更改', 'Changes'), count: working.length,
                         children: working.length === 0
-                          ? jsx('div', { className: 'dsh-fleet-git-section-empty', children: '工作树是干净的' })
+                          ? jsx('div', { className: 'dsh-fleet-git-section-empty', children: localizedLabel('工作树是干净的', 'The worktree is clean') })
                           : working.map(change => jsx(ChangeRow, {
                               root: statusRoot, teamId, path: change.path, code: change.index === '?' ? '?' : change.worktree, staged: false,
                             }, `w:${change.path}`)),
                       }),
                       stashes.length > 0 && jsx(Section, {
-                        title: '储藏', count: stashes.length, defaultOpen: true,
+                        title: localizedLabel('储藏', 'Stashes'), count: stashes.length, defaultOpen: true,
                         children: stashes.map(stash => jsxs('div', {
                           className: 'dsh-fleet-git-stash-row',
                           title: stash.subject,
@@ -1093,14 +1043,14 @@ export function filterGitBranchesByQuery(
       branch.fullName,
       branch.head,
       branch.upstream,
-      branch.current ? 'current 当前' : undefined,
-      branch.remote ? 'remote 远程' : 'local 本地',
+      branch.current ? localizedLabel('current 当前', 'current') : undefined,
+      branch.remote ? localizedLabel('remote 远程', 'remote') : localizedLabel('local 本地', 'local'),
       commit?.subject,
       commit?.authorName,
       commit?.authorEmail,
       commit?.authoredAt,
       ...(commit?.decorations ?? []),
-      ...worktrees.flatMap(worktree => [worktree.path, worktree.head, worktree.detached ? 'detached 分离' : undefined]),
+      ...worktrees.flatMap(worktree => [worktree.path, worktree.head, worktree.detached ? localizedLabel('detached 分离', 'detached') : undefined]),
       ...branchMembers.flatMap(member => [member.id, member.name, member.role, member.responsibility]),
     ].filter((value): value is string => value !== undefined).join('\n').toLocaleLowerCase()
     return tokens.every(token => metadata.includes(token))
@@ -1392,7 +1342,7 @@ function RefMembers({ members, emphasizedMemberId }: {
   return jsx('span', {
     className: 'dsh-fleet-git-ref-members',
     title: names,
-    'aria-label': `位于此分支：${names}`,
+    'aria-label': localizedLabel(`位于此分支：${names}`, `On branches: ${names}`),
     children: members.map(member => jsx('span', {
       className: 'dsh-fleet-git-ref-member',
       'data-emphasized': member.id === emphasizedMemberId ? 'true' : undefined,
@@ -1485,7 +1435,7 @@ function CommitFileNodes({ nodes }: { readonly nodes: readonly GitCommitFileTree
             jsx('span', { className: 'dsh-fleet-git-commit-file-status', 'data-status': node.file.status, children: node.file.status }),
             jsx('span', { className: 'dsh-fleet-git-commit-file-name', children: node.name }),
             node.file.binary
-              ? jsx('span', { className: 'dsh-fleet-git-commit-file-binary', children: '二进制' })
+              ? jsx('span', { className: 'dsh-fleet-git-commit-file-binary', children: localizedLabel('二进制', 'Binary') })
               : jsxs('span', {
                   className: 'dsh-fleet-git-commit-file-stats',
                   children: [
@@ -1502,12 +1452,12 @@ function CommitDetailsPanel({ state }: { readonly state: CommitDetailsState }): 
   if (state.loading) return jsx('div', {
     className: 'dsh-fleet-git-commit-details-row',
     id: `dsh-fleet-git-commit-${state.hash}`,
-    children: jsx('div', { className: 'dsh-fleet-git-commit-details-loading', children: '正在读取提交详情…' }),
+    children: jsx('div', { className: 'dsh-fleet-git-commit-details-loading', children: localizedLabel('正在读取提交详情…', 'Loading commit details…') }),
   })
   if (state.error !== undefined || state.details === undefined) return jsx('div', {
     className: 'dsh-fleet-git-commit-details-row',
     id: `dsh-fleet-git-commit-${state.hash}`,
-    children: jsx('div', { className: 'dsh-fleet-git-commit-details-loading dsh-fleet-git-commit-details-error', children: state.error ?? '提交详情不可用' }),
+    children: jsx('div', { className: 'dsh-fleet-git-commit-details-loading dsh-fleet-git-commit-details-error', children: state.error ?? localizedLabel('提交详情不可用', 'Commit details are unavailable') }),
   })
   const details = state.details
   const additions = details.files.reduce((total, file) => total + (file.additions ?? 0), 0)
@@ -1522,41 +1472,41 @@ function CommitDetailsPanel({ state }: { readonly state: CommitDetailsState }): 
       children: [
         jsxs('section', {
           className: 'dsh-fleet-git-commit-summary',
-          'aria-label': '提交详情',
+          'aria-label': localizedLabel('提交详情', 'Commit details'),
           children: [
             jsx('h3', { children: details.subject }),
             jsxs('dl', {
               children: [
-                jsx('dt', { children: '提交' }),
+                jsx('dt', { children: localizedLabel('提交', 'Commit') }),
                 jsx('dd', { children: jsx('code', { title: details.hash, children: details.hash }) }),
-                jsx('dt', { children: '父提交' }),
-                jsx('dd', { children: details.parents.length === 0 ? '无' : details.parents.map(parent => parent.slice(0, 10)).join(', ') }),
-                jsx('dt', { children: '作者' }),
+                jsx('dt', { children: localizedLabel('父提交', 'Parents') }),
+                jsx('dd', { children: details.parents.length === 0 ? localizedLabel('无', 'None') : details.parents.map(parent => parent.slice(0, 10)).join(', ') }),
+                jsx('dt', { children: localizedLabel('作者', 'Author') }),
                 jsx('dd', { title: author, children: author }),
-                jsx('dt', { children: '作者时间' }),
+                jsx('dt', { children: localizedLabel('作者时间', 'Authored') }),
                 jsx('dd', { children: new Date(details.authoredAt).toLocaleString() }),
-                jsx('dt', { children: '提交者' }),
+                jsx('dt', { children: localizedLabel('提交者', 'Committer') }),
                 jsx('dd', { title: committer, children: committer }),
-                jsx('dt', { children: '提交时间' }),
+                jsx('dt', { children: localizedLabel('提交时间', 'Committed') }),
                 jsx('dd', { children: new Date(details.committedAt).toLocaleString() }),
               ],
             }),
             jsxs('div', {
               className: 'dsh-fleet-git-commit-description',
               children: [
-                jsx('strong', { children: '描述' }),
-                jsx('p', { 'data-empty': details.body.length === 0 ? 'true' : undefined, children: details.body || '无附加描述' }),
+                jsx('strong', { children: localizedLabel('描述', 'Description') }),
+                jsx('p', { 'data-empty': details.body.length === 0 ? 'true' : undefined, children: details.body || localizedLabel('无附加描述', 'No additional description') }),
               ],
             }),
           ],
         }),
         jsxs('section', {
           className: 'dsh-fleet-git-commit-files',
-          'aria-label': '提交文件',
+          'aria-label': localizedLabel('提交文件', 'Commit files'),
           children: [
             jsxs('header', {
               children: [
-                jsx('strong', { children: `${String(details.files.length)} 个文件` }),
+                jsx('strong', { children: localizedLabel(`${String(details.files.length)} 个文件`, `${String(details.files.length)} files`) }),
                 jsxs('span', {
                   children: [
                     jsx('span', { className: 'dsh-fleet-git-additions', children: `+${String(additions)}` }),
@@ -1566,7 +1516,7 @@ function CommitDetailsPanel({ state }: { readonly state: CommitDetailsState }): 
               ],
             }),
             details.files.length === 0
-              ? jsx('div', { className: 'dsh-fleet-git-commit-files-empty', children: '这个提交没有文件变更。' })
+              ? jsx('div', { className: 'dsh-fleet-git-commit-files-empty', children: localizedLabel('这个提交没有文件变更。', 'This commit contains no file changes.') })
               : jsx(CommitFileNodes, { nodes: buildCommitFileTree(details.files) }),
           ],
         }),
@@ -1638,14 +1588,14 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
     setDetailsState({ hash, loading: true })
     void (async () => {
       try {
-        if (webClient === undefined) throw new Error('Git Remote 尚未连接')
+        if (webClient === undefined) throw new Error(localizedLabel('Git Remote 尚未连接', 'Git Remote is not connected'))
         const details = unwrap(await webClient.commit({ root, hash }))
         if (detailsRequest.current === request) setDetailsState({ hash, loading: false, details })
       } catch (error) {
         if (detailsRequest.current === request) setDetailsState({
           hash,
           loading: false,
-          error: error instanceof Error ? error.message : '提交详情读取失败',
+          error: error instanceof Error ? error.message : localizedLabel('提交详情读取失败', 'Could not read commit details'),
         })
       }
     })()
@@ -1653,7 +1603,7 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
   return jsx('div', {
     className: 'dsh-fleet-git-graph-scroll',
     children: rows.length === 0
-      ? jsx('div', { className: 'dsh-fleet-git-empty', children: '仓库还没有提交记录。' })
+      ? jsx('div', { className: 'dsh-fleet-git-empty', children: localizedLabel('仓库还没有提交记录。', 'This repository has no commits yet.') })
       : jsxs('div', {
           className: 'dsh-fleet-git-graph-table',
           ref: table,
@@ -1663,27 +1613,31 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
               className: 'dsh-fleet-git-graph-header',
               role: 'row',
               children: [
-                jsx('span', { children: '图谱' }),
-                jsx('span', { children: '描述' }),
+                jsx('span', { children: localizedLabel('图谱', 'Graph') }),
+                jsx('span', { children: localizedLabel('描述', 'Description') }),
                 jsxs('span', {
                   className: 'dsh-fleet-git-resizable-header',
                   children: [
                     jsx(ColumnResizeHandle, {
-                      label: '调整描述与日期列分界', width: columnWidths.date, min: 112, max: 240, side: 'left',
+                      label: localizedLabel('调整描述与日期列分界', 'Resize description and date columns'), width: columnWidths.date, min: 112, max: 240, side: 'left',
                       onResizeStart: () => { setTableWidth(table.current?.getBoundingClientRect().width) },
                       onChange: (date: number) => { setColumnWidths(current => ({ ...current, date })) },
                     }),
                     jsx('button', {
                       type: 'button',
                       className: 'dsh-fleet-git-header-toggle',
-                      title: dateMode === 'relative' ? '切换为标准日期和时间' : '切换为相对时间',
-                      'aria-label': dateMode === 'relative' ? '日期：当前显示相对时间，切换为标准日期和时间' : '日期：当前显示标准日期和时间，切换为相对时间',
+                      title: dateMode === 'relative'
+                        ? localizedLabel('切换为标准日期和时间', 'Switch to standard date and time')
+                        : localizedLabel('切换为相对时间', 'Switch to relative time'),
+                      'aria-label': dateMode === 'relative'
+                        ? localizedLabel('日期：当前显示相对时间，切换为标准日期和时间', 'Date: showing relative time; switch to standard date and time')
+                        : localizedLabel('日期：当前显示标准日期和时间，切换为相对时间', 'Date: showing standard date and time; switch to relative time'),
                       'aria-pressed': dateMode === 'standard',
                       onClick: () => { setDateMode(current => current === 'relative' ? 'standard' : 'relative') },
-                      children: '日期',
+                      children: localizedLabel('日期', 'Date'),
                     }),
                     jsx(ColumnResizeHandle, {
-                      label: '调整日期列宽', width: columnWidths.date, min: 112, max: 240,
+                      label: localizedLabel('调整日期列宽', 'Resize date column'), width: columnWidths.date, min: 112, max: 240,
                       onResizeStart: () => { resizeStartWidth.current = table.current?.getBoundingClientRect().width },
                       onResizeEnd: () => { resizeStartWidth.current = undefined },
                       onChange: (date: number, delta: number) => {
@@ -1699,14 +1653,18 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
                     jsx('button', {
                       type: 'button',
                       className: 'dsh-fleet-git-header-toggle',
-                      title: authorMode === 'git' ? '显示可识别的 Fleet 成员姓名与角色' : '显示 Git 作者',
-                      'aria-label': authorMode === 'git' ? '作者：当前显示 Git 作者，切换为 Fleet 成员' : '作者：当前显示 Fleet 成员，切换为 Git 作者',
+                      title: authorMode === 'git'
+                        ? localizedLabel('显示可识别的 Fleet 成员姓名与角色', 'Show recognized Fleet member names and roles')
+                        : localizedLabel('显示 Git 作者', 'Show Git authors'),
+                      'aria-label': authorMode === 'git'
+                        ? localizedLabel('作者：当前显示 Git 作者，切换为 Fleet 成员', 'Author: showing Git authors; switch to Fleet members')
+                        : localizedLabel('作者：当前显示 Fleet 成员，切换为 Git 作者', 'Author: showing Fleet members; switch to Git authors'),
                       'aria-pressed': authorMode === 'fleet',
                       onClick: () => { setAuthorMode(current => current === 'git' ? 'fleet' : 'git') },
-                      children: '作者',
+                      children: localizedLabel('作者', 'Author'),
                     }),
                     jsx(ColumnResizeHandle, {
-                      label: '调整作者列宽', width: columnWidths.author, min: 110, max: 320,
+                      label: localizedLabel('调整作者列宽', 'Resize author column'), width: columnWidths.author, min: 110, max: 320,
                       onResizeStart: () => { resizeStartWidth.current = table.current?.getBoundingClientRect().width },
                       onResizeEnd: () => { resizeStartWidth.current = undefined },
                       onChange: (author: number, delta: number) => {
@@ -1719,9 +1677,9 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
                 jsxs('span', {
                   className: 'dsh-fleet-git-resizable-header',
                   children: [
-                    jsx('span', { children: '提交' }),
+                    jsx('span', { children: localizedLabel('提交', 'Commit') }),
                     jsx(ColumnResizeHandle, {
-                      label: '调整提交列宽', width: columnWidths.hash, min: 64, max: 180,
+                      label: localizedLabel('调整提交列宽', 'Resize commit column'), width: columnWidths.hash, min: 64, max: 180,
                       onResizeStart: () => { resizeStartWidth.current = table.current?.getBoundingClientRect().width },
                       onResizeEnd: () => { resizeStartWidth.current = undefined },
                       onChange: (hash: number, delta: number) => {
@@ -1780,8 +1738,8 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
                           title: branch === undefined
                             ? decoration
                             : synchronizedRemote === undefined
-                              ? `${branch.remote ? '远程分支' : '本地分支'} · ${decoration}`
-                              : `本地与远程同步 · ${decoration} ↔ ${synchronizedRemote.name}`,
+                              ? localizedLabel(`${branch.remote ? '远程分支' : '本地分支'} · ${decoration}`, `${branch.remote ? 'Remote branch' : 'Local branch'} · ${decoration}`)
+                              : localizedLabel(`本地与远程同步 · ${decoration} ↔ ${synchronizedRemote.name}`, `Local and remote synchronized · ${decoration} ↔ ${synchronizedRemote.name}`),
                           children: [
                             kind === 'stash'
                               ? jsx(Icon, { name: 'stash', size: 11 })
@@ -1811,7 +1769,10 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
                   ? jsxs('span', {
                       className: 'dsh-fleet-git-commit-author',
                       'data-fleet-member': 'true',
-                      title: `${attributedMember.name} · ${attributedMember.role}\nGit 作者：${row.commit.authorName}${row.commit.authorEmail.length === 0 ? '' : ` <${row.commit.authorEmail}>`}`,
+                      title: localizedLabel(
+                        `${attributedMember.name} · ${attributedMember.role}\nGit 作者：${row.commit.authorName}${row.commit.authorEmail.length === 0 ? '' : ` <${row.commit.authorEmail}>`}`,
+                        `${attributedMember.name} · ${attributedMember.role}\nGit author: ${row.commit.authorName}${row.commit.authorEmail.length === 0 ? '' : ` <${row.commit.authorEmail}>`}`,
+                      ),
                       children: [
                         jsx('strong', { children: attributedMember.name }),
                         jsx('small', { children: attributedMember.role }),
@@ -1825,8 +1786,8 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
                       type: 'button',
                       className: 'dsh-fleet-git-commit-hash-button',
                       'data-copied': copiedHash === row.commit.hash ? 'true' : undefined,
-                      title: `复制完整提交 ${row.commit.hash}`,
-                      'aria-label': `复制完整提交 ${row.commit.hash}`,
+                      title: localizedLabel(`复制完整提交 ${row.commit.hash}`, `Copy full commit ${row.commit.hash}`),
+                      'aria-label': localizedLabel(`复制完整提交 ${row.commit.hash}`, `Copy full commit ${row.commit.hash}`),
                       onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
                         event.stopPropagation()
                         void copyCommitHash(row.commit.hash)
@@ -1834,7 +1795,7 @@ function GraphView({ root, snapshot, members, selectedBranches, showRemoteBranch
                       onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => { event.stopPropagation() },
                       children: jsx('code', {
                         className: 'dsh-fleet-git-commit-hash',
-                        children: copiedHash === row.commit.hash ? '已复制' : row.commit.hash.slice(0, SHORT_COMMIT_LENGTH),
+                        children: copiedHash === row.commit.hash ? localizedLabel('已复制', 'Copied') : row.commit.hash.slice(0, SHORT_COMMIT_LENGTH),
                       }),
                     }),
                   ],
@@ -1888,25 +1849,28 @@ function DiffView({ root, teamId, state }: { readonly root: string; readonly tea
         children: [
           jsxs('div', {
             className: 'dsh-fleet-git-main-title',
-            children: [jsx('strong', { children: fileName(selection.path) }), jsx('span', { children: `${selection.staged ? '暂存的更改' : '工作树更改'} · ${selection.path}` })],
+            children: [
+              jsx('strong', { children: fileName(selection.path) }),
+              jsx('span', { children: `${selection.staged ? localizedLabel('暂存的更改', 'Staged change') : localizedLabel('工作树更改', 'Worktree change')} · ${selection.path}` }),
+            ],
           }),
           jsx('button', {
-            type: 'button', className: 'dsh-fleet-git-icon-button', 'aria-label': '关闭 Diff', title: '返回 Git Graph',
+            type: 'button', className: 'dsh-fleet-git-icon-button', 'aria-label': localizedLabel('关闭 Diff', 'Close Diff'), title: localizedLabel('返回 Git Graph', 'Return to Git Graph'),
             onClick: () => { closeDiff(root, teamId) }, children: jsx(Icon, { name: 'close', size: 16 }),
           }),
         ],
       }),
       state.diffLoading
-        ? jsx('div', { className: 'dsh-fleet-git-empty', children: '正在读取 Diff…' })
+        ? jsx('div', { className: 'dsh-fleet-git-empty', children: localizedLabel('正在读取 Diff…', 'Loading Diff…') })
         : state.diffError !== undefined
           ? jsx('div', { className: 'dsh-fleet-git-error', children: state.diffError })
           : jsxs('div', {
               className: 'dsh-fleet-git-diff-scroll',
               children: [
                 state.diff?.text.length === 0
-                  ? jsx('div', { className: 'dsh-fleet-git-empty', children: '这个文件没有可显示的文本 Diff。' })
+                  ? jsx('div', { className: 'dsh-fleet-git-empty', children: localizedLabel('这个文件没有可显示的文本 Diff。', 'This file has no displayable text Diff.') })
                   : jsx(DiffContent, { text: state.diff?.text ?? '' }),
-                state.diff?.truncated === true && jsx('div', { className: 'dsh-fleet-git-truncated', children: 'Diff 较大，仅显示前 512 KiB。' }),
+                state.diff?.truncated === true && jsx('div', { className: 'dsh-fleet-git-truncated', children: localizedLabel('Diff 较大，仅显示前 512 KiB。', 'This Diff is large; only the first 512 KiB are shown.') }),
               ],
             }),
     ],
@@ -1920,9 +1884,9 @@ function useGitJoyride(root: string | undefined, teamId: string, state: GitViewS
     const dispose = [
       joyride.register({
         id: 'fleet.git.file.select',
-        label: '打开 Fleet Git 变更文件',
+        label: localizedLabel('打开 Fleet Git 变更文件', 'Open changed file in Fleet Git'),
         scope: 'fleet',
-        description: '只允许打开当前仓库状态中已有的变更文件。输入 {"path":"…","staged":true|false}。',
+        description: localizedLabel('只允许打开当前仓库状态中已有的变更文件。输入 {"path":"…","staged":true|false}。', 'Open only a changed file already present in the current repository state. Input {"path":"…","staged":true|false}.'),
         options: () => state.snapshot?.status.changes.flatMap(change => [
           ...(change.index !== ' ' && change.index !== '?' ? [{ path: change.path, staged: true }] : []),
           ...(change.worktree !== ' ' || change.index === '?' ? [{ path: change.path, staged: false }] : []),
@@ -1943,9 +1907,9 @@ function useGitJoyride(root: string | undefined, teamId: string, state: GitViewS
       }),
       joyride.register({
         id: 'fleet.git.graph.show',
-        label: '返回 Fleet Git 图谱',
+        label: localizedLabel('返回 Fleet Git 图谱', 'Return to Fleet Git graph'),
         scope: 'fleet',
-        description: '关闭当前 Diff，返回当前仓库的提交图谱。',
+        description: localizedLabel('关闭当前 Diff，返回当前仓库的提交图谱。', 'Close the current Diff and return to the repository commit graph.'),
         target: () => document.querySelector<HTMLElement>('.dsh-fleet-git-main'),
         perform: () => {
           closeDiff(root, teamId)
@@ -1954,9 +1918,9 @@ function useGitJoyride(root: string | undefined, teamId: string, state: GitViewS
       }),
       joyride.register({
         id: 'fleet.git.refresh',
-        label: '刷新 Fleet Git',
+        label: localizedLabel('刷新 Fleet Git', 'Refresh Fleet Git'),
         scope: 'fleet',
-        description: '只刷新当前团队已挂载仓库的只读状态与图谱。',
+        description: localizedLabel('只刷新当前团队已挂载仓库的只读状态与图谱。', 'Refresh only the read-only status and graph of the current Team’s mounted repository.'),
         perform: async () => {
           await refresh(root, teamId)
           return { root }
@@ -1964,9 +1928,9 @@ function useGitJoyride(root: string | undefined, teamId: string, state: GitViewS
       }),
       joyride.register({
         id: 'fleet.git.scroll',
-        label: '滚动 Fleet Git 当前视图',
+        label: localizedLabel('滚动 Fleet Git 当前视图', 'Scroll the current Fleet Git view'),
         scope: 'fleet',
-        description: '只滚动 Git 的 sidebar 或 main。direction 可为 up、down、left、right、top、bottom。',
+        description: localizedLabel('只滚动 Git 的 sidebar 或 main。direction 可为 up、down、left、right、top、bottom。', 'Scroll only the Git sidebar or main area. direction may be up, down, left, right, top, or bottom.'),
         options: () => ({ areas: ['sidebar', 'main'], directions: ['up', 'down', 'left', 'right', 'top', 'bottom'] }),
         target: () => gitScrollTarget('main'),
         perform: scrollGit,
@@ -1993,7 +1957,7 @@ function BranchSearch({ value, matchCount, onChange }: {
         placeholder: localizedLabel('搜索分支', 'Search branches'),
         'aria-label': label,
         'aria-description': localizedLabel(
-          '可搜索分支名、提交、作者、远端、工作树和成员等元数据；图谱结构会完整保留',
+          localizedLabel('可搜索分支名、提交、作者、远端、工作树和成员等元数据；图谱结构会完整保留', 'Search branch names, commits, authors, remotes, worktrees, members, and other metadata while preserving the graph structure'),
           'Search branch names, commits, authors, remotes, worktrees, members, and other metadata while preserving the full graph',
         ),
         onChange: (event: ChangeEvent<HTMLInputElement>) => { onChange(event.currentTarget.value) },
@@ -2063,15 +2027,17 @@ function BranchFilter({ branches, selectedBranches, showRemoteBranches, onSelect
         jsx('span', { className: 'dsh-fleet-git-branch-option-name', children: branch.name }),
         jsx('span', {
           className: 'dsh-fleet-git-branch-option-origin',
-          children: branch.remote ? '远程' : branch.current ? '本地 · 当前' : '本地',
+          children: branch.remote
+            ? localizedLabel('远程', 'Remote')
+            : branch.current ? localizedLabel('本地 · 当前', 'Local · Current') : localizedLabel('本地', 'Local'),
         }),
       ],
     }, branch.fullName)
   }
 
   const label = selectedBranches === null
-    ? showRemoteBranches ? '全部分支' : '本地分支'
-    : `${String(selectedCount)} 个分支`
+    ? showRemoteBranches ? localizedLabel('全部分支', 'All branches') : localizedLabel('本地分支', 'Local branches')
+    : localizedLabel(`${String(selectedCount)} 个分支`, `${String(selectedCount)} branches`)
   return jsxs('div', {
     ref: container,
     className: 'dsh-fleet-git-branch-filter',
@@ -2087,14 +2053,14 @@ function BranchFilter({ branches, selectedBranches, showRemoteBranches, onSelect
         className: 'dsh-fleet-git-branch-filter-trigger',
         'aria-haspopup': 'menu',
         'aria-expanded': open ? 'true' : 'false',
-        title: '选择 Git Graph 中显示的分支',
+        title: localizedLabel('选择 Git Graph 中显示的分支', 'Choose branches shown in Git Graph'),
         onClick: () => { setOpen(value => !value) },
         children: [jsx(Icon, { name: 'branch', size: 15 }), jsx('span', { children: label }), jsx(Icon, { name: 'chevron', size: 12 })],
       }),
       open && jsxs('div', {
         className: 'dsh-fleet-git-branch-menu',
         role: 'menu',
-        'aria-label': '显示的分支',
+        'aria-label': localizedLabel('显示的分支', 'Visible branches'),
         children: [
           jsxs('button', {
             type: 'button',
@@ -2104,7 +2070,7 @@ function BranchFilter({ branches, selectedBranches, showRemoteBranches, onSelect
             onClick: () => { onSelectionChange(null) },
             children: [
               jsx('span', { className: 'dsh-fleet-git-menu-check', children: selectedBranches === null && jsx(Icon, { name: 'check', size: 14 }) }),
-              jsx('span', { className: 'dsh-fleet-git-branch-option-name', children: '显示全部分支' }),
+              jsx('span', { className: 'dsh-fleet-git-branch-option-name', children: localizedLabel('显示全部分支', 'Show all branches') }),
             ],
           }),
           jsxs('button', {
@@ -2115,13 +2081,13 @@ function BranchFilter({ branches, selectedBranches, showRemoteBranches, onSelect
             onClick: () => { onRemoteVisibilityChange(!showRemoteBranches) },
             children: [
               jsx('span', { className: 'dsh-fleet-git-menu-check', children: showRemoteBranches && jsx(Icon, { name: 'check', size: 14 }) }),
-              jsx('span', { children: '显示远程分支' }),
+              jsx('span', { children: localizedLabel('显示远程分支', 'Show remote branches') }),
               jsx('span', { className: 'dsh-fleet-git-remote-count', children: remoteBranches.length }),
             ],
           }),
-          localBranches.length > 0 && jsx('div', { className: 'dsh-fleet-git-branch-group-label', children: '本地分支' }),
+          localBranches.length > 0 && jsx('div', { className: 'dsh-fleet-git-branch-group-label', children: localizedLabel('本地分支', 'Local branches') }),
           ...localBranches.map(branchRow),
-          showRemoteBranches && remoteBranches.length > 0 && jsx('div', { className: 'dsh-fleet-git-branch-group-label', children: '远程分支' }),
+          showRemoteBranches && remoteBranches.length > 0 && jsx('div', { className: 'dsh-fleet-git-branch-group-label', children: localizedLabel('远程分支', 'Remote branches') }),
           ...(showRemoteBranches ? remoteBranches.map(branchRow) : []),
         ],
       }),
@@ -2142,7 +2108,7 @@ function GitMain(owner: FleetPaneOwner): ReactElement {
     [owner.snapshot.assistants, owner.snapshot.members],
   )
   const emphasizedMemberId = useMemberEmphasis(teamId)
-  useGitRefresh(root, teamId)
+  useGitLoad(root, teamId)
   useGitJoyride(root, teamId, state)
   useEffect(() => {
     setShowRemoteBranches(true)
@@ -2169,20 +2135,20 @@ function GitMain(owner: FleetPaneOwner): ReactElement {
     if (root === undefined) return
     setFetching(true)
     try {
-      if (webClient === undefined) throw new Error('Git Remote 尚未连接')
+      if (webClient === undefined) throw new Error(localizedLabel('Git Remote 尚未连接', 'Git Remote is not connected'))
       const snapshot = unwrap(await webClient.fetch({ root, teamId }))
       const { error: _error, notRepository: _notRepository, ...current } = stateFor(root, teamId)
       publish(root, teamId, { ...current, snapshot, loading: false })
     } catch (error) {
       publish(root, teamId, {
         ...stateFor(root, teamId),
-        error: error instanceof Error ? error.message : '从远端获取失败',
+        error: error instanceof Error ? error.message : localizedLabel('从远端获取失败', 'Could not fetch from remote'),
       })
     } finally {
       setFetching(false)
     }
   }
-  if (root === undefined) return jsx('div', { className: 'dsh-fleet-git-main-empty', children: '挂载 Git 工作区后，这里会显示提交图谱。' })
+  if (root === undefined) return jsx('div', { className: 'dsh-fleet-git-main-empty', children: localizedLabel('挂载 Git 工作区后，这里会显示提交图谱。', 'Mount a Git workspace to show its commit graph here.') })
   if (state.selection !== undefined) return jsx(DiffView, { root, teamId, state })
   return jsxs('div', {
     className: 'dsh-fleet-git-main',
@@ -2196,10 +2162,10 @@ function GitMain(owner: FleetPaneOwner): ReactElement {
               jsx('strong', { children: 'Git Graph' }),
               jsx('span', {
                 children: state.notRepository === true
-                  ? '当前工作区未初始化 Git'
+                  ? localizedLabel('当前工作区未初始化 Git', 'Git is not initialized in this workspace')
                   : state.snapshot === undefined
                     ? root
-                    : `${state.snapshot.status.branch ?? 'Detached HEAD'} · ${String(visibleCommitCount)} 个提交`,
+                    : localizedLabel(`${state.snapshot.status.branch ?? 'Detached HEAD'} · ${String(visibleCommitCount)} 个提交`, `${state.snapshot.status.branch ?? 'Detached HEAD'} · ${String(visibleCommitCount)} commits`),
               }),
             ],
           }),
@@ -2224,13 +2190,13 @@ function GitMain(owner: FleetPaneOwner): ReactElement {
             className: 'dsh-fleet-git-main-actions',
             children: [
               jsx('button', {
-                type: 'button', className: 'dsh-fleet-git-icon-button', 'aria-label': '从远端获取', title: '从远端获取',
+                type: 'button', className: 'dsh-fleet-git-icon-button', 'aria-label': localizedLabel('从远端获取', 'Fetch from remote'), title: localizedLabel('从远端获取', 'Fetch from remote'),
                 'data-loading': fetching ? 'true' : undefined,
                 disabled: state.loading || fetching || state.notRepository === true,
                 onClick: () => { void fetchFromRemote() }, children: jsx(Icon, { name: 'fetch', size: 17 }),
               }),
               jsx('button', {
-                type: 'button', className: 'dsh-fleet-git-icon-button', 'aria-label': '刷新 Git Graph', title: '刷新',
+                type: 'button', className: 'dsh-fleet-git-icon-button', 'aria-label': localizedLabel('刷新 Git Graph', 'Refresh Git Graph'), title: localizedLabel('刷新', 'Refresh'),
                 'data-loading': state.loading && !fetching ? 'true' : undefined,
                 disabled: state.loading || fetching, onClick: () => { void refresh(root, teamId) }, children: jsx(Icon, { name: 'refresh', size: 16 }),
               }),
@@ -2243,10 +2209,12 @@ function GitMain(owner: FleetPaneOwner): ReactElement {
       state.notRepository === true
         ? jsx('div', {
             className: 'dsh-fleet-git-empty',
-            children: '这个工作区还不是 Git 仓库；初始化后，提交图谱会自动出现在这里。',
+            children: localizedLabel('这个工作区还不是 Git 仓库；初始化后，提交图谱会自动出现在这里。', 'This workspace is not a Git repository yet; its commit graph will appear here after initialization.'),
           })
         : state.snapshot === undefined
-          ? jsx('div', { className: 'dsh-fleet-git-empty', children: state.loading ? '正在读取提交图谱…' : '没有可显示的 Git 数据。' })
+          ? jsx('div', { className: 'dsh-fleet-git-empty', children: state.loading
+              ? localizedLabel('正在读取提交图谱…', 'Loading commit graph…')
+              : localizedLabel('没有可显示的 Git 数据。', 'No Git data to display.') })
         : jsx(GraphView, {
             root,
             snapshot: state.snapshot,
@@ -2262,15 +2230,7 @@ function GitMain(owner: FleetPaneOwner): ReactElement {
 
 const styles = `
 .dsh-fleet-git-sidebar-layout{width:100%;min-width:0;min-height:0;flex:1;display:flex;flex-direction:column;gap:8px}
-.dsh-fleet-git-team-block{position:relative}
-.dsh-fleet-git-team-trigger{appearance:none;width:100%;min-height:32px;color:var(--dsw-alias-label-primary);background:transparent;border:0;border-radius:8px;padding:0 4px;display:flex;align-items:center;gap:6px;cursor:pointer;font:inherit;text-align:left}
-.dsh-fleet-git-team-trigger:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.dsh-fleet-git-team-trigger:focus-visible,.dsh-fleet-git-icon-button:focus-visible,.dsh-fleet-git-section-head:focus-visible,.dsh-fleet-git-change-row:focus-visible,.dsh-fleet-git-member-row:focus-visible,.dsh-fleet-git-team-menu button:focus-visible,.dsh-fleet-git-branch-filter-trigger:focus-visible,.dsh-fleet-git-branch-menu button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.dsh-fleet-git-commit-row:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
-.dsh-fleet-git-team-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
-.dsh-fleet-git-team-trigger svg{transform:rotate(90deg)}
-.dsh-fleet-git-team-menu{z-index:20;box-sizing:border-box;width:calc(100% - 20px);max-height:260px;position:absolute;top:47px;left:10px;overflow:auto;background:var(--dsw-specific-menu);border-radius:10px;box-shadow:var(--dsw-shadow-lv3);padding:4px;display:flex;flex-direction:column}
-.dsh-fleet-git-team-menu button{appearance:none;min-height:34px;color:var(--dsw-alias-label-primary);background:transparent;border:0;border-radius:7px;padding:0 9px;font:inherit;text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsh-fleet-git-team-menu button:hover,.dsh-fleet-git-team-menu button[aria-checked="true"]{background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-fleet-git-icon-button:focus-visible,.dsh-fleet-git-section-head:focus-visible,.dsh-fleet-git-change-row:focus-visible,.dsh-fleet-git-member-row:focus-visible,.dsh-fleet-git-branch-filter-trigger:focus-visible,.dsh-fleet-git-branch-menu button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.dsh-fleet-git-commit-row:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
 .dsh-fleet-git-sidebar{min-height:0;flex:1}
 .dsh-fleet-git-sidebar-head,.dsh-fleet-git-main-head{box-sizing:border-box;min-height:48px;flex:none;display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid color-mix(in srgb,var(--dsw-alias-label-caption) 18%,transparent)}
 .dsh-fleet-git-repository-copy,.dsh-fleet-git-main-title{min-width:0;flex:1;display:flex;flex-direction:column;gap:1px}
@@ -2304,7 +2264,6 @@ const styles = `
 .dsh-fleet-git-member-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:1px}
 .dsh-fleet-git-member-heading{min-width:0;display:flex;align-items:baseline;gap:6px}.dsh-fleet-git-member-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.dsh-fleet-git-member-role{max-width:45%;flex:none;color:var(--dsw-alias-label-caption);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px}
 .dsh-fleet-git-member-location{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-caption);font-size:10px}
-.dsh-fleet-git-member-popover-avatar{box-sizing:border-box;width:42px;height:42px;flex:none;display:inline-flex;align-items:center;justify-content:center;color:#fff;border:1.5px solid color-mix(in srgb,var(--dsw-alias-bg-layer-1) 80%,transparent);border-radius:10px;font-size:15px;font-weight:700;text-shadow:0 1px 1px rgba(18,27,39,.24)}
 .dsh-fleet-git-stash-row{box-sizing:border-box;min-height:32px;padding:4px 12px 4px 27px;display:flex;align-items:center;gap:7px;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-fleet-git-stash-row svg{flex:none}.dsh-fleet-git-stash-row code{flex:none;color:var(--dsw-alias-state-business-primary);font:10px/1.3 var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace)}.dsh-fleet-git-stash-row span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-fleet-git-main,.dsh-fleet-git-diff-view{width:100%;height:100%;min-width:0;min-height:0;display:flex;flex-direction:column;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1)}
 .dsh-fleet-git-main{container-type:inline-size}
@@ -2397,7 +2356,7 @@ const styles = `
 .dsh-fleet-git-error{margin:10px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:5px;font-size:11px}.dsh-fleet-git-error span{color:var(--dsw-alias-label-secondary)}
 .dsh-fleet-git-inline-error{padding:7px 14px;color:var(--dsw-alias-label-primary);background:color-mix(in srgb,#bb4d58 9%,var(--dsw-alias-bg-layer-1));font-size:11px}
 @container(max-width:320px){.dsh-fleet-git-main-title span{display:none}.dsh-fleet-git-branch-filter-trigger{min-width:30px;width:30px;padding:0;justify-content:center}.dsh-fleet-git-branch-filter-trigger>span,.dsh-fleet-git-branch-filter-trigger>svg:last-child{display:none}}
-@media(max-width:640px){.dsh-fleet-git-team-trigger,.dsh-fleet-git-section-head,.dsh-fleet-git-member-row,.dsh-fleet-git-branch-option,.dsh-fleet-git-remote-toggle{min-height:44px}.dsh-fleet-git-repository-copy strong,.dsh-fleet-git-main-title strong{font-size:14px}.dsh-fleet-git-branch-menu{width:min(300px,calc(100vw - 32px))}}
+@media(max-width:640px){.dsh-fleet-git-section-head,.dsh-fleet-git-member-row,.dsh-fleet-git-branch-option,.dsh-fleet-git-remote-toggle{min-height:44px}.dsh-fleet-git-repository-copy strong,.dsh-fleet-git-main-title strong{font-size:14px}.dsh-fleet-git-branch-menu{width:min(300px,calc(100vw - 32px))}}
 @media(prefers-reduced-motion:reduce){.dsh-fleet-git-section-chevron,.dsh-fleet-git-commit-file-tree details>summary svg{transition:none}.dsh-fleet-git-ref-member[data-emphasized="true"]{animation:none}}
 `
 
@@ -2414,7 +2373,7 @@ function installStyles(): void {
 }
 
 export const name = '@ch4acko3/dsh-agent-fleet-git'
-export const inject = ['slots', 'remote'] as const
+export const inject = ['slots', 'remote', 'typert'] as const
 
 export async function apply(ctx: FleetGitClientContext): Promise<() => Promise<void>> {
   installStyles()
@@ -2438,6 +2397,9 @@ export async function apply(ctx: FleetGitClientContext): Promise<() => Promise<v
     throw new Error('Fleet Git Web Remote did not mount its fleetGit namespace')
   }
   webClient = mounted
+  new FleetGitWebPeerRemote(ctx as unknown as Context)
+  const disposePeerLocal = ctx.typert.register(FLEET_GIT_WEB_PEER_LOCAL)
+  document.addEventListener('visibilitychange', refreshVisibleRepositories)
   ctx.slots.inject('fleet.panel.tool', () => ctx.slots.register({ name: 'fleet.panel.tool', id: TOOL_ID, order: 35 }, GitTool))
   ctx.slots.inject('fleet.panel.sidebar', () => ctx.slots.register({ name: 'fleet.panel.sidebar', key: TOOL_ID }, GitSidebar))
   ctx.slots.inject('fleet.panel.main', () => ctx.slots.register({ name: 'fleet.panel.main', key: TOOL_ID }, GitMain))
@@ -2447,6 +2409,9 @@ export async function apply(ctx: FleetGitClientContext): Promise<() => Promise<v
       diffServicesChanged()
     }
     if (webClient === mounted) webClient = undefined
+    dirtyRepositories.clear()
+    document.removeEventListener('visibilitychange', refreshVisibleRepositories)
+    await disposePeerLocal()
     await disposeRemote()
   }
 }

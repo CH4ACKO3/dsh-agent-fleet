@@ -12,13 +12,35 @@ export interface StagedFleetActivation {
 
 export interface FleetActivationClientSessions {
   readonly list: {
-    getSnapshot(): { readonly current?: string }
+    getSnapshot(): {
+      readonly current?: string
+      readonly byId: Readonly<Record<string, unknown>>
+    }
     subscribe(listener: () => void): () => void
+  }
+  open(sessionId: string): void
+}
+
+export interface FleetActivationClientWorkspaces {
+  readonly list: {
+    getSnapshot(): { readonly archivedSessionIds: readonly string[] }
   }
 }
 
+export interface FleetAssistantConnectionReference {
+  readonly assistantId: string
+  readonly assistantName?: string
+  readonly sessionId: string
+}
+
+export type FleetExistingAssistantRoute =
+  | { readonly kind: 'create' }
+  | { readonly kind: 'open'; readonly assistants: readonly FleetAssistantConnectionReference[] }
+  | { readonly kind: 'reconnect'; readonly assistants: readonly FleetAssistantConnectionReference[] }
+
 let sequence = 0
 let sessions: FleetActivationClientSessions | undefined
+let workspaces: FleetActivationClientWorkspaces | undefined
 const snapshots = new Map<string, StagedFleetActivation>()
 const listeners = new Set<() => void>()
 
@@ -28,6 +50,46 @@ function publish(): void {
 
 export function configureFleetActivationSessions(next: FleetActivationClientSessions | undefined): void {
   sessions = next
+}
+
+export function configureFleetActivationWorkspaces(next: FleetActivationClientWorkspaces | undefined): void {
+  workspaces = next
+}
+
+export function classifyFleetExistingAssistants(
+  assistants: readonly FleetAssistantConnectionReference[],
+  knownSessionIds: readonly string[],
+  archivedSessionIds: readonly string[],
+): FleetExistingAssistantRoute {
+  if (assistants.length === 0) return { kind: 'create' }
+  const known = new Set(knownSessionIds)
+  const archived = new Set(archivedSessionIds)
+  const available = assistants.filter(assistant =>
+    known.has(assistant.sessionId) && !archived.has(assistant.sessionId))
+  return available.length > 0
+    ? { kind: 'open', assistants: available }
+    : { kind: 'reconnect', assistants }
+}
+
+export function fleetExistingAssistantRoute(
+  assistants: readonly FleetAssistantConnectionReference[],
+): FleetExistingAssistantRoute {
+  return classifyFleetExistingAssistants(
+    assistants,
+    Object.keys(sessions?.list.getSnapshot().byId ?? {}),
+    workspaces?.list.getSnapshot().archivedSessionIds ?? [],
+  )
+}
+
+export function openFleetSession(sessionId: string): void {
+  if (sessions === undefined) throw new Error('DSH Session service is unavailable')
+  if (sessions.list.getSnapshot().byId[sessionId] === undefined) {
+    throw new Error(`Session ${sessionId} is unavailable`)
+  }
+  if (workspaces?.list.getSnapshot().archivedSessionIds.includes(sessionId) === true) {
+    throw new Error(`Session ${sessionId} is archived`)
+  }
+  sessions.open(sessionId)
 }
 
 export function getCurrentFleetSessionId(): string | undefined {

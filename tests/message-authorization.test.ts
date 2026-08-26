@@ -7,7 +7,11 @@ describe('Fleet message delivery authorization', () => {
     const sender = { id: 'sender', inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn() }
     const recipient = { id: 'recipient', inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn() }
     const agents = new Map([[sender.id, sender], [recipient.id, recipient]])
-    const hub = new MessageHub({ get: id => agents.get(id), list: () => [...agents.values()] })
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    })
     const allowed = new Set(['message.post'])
     const tools: Array<{ readonly name: string; execute(args: never, context: never): Promise<unknown> }> = []
     installMessageTools({

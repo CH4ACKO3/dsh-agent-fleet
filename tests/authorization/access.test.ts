@@ -10,6 +10,7 @@ import {
 
 import { FleetAccessService, applyAccess, type FleetAccessState } from '../../src/authorization/access.js'
 import { FleetGroupService, fleetPrivateGroupId } from '../../src/authorization/groups.js'
+import { FleetConfigurationRegistry } from '../../src/configuration.js'
 
 const alice: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -185,6 +186,36 @@ describe('FleetAccessService', () => {
     }, false)).toBe(true)
   })
 
+  it('uses Team initialization Access settings until a runtime edit is persisted', () => {
+    const configured = {
+      version: 1,
+      modes: [{ principal: privateGroup, resourceKind: 'file', mode: 'restricted' }],
+      rules: [{
+        id: 'configured-source', principal: privateGroup,
+        resource: { kind: 'file', id: '/project/one/src' },
+        scope: 'tree', effect: 'allow', levels: ['read'],
+      }],
+    }
+    const { runs, groups } = fixture()
+    const configuredRuns = {
+      status: (teamId: string) => ({ id: teamId, projectRoot: '/project/one' }),
+      readExtensionState: runs.readExtensionState.bind(runs),
+      writeExtensionState: runs.writeExtensionState.bind(runs),
+      exportConfiguration: () => ({ modules: { 'dsh-agent-fleet/authorization/access': configured } }),
+    } as unknown as FleetRunService
+    const access = new FleetAccessService(configuredRuns, groups)
+
+    expect(access.mode('team-1', privateGroup, 'file')).toBe('restricted')
+    expect(access.authorize({
+      teamId: 'team-1', subject, action: 'resource.read',
+      resource: { kind: 'file', id: '/project/one/src/index.ts' },
+    }, false)).toBe(true)
+    expect(access.authorize({
+      teamId: 'team-1', subject, action: 'resource.read',
+      resource: { kind: 'file', id: '/project/one/secret.txt' },
+    }, true)).toBe(false)
+  })
+
   it('combines with Core so OP still cannot bypass a resource deny', () => {
     const { access } = fixture()
     access.registerAdapter({
@@ -231,6 +262,7 @@ describe('FleetAccessService', () => {
     applyAccess(ctx)
     ctx.provide('fleetRuns', runs)
     ctx.provide('fleetAuthorization', authorization)
+    ctx.provide('fleetConfiguration', new FleetConfigurationRegistry())
     ctx.provide('fleetGroups', new FleetGroupService(runs))
     await new Promise<void>(resolve => { setImmediate(resolve) })
 
