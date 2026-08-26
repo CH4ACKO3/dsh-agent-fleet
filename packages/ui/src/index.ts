@@ -47,6 +47,7 @@ import {
   fleetConfigurationModules,
 } from './configuration-modules.js'
 import {
+  activeFleetCommandQuery,
   captureFleetOfficialComposer,
   configureFleetAssistantSessionModel,
   fleetPrivateConversationCommands,
@@ -6833,8 +6834,10 @@ interface NativeComposerKeyboard {
   readonly snapshot: NativeInputSnapshot
   setDraft(text: string): void
   submit(mode?: unknown): void
-  arbitrate?(key: 'up' | 'down' | 'enter' | 'escape'): unknown
-  track?(): void
+  arbitrate?(key: 'up' | 'down' | 'enter' | 'escape', composing: boolean): unknown
+  track?(draft: string, caret: number): void
+  dismissPopup?(): void
+  space?(): boolean
 }
 
 type NativeRenderSlot = (
@@ -6918,6 +6921,7 @@ export function withFleetComposerActivation(
     const [assistantUrgent, setAssistantUrgent] = useState(false)
     const [assistantError, setAssistantError] = useState<string>()
     const [assistantCommandOpen, setAssistantCommandOpen] = useState(false)
+    const [assistantCommandQuery, setAssistantCommandQuery] = useState('')
     const [assistantCommandHighlight, setAssistantCommandHighlight] = useState(0)
     const assistantAttachments = useFleetComposerAttachments(sessionId ?? '')
     const assistantComposer = useRef<HTMLDivElement>(null)
@@ -6974,6 +6978,7 @@ export function withFleetComposerActivation(
 
     useEffect(() => {
       setAssistantCommandOpen(false)
+      setAssistantCommandQuery('')
       setAssistantCommandHighlight(0)
     }, [sessionId])
 
@@ -7018,6 +7023,10 @@ export function withFleetComposerActivation(
       const command = props.command as ((line: string) => Promise<boolean>) | undefined
       const renderSlot = props.renderSlot as NativeRenderSlot
       const commandEntries = fleetPrivateConversationCommands(assistantName ?? (isChineseLocale() ? '团队助理' : 'Team assistant'))
+      const visibleCommandEntries = assistantCommandQuery === ''
+        ? commandEntries
+        : commandEntries.filter(entry => entry.name.toLocaleLowerCase()
+            .startsWith(assistantCommandQuery.toLocaleLowerCase()))
       const runAssistantCommand = (name: typeof commandEntries[number]['name']): void => {
         if (assistantSending || inputActions === undefined) return
         const entry = commandEntries.find(candidate => candidate.name === name)
@@ -7088,24 +7097,40 @@ export function withFleetComposerActivation(
       const assistantKeyboard = assistantKeyboardBase === undefined
         ? undefined
         : withComposerOverrides(assistantKeyboardBase, {
-            arbitrate: (key: 'up' | 'down' | 'enter' | 'escape') => {
-              if (!assistantCommandOpen) return assistantKeyboardBase.arbitrate?.(key)
+            arbitrate: (key: 'up' | 'down' | 'enter' | 'escape', composing: boolean) => {
+              if (!assistantCommandOpen) return assistantKeyboardBase.arbitrate?.(key, composing)
               if (key === 'escape') {
                 setAssistantCommandOpen(false)
                 return 'consumed'
               }
               if (key === 'up' || key === 'down') {
+                if (visibleCommandEntries.length === 0) return 'consumed'
                 setAssistantCommandHighlight(current =>
-                  (current + (key === 'up' ? -1 : 1) + commandEntries.length) % commandEntries.length)
+                  (current + (key === 'up' ? -1 : 1) + visibleCommandEntries.length) % visibleCommandEntries.length)
                 return 'consumed'
               }
-              const entry = commandEntries[assistantCommandHighlight]
+              const entry = visibleCommandEntries[assistantCommandHighlight]
               if (entry !== undefined) runAssistantCommand(entry.name)
               return 'pick-highlighted'
             },
-            track: () => {
+            track: (draft: string, caret: number) => {
+              const commandQuery = activeFleetCommandQuery(draft, caret)
+              if (commandQuery !== undefined) {
+                assistantKeyboardBase.dismissPopup?.()
+                setAssistantCommandQuery(commandQuery.query)
+                setAssistantCommandHighlight(0)
+                setAssistantCommandOpen(true)
+                return
+              }
+              setAssistantCommandQuery('')
               setAssistantCommandOpen(false)
-              assistantKeyboardBase.track?.()
+              assistantKeyboardBase.track?.(draft, caret)
+            },
+            space: () => {
+              if (!assistantCommandOpen) return assistantKeyboardBase.space?.() ?? false
+              const entry = visibleCommandEntries[assistantCommandHighlight]
+              if (entry !== undefined) runAssistantCommand(entry.name)
+              return true
             },
           })
       const nativeUseMenuLauncher = props.useMenuLauncher as (<Selection>(
@@ -7120,14 +7145,14 @@ export function withFleetComposerActivation(
         className: 'dsh-fleet-conversation-command-menu',
         role: 'listbox',
         'aria-label': isChineseLocale() ? '助理私聊命令' : 'Assistant private conversation commands',
-        'aria-activedescendant': `dsh-fleet-assistant-command-${commandEntries[assistantCommandHighlight]?.name ?? 'compact'}`,
+        'aria-activedescendant': `dsh-fleet-assistant-command-${visibleCommandEntries[assistantCommandHighlight]?.name ?? 'none'}`,
         children: [
           jsx('div', {
             className: 'dsh-fleet-conversation-command-menu-title',
             role: 'presentation',
             children: isChineseLocale() ? '命令' : 'Commands',
           }),
-          ...commandEntries.map((entry, index) => jsxs('button', {
+          ...visibleCommandEntries.map((entry, index) => jsxs('button', {
             id: `dsh-fleet-assistant-command-${entry.name}`,
             type: 'button',
             role: 'option',
@@ -7143,6 +7168,11 @@ export function withFleetComposerActivation(
               jsx('span', { className: 'dsh-fleet-conversation-command-menu-description', children: entry.description }),
             ],
           }, entry.name)),
+          visibleCommandEntries.length === 0 && jsx('div', {
+            className: 'dsh-fleet-conversation-command-menu-title',
+            role: 'status',
+            children: isChineseLocale() ? '没有匹配的命令' : 'No matching commands',
+          }),
         ],
       })
       const assistantUseInput: NativeUseInput = selector => useInput(snapshot => selector(snapshot === undefined
@@ -7166,6 +7196,8 @@ export function withFleetComposerActivation(
           keyboard: assistantKeyboard,
           command: undefined,
           toggleCommandMenu: () => {
+            assistantKeyboardBase?.dismissPopup?.()
+            setAssistantCommandQuery('')
             setAssistantCommandHighlight(0)
             setAssistantCommandOpen(current => !current)
           },

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  activeFleetCommandQuery,
   activeFleetMentionQuery,
   clampFleetTimelineTime,
   decorateFleetMetaWelcomeSnapshot,
@@ -535,6 +536,13 @@ describe('Fleet member mentions', () => {
       caret: 7,
     })
     expect(activeFleetMentionQuery('mail@example', 12)).toBeUndefined()
+  })
+
+  it('recognizes only a leading slash token as an active command query', () => {
+    expect(activeFleetCommandQuery('/mo', 3)).toEqual({ start: 0, end: 3, query: 'mo' })
+    expect(activeFleetCommandQuery('  /plan', 7)).toEqual({ start: 2, end: 7, query: 'plan' })
+    expect(activeFleetCommandQuery('look /mo', 8)).toBeUndefined()
+    expect(activeFleetCommandQuery('/goal task', 10)).toBeUndefined()
   })
 })
 

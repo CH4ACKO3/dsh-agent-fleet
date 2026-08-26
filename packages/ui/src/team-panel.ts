@@ -10059,6 +10059,22 @@ export interface FleetActiveMentionQuery {
   readonly query: string
 }
 
+export interface FleetActiveCommandQuery {
+  readonly start: number
+  readonly end: number
+  readonly query: string
+}
+
+/** Return the leading slash token currently being edited by the caret. */
+export function activeFleetCommandQuery(text: string, caret: number): FleetActiveCommandQuery | undefined {
+  const end = Math.max(0, Math.min(text.length, caret))
+  const prefix = text.slice(0, end)
+  const match = /^(\s*)\/([^\s/]*)$/u.exec(prefix)
+  if (match === null) return undefined
+  const start = match[1]?.length ?? 0
+  return { start, end, query: match[2] ?? '' }
+}
+
 export function activeFleetMentionQuery(text: string, caret: number): FleetActiveMentionQuery | undefined {
   const end = Math.max(0, Math.min(text.length, caret))
   const prefix = text.slice(0, end)
@@ -11217,10 +11233,14 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
   const [modelDirectory, modelDirectoryState] = useFleetPanelModelDirectory(modelDirectorySessionId)
   const draftHistory = useRef<readonly string[]>([owner.draft])
   const draftHistoryIndex = useRef(0)
+  const composerRef = useRef<HTMLDivElement>(null)
   const commandMenuRef = useRef<HTMLDivElement>(null)
   const [commandMenuOpen, setCommandMenuOpen] = useState(false)
   const [commandMenuView, setCommandMenuView] = useState<'commands' | 'models'>('commands')
+  const [commandQuery, setCommandQuery] = useState('')
   const [commandHighlight, setCommandHighlight] = useState(0)
+  const [mentionQuery, setMentionQuery] = useState<FleetActiveMentionQuery>()
+  const [mentionHighlight, setMentionHighlight] = useState(0)
   const [commandRunning, setCommandRunning] = useState(false)
   const [commandFeedback, setCommandFeedback] = useState<{
     readonly kind: 'success' | 'error'
@@ -11233,22 +11253,25 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
     draftHistoryIndex.current = 0
     setCommandMenuOpen(false)
     setCommandMenuView('commands')
+    setCommandQuery('')
+    setMentionQuery(undefined)
     setCommandFeedback(undefined)
   }, [owner.activeItem, owner.snapshot.teamId])
 
   useEffect(() => { void targetSession?.open?.() }, [targetSession])
 
   useEffect(() => {
-    if (!commandMenuOpen) return
+    if (!commandMenuOpen && mentionQuery === undefined) return
     const close = (event: globalThis.PointerEvent): void => {
       if (!(event.target instanceof Node)) return
       const card = commandMenuRef.current?.closest('[data-composer-card="true"]')
       if (card?.contains(event.target) === true) return
       setCommandMenuOpen(false)
+      setMentionQuery(undefined)
     }
     document.addEventListener('pointerdown', close, true)
     return () => { document.removeEventListener('pointerdown', close, true) }
-  }, [commandMenuOpen])
+  }, [commandMenuOpen, mentionQuery])
 
   if (capture === undefined) {
     return jsx('div', {
@@ -11278,7 +11301,7 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
     ['/', fleetConversationCommands(conversation, peer).map(command => command.name)],
     ['@', teamAgents(owner.snapshot).map(member => member.name)],
   ]))
-  const useMenuLauncher = <Selection,>(selector: (snapshot: string | null) => Selection): Selection => selector(commandMenuOpen ? 'command' : null)
+  const useMenuLauncher = <Selection,>(selector: (snapshot: string | null) => Selection): Selection => selector(commandMenuOpen || mentionQuery !== undefined ? 'command' : null)
   const useProjection = <Selection,>(name: string, selector?: (snapshot: any) => Selection): Selection | undefined => {
     const projection = targetSession?.projections?.faceOf(name)
     const subscribe = (listener: () => void): (() => void) => projection?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE
@@ -11303,6 +11326,15 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
     owner.setDraft(draftHistory.current[next] ?? '')
   }
   const commandEntries = fleetConversationCommands(conversation, peer)
+  const visibleCommandEntries = commandQuery === ''
+    ? commandEntries
+    : commandEntries.filter(entry => entry.name.toLocaleLowerCase().startsWith(commandQuery.toLocaleLowerCase()))
+  const mentionEntries = teamAgents(owner.snapshot).filter(member => {
+    const query = mentionQuery?.query.trim().toLocaleLowerCase() ?? ''
+    return query === ''
+      || member.name.toLocaleLowerCase().includes(query)
+      || member.role.toLocaleLowerCase().includes(query)
+  })
   const modelEntries = modelDirectoryState.groups.flatMap(group => group.models.map(model => ({ group, model })))
   const exportTeam = (clearDraft: boolean): void => {
     if (owner.exportTeam === undefined || commandRunning) return
@@ -11373,7 +11405,7 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
       })
     }).finally(() => { setCommandRunning(false) })
   }
-  const pickCommand = (entry = commandEntries[commandHighlight]): void => {
+  const pickCommand = (entry = visibleCommandEntries[commandHighlight]): void => {
     if (entry === undefined) return
     if (entry.behavior === 'input') {
       setCommandMenuOpen(false)
@@ -11388,6 +11420,17 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
     }
     if (conversation.kind === 'channel') exportTeam(false)
     else executeMemberCommand(`/${entry.name}`, false)
+  }
+  const pickMention = (member = mentionEntries[mentionHighlight]): void => {
+    if (member === undefined || mentionQuery === undefined) return
+    const inserted = insertFleetMemberMention(owner.draft, mentionQuery, member.name)
+    setDraft(inserted.text)
+    setMentionQuery(undefined)
+    requestAnimationFrame(() => {
+      const input = composerRef.current?.querySelector('textarea')
+      input?.focus({ preventScroll: true })
+      input?.setSelectionRange(inserted.caret, inserted.caret)
+    })
   }
   const submit = (): void => {
     if (owner.sending || commandRunning || (owner.draft.trim() === '' && attachments.files.length === 0)) return
@@ -11421,8 +11464,40 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
   const keyboard = {
     snapshot: { ...inputSnapshot, paste: undefined },
     setDraft,
-    track: () => { setCommandMenuOpen(false) },
+    track: (draft: string, caret: number) => {
+      const mention = activeFleetMentionQuery(draft, caret)
+      if (mention !== undefined) {
+        setCommandMenuOpen(false)
+        setMentionQuery(mention)
+        setMentionHighlight(0)
+        return
+      }
+      setMentionQuery(undefined)
+      const command = activeFleetCommandQuery(draft, caret)
+      if (command !== undefined) {
+        setCommandMenuView('commands')
+        setCommandQuery(command.query)
+        setCommandHighlight(0)
+        setCommandMenuOpen(true)
+        return
+      }
+      setCommandMenuOpen(false)
+      setCommandQuery('')
+    },
     arbitrate: (key: 'up' | 'down' | 'enter' | 'escape') => {
+      if (mentionQuery !== undefined) {
+        if (key === 'escape') {
+          setMentionQuery(undefined)
+          return 'consumed'
+        }
+        if (key === 'up' || key === 'down') {
+          if (mentionEntries.length > 0) setMentionHighlight(current =>
+            (current + (key === 'up' ? -1 : 1) + mentionEntries.length) % mentionEntries.length)
+          return 'consumed'
+        }
+        if (mentionEntries[mentionHighlight] !== undefined) pickMention()
+        return 'pick-highlighted'
+      }
       if (!commandMenuOpen) return 'pass'
       if (key === 'escape') {
         if (commandMenuView === 'models') {
@@ -11434,17 +11509,20 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
         return 'consumed'
       }
       if (key === 'up' || key === 'down') {
-        const count = commandMenuView === 'models' ? modelEntries.length : commandEntries.length
+        const count = commandMenuView === 'models' ? modelEntries.length : visibleCommandEntries.length
         if (count > 0) setCommandHighlight(current => (current + (key === 'up' ? -1 : 1) + count) % count)
         return 'consumed'
       }
       if (commandMenuView === 'models') {
         const choice = modelEntries[commandHighlight]
         if (choice !== undefined) selectModel(choice.group, choice.model)
-      } else if (commandEntries[commandHighlight] !== undefined) pickCommand()
+      } else if (visibleCommandEntries[commandHighlight] !== undefined) pickCommand()
       return 'pick-highlighted'
     },
-    dismissPopup: () => undefined,
+    dismissPopup: () => {
+      setCommandMenuOpen(false)
+      setMentionQuery(undefined)
+    },
     redo: () => { moveDraftHistory(1) },
     undo: () => { moveDraftHistory(-1) },
     space: () => false,
@@ -11494,7 +11572,41 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
           ? panelText('正在应用命令…', 'Applying command…')
           : feedback?.text,
   })
-  const overlay = commandMenuOpen && jsx('div', {
+  const overlay = mentionQuery !== undefined ? jsx('div', {
+    ref: commandMenuRef,
+    className: 'dsh-fleet-conversation-command-menu',
+    role: 'listbox',
+    'aria-label': panelText('提及团队成员', 'Mention a Team member'),
+    'aria-activedescendant': `dsh-fleet-mention-${mentionEntries[mentionHighlight]?.id ?? 'none'}`,
+    children: [
+      jsx('div', {
+        className: 'dsh-fleet-conversation-command-menu-title',
+        role: 'presentation',
+        children: panelText('团队成员', 'Team members'),
+      }),
+      ...mentionEntries.map((member, index) => jsxs('button', {
+        id: `dsh-fleet-mention-${member.id}`,
+        type: 'button',
+        role: 'option',
+        'aria-selected': mentionHighlight === index,
+        className: 'dsh-fleet-conversation-command-menu-item',
+        onMouseEnter: () => { setMentionHighlight(index) },
+        onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+          event.preventDefault()
+          pickMention(member)
+        },
+        children: [
+          jsx('span', { className: 'dsh-fleet-conversation-command-menu-name', children: member.name }),
+          jsx('span', { className: 'dsh-fleet-conversation-command-menu-description', children: member.role }),
+        ],
+      }, member.id)),
+      mentionEntries.length === 0 && jsx('div', {
+        className: 'dsh-fleet-conversation-command-menu-title',
+        role: 'status',
+        children: panelText('没有匹配的成员', 'No matching members'),
+      }),
+    ],
+  }) : commandMenuOpen && jsx('div', {
     ref: commandMenuRef,
     className: 'dsh-fleet-conversation-command-menu',
     role: 'listbox',
@@ -11554,7 +11666,7 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
         role: 'presentation',
         children: panelText('命令', 'Commands'),
       }),
-      ...commandEntries.map((entry, index) => jsxs('button', {
+      ...visibleCommandEntries.map((entry, index) => jsxs('button', {
         id: `dsh-fleet-command-${entry.name}`,
         type: 'button',
         role: 'option',
@@ -11570,6 +11682,11 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
           jsx('span', { className: 'dsh-fleet-conversation-command-menu-description', children: entry.description }),
         ],
       }, entry.name)),
+      visibleCommandEntries.length === 0 && jsx('div', {
+        className: 'dsh-fleet-conversation-command-menu-title',
+        role: 'status',
+        children: panelText('没有匹配的命令', 'No matching commands'),
+      }),
     ],
   })
   const capturedRenderSlot = capture.props.renderSlot as ((
@@ -11592,6 +11709,7 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
   }
   const InputBar = capture.InputBar
   return jsxs('div', {
+    ref: composerRef,
     className: 'dsh-fleet-panel-composer-wrap dsh-fleet-official-composer',
     children: [
       jsx(FleetSessionGoalDock, { session: targetSession }),
@@ -11627,6 +11745,8 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
         : () => {
             setCommandHighlight(0)
             setCommandMenuView('commands')
+            setCommandQuery('')
+            setMentionQuery(undefined)
             setCommandMenuOpen(current => !current)
           },
       stop: undefined,
