@@ -10,20 +10,12 @@ import {
 
 export { Adapter, Processor }
 export {
-  createFleetGitContextAlgorithm,
-  FLEET_GIT_CONTEXT_ALGORITHM_ID,
-} from './git-context.js'
-export {
   createFleetHistorySearchAlgorithm,
   FLEET_HISTORY_SEARCH_ALGORITHM_ID,
 } from './history-search.js'
 export type { FleetHistorySearchItem } from './history-search.js'
 export * from './patchouli.js'
 export * from './settings.js'
-export {
-  createFleetSelfHistoryAlgorithm,
-  FLEET_SELF_HISTORY_ALGORITHM_ID,
-} from './self-history.js'
 export {
   createFleetSharedResourcesAlgorithm,
   FLEET_SHARED_RESOURCES_ALGORITHM_ID,

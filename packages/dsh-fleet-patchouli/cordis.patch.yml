@@ -1,3 +1,6 @@
 - insert:
+    - id: patchouli-native-context
+      name: dsh-patchouli-native-context-service
+
     - id: dsh-fleet-patchouli
       name: dsh-fleet-patchouli

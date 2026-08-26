@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { FleetRunService } from 'dsh-agent-fleet'
 
-import { createFleetGitContextAlgorithm } from './git-context.js'
 import { createFleetHistorySearchAlgorithm } from './history-search.js'
 import {
   fleetMemoryEffortAtLeast,
@@ -10,7 +9,6 @@ import {
   fleetMemoryEffortForRequest,
   FLEET_MEMORY_PROCESSOR_ID,
 } from './patchouli.js'
-import { createFleetSelfHistoryAlgorithm } from './self-history.js'
 import { createFleetSharedResourcesAlgorithm } from './shared-resources.js'
 import { createFleetTeamActivityAlgorithm } from './team-activity.js'
 import { createFleetTeamStateAlgorithm } from './team-state.js'
@@ -279,11 +277,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   host.inject(['patchouli', 'fleetRuns'], scope => scope.patchouli.register(
     createFleetMemoryProcessor([
       createFleetHistorySearchAlgorithm(scope, scope.fleetRuns),
-      createFleetSelfHistoryAlgorithm(scope, scope.fleetRuns),
       createFleetTeamStateAlgorithm(scope, scope.fleetRuns),
       createFleetTeamActivityAlgorithm(scope.fleetRuns),
       createFleetSharedResourcesAlgorithm(scope, scope.fleetRuns),
-      createFleetGitContextAlgorithm(scope, scope.fleetRuns),
     ], {
       ...(config.settings === undefined ? {} : { settings: config.settings }),
       recordRecallAudit: audit => scope.fleetRuns.recordDataEvent(audit.teamId, 'memory.recalled', {

@@ -367,7 +367,7 @@ describe('Fleet Patchouli processor', () => {
     expect((result.algorithms as Array<{ value: Record<string, unknown> }>)[0]?.value.items).toBeUndefined()
   })
 
-  it('registers every Fleet retrieval block and keeps Git behind its effort gate', async () => {
+  it('registers only Team-owned retrieval blocks', async () => {
     let plugin: MemoryPlugin | undefined
     const team = {
       id: 'team-1',
@@ -389,15 +389,6 @@ describe('Fleet Patchouli processor', () => {
       resourceStore: () => ({ listResources: () => [] }),
       readResourcePreview: vi.fn(),
     }
-    const git = {
-      snapshot: vi.fn().mockResolvedValue({
-        status: { root: '/workspace', branch: 'main', head: 'abc123', changes: [], worktrees: [] },
-        branches: [],
-        commits: [],
-      }),
-      diff: vi.fn(),
-      commit: vi.fn(),
-    }
     const authorization = {
       actorForAgent: (sessionId: string) => sessionId === 'session-lead'
         ? { teamId: 'team-1', subject: { kind: 'member', id: 'lead' } }
@@ -408,9 +399,7 @@ describe('Fleet Patchouli processor', () => {
     }
     const scope = {
       fleetRuns,
-      get: (service: string) => service === 'fleetGitRecall'
-        ? git
-        : service === 'fleetAuthorization' ? authorization : undefined,
+      get: (service: string) => service === 'fleetAuthorization' ? authorization : undefined,
       patchouli: {
         register: (candidate: MemoryPlugin) => { plugin = candidate; return () => {} },
       },
@@ -430,7 +419,6 @@ describe('Fleet Patchouli processor', () => {
     await expect(retrieve('low')).resolves.toMatchObject({
       algorithms: [
         { algorithm: 'fleet-conversation-history' },
-        { algorithm: 'fleet-self-history' },
         { algorithm: 'fleet-team-state' },
         { algorithm: 'fleet-team-activity' },
         { algorithm: 'fleet-shared-resources' },
@@ -439,14 +427,11 @@ describe('Fleet Patchouli processor', () => {
     await expect(retrieve('medium')).resolves.toMatchObject({
       algorithms: [
         { algorithm: 'fleet-conversation-history' },
-        { algorithm: 'fleet-self-history' },
         { algorithm: 'fleet-team-state' },
         { algorithm: 'fleet-team-activity' },
         { algorithm: 'fleet-shared-resources' },
-        { algorithm: 'fleet-git-context' },
       ],
     })
-    expect(git.snapshot).toHaveBeenCalledOnce()
 
     await expect(plugin.retrieve({
       meta: {
@@ -459,7 +444,6 @@ describe('Fleet Patchouli processor', () => {
       handled: true,
       algorithms: [
         { algorithm: 'fleet-conversation-history' },
-        { algorithm: 'fleet-self-history' },
         { algorithm: 'fleet-team-state' },
         { algorithm: 'fleet-team-activity' },
         { algorithm: 'fleet-shared-resources' },
