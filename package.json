@@ -72,7 +72,7 @@
     "build": "pnpm -r --if-present build && pnpm run build:client && pnpm run build:host",
     "build:client": "pnpm run generate:team-templates && tsdown --config-loader unrun && tsc -p tsconfig.client.build.json",
     "build:host": "tsc -p tsconfig.package.json",
-    "test": "pnpm -r --if-present test && pnpm run build && vitest run tests",
+    "test": "pnpm run build && pnpm -r --if-present test && vitest run tests",
     "typecheck": "pnpm --filter @dsh-agent-fleet/core build && pnpm --filter @dsh-agent-fleet/message build && pnpm -r --if-present typecheck && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.package.json --noEmit"
   },
   "dependencies": {
