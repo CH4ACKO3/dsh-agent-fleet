@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { FleetMemberView } from '../src/member-view.js'
+import type { FleetCoordinationEvent } from '@dsh-agent-fleet/message'
 import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
 
@@ -71,6 +72,59 @@ describe('Fleet collaboration identities', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(team.calendar.get('agent-lead', event.id).meetingId).toBeDefined()
     expect(team.messages.listMeetings(agents.get('agent-lead') as never)).toHaveLength(1)
+    collaboration.close()
+  })
+
+  it('reconciles completed required tasks with restored message obligations', () => {
+    const lead = view('lead')
+    const reviewer = view('reviewer')
+    const views = new Map([lead, reviewer].map(member => [member.id, member]))
+    const agents = new Map(['lead', 'reviewer'].map(id => [`agent-${id}`, {
+      id: `agent-${id}`, inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(),
+    }]))
+    const authorization = new FleetAuthorizationService()
+    authorization.installBaseline({
+      resolveSubject: (_teamId, subject) => views.get(subject.id),
+      authorizeResource: () => true,
+    })
+    const collaboration = new FleetCollaborationService({
+      agents: { get: (id: string) => agents.get(id) },
+      fs: { contains: () => true },
+      on: () => () => {},
+    } as never, authorization)
+    const coordination: FleetCoordinationEvent[] = []
+    const open = (onCoordination: (event: FleetCoordinationEvent) => void) => collaboration.open({
+      id: 'team-required', memberViews: [lead, reviewer], defaultVoters: ['lead', 'reviewer'],
+      projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-required',
+      onCoordination, onResource: () => {}, onMemberStatus: () => {},
+    })
+    const first = open(event => { coordination.push(event) })
+    first.attachMember('agent-lead', lead)
+    first.attachMember('agent-reviewer', reviewer)
+    const sent = first.messages.send(agents.get('agent-lead') as never, {
+      to: '#general', text: '@reviewer inspect the release.', mentions: ['@reviewer'], delivery: 'quiet',
+    })
+    const required = first.tasks.pendingRequirement('reviewer')
+    if (required === undefined) throw new Error('expected required task')
+    first.tasks.complete('agent-reviewer', required.id)
+    const taskState = first.tasks.state()
+    expect(first.messages.pendingRequiredReply('reviewer')).toBeUndefined()
+
+    collaboration.closeTeam('team-required')
+    const restored = open(() => {})
+    restored.restoreProductivity({
+      tasks: taskState,
+      schedules: { version: 1, schedules: [] },
+      calendar: { version: 1, events: [] },
+    })
+    restored.attachMember('agent-lead', lead)
+    restored.attachMember('agent-reviewer', reviewer)
+    restored.restore({ coordination, resources: [], memberStatuses: [] })
+    expect(restored.tasks.pendingRequirement('reviewer')).toBeUndefined()
+    expect(restored.messages.pendingRequiredReply('reviewer')).toBeUndefined()
+    expect(restored.tasks.state().tasks).toContainEqual(expect.objectContaining({
+      id: required.id, status: 'completed', requirement: expect.objectContaining({ messageId: sent.messageId }),
+    }))
     collaboration.close()
   })
 })

@@ -37,8 +37,9 @@ Agent 目标可以使用 Core 注册的 Fleet 名称（例如 `@reviewer`）或�
 
 频道是持久的异步协作空间，不形成 Agent 上下级关系。Agent 可以在频道中发布工作，
 其他 Agent 使用 `reply_to` 认领、补充或返回结果。私聊 `to` 中的 `@target` 只是路由地址，普通私聊
-和回复不会继续要求回复；私聊或频道消息中所有成功解析的 `mentions` 才会要求目标通过 Fleet 回复后
-才能保持 idle。带 mention 的私聊回复会要求对方再做一次最终确认，不带 mention 的确认会结束往返。
+和回复不会创建义务；私聊或频道消息中所有成功解析的 `mentions` 会在完整 Fleet 主机中提升成分配给
+目标的高优先级持久 Task。普通回复或确认不会完成它，目标完成实际工作后必须显式调用
+`fleet_task complete`；不带 mention 的私聊和回复不会创建任务。
 不需要回复的 FYI 应使用不带 mention 的普通频道消息。使用 `fleet_followup` 时，消息对所有频道成员可见，
 但只有明确 `mentions` 的 Agent
 会被唤醒。频道的 `createdBy` 只控制归档，

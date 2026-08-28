@@ -75,7 +75,7 @@ export interface FleetMessage {
   readonly recipientIds?: string[]
   readonly text: string
   readonly replyTo?: string
-  /** The recipient must send a later message in this conversation before remaining idle. */
+  /** The host must keep the recipient active until its required action is satisfied. */
   readonly mustReply?: boolean
   readonly resources: string[]
   readonly mentions: string[]

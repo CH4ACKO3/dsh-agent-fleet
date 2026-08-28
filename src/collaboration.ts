@@ -17,6 +17,7 @@ import { installMessageTools, MessageHub } from '@dsh-agent-fleet/message'
 import type {
   AgentDirectory,
   FleetCoordinationEvent,
+  FleetMessage,
   FleetMessagePermission,
   FleetSystemNotificationKind,
   MessageAgent,
@@ -377,6 +378,7 @@ export class FleetCollaborationService {
         { sender, input: message },
         () => ({ kind: 'send', input: message }),
       ),
+      requiredActionInstruction: () => 'Fleet promotes this obligation to a persistent high-priority task. Call fleet_task with action="list" to find it, perform the requested work, then call fleet_task with action="complete". Sending a message alone does not complete the task.',
     })
     const canManage = (agentId: string, namespace: string): boolean => {
       const member = memberNamesById.get(agentId)
@@ -410,6 +412,35 @@ export class FleetCollaborationService {
         `task:${task.id}`,
         'wakeup',
       ))
+    const requiredRecipients = (message: FleetMessage): string[] => {
+      if (message.mustReply === true) return [...new Set(message.recipientIds ?? [])]
+      return message.conversation.startsWith('#') ? [...new Set(message.mentions)] : []
+    }
+    const requiredTitle = (message: FleetMessage): string => {
+      const preview = message.text.replace(/\s+/gu, ' ').trim()
+      const shortened = preview.length > 120 ? `${preview.slice(0, 117)}...` : preview
+      return `Required from @${message.fromName ?? message.from}: ${shortened}`
+    }
+    const ensureMessageTasks = (message: FleetMessage): void => {
+      if (message.kind !== 'text') return
+      const createdBy = participantName(message.from) ?? message.fromName ?? 'User'
+      for (const assignee of requiredRecipients(message)) {
+        if (!memberViews.has(assignee)) continue
+        tasks.ensureMessageTask({
+          messageId: message.id,
+          conversation: message.conversationId ?? message.conversation,
+          createdBy,
+          assignee,
+          title: requiredTitle(message),
+          description: [
+            `Required action created from Fleet message ${message.id} in ${message.conversation}.`,
+            '',
+            message.text,
+          ].join('\n'),
+          resources: message.resources,
+        })
+      }
+    }
     const scheduler = new FleetScheduler(memberDirectory, agentId => canManage(agentId, 'schedule'), (task, recipients) =>
       notifyMembers(
         recipients,
@@ -443,6 +474,7 @@ export class FleetCollaborationService {
     const stops = [
       messages.onEvent(event => {
         input.onCoordination(event)
+        if (event.type === 'message') ensureMessageTasks(event.message)
         if (event.type === 'meeting' && event.action === 'closed') {
           calendar.closeLinkedMeeting(event.meeting.id, event.meeting.closedAt)
         }
@@ -451,15 +483,22 @@ export class FleetCollaborationService {
       memberStatuses.onEvent(input.onMemberStatus),
       tasks.onEvent(event => {
         input.onTask?.(event, tasks.state())
+        if (event.action === 'completed' && event.task.requirement?.kind === 'message') {
+          messages.completeRequiredReply(event.task.requirement.assignee, event.task.requirement.messageId)
+        }
         if (event.action !== 'due' && event.action !== 'notification') {
           const recipients = [...event.task.assignees, ...event.task.reviewers, ...event.task.followers]
             .filter(member => member !== event.actor)
           notifyMembers(
             recipients,
-            `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`,
+            event.task.requirement === undefined
+              ? `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`
+              : `[Fleet required task ${event.action}] ${event.task.title} (${event.task.id}). A reply does not complete this obligation; use fleet_task action="complete" after the requested work is done.`,
             'task_notice',
             `task:${event.task.id}`,
-            event.action === 'created' || event.action === 'completed' ? 'wakeup' : 'quiet',
+            event.task.requirement === undefined && (event.action === 'created' || event.action === 'completed')
+              ? 'wakeup'
+              : 'quiet',
           )
         }
       }),
@@ -755,6 +794,14 @@ export class FleetCollaborationService {
       },
       restore: (state) => {
         messages.restore(state.coordination)
+        for (const task of tasks.state().tasks) {
+          if (task.status === 'completed' && task.requirement?.kind === 'message') {
+            messages.completeRequiredReply(task.requirement.assignee, task.requirement.messageId)
+          }
+        }
+        for (const member of memberViews.keys()) {
+          for (const message of messages.pendingRequiredReplies(member)) ensureMessageTasks(message)
+        }
         resources.restoreResources(state.resources)
         memberStatuses.restore(state.memberStatuses)
       },

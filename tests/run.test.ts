@@ -3810,7 +3810,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('starts another member turn with a required-reply notice for a quiet mentioned message', async () => {
+  it('starts another member turn with a required-task notice for a quiet mentioned message', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -3831,6 +3831,11 @@ describe('FleetRunService', () => {
       mentions: ['@reviewer'],
       delivery: 'quiet',
     })
+    const requiredTask = service.taskBoard(run.id).pendingRequirement('reviewer')
+    expect(requiredTask).toMatchObject({
+      status: 'open', priority: 'high', assignees: ['reviewer'],
+      requirement: { kind: 'message', messageId: sent.messageId, assignee: 'reviewer' },
+    })
     expect(service.messageHub(run.id).pendingWakeups(reviewer.id)).toEqual([])
     const messagesAfterInjection = reviewer.messages.length
 
@@ -3847,13 +3852,16 @@ describe('FleetRunService', () => {
     expect(reviewer.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining(`Message ${sent.messageId}`),
+        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
       }),
     ])
     expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'coordination.system_notification', data: expect.stringContaining('message_notice') }),
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
+      expect.objectContaining({ type: 'task.created', data: expect.stringContaining(sent.messageId) }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
     ]))
+    if (requiredTask === undefined) throw new Error('expected required task')
+    service.taskBoard(run.id).complete(reviewer.id, requiredTask.id)
+    expect(service.messageHub(run.id).pendingRequiredReply(reviewer.id)).toBeUndefined()
 
     service.finish(launcher as unknown as Agent, 'cancelled', 'Unread continuation verified.', run.id)
     await service.wait(run.id, 1_000)
@@ -3862,7 +3870,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('keeps a member active after reading a must-reply message until it replies in that conversation', async () => {
+  it('keeps a member active after replying to a required message until its task is completed', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -3888,6 +3896,8 @@ describe('FleetRunService', () => {
       .toContainEqual(expect.objectContaining({ id: sent.messageId, mustReply: true }))
     expect(messages.inbox(reviewer, { unreadOnly: true })).toEqual([])
     expect(messages.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
+    const requiredTask = service.taskBoard(run.id).pendingRequirement('reviewer')
+    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: 'reviewer' })
 
     const messagesBeforeRequiredReplyWake = reviewer.messages.length
     reviewer.completeTurn()
@@ -3896,7 +3906,7 @@ describe('FleetRunService', () => {
     expect(reviewer.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining(`Message ${sent.messageId}`),
+        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
       }),
     ])
 
@@ -3906,11 +3916,19 @@ describe('FleetRunService', () => {
       delivery: 'quiet',
     })
     expect(messages.pendingRequiredReply(reviewer.id)).toBeUndefined()
+    expect(service.taskBoard(run.id).pendingRequirement('reviewer')?.id).toBe(requiredTask?.id)
     const messagesAfterReply = reviewer.messages.length
     service.agentIdle(reviewer as unknown as Agent)
-    expect(reviewer.messages).toHaveLength(messagesAfterReply)
+    expect(reviewer.messages).toHaveLength(messagesAfterReply + 1)
+    if (requiredTask === undefined) throw new Error('expected required task')
+    service.taskBoard(run.id).complete(reviewer.id, requiredTask.id)
+    expect(service.taskBoard(run.id).pendingRequirement('reviewer')).toBeUndefined()
+    const messagesAfterCompletion = reviewer.messages.length
+    service.agentIdle(reviewer as unknown as Agent)
+    expect(reviewer.messages).toHaveLength(messagesAfterCompletion)
     expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
+      expect.objectContaining({ type: 'task.completed', data: expect.stringContaining(requiredTask.id) }),
     ]))
 
     service.finish(launcher as unknown as Agent, 'cancelled', 'Required reply behavior verified.', run.id)
@@ -3920,7 +3938,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('keeps a user-facing assistant active for must-reply messages while the Team has no running work', async () => {
+  it('keeps a user-facing assistant active for required tasks while the Team has no running work', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
     const run = await first.service.create(first.launcher as unknown as Agent, {
@@ -3956,6 +3974,7 @@ describe('FleetRunService', () => {
     service.agentSessionStarted(launcher as unknown as Agent)
     expect(registeredTools).toContain('fleet_send')
     expect(registeredTools).toContain('fleet_messages')
+    expect(registeredTools).toContain('fleet_task')
     const messages = service.messageHub(run.id)
     const sent = service.sendUserConversationMessage({
       runId: run.id,
@@ -3965,6 +3984,8 @@ describe('FleetRunService', () => {
     })
     expect(service.status(run.id)).toMatchObject({ status: 'idle' })
     expect(messages.pendingRequiredReply(assistantId)).toMatchObject({ id: sent.messageId })
+    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
+    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: assistantId })
 
     const beforeRequiredReplyWake = launcher.messages.length
     service.recordMemberSessionEvent(launcher.id, {
@@ -3977,11 +3998,11 @@ describe('FleetRunService', () => {
     expect(launcher.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining(`Message ${sent.messageId}`),
+        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
       }),
     ])
     expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
     ]))
 
     messages.send(launcher as unknown as Agent, {
@@ -3993,6 +4014,17 @@ describe('FleetRunService', () => {
     const afterReply = launcher.messages.length
     service.agentStatusChanged(launcher as unknown as Agent)
     expect(launcher.messages).toHaveLength(afterReply + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
+      }),
+    ])
+    if (requiredTask === undefined) throw new Error('expected required task')
+    service.taskBoard(run.id).complete(launcher.id, requiredTask.id)
+    const afterComplete = launcher.messages.length
+    service.agentStatusChanged(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterComplete + 1)
     expect(launcher.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
@@ -4025,6 +4057,8 @@ describe('FleetRunService', () => {
       mentions: [`@${assistantId}`],
       delivery: 'quiet',
     })
+    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
+    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: assistantId })
     const afterArrival = launcher.messages.length
     service.agentSessionStarted(launcher as unknown as Agent)
 
@@ -4032,7 +4066,7 @@ describe('FleetRunService', () => {
     expect(launcher.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining(`Message ${sent.messageId}`),
+        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
       }),
     ])
     expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
@@ -4055,7 +4089,12 @@ describe('FleetRunService', () => {
     })
     const afterReply = launcher.messages.length
     service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterReply)
+    expect(launcher.messages).toHaveLength(afterReply + 1)
+    if (requiredTask === undefined) throw new Error('expected required task')
+    service.taskBoard(run.id).complete(launcher.id, requiredTask.id)
+    const afterComplete = launcher.messages.length
+    service.agentIdle(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterComplete)
     disconnect()
   })
 

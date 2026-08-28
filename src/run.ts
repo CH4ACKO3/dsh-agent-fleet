@@ -83,6 +83,7 @@ import {
 import {
   FLEET_TASK_STATE_NAMESPACE,
   parseFleetTaskState,
+  type FleetTaskBoard,
 } from './productivity/task.js'
 import {
   FLEET_SCHEDULE_STATE_NAMESPACE,
@@ -2797,6 +2798,10 @@ export class FleetRunService {
     return this.requireRuntime(runId).messages
   }
 
+  taskBoard(runId: string): FleetTaskBoard {
+    return this.requireRuntime(runId).tasks
+  }
+
   requireAssistantConnection(caller: Agent, runId: string, allowDormant = false): FleetRunAssistant {
     const record = this.requireRecord(runId)
     if (allowDormant && this.dormantRunIds.has(record.id)) {
@@ -5284,7 +5289,9 @@ export class FleetRunService {
     if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
       this.wakeNetworkRecoveriesForRoute(runId, route, sessionId)
     }
-    if (agent !== undefined) this.continueRequiredReply(runId, runtime, record, agent)
+    if (agent !== undefined && !this.continueRequiredTask(runId, runtime, record, agent)) {
+      this.continueRequiredReply(runId, runtime, record, agent)
+    }
   }
 
   private continueRequiredReply(
@@ -5303,6 +5310,38 @@ export class FleetRunService {
       member: participant.name,
       reason: 'required_reply',
       messages: [requiredReply.id],
+    })
+    return true
+  }
+
+  private continueRequiredTask(
+    runId: string,
+    runtime: FleetCollaborationTeam,
+    record: FleetRunRecord,
+    agent: Agent,
+  ): boolean {
+    const participant = this.participants(record)
+      .find(candidate => candidate.sessionId === String(agent.id))
+    if (participant === undefined
+      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
+    const task = runtime.tasks.pendingRequirement(participant.name)
+    if (task === undefined) return false
+    runtime.messages.sendSystemNotification(participant.name, {
+      kind: 'task_notice',
+      text: [
+        `[Fleet required task] ${task.title} (${task.id})`,
+        task.description,
+        'This obligation remains active after an acknowledgement or progress reply. Perform the requested work, record useful progress if needed, then call fleet_task with action="complete" and this task id.',
+      ].filter(Boolean).join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `required-task:${task.id}`,
+      ...(task.requirement === undefined ? {} : { relatedMessageId: task.requirement.messageId }),
+    })
+    this.appendEvent(runId, 'member_continued', {
+      member: participant.name,
+      reason: 'required_task',
+      tasks: [task.id],
+      ...(task.requirement === undefined ? {} : { messages: [task.requirement.messageId] }),
     })
     return true
   }
@@ -5341,9 +5380,12 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const record = this.records.get(runId)
 
-    // A required reply belongs to the conversation, not to the current work item.
-    // Keep both formal members and user-facing assistants active even when the
-    // Team is idle or its latest work is blocked/finished.
+    // Message obligations are promoted to durable required tasks. Keep both
+    // formal members and user-facing assistants active until the task is
+    // explicitly completed, even if they have already acknowledged the message.
+    if (record !== undefined && this.continueRequiredTask(runId, runtime, record, agent)) return
+    // Preserve legacy required-reply recovery for journals that have not yet
+    // been migrated to a task.
     if (record !== undefined && this.continueRequiredReply(runId, runtime, record, agent)) return
     // Unread conversation state also outlives a work item. In particular, the
     // user-facing assistant must consume member replies before answering later
@@ -5359,9 +5401,12 @@ export class FleetRunService {
       if (live?.status !== 'idle') continue
       const pending = runtime.messages.pendingWakeups(member.sessionId)
       const unread = runtime.messages.followupUnread(live)
-      const requiredReply = unread === undefined
-        ? runtime.messages.followupRequiredReply(live)
-        : undefined
+      const requiredTask = unread === undefined ? runtime.tasks.pendingRequirement(member.name) : undefined
+      if (requiredTask !== undefined) {
+        if (this.continueRequiredTask(runId, runtime, record, live)) wokeUnread = true
+        continue
+      }
+      const requiredReply = unread === undefined ? runtime.messages.followupRequiredReply(live) : undefined
       const waitingMessage = unread ?? requiredReply
       if (waitingMessage === undefined) continue
       this.appendEvent(runId, 'member_continued', {
@@ -8290,13 +8335,13 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send a quiet message from the calling Fleet participant to a member, Channel, or the external user. The @ in a direct to target is routing only. A resolved mention in the message requires that mentioned target to reply; an ordinary direct message or reply does not. User-facing Team assistants must use this tool to reply to @User.',
+    description: 'Send a quiet message from the calling Fleet participant to a member, Channel, or the external user. The @ in a direct to target is routing only. A resolved message mention creates a persistent must-complete task for that target; an ordinary direct message or reply does not. User-facing Team assistants must use this tool to reply to @User.',
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target must reply; a direct message may mention only its recipient. Quiet delivery does not wake them immediately.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient. Quiet delivery does not wake them immediately.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Parsed message mentions already apply target-level must-reply automatically.' },
+      must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a persistent must-complete task for every recipient. Parsed message mentions already create target-level required tasks automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
@@ -8316,13 +8361,13 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_followup',
-    description: 'Send a Fleet message and wake or urgently interrupt its recipients. The @ in a direct to target is routing only. Resolved message mentions require those targets to reply; in a Channel they also select who is woken or interrupted.',
+    description: 'Send a Fleet message and wake or urgently interrupt its recipients. The @ in a direct to target is routing only. Resolved message mentions create persistent must-complete tasks for those targets; in a Channel they also select who is woken or interrupted.',
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target must reply; a direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Parsed message mentions already apply target-level must-reply automatically.' },
+      must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a persistent must-complete task for every recipient. Parsed message mentions already create target-level required tasks automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
       interrupt: { type: 'boolean', description: 'Interrupt in-flight work instead of an ordinary wake-up.' },
     },

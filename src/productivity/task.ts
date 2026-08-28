@@ -20,6 +20,13 @@ export interface FleetTaskEntry {
   readonly createdAt: string
 }
 
+export interface FleetTaskRequirement {
+  readonly kind: 'message'
+  readonly messageId: string
+  readonly conversation: string
+  readonly assignee: string
+}
+
 export interface FleetProjectTask {
   readonly id: string
   readonly title: string
@@ -40,6 +47,8 @@ export interface FleetProjectTask {
   readonly completedAt?: string
   readonly dueNotifiedAt?: string
   readonly duePendingFor?: string[]
+  /** A durable obligation created from a must-reply message or parsed @mention. */
+  readonly requirement?: FleetTaskRequirement
 }
 
 export interface FleetTaskState {
@@ -76,6 +85,16 @@ export interface UpdateFleetProjectTaskInput {
   readonly followers?: readonly string[]
   readonly dependencies?: readonly string[]
   readonly dueAt?: string
+  readonly resources?: readonly string[]
+}
+
+export interface EnsureFleetMessageTaskInput {
+  readonly messageId: string
+  readonly conversation: string
+  readonly createdBy: string
+  readonly assignee: string
+  readonly title: string
+  readonly description?: string
   readonly resources?: readonly string[]
 }
 
@@ -201,10 +220,65 @@ export class FleetTaskBoard {
     return snapshot(task)
   }
 
+  ensureMessageTask(input: EnsureFleetMessageTaskInput): FleetProjectTask {
+    this.assertOpen()
+    const assignee = this.resolve(input.assignee)
+    const existing = [...this.tasks.values()].find(task =>
+      task.requirement?.kind === 'message'
+      && task.requirement.messageId === input.messageId
+      && task.requirement.assignee === assignee)
+    if (existing !== undefined) return snapshot(existing)
+    const now = new Date().toISOString()
+    const createdBy = requiredText(input.createdBy, 'task creator')
+    const task: FleetProjectTask = {
+      id: `task_${randomUUID()}`,
+      title: requiredText(input.title, 'task title'),
+      description: input.description?.trim() ?? '',
+      status: 'open',
+      priority: 'high',
+      createdBy,
+      assignees: [assignee],
+      reviewers: [],
+      followers: this.resolveOptionalMember(createdBy, assignee),
+      dependencies: [],
+      resources: this.strings(input.resources ?? [], 'resource id'),
+      entries: [],
+      createdAt: now,
+      updatedAt: now,
+      requirement: {
+        kind: 'message',
+        messageId: requiredText(input.messageId, 'required message id'),
+        conversation: requiredText(input.conversation, 'required message conversation'),
+        assignee,
+      },
+    }
+    this.tasks.set(task.id, task)
+    this.emit({ action: 'created', task, actor: createdBy })
+    return snapshot(task)
+  }
+
+  pendingRequirement(reference: string): FleetProjectTask | undefined {
+    const assignee = this.resolve(reference)
+    const task = [...this.tasks.values()]
+      .filter(candidate => candidate.requirement?.assignee === assignee)
+      .filter(candidate => candidate.status !== 'completed')
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0]
+    return task === undefined ? undefined : snapshot(task)
+  }
+
   update(callerId: string, id: string, input: UpdateFleetProjectTaskInput): FleetProjectTask {
     const current = this.requireTask(id)
     this.requireResponsible(callerId, current)
     if (Object.values(input).every(value => value === undefined)) throw new Error('task update requires a change')
+    if (current.requirement !== undefined && input.status === 'cancelled') {
+      throw new Error(`required Fleet task ${id} must be completed and cannot be cancelled`)
+    }
+    if (current.requirement !== undefined && input.assignees !== undefined) {
+      const assignees = this.resolveMany(input.assignees)
+      if (assignees.length !== 1 || assignees[0] !== current.requirement.assignee) {
+        throw new Error(`required Fleet task ${id} cannot be reassigned`)
+      }
+    }
     const dependencies = input.dependencies === undefined ? undefined : this.taskReferences(input.dependencies, id)
     let updated: FleetProjectTask = {
       ...current,
@@ -293,6 +367,9 @@ export class FleetTaskBoard {
         ...(task.duePendingFor === undefined ? {} : {
           duePendingFor: unique(task.duePendingFor.map(value => value === member ? successor : value)),
         }),
+        ...(task.requirement?.assignee === member
+          ? { requirement: { ...task.requirement, assignee: successor } }
+          : {}),
         updatedAt: new Date().toISOString(),
       }
       this.replace(updated)
@@ -379,6 +456,11 @@ export class FleetTaskBoard {
     return unique(values.map(value => this.resolve(value)))
   }
 
+  private resolveOptionalMember(reference: string, except: string): string[] {
+    const member = this.directory.resolve(reference)
+    return member === undefined || member === except ? [] : [member]
+  }
+
   private strings(values: readonly string[], label: string): string[] {
     return unique(values.map(value => requiredText(value, label)))
   }
@@ -445,6 +527,13 @@ const TASK_SCHEMA = {
     entries: { type: 'array', required: true, items: ENTRY_SCHEMA }, createdAt: { type: 'string', required: true }, updatedAt: { type: 'string', required: true },
     completedAt: { type: 'string' }, dueNotifiedAt: { type: 'string' },
     duePendingFor: { type: 'array', items: { type: 'string' } },
+    requirement: {
+      type: 'object', additionalProperties: false, properties: {
+        kind: { type: 'string', required: true, enum: ['message'] },
+        messageId: { type: 'string', required: true }, conversation: { type: 'string', required: true },
+        assignee: { type: 'string', required: true },
+      },
+    },
   },
 } as const
 
@@ -471,7 +560,7 @@ export function installTaskTools(
 ): () => void {
   return ctx.tools.register(defineTool({
     name: 'fleet_task',
-    description: 'Manage persistent Team tasks, owners, reviewers, dependencies, subtasks, comments, progress, deadlines, and resources.',
+    description: 'Manage persistent Team tasks, owners, reviewers, dependencies, subtasks, comments, progress, deadlines, and resources. Parsed message mentions and must_reply directives appear as high-priority required tasks: replying or acknowledging is not completion, and the assignee must use action="complete" after performing the work.',
     parameters: {
       action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'update', 'comment', 'progress', 'complete', 'reopen'] },
       id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' },

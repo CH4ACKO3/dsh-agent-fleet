@@ -290,7 +290,7 @@ The receiving agent should not call the migration complete until all of these pa
 
 1. `dsh web --help` builds the Loader tree without duplicate IDs.
 2. `dsh web --port 3080` serves the UI and survives a cold restart.
-3. A team can be created, all assistants load, and a must-reply message is sent with the Fleet message tool.
+3. A team can be created, all assistants load, and a parsed mention or legacy `must_reply` message creates a persistent required Task that remains active until `fleet_task complete`.
 4. The deployment's configured public model provider completes a normal request.
 5. Patchouli records the interaction, and a later request retrieves it through the configured retrieval model.
 6. Markdown rendering, source/comparison views, Git integration, and the budget panel load without browser errors.

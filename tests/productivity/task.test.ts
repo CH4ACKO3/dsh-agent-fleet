@@ -56,6 +56,37 @@ describe('FleetTaskBoard', () => {
     })
   })
 
+  it('persists and deduplicates must-complete tasks promoted from messages', () => {
+    const board = new FleetTaskBoard(directory)
+    const task = board.ensureMessageTask({
+      messageId: 'msg_42', conversation: '#main', createdBy: 'lead', assignee: 'reviewer',
+      title: 'Required from @lead: inspect the release', description: 'Inspect the release.',
+      resources: ['document:release'],
+    })
+    expect(board.ensureMessageTask({
+      messageId: 'msg_42', conversation: '#main', createdBy: 'lead', assignee: 'reviewer',
+      title: 'Duplicate delivery',
+    }).id).toBe(task.id)
+    expect(board.pendingRequirement('agent-reviewer')).toMatchObject({
+      id: task.id, priority: 'high', assignees: ['reviewer'], followers: ['lead'],
+      requirement: { kind: 'message', messageId: 'msg_42', conversation: '#main', assignee: 'reviewer' },
+    })
+    expect(() => board.update('agent-reviewer', task.id, { status: 'cancelled' }))
+      .toThrow('must be completed')
+    expect(() => board.update('agent-reviewer', task.id, { assignees: ['qa'] }))
+      .toThrow('cannot be reassigned')
+    board.retireMember('reviewer', 'qa')
+    expect(board.pendingRequirement('qa')).toMatchObject({
+      id: task.id, assignees: ['qa'], requirement: { assignee: 'qa' },
+    })
+
+    const restored = new FleetTaskBoard(directory)
+    restored.restore(parseFleetTaskState(board.state() as never))
+    expect(restored.pendingRequirement('qa')?.id).toBe(task.id)
+    restored.complete('agent-qa', task.id)
+    expect(restored.pendingRequirement('qa')).toBeUndefined()
+  })
+
   it('freezes deadline timers while paused and persists before waking', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))

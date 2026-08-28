@@ -445,13 +445,13 @@ export function installMessageTools(
   if (options.messages !== false) {
   register(defineTool({
     name: 'fleet_send',
-    description: 'Send a process-local Fleet message without waking an idle Agent. The @ in a direct to target is routing only. A resolved mention in the message requires that mentioned target to reply; an ordinary direct message or reply does not. Use #channel as a shared asynchronous coordination log and reply_to to continue a task thread without creating an Agent hierarchy. Meeting messages enter every other participant\'s context in full.',
+    description: 'Send a process-local Fleet message without waking an idle Agent. The @ in a direct to target is routing only. A resolved mention marks a target-level required action that a full Fleet host promotes to a persistent task; an ordinary direct message or reply does not. Use #channel as a shared asynchronous coordination log and reply_to to continue a task thread without creating an Agent hierarchy. Meeting messages enter every other participant\'s context in full.',
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target must reply; a direct message may mention only its recipient. Quiet delivery does not wake them immediately.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target receives a required action; a full Fleet host persists it as a must-complete task. A direct message may mention only its recipient. Quiet delivery does not wake them immediately.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Parsed message mentions already apply target-level must-reply automatically.' },
+      must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a required action for every recipient. A full Fleet host persists these as must-complete tasks.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(SEND_SCHEMA),
@@ -472,13 +472,13 @@ export function installMessageTools(
 
   register(defineTool({
     name: 'fleet_followup',
-    description: 'Send a process-local Fleet message and start selected Agents\' next turns. The @ in a direct to target is routing only. Resolved message mentions require those targets to reply; in a Channel they also select who wakes or is interrupted. Set interrupt only for urgent information that makes in-flight work unsafe or obsolete.',
+    description: 'Send a process-local Fleet message and start selected Agents\' next turns. The @ in a direct to target is routing only. Resolved message mentions create target-level required actions that a full Fleet host persists as must-complete tasks; in a Channel they also select who wakes or is interrupted. Set interrupt only for urgent information that makes in-flight work unsafe or obsolete.',
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target must reply; a direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target receives a required action; a full Fleet host persists it as a must-complete task. A direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Parsed message mentions already apply target-level must-reply automatically.' },
+      must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a required action for every recipient. A full Fleet host persists these as must-complete tasks.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
       interrupt: { type: 'boolean', description: 'Cancel the recipients current Agent step, preserve pending inbox work, and steer this message immediately.' },
     },

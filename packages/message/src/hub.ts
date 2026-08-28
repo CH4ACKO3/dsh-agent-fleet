@@ -112,6 +112,7 @@ function mustReplyInstruction(message: FleetMessage): string {
 export interface MessageHubOptions {
   readonly validateTaskReference?: (taskId: string, assigneeId?: string) => void
   readonly beforeSend?: (sender: MessageAgent, input: SendMessageInput) => SendMessageDecision
+  readonly requiredActionInstruction?: (message: FleetMessage) => string
 }
 
 export class MessageHub {
@@ -601,13 +602,37 @@ export class MessageHub {
     return message === undefined ? undefined : snapshot(message)
   }
 
+  pendingRequiredReplies(reference: string): FleetMessage[] {
+    this.assertOpen()
+    const participantId = this.resolveAgent(reference)
+    return [...(this.requiredRepliesByParticipant.get(participantId)?.values() ?? [])]
+      .sort((left, right) => left.sequence - right.sequence)
+      .map(snapshot)
+  }
+
+  completeRequiredReply(reference: string, messageId: string): FleetMessage | undefined {
+    this.assertOpen()
+    const participantId = this.resolveAgent(reference)
+    const required = this.requiredRepliesByParticipant.get(participantId)
+    if (required === undefined) return undefined
+    const match = [...required.entries()].find(([, message]) => message.id === messageId)
+    if (match === undefined) return undefined
+    const [conversationId, message] = match
+    required.delete(conversationId)
+    if (required.size === 0) this.requiredRepliesByParticipant.delete(participantId)
+    const target = this.agents.get(participantId)
+    if (target !== undefined) this.removePendingSystemNotification(target, this.requiredReplyNoticeKey(message))
+    this.changed([participantId])
+    return snapshot(message)
+  }
+
   followupRequiredReply(target: MessageAgent): FleetMessage | undefined {
     const message = this.pendingRequiredReply(target.id)
     if (message === undefined) return undefined
     const sender = `@${message.fromName ?? message.from}`
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
-      text: `[Fleet ${message.conversation}] Message ${message.id} from ${sender} requires a reply before going idle. ${mustReplyInstruction(message)}`,
+      text: `[Fleet ${message.conversation}] Message ${message.id} from ${sender} requires an action before going idle. ${this.requiredActionInstruction(message)}`,
       delivery: 'wakeup',
       coalesceKey: this.requiredReplyNoticeKey(message),
       relatedMessageId: message.id,
@@ -1625,7 +1650,7 @@ export class MessageHub {
     const sender = `@${message.fromName ?? message.from}`
     const mustReply = this.requiresReply(message, target.id)
     const replyMarker = mustReply ? ' | must-reply' : ''
-    const replyInstruction = mustReply ? `\n${mustReplyInstruction(message)}` : ''
+    const replyInstruction = mustReply ? `\n${this.requiredActionInstruction(message)}` : ''
     const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}${replyInstruction}`
     const input = createUserMessage({
       content: [{ type: 'text', text }],
@@ -1784,7 +1809,7 @@ export class MessageHub {
 
   private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
     const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
-    const replyInstruction = this.requiresReply(message, target.id) ? ` ${mustReplyInstruction(message)}` : ''
+    const replyInstruction = this.requiresReply(message, target.id) ? ` ${this.requiredActionInstruction(message)}` : ''
     const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.${replyInstruction}`
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
@@ -1798,6 +1823,10 @@ export class MessageHub {
   private requiresReply(message: FleetMessage, participantId: string): boolean {
     if (message.mustReply === true) return message.recipientIds?.includes(participantId) ?? false
     return message.conversation.startsWith('#') && message.mentions.includes(participantId)
+  }
+
+  private requiredActionInstruction(message: FleetMessage): string {
+    return this.options.requiredActionInstruction?.(snapshot(message)) ?? mustReplyInstruction(message)
   }
 
   private deliverMeeting(
