@@ -512,7 +512,7 @@ export class MessageHub {
       if (mentions.some(mention => mention !== recipient)) {
         throw new Error('a direct message can only mention its recipient')
       }
-      return this.sendDirect(sender, { ...input, to: `@${recipient}` }, text, resources, origin)
+      return this.sendDirect(sender, { ...input, to: `@${recipient}` }, text, resources, mentions, origin)
     }
     if (!input.to.startsWith('#')) throw new Error(`invalid Fleet target ${input.to}`)
     return this.sendChannel(sender, input, text, resources, mentions, origin)
@@ -1388,6 +1388,7 @@ export class MessageHub {
     input: SendMessageInput,
     text: string,
     resources: string[],
+    mentions: string[],
     origin?: FleetMessage['origin'],
   ): SendMessageResult {
     const targetId = agentTarget(input.to)
@@ -1395,13 +1396,11 @@ export class MessageHub {
     this.requireContact(sender.id, targetId)
     this.requireKnownParticipant(targetId)
     this.clearPendingWakeups(sender.id, input.to)
-    const conversationId = this.conversationId(sender.id, input.to)
-    const completingRequiredReply = this.requiredRepliesByParticipant.get(sender.id)?.has(conversationId) === true
-    // Every direct @target is a request by default. A response that is already
-    // satisfying the same direct conversation is exempt, otherwise two Agents
-    // would create an endless reciprocal must-reply chain. Explicit mustReply
-    // and trusted user messages still override that cycle guard.
-    const mustReply = input.mustReply === true || origin === 'user' || !completingRequiredReply
+    // The @ in a direct target is routing syntax, not a mention. Only an
+    // explicitly parsed mention (plus trusted user input or mustReply) creates
+    // a reply obligation. This lets an ordinary reply finish the conversation,
+    // while a reply that mentions its recipient asks for a final confirmation.
+    const mustReply = input.mustReply === true || origin === 'user' || mentions.includes(targetId)
     const { mustReply: _mustReply, ...rest } = input
     const normalizedInput: SendMessageInput = mustReply ? { ...rest, mustReply: true } : rest
     const message = this.appendMessage(
@@ -1409,7 +1408,7 @@ export class MessageHub {
       normalizedInput,
       text,
       resources,
-      [],
+      mentions,
       [targetId],
       input.kind ?? 'text',
       origin,

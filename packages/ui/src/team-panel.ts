@@ -8037,7 +8037,7 @@ export function FleetTeamPanel({
     const teamId = activeTeam.teamId
     const conversationId = activeItem
     const conversation = activeTeam.conversations.find(candidate => candidate.id === conversationId)
-    const mentions = conversation?.kind === 'channel'
+    const mentions = conversation?.kind === 'channel' || conversation?.kind === 'direct'
       ? activeTeam.members.filter(member => containsFleetMention(text, member.id) || containsFleetMention(text, member.name))
         .map(member => `@${member.id}`)
       : []

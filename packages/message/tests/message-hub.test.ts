@@ -91,7 +91,7 @@ function setup(): {
 }
 
 describe('MessageHub', () => {
-  it('promotes quiet direct Agent messages to must-reply requests', () => {
+  it('keeps ordinary quiet direct Agent messages non-blocking', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {
       to: '@reviewer',
@@ -104,14 +104,13 @@ describe('MessageHub', () => {
     expect(reviewer.injected).toHaveLength(1)
     expect(reviewer.followedUp).toHaveLength(0)
     expect(reviewer.injected[0]).toContain('Please inspect the parser.')
-    expect(reviewer.injected[0]).toContain('must-reply')
+    expect(reviewer.injected[0]).not.toContain('must-reply')
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
       from: 'lead',
-      mustReply: true,
       resources: ['res_parser'],
     })
-    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
   })
 
   it('preserves direct-human origin for trusted host messages without changing ordinary relays', () => {
@@ -702,7 +701,7 @@ describe('MessageHub', () => {
     expect(hub.search(lead, { query: 'large-recent-marker-128' })).toHaveLength(1)
   })
 
-  it('tolerates mentioning the recipient in a direct message without giving it extra effect', () => {
+  it('requires final confirmation only when direct messages and replies explicitly mention their recipient', () => {
     const { hub, lead, reviewer, observer } = setup()
     const sent = hub.send(lead, {
       to: '@reviewer',
@@ -716,8 +715,27 @@ describe('MessageHub', () => {
     expect(observer.injected).toHaveLength(0)
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
-      mentions: [],
+      mentions: ['reviewer'],
+      mustReply: true,
     })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
+
+    const reply = hub.send(reviewer, {
+      to: '@lead',
+      text: '@lead The parser is correct; please confirm receipt.',
+      mentions: ['@lead'],
+      delivery: 'quiet',
+    })
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+    expect(hub.pendingRequiredReply(lead.id)).toMatchObject({ id: reply.messageId })
+
+    hub.send(lead, {
+      to: '@reviewer',
+      text: 'Receipt confirmed.',
+      delivery: 'quiet',
+    })
+    expect(hub.pendingRequiredReply(lead.id)).toBeUndefined()
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
 
     expect(() => hub.send(lead, {
       to: '@reviewer',

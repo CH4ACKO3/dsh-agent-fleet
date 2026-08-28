@@ -8290,13 +8290,13 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send a quiet message from the calling Fleet participant to a member, Channel, or the external user. A direct @target automatically requires that target to reply. Resolved Channel mentions require only those mentioned targets to reply. User-facing Team assistants must use this tool to reply to @User.',
+    description: 'Send a quiet message from the calling Fleet participant to a member, Channel, or the external user. The @ in a direct to target is routing only. A resolved mention in the message requires that mentioned target to reply; an ordinary direct message or reply does not. User-facing Team assistants must use this tool to reply to @User.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target is automatically must-reply.' },
+      to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in a Channel. Every mentioned target must reply; quiet delivery does not wake them immediately.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target must reply; a direct message may mention only its recipient. Quiet delivery does not wake them immediately.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Direct @targets and Channel mentions already apply target-level must-reply automatically.' },
+      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Parsed message mentions already apply target-level must-reply automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
@@ -8316,13 +8316,13 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_followup',
-    description: 'Send a Fleet message and wake or urgently interrupt its recipients. A direct @target automatically requires a reply. In a Channel, resolved mentions both require those targets to reply and select who is woken or interrupted.',
+    description: 'Send a Fleet message and wake or urgently interrupt its recipients. The @ in a direct to target is routing only. Resolved message mentions require those targets to reply; in a Channel they also select who is woken or interrupted.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target is automatically must-reply.' },
+      to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets for a Channel follow-up. Every mentioned target must reply and is woken or interrupted.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target must reply; a direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Direct @targets and Channel mentions already apply target-level must-reply automatically.' },
+      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Parsed message mentions already apply target-level must-reply automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
       interrupt: { type: 'boolean', description: 'Interrupt in-flight work instead of an ordinary wake-up.' },
     },

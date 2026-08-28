@@ -3792,7 +3792,7 @@ describe('FleetRunService', () => {
     expect(messages.pendingWakeups(reviewer.id)).toEqual([])
     expect(service.readTrace(run.id, 0, 100).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('team_quiescent') }),
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('pending_wakeup') }),
     ]))
 
     await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
