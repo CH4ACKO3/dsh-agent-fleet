@@ -4098,6 +4098,53 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('freezes required-task continuation while the Team is paused and resumes it later', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected attached Fleet assistant')
+    const sent = service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${assistantId}`,
+      text: 'Complete this after the Team resumes.',
+      delivery: 'quiet',
+    })
+    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
+    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: assistantId })
+
+    await service.pauseTeam(launcher as unknown as Agent, run.id)
+    expect(service.status(run.id)).toMatchObject({ status: 'paused' })
+    launcher.status = 'idle'
+    const afterPause = launcher.messages.length
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    })
+    service.agentIdle(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterPause)
+    expect(service.taskBoard(run.id).pendingRequirement(assistantId)?.id).toBe(requiredTask?.id)
+
+    await service.resumeTeam(launcher as unknown as Agent, run.id)
+    const afterResume = launcher.messages.length
+    service.agentIdle(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterResume + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
+      }),
+    ])
+    expect(service.taskBoard(run.id).pendingRequirement(assistantId)?.id).toBe(requiredTask?.id)
+    disconnect()
+  })
+
   it('pauses and resumes a Team without resuming members that were already paused individually', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)

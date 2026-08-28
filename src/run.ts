@@ -5294,6 +5294,14 @@ export class FleetRunService {
     }
   }
 
+  private autoContinuationPaused(record: FleetRunRecord, participant: string): boolean {
+    if (record.status === 'paused' || this.pausingTeams.has(record.id)) return true
+    if (this.pausingMembers.has(`${record.id}:${participant}`)) return true
+    const member = record.members.find(candidate => candidate.name === participant)
+    if (member !== undefined) return member.status === 'paused' || member.status === 'offline'
+    return record.assistants.find(candidate => candidate.view.id === participant)?.status === 'paused'
+  }
+
   private continueRequiredReply(
     runId: string,
     runtime: FleetCollaborationTeam,
@@ -5303,6 +5311,7 @@ export class FleetRunService {
     const participant = this.participants(record)
       .find(candidate => candidate.sessionId === String(agent.id))
     if (participant === undefined
+      || this.autoContinuationPaused(record, participant.name)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const requiredReply = runtime.messages.followupRequiredReply(agent)
     if (requiredReply === undefined) return false
@@ -5323,6 +5332,7 @@ export class FleetRunService {
     const participant = this.participants(record)
       .find(candidate => candidate.sessionId === String(agent.id))
     if (participant === undefined
+      || this.autoContinuationPaused(record, participant.name)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const task = runtime.tasks.pendingRequirement(participant.name)
     if (task === undefined) return false
@@ -5355,6 +5365,7 @@ export class FleetRunService {
     const participant = this.participants(record)
       .find(candidate => candidate.sessionId === String(agent.id))
     if (participant === undefined
+      || this.autoContinuationPaused(record, participant.name)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const pending = runtime.messages.pendingWakeups(participant.sessionId)
     const unread = runtime.messages.followupUnread(agent)
@@ -5379,18 +5390,21 @@ export class FleetRunService {
     if (entry === undefined) return
     const [runId, runtime] = entry
     const record = this.records.get(runId)
+    const participant = runtime.memberNamesById.get(agentId)
+    if (record === undefined || participant === undefined
+      || this.autoContinuationPaused(record, participant)) return
 
     // Message obligations are promoted to durable required tasks. Keep both
     // formal members and user-facing assistants active until the task is
     // explicitly completed, even if they have already acknowledged the message.
-    if (record !== undefined && this.continueRequiredTask(runId, runtime, record, agent)) return
+    if (this.continueRequiredTask(runId, runtime, record, agent)) return
     // Preserve legacy required-reply recovery for journals that have not yet
     // been migrated to a task.
-    if (record !== undefined && this.continueRequiredReply(runId, runtime, record, agent)) return
+    if (this.continueRequiredReply(runId, runtime, record, agent)) return
     // Unread conversation state also outlives a work item. In particular, the
     // user-facing assistant must consume member replies before answering later
     // progress questions from stale context.
-    if (record !== undefined && this.continueUnread(runId, runtime, record, agent)) return
+    if (this.continueUnread(runId, runtime, record, agent)) return
     if (record?.status !== 'running' || record.work?.status !== 'running') return
 
     let wokeUnread = false
