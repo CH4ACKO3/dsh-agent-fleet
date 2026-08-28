@@ -2,6 +2,11 @@
   "name": "@ch4acko3/dsh-agent-fleet-git",
   "version": "0.1.0",
   "description": "Fleet-aware Git scope checking, worktree service, and read-only graph for DeepSeek Harness",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CH4ACKO3/dsh-agent-fleet.git",
+    "directory": "packages/git"
+  },
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"

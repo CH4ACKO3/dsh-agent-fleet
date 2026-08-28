@@ -2,6 +2,11 @@
   "name": "dsh-agent-fleet-patchouli",
   "version": "0.1.0",
   "description": "Patchouli memory integration for DSH Agent Fleet",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CH4ACKO3/dsh-agent-fleet.git",
+    "directory": "packages/dsh-fleet-patchouli"
+  },
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"

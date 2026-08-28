@@ -2,6 +2,11 @@
   "name": "@ch4acko3/dsh-agent-fleet-lark",
   "version": "0.1.0",
   "description": "Lark and Feishu connector for Agent Fleet Gateway",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CH4ACKO3/dsh-agent-fleet.git",
+    "directory": "packages/lark"
+  },
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"

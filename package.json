@@ -2,6 +2,10 @@
   "name": "dsh-agent-fleet",
   "version": "0.1.0",
   "description": "Process-local development collaboration for DeepSeek Harness Agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CH4ACKO3/dsh-agent-fleet.git"
+  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

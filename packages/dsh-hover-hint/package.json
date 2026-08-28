@@ -2,6 +2,11 @@
   "name": "dsh-hover-hint",
   "version": "0.1.0",
   "description": "Native-style delayed hover hints for DeepSeek Harness WebUI plugins",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CH4ACKO3/dsh-agent-fleet.git",
+    "directory": "packages/dsh-hover-hint"
+  },
   "type": "module",
   "engines": {
     "node": "^22.22.3 || >=24.11.1"

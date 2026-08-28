@@ -98,7 +98,13 @@ jobs:
           echo "PACKAGE_TARBALL=${package_tarballs[0]}" >> "$GITHUB_ENV"
 
       - name: Publish npm package
-        run: npm publish "$PACKAGE_TARBALL" --access public --provenance
+        shell: bash
+        run: |
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION is already published"
+          else
+            npm publish "$PACKAGE_TARBALL" --access public --provenance
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
