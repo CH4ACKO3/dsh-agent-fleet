@@ -97,6 +97,25 @@ jobs:
           test "${#package_tarballs[@]}" -eq 1
           echo "PACKAGE_TARBALL=${package_tarballs[0]}" >> "$GITHUB_ENV"
 
+      - name: Verify publishable manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/published-package.json"
+          tar -xOf "$PACKAGE_TARBALL" package/package.json > "$manifest"
+          node - "$manifest" <<'NODE'
+          const manifest = require(process.argv[2])
+          const sections = ['dependencies', 'optionalDependencies', 'peerDependencies']
+          const unresolved = sections.flatMap((section) =>
+            Object.entries(manifest[section] ?? {})
+              .filter(([, version]) => String(version).startsWith('workspace:'))
+              .map(([name, version]) => `${section}.${name}=${version}`),
+          )
+          if (unresolved.length > 0) {
+            throw new Error(`Published manifest contains workspace ranges: ${unresolved.join(', ')}`)
+          }
+          NODE
+
       - name: Publish npm package
         shell: bash
         run: |
