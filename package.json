@@ -69,7 +69,7 @@
   "scripts": {
     "generate:team-templates": "node scripts/generate-team-templates.mjs",
     "compact:fleet-journal": "node scripts/compact-fleet-journal.mjs",
-    "build": "pnpm -r --if-present build && pnpm run build:client && pnpm run build:host",
+    "build": "pnpm --filter @dsh-agent-fleet/core --filter @dsh-agent-fleet/gateway --filter @dsh-agent-fleet/message --filter @dsh-agent-fleet/resources --filter dsh-hover-hint build && pnpm run build:client && pnpm run build:host && pnpm --filter @ch4acko3/dsh-agent-fleet-git --filter @ch4acko3/dsh-agent-fleet-lark --filter dsh-agent-fleet-patchouli build",
     "build:client": "pnpm run generate:team-templates && tsdown --config-loader unrun && tsc -p tsconfig.client.build.json",
     "build:host": "tsc -p tsconfig.package.json",
     "test": "pnpm run build && pnpm -r --if-present test && vitest run tests",
