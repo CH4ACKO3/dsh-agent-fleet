@@ -16,7 +16,9 @@ interface FleetActivationSetups {
 }
 
 interface FleetConnectionServices {
-  readonly runs: Pick<FleetRunService, 'attachAssistant' | 'sendUserConversationMessage'>
+  readonly runs: Pick<FleetRunService, 'attachAssistant' | 'sendUserConversationMessage'> & {
+    agentSessionStarted?(agent: Agent): void
+  }
   readonly assistant: Pick<FleetAssistantRuntime, 'activate'>
   readonly meta: Pick<FleetMetaAssistantService, 'activate'>
 }
@@ -88,6 +90,7 @@ export async function activateFleetFromMessages(
       ...(activation.request.assistantId === undefined ? {} : { assistantId: activation.request.assistantId }),
     })
     connection.assistant.activate(agent, attached.run.id, attached.assistant.view)
+    connection.runs.agentSessionStarted?.(agent)
   } else {
     const setup = setups.begin(agent, {
       ...(activation.initialIdea === undefined ? {} : { initialIdea: activation.initialIdea }),

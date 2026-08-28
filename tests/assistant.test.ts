@@ -72,6 +72,12 @@ describe('FleetAssistantRuntime', () => {
       order: 0,
       text: FLEET_ASSISTANT_SYSTEM_PROMPT,
     })
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'first inspect current activity and read the relevant conversation with `fleet_messages`',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'omit `recipients` only when every available member should act',
+    )
     expect(fixture.restrict).not.toHaveBeenCalled()
 
     runtime.activate(fixture.agent)

@@ -52,6 +52,7 @@ import type {
   FleetMessage,
   FleetTarget,
   MessageHub,
+  ReadMessagesResult,
   SendMessageResult,
 } from '@dsh-agent-fleet/message'
 import type { FleetResources } from '@dsh-agent-fleet/resources'
@@ -438,6 +439,7 @@ export interface FleetAssistantMessage {
   readonly runId: string
   readonly kind: FleetAssistantMessageKind
   readonly text: string
+  readonly mustReply?: boolean
   readonly recipients: string[]
   readonly assistantSessionId: string
   readonly assistantId: string
@@ -983,11 +985,13 @@ export interface SendAssistantMessageInput {
   readonly runId?: string
   readonly kind: FleetAssistantMessageKind
   readonly text: string
+  readonly recipients?: readonly string[]
+  readonly mustReply?: boolean
   readonly projectRoot?: string
 }
 
 export interface SendFleetConversationMessageInput {
-  readonly runId: string
+  readonly runId?: string
   readonly to: FleetTarget
   readonly text: string
   readonly replyTo?: string
@@ -995,6 +999,22 @@ export interface SendFleetConversationMessageInput {
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
   readonly delivery: 'quiet' | 'wakeup' | 'interrupt'
+}
+
+export interface FleetConversationMessagesInput {
+  readonly action?: 'read' | 'search' | 'inbox' | 'react' | 'reactions' | 'pin' | 'unpin' | 'pins' | 'text'
+  readonly conversation?: FleetTarget
+  readonly after?: string
+  readonly limit?: number
+  readonly maxChars?: number
+  readonly query?: string
+  readonly from?: string
+  readonly resource?: string
+  readonly unreadOnly?: boolean
+  readonly messageId?: string
+  readonly offset?: number
+  readonly reaction?: string
+  readonly remove?: boolean
 }
 
 export interface UploadFleetResourceInput {
@@ -2118,6 +2138,28 @@ export class FleetRunService {
 
   setResidentAssistantController(controller: FleetResidentAssistantController | undefined): void {
     this.residentAssistants = controller
+  }
+
+  /** Complete assistant tool binding once the native Agent scope is composed. */
+  agentSessionStarted(agent: Agent): void {
+    const sessionId = String(agent.id)
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      runtime.memberNamesById.has(sessionId)
+      && this.records.get(runId)?.assistants.some(assistant => assistant.sessionId === sessionId) === true,
+    )
+    if (entry === undefined) return
+    const [runId, runtime] = entry
+    const assistantId = runtime.memberNamesById.get(sessionId)
+    if (assistantId === undefined) return
+    void this.installAssistantTools(agent, runtime, assistantId)
+      .then(() => {
+        if (agent.status === 'idle') this.agentIdle(agent)
+      })
+      .catch((error: unknown) => {
+        this.ctx.logger('dsh-agent-fleet').warn(
+          `Could not install Fleet assistant tools for ${assistantId} in Team ${runId}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
   }
 
   authorizationBaseline(): FleetAuthorizationBaseline {
@@ -3695,6 +3737,21 @@ export class FleetRunService {
   ): Promise<FleetMemberRequestConfiguration> {
     const record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    return this.configureMemberRequest(record, input)
+  }
+
+  async configureMemberAsExternal(
+    input: ConfigureFleetMemberInput,
+  ): Promise<FleetMemberRequestConfiguration> {
+    const record = this.requireMutableRecord(input.runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    return this.configureMemberRequest(record, input)
+  }
+
+  private async configureMemberRequest(
+    record: FleetRunRecord,
+    input: ConfigureFleetMemberInput,
+  ): Promise<FleetMemberRequestConfiguration> {
     const member = record.members.find(candidate => candidate.name === input.member)
     if (member === undefined) throw new Error(`unknown Fleet member ${input.member}`)
     const currentView = this.effectiveMemberViews(record).find(view => view.id === member.name)
@@ -3729,6 +3786,26 @@ export class FleetRunService {
       ? this.requireAssistantConnection(caller, record.id)
       : record.assistants.find(candidate => candidate.view.id === input.assistant)
     if (assistant === undefined) throw new Error(`unknown Fleet assistant ${String(input.assistant)}`)
+    return this.configureAssistantRequest(record, input, assistant)
+  }
+
+  async configureAssistantAsExternal(
+    input: ConfigureFleetAssistantInput,
+  ): Promise<FleetAssistantRequestConfiguration> {
+    const record = this.requireMutableRecord(input.runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    const assistant = input.assistant === undefined
+      ? record.assistants[0]
+      : record.assistants.find(candidate => candidate.view.id === input.assistant)
+    if (assistant === undefined) throw new Error(`unknown Fleet assistant ${String(input.assistant)}`)
+    return this.configureAssistantRequest(record, input, assistant)
+  }
+
+  private async configureAssistantRequest(
+    record: FleetRunRecord,
+    input: ConfigureFleetAssistantInput,
+    assistant: FleetRunAssistant,
+  ): Promise<FleetAssistantRequestConfiguration> {
     const runtime = this.collaboration.get(record.id)
     const connected = runtime?.memberNamesById.get(assistant.sessionId) === assistant.view.id
     const live = connected ? this.ctx.agents.get(SessionId(assistant.sessionId)) : undefined
@@ -3768,6 +3845,21 @@ export class FleetRunService {
   ): Promise<FleetTeamRequestConfiguration> {
     const record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    return this.configureTeamRequest(record, input)
+  }
+
+  async configureTeamAsExternal(
+    input: ConfigureFleetTeamInput,
+  ): Promise<FleetTeamRequestConfiguration> {
+    const record = this.requireMutableRecord(input.runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    return this.configureTeamRequest(record, input)
+  }
+
+  private async configureTeamRequest(
+    record: FleetRunRecord,
+    input: ConfigureFleetTeamInput,
+  ): Promise<FleetTeamRequestConfiguration> {
     const runtime = this.requireRuntime(record.id)
     const views = new Map(this.effectiveMemberViews(record).map(view => [view.id, view]))
     const managedNames = new Set(this.core.list()
@@ -4558,10 +4650,50 @@ export class FleetRunService {
     runtime: FleetCollaborationTeam,
     assistantId: string,
   ): Promise<void> {
-    if (this.assistantToolAgents.has(caller)) return
+    // Agent factory setup runs before publication. A registration made through
+    // that temporary setup fiber is not a durable Agent-scoped contribution.
+    // The resident controller calls us again after `agents.resume()` returns.
+    if (this.ctx.agents.get(SessionId(String(caller.id))) !== caller) return
     const callerCtx = (caller as Agent & { readonly ctx?: Context }).ctx
-    if (callerCtx !== undefined) await installMemberTools(callerCtx, runtime, assistantId, true)
-    this.assistantToolAgents.add(caller)
+    if (callerCtx === undefined) return
+    const ready = callerCtx as Context & {
+      readonly fs?: unknown
+      readonly tools?: {
+        readonly register?: unknown
+        get?(name: string, agent?: Agent): unknown
+      }
+      readonly inject?: unknown
+    }
+    const registeredHere = this.assistantToolAgents.has(caller)
+    if (registeredHere) return
+    if (typeof ready.tools?.register === 'function') {
+      const configured = runtime.memberViews.get(assistantId)?.toolGroups ?? []
+      const hostHasProgress = typeof ready.tools.get === 'function'
+        && ready.tools.get('fleet_progress') !== undefined
+      const stop = runtime.installTools(callerCtx, assistantId, {
+        exposeHostFleetTools: true,
+        toolGroups: configured.filter(group =>
+          (ready.fs !== undefined || group !== 'resources')
+          && (!hostHasProgress || group !== 'status'),
+        ),
+      })
+      if (typeof ready.tools.get === 'function'
+        && ready.tools.get('fleet_messages', caller) === undefined) {
+        stop()
+        throw new Error('Fleet assistant message tools were not visible in the Agent scope after installation')
+      }
+      this.assistantToolAgents.add(caller)
+      return
+    }
+    if (typeof ready.inject !== 'function') return
+    // Mark the binding only after Cordis has actually supplied its dependencies.
+    // Previously a pending inject was treated as installed, so a later attach
+    // could not retry and a foreground assistant could permanently miss fleet_send.
+    await callerCtx.inject(['fs', 'tools'], (scope) => {
+      const stop = runtime.installTools(scope, assistantId, { exposeHostFleetTools: true })
+      this.assistantToolAgents.add(caller)
+      return stop
+    })
   }
 
   detachAssistant(caller: Agent, runId?: string): FleetRunRecord {
@@ -4590,7 +4722,19 @@ export class FleetRunService {
     if (content.length > MAX_ASSISTANT_MESSAGE_LENGTH) {
       throw new Error(`Fleet assistant message cannot exceed ${MAX_ASSISTANT_MESSAGE_LENGTH} characters`)
     }
-    const recipients = record.members.filter(member => this.memberCanReply(member)).map(member => member.name)
+    const available = record.members.filter(member => this.memberCanReply(member))
+    const views = new Map(this.effectiveMemberViews(record).map(view => [view.id, view]))
+    const recipients = input.recipients === undefined
+      ? available.map(member => member.name)
+      : [...new Set(input.recipients.map(reference => {
+          const normalized = reference.startsWith('@') ? reference.slice(1) : reference
+          const matches = available.filter(member =>
+            member.name === normalized || views.get(member.name)?.name === normalized,
+          )
+          if (matches.length === 0) throw new Error(`unknown or unavailable Fleet member ${reference}`)
+          if (matches.length > 1) throw new Error(`ambiguous Fleet member ${reference}`)
+          return matches[0]?.name as string
+        }))]
     if (recipients.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
     const channel = parseTeamTemplate(
       JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
@@ -4614,13 +4758,17 @@ export class FleetRunService {
       to: `#${channel.id}`,
       text: content,
       delivery: input.kind === 'directive' ? 'wakeup' : 'quiet',
-      ...(input.kind === 'directive' ? { mentions: recipients.map(member => `@${member}`) } : {}),
+      ...(input.mustReply === true ? { mustReply: true } : {}),
+      ...(input.kind === 'directive' || input.recipients !== undefined
+        ? { mentions: recipients.map(member => `@${member}`) }
+        : {}),
     })
     const message: FleetAssistantMessage = {
       id: `assistant_message_${randomUUID()}`,
       runId: record.id,
       kind: input.kind,
       text: messages.getMessage(caller, sent.messageId).text,
+      ...(input.mustReply === true ? { mustReply: true } : {}),
       recipients,
       assistantSessionId: String(caller.id),
       assistantId: assistant.view.id,
@@ -4632,7 +4780,8 @@ export class FleetRunService {
   }
 
   sendConversationMessage(caller: Agent, input: SendFleetConversationMessageInput): SendMessageResult {
-    const record = this.requireMutableRecord(input.runId)
+    const record = this.requireCallerRecord(caller, input.runId)
+    if (isTerminal(record.status)) throw new Error(`Fleet team ${record.id} is ${record.status}`)
     this.requireAssistantConnection(caller, record.id)
     const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
     if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
@@ -4661,6 +4810,69 @@ export class FleetRunService {
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
     })
+  }
+
+  conversationMessages(
+    caller: Agent,
+    input: FleetConversationMessagesInput,
+  ): ReadMessagesResult | Record<string, unknown> {
+    const record = this.requireCallerRecord(caller)
+    const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
+    if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
+    if (record.assistants.some(assistant => assistant.sessionId === String(caller.id))) {
+      this.requireAssistantConnection(caller, record.id)
+    }
+    const action = input.action ?? 'read'
+    const subject = {
+      kind: record.assistants.some(assistant => assistant.sessionId === String(caller.id)) ? 'assistant' as const : 'member' as const,
+      id: participant.name,
+    }
+    this.authorization?.require({
+      teamId: record.id,
+      subject,
+      action: action === 'react' || action === 'pin' || action === 'unpin' ? 'message.post' : 'message.read',
+      ...(input.conversation === undefined
+        ? {}
+        : { resource: { kind: 'conversation' as const, id: input.conversation } }),
+    })
+    const messages = this.requireRuntime(record.id).messages
+    if (action === 'read') {
+      if (input.conversation === undefined) throw new Error('fleet_messages read requires conversation')
+      return messages.read(caller, {
+        conversation: input.conversation,
+        ...(input.after === undefined ? {} : { after: input.after }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(input.maxChars === undefined ? {} : { maxChars: input.maxChars }),
+        ...(input.unreadOnly === undefined ? {} : { unreadOnly: input.unreadOnly }),
+      })
+    }
+    if (action === 'search') return { action, messages: messages.search(caller, {
+      ...(input.query === undefined ? {} : { query: input.query }),
+      ...(input.conversation === undefined ? {} : { conversation: input.conversation }),
+      ...(input.from === undefined ? {} : { from: input.from }),
+      ...(input.resource === undefined ? {} : { resource: input.resource }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+    }) }
+    if (action === 'inbox') return { action, inbox: messages.inbox(caller, {
+      ...(input.unreadOnly === undefined ? {} : { unreadOnly: input.unreadOnly }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+    }) }
+    if (action === 'pins') return { action, pins: messages.listPins(caller, input.conversation) }
+    if (input.messageId === undefined) throw new Error(`fleet_messages ${action} requires message_id`)
+    if (action === 'text') return {
+      action,
+      chunk: messages.readMessageText(caller, input.messageId, input.offset, input.limit ?? 12_000),
+    }
+    if (action === 'reactions') return { action, reactions: messages.listReactions(caller, input.messageId) }
+    if (action === 'react') {
+      if (input.reaction === undefined) throw new Error('fleet_messages react requires reaction')
+      return { action, reaction: messages.react(caller, {
+        messageId: input.messageId,
+        reaction: input.reaction,
+        ...(input.remove === undefined ? {} : { remove: input.remove }),
+      }) }
+    }
+    return { action, pin: messages.pin(caller, input.messageId, action === 'unpin') }
   }
 
   sendUserConversationMessage(input: SendFleetConversationMessageInput): SendMessageResult {
@@ -5025,7 +5237,9 @@ export class FleetRunService {
   recordMemberSessionEvent(sessionId: string, event: SessionEvent): void {
     if (event.type === 'session/end-seed') return
     const entry = this.collaboration.entries().find(([runId, runtime]) =>
-      !this.dormantRunIds.has(runId) && runtime.memberNamesById.has(sessionId),
+      runtime.memberNamesById.has(sessionId)
+      && (!this.dormantRunIds.has(runId)
+        || this.records.get(runId)?.assistants.some(assistant => assistant.sessionId === sessionId) === true),
     )
     if (entry === undefined) return
     const [runId, runtime] = entry
@@ -5052,6 +5266,48 @@ export class FleetRunService {
     if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
       this.wakeNetworkRecoveriesForRoute(runId, route, sessionId)
     }
+    if (agent !== undefined) this.continueRequiredReply(runId, runtime, record, agent)
+  }
+
+  private continueRequiredReply(
+    runId: string,
+    runtime: FleetCollaborationTeam,
+    record: FleetRunRecord,
+    agent: Agent,
+  ): boolean {
+    const participant = this.participants(record)
+      .find(candidate => candidate.sessionId === String(agent.id))
+    if (participant === undefined
+      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
+    const requiredReply = runtime.messages.followupRequiredReply(agent)
+    if (requiredReply === undefined) return false
+    this.appendEvent(runId, 'member_continued', {
+      member: participant.name,
+      reason: 'required_reply',
+      messages: [requiredReply.id],
+    })
+    return true
+  }
+
+  private continueUnread(
+    runId: string,
+    runtime: FleetCollaborationTeam,
+    record: FleetRunRecord,
+    agent: Agent,
+  ): boolean {
+    const participant = this.participants(record)
+      .find(candidate => candidate.sessionId === String(agent.id))
+    if (participant === undefined
+      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
+    const pending = runtime.messages.pendingWakeups(participant.sessionId)
+    const unread = runtime.messages.followupUnread(agent)
+    if (unread === undefined) return false
+    this.appendEvent(runId, 'member_continued', {
+      member: participant.name,
+      reason: pending.length > 0 ? 'pending_wakeup' : 'unread_message',
+      messages: [unread.id],
+    })
+    return true
   }
 
   agentIdle(agent: Agent): void {
@@ -5059,11 +5315,22 @@ export class FleetRunService {
     const agentId = String(agent.id)
     this.clearMemberActivity(agentId)
     const entry = this.collaboration.entries().find(([runId, runtime]) =>
-      !this.dormantRunIds.has(runId) && runtime.memberNamesById.has(agentId),
+      runtime.memberNamesById.has(agentId)
+      && (!this.dormantRunIds.has(runId)
+        || this.records.get(runId)?.assistants.some(assistant => assistant.sessionId === agentId) === true),
     )
     if (entry === undefined) return
     const [runId, runtime] = entry
     const record = this.records.get(runId)
+
+    // A required reply belongs to the conversation, not to the current work item.
+    // Keep both formal members and user-facing assistants active even when the
+    // Team is idle or its latest work is blocked/finished.
+    if (record !== undefined && this.continueRequiredReply(runId, runtime, record, agent)) return
+    // Unread conversation state also outlives a work item. In particular, the
+    // user-facing assistant must consume member replies before answering later
+    // progress questions from stale context.
+    if (record !== undefined && this.continueUnread(runId, runtime, record, agent)) return
     if (record?.status !== 'running' || record.work?.status !== 'running') return
 
     let wokeUnread = false
@@ -7866,6 +8133,23 @@ const ACTIVITY_RESULT_SCHEMA = {
   },
 } as const
 
+const MESSAGE_SEND_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    messageId: { type: 'string', required: true },
+    recipients: { type: 'integer', required: true },
+    delivered: { type: 'integer', required: true },
+    woken: { type: 'integer', required: true },
+  },
+} as const
+
+const MESSAGE_ACTION_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {},
+} as const
+
 const MEMBER_MANAGEMENT_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
     action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'configure', 'configure_all', 'pause', 'resume', 'remove'] },
@@ -7924,6 +8208,7 @@ const ASSISTANT_MESSAGE_SCHEMA = {
     runId: { type: 'string', required: true },
     kind: { type: 'string', required: true, enum: ['collaboration', 'directive'] },
     text: { type: 'string', required: true },
+    mustReply: { type: 'boolean' },
     recipients: { type: 'array', required: true, items: { type: 'string' } },
     assistantSessionId: { type: 'string', required: true },
     assistantId: { type: 'string', required: true },
@@ -7985,6 +8270,101 @@ export function installRunTools(
   service: FleetRunService,
   assistant: FleetAssistantRuntime,
 ): void {
+  ctx.tools.register(defineTool({
+    name: 'fleet_send',
+    description: 'Send a quiet message from the calling Fleet participant to a member, Channel, or the external user. User-facing Team assistants must use this tool to reply to @User.',
+    parameters: {
+      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form.' },
+      message: { type: 'string', required: true, description: 'Self-contained message text.' },
+      reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
+      must_reply: { type: 'boolean', description: 'Require each recipient to send a later message before remaining idle.' },
+      resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
+    },
+    output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_send')
+      return Promise.resolve(service.sendConversationMessage(caller, {
+        to: args.to as `@${string}` | `#${string}` | `meeting:${string}`,
+        text: args.message,
+        delivery: 'quiet',
+        ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
+        ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
+        ...(args.resources === undefined ? {} : { resources: args.resources }),
+      }))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_followup',
+    description: 'Send a Fleet message and wake or urgently interrupt its recipients. In a Channel, only explicitly mentioned members are woken.',
+    parameters: {
+      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form.' },
+      message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Explicit @member targets for a Channel follow-up.' },
+      reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
+      must_reply: { type: 'boolean', description: 'Require each recipient to send a later message before remaining idle.' },
+      resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
+      interrupt: { type: 'boolean', description: 'Interrupt in-flight work instead of an ordinary wake-up.' },
+    },
+    output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_followup')
+      return Promise.resolve(service.sendConversationMessage(caller, {
+        to: args.to as `@${string}` | `#${string}` | `meeting:${string}`,
+        text: args.message,
+        delivery: args.interrupt === true ? 'interrupt' : 'wakeup',
+        ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
+        ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
+        ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
+        ...(args.resources === undefined ? {} : { resources: args.resources }),
+      }))
+    },
+  }))
+
+  // Message reading is a process-wide routing capability, like sending. The
+  // caller Agent identifies its Team at execution time, so resident assistants
+  // can always consume unread state even when a scoped optional-tool binding is
+  // being restored after a host/plugin restart. Agent-scoped tools may still
+  // shadow this definition with the same semantics and richer discovery groups.
+  ctx.tools.register(defineTool({
+    name: 'fleet_messages',
+    description: 'Read and inspect Fleet conversations for the calling Fleet participant. Reading returned text advances persistent read progress; notifications and ordinary model output do not.',
+    parameters: {
+      action: { type: 'string', enum: ['read', 'search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'], description: 'Defaults to read.' },
+      conversation: { type: 'string', description: 'Conversation in @fleet-name, @agent-id, #channel, or meeting:id form.' },
+      after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
+      limit: { type: 'integer', description: 'Bound the number of returned items or text characters, depending on action.' },
+      max_chars: { type: 'integer', description: 'Maximum total text returned by read.' },
+      query: { type: 'string', description: 'Case-insensitive text query for search.' },
+      from: { type: 'string', description: 'Optional sender filter for search.' },
+      resource: { type: 'string', description: 'Optional resource id filter for search.' },
+      unread_only: { type: 'boolean', description: 'For read, defaults true. For inbox, return only unread items.' },
+      message_id: { type: 'string', description: 'Message id for text, reaction, or pin actions.' },
+      offset: { type: 'integer', description: 'Character offset for text continuation.' },
+      reaction: { type: 'string', description: 'Reaction label for react.' },
+      remove: { type: 'boolean', description: 'Remove the calling participant reaction instead of adding it.' },
+    },
+    output: jsonOutput(MESSAGE_ACTION_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_messages')
+      return Promise.resolve(service.conversationMessages(caller, {
+        ...(args.action === undefined ? {} : { action: args.action }),
+        ...(args.conversation === undefined ? {} : { conversation: args.conversation as FleetTarget }),
+        ...(args.after === undefined ? {} : { after: args.after }),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        ...(args.max_chars === undefined ? {} : { maxChars: args.max_chars }),
+        ...(args.query === undefined ? {} : { query: args.query }),
+        ...(args.from === undefined ? {} : { from: args.from }),
+        ...(args.resource === undefined ? {} : { resource: args.resource }),
+        ...(args.unread_only === undefined ? {} : { unreadOnly: args.unread_only }),
+        ...(args.message_id === undefined ? {} : { messageId: args.message_id }),
+        ...(args.offset === undefined ? {} : { offset: args.offset }),
+        ...(args.reaction === undefined ? {} : { reaction: args.reaction }),
+        ...(args.remove === undefined ? {} : { remove: args.remove }),
+      }) as unknown as Record<string, JsonValue>)
+    },
+  }))
+
   ctx.tools.register(defineTool({
     name: 'fleet_run',
     description: 'Control a persistent Fleet Team lifecycle: create it, pause, resume or wake its member runtimes, submit work, poll a short wait slice, directly finish current work, or close the Team.',
@@ -8049,6 +8429,7 @@ export function installRunTools(
         const run = await service.resume(caller, { runId: args.run_id, projectRoot })
         const view = run.assistants.find(candidate => candidate.sessionId === String(caller.id))?.view
         assistant.activate(caller, run.id, view)
+        service.agentSessionStarted(caller)
         return { action: 'resume' as const, run }
       }
       const projectRoot = args.cwd ?? caller.session.header.cwd
@@ -8067,6 +8448,7 @@ export function installRunTools(
           })
         const view = run.assistants.find(candidate => candidate.sessionId === String(caller.id))?.view
         assistant.activate(caller, run.id, view)
+        service.agentSessionStarted(caller)
         return { action: 'create' as const, run }
       }
       if (args.task === undefined) throw new Error('fleet_run start requires task')
@@ -8137,6 +8519,8 @@ export function installRunTools(
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team.' },
       kind: { type: 'string', enum: ['collaboration', 'directive'], description: 'Message intent. Collaboration preserves normal flow; directive is an explicit controller direction.' },
       text: { type: 'string', description: 'Message to relay to the Team coordinator. Required for message.' },
+      recipients: { type: 'array', items: { type: 'string' }, description: 'For message, specific member ids or names to mention. Omit only when the message is for every available member.' },
+      must_reply: { type: 'boolean', description: 'Require every directive recipient to send a later message in the Team Channel before remaining idle.' },
       after_sequence: { type: 'integer', description: 'For observe, return durable Team events after this sequence. Defaults to 0.' },
       limit: { type: 'integer', description: 'For observe, return from 1 through 200 events. Defaults to 100.' },
       assistant_id: { type: 'string', description: 'Existing assistant id to rebind after a restart; omit to add a new assistant.' },
@@ -8176,10 +8560,12 @@ export function installRunTools(
           ...(args.tool_groups === undefined ? {} : { toolGroups: args.tool_groups }),
           ...(args.permissions === undefined ? {} : { permissions: args.permissions }),
         })
+        const mode = assistant.activate(caller, attached.run.id, attached.assistant.view)
+        service.agentSessionStarted(caller)
         return {
           action: 'activate' as const,
           run: attached.run,
-          mode: assistant.activate(caller, attached.run.id, attached.assistant.view),
+          mode,
         }
       }
       if (args.action === 'deactivate') {
@@ -8193,6 +8579,8 @@ export function installRunTools(
           ...(args.run_id === undefined ? {} : { runId: args.run_id }),
           kind: args.kind ?? 'collaboration',
           text: args.text,
+          ...(args.recipients === undefined ? {} : { recipients: args.recipients }),
+          ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
           ...(projectRoot === undefined ? {} : { projectRoot }),
         })
         return Promise.resolve({

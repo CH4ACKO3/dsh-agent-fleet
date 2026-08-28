@@ -19,7 +19,9 @@ function assistantAgentOptions(run: FleetRunRecord, assistant: FleetRunAssistant
 /** Keep every persisted Team assistant ready without resuming the formal member roster. */
 export async function activateResidentFleetAssistants(
   ctx: Context,
-  runs: Pick<FleetRunService, 'list' | 'attachAssistant'>,
+  runs: Pick<FleetRunService, 'list' | 'attachAssistant'> & {
+    agentSessionStarted?(agent: Agent): void
+  },
   runtime: Pick<FleetAssistantRuntime, 'activate'>,
 ): Promise<{
   agentDisposed(sessionId: string): void
@@ -49,6 +51,7 @@ export async function activateResidentFleetAssistants(
           const live = ctx.agents.get(SessionId(assistant.sessionId))
           if (live !== undefined) {
             await activate(live, run, assistant)
+            runs.agentSessionStarted?.(live)
             continue
           }
           if (handles.has(assistant.sessionId)) continue
@@ -61,6 +64,11 @@ export async function activateResidentFleetAssistants(
             },
           })
           handles.set(assistant.sessionId, handle)
+          // `setup` runs while the resumed Agent is unpublished. Effects added
+          // there belong to that temporary setup fiber and can unwind when the
+          // callback returns. Bind Fleet tools only after resume has published
+          // the Agent and returned its durable handle.
+          runs.agentSessionStarted?.(handle.agent)
         } catch (error) {
           ctx.logger('dsh-agent-fleet').warn(
             `Could not activate Fleet assistant ${assistant.view.id} for Team ${run.id}: ${error instanceof Error ? error.message : String(error)}`,

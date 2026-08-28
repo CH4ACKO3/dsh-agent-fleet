@@ -468,6 +468,7 @@ describe('FleetRunService', () => {
 
     const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
     const activate = vi.fn()
+    const sessionStarted = vi.spyOn(second.service, 'agentSessionStarted')
     const resume = vi.fn(async (options: ResumeAgentOptions) => {
       const agent = second.runtime.add(String(options.resumeSessionId), root)
       await options.setup?.({ agent } as unknown as Context)
@@ -487,6 +488,7 @@ describe('FleetRunService', () => {
 
     expect(resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: assistant.sessionId }))
     expect(activate).toHaveBeenCalledWith(expect.objectContaining({ id: assistant.sessionId }), run.id, assistant.view)
+    expect(sessionStarted).toHaveBeenCalledWith(expect.objectContaining({ id: assistant.sessionId }))
     expect(second.service.status(run.id).assistants[0]).toMatchObject({ status: 'idle' })
 
     await residents.dispose()
@@ -1957,6 +1959,24 @@ describe('FleetRunService', () => {
     expect(service.readTrace(run.id, 0, 100).events)
       .toContainEqual(expect.objectContaining({ type: 'assistant_message' }))
 
+    const targeted = service.sendAssistantMessage(launcher as unknown as Agent, {
+      runId: run.id,
+      kind: 'directive',
+      text: '@reviewer Please analyze the current result.',
+      recipients: ['@reviewer'],
+      projectRoot: root,
+    })
+    expect(targeted.recipients).toEqual(['reviewer'])
+    const targetedMessage = service.messageHub(run.id).read(lead, { conversation: '#main' }).messages
+      .find(message => message.text === '@reviewer Please analyze the current result.')
+    expect(targetedMessage).toMatchObject({
+      mentions: ['reviewer'],
+      delivery: 'wakeup',
+    })
+    expect(service.messageHub(run.id).pendingWakeups(lead.id)).toEqual([])
+    expect(service.messageHub(run.id).pendingWakeups(reviewer.id))
+      .toContainEqual(expect.objectContaining({ id: targetedMessage?.id }))
+
     const sent = service.sendConversationMessage(launcher as unknown as Agent, {
       runId: run.id,
       to: '#main',
@@ -2045,12 +2065,16 @@ describe('FleetRunService', () => {
     })).toThrow('plain file name')
 
     service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    service.sendAssistantMessage(launcher as unknown as Agent, {
+    const directive = service.sendAssistantMessage(launcher as unknown as Agent, {
       runId: run.id,
       kind: 'directive',
       text: 'Pause feature expansion and finish the requested file only.',
+      mustReply: true,
       projectRoot: root,
     })
+    expect(directive).toMatchObject({ mustReply: true })
+    expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages.at(-1))
+      .toMatchObject({ mustReply: true })
     expect(lead.messages.at(-1)?.content).toEqual([
       expect.objectContaining({ type: 'text', text: expect.stringContaining('Pause feature expansion') }),
     ])
@@ -3855,6 +3879,137 @@ describe('FleetRunService', () => {
     await service.wait(run.id, 1_000)
     service.end(launcher as unknown as Agent, 'Required reply Team closed.', run.id)
     await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('keeps a user-facing assistant active for must-reply messages while the Team has no running work', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected attached Fleet assistant')
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, { launcherId: first.launcher.id })
+    const { service, launcher } = second
+    const registeredTools: string[] = []
+    const scoped = new FakeAgentContext() as FakeAgentContext & {
+      tools: {
+        register(tool: { readonly name: string }): () => void
+        restrict(): () => void
+        guard(): () => void
+        get(name: string): unknown
+      }
+    }
+    launcher.ctx = scoped as unknown as Context
+    await service.attachAssistant(launcher as unknown as Agent, { runId: run.id })
+    expect(service.status(run.id)).toMatchObject({ runtimeState: 'dormant' })
+    scoped.tools = {
+      register: tool => { registeredTools.push(tool.name); return () => {} },
+      restrict: () => () => {},
+      guard: () => () => {},
+      get: name => ['fleet_send', 'fleet_followup', 'fleet_progress'].includes(name) ? { name } : undefined,
+    }
+    service.agentSessionStarted(launcher as unknown as Agent)
+    expect(registeredTools).toContain('fleet_send')
+    expect(registeredTools).toContain('fleet_messages')
+    const messages = service.messageHub(run.id)
+    const sent = service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${assistantId}`,
+      text: 'Reply before becoming idle.',
+      delivery: 'wakeup',
+    })
+    expect(service.status(run.id)).toMatchObject({ status: 'idle' })
+    expect(messages.pendingRequiredReply(assistantId)).toMatchObject({ id: sent.messageId })
+
+    const beforeRequiredReplyWake = launcher.messages.length
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    })
+    expect(launcher.messages).toHaveLength(beforeRequiredReplyWake + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining(`Message ${sent.messageId}`),
+      }),
+    ])
+    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
+    ]))
+
+    messages.send(launcher as unknown as Agent, {
+      to: '@User',
+      text: 'The required reply is complete.',
+      delivery: 'quiet',
+    })
+    expect(messages.pendingRequiredReply(assistantId)).toBeUndefined()
+    const afterReply = launcher.messages.length
+    service.agentStatusChanged(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterReply + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Call fleet_messages with action="read"'),
+      }),
+    ])
+    messages.read(launcher as unknown as Agent, { conversation: '@User' })
+    const afterRead = launcher.messages.length
+    service.agentIdle(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterRead)
+    second.disconnect()
+  })
+
+  it('keeps a user-facing assistant active for unread member replies while the Team has no running work', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (assistantId === undefined || lead === undefined) throw new Error('expected assistant and lead')
+    expect(service.status(run.id)).toMatchObject({ status: 'idle' })
+
+    const sent = service.messageHub(run.id).send(lead, {
+      to: '#main',
+      text: '@team-assistant The requested analysis is ready.',
+      mentions: [`@${assistantId}`],
+      delivery: 'quiet',
+    })
+    const afterArrival = launcher.messages.length
+    service.agentSessionStarted(launcher as unknown as Agent)
+
+    await vi.waitFor(() => expect(launcher.messages).toHaveLength(afterArrival + 1))
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining(`Call fleet_messages with action="read" and conversation="#main"`),
+      }),
+    ])
+    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining(sent.messageId) }),
+    ]))
+
+    expect(service.conversationMessages(launcher as unknown as Agent, {
+      action: 'read',
+      conversation: '#main',
+    })).toMatchObject({
+      messages: [expect.objectContaining({ id: sent.messageId })],
+    })
+    const afterRead = launcher.messages.length
+    service.agentIdle(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterRead)
     disconnect()
   })
 

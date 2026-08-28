@@ -52,6 +52,7 @@ export interface FleetSetupServiceOptions {
 interface FleetSetupRunService {
   create(launcher: Agent, input: CreateRunInput): Promise<FleetRunRecord>
   findBySetupId(setupId: string, projectRoot: string): FleetRunRecord | undefined
+  agentSessionStarted?(agent: Agent): void
 }
 
 export interface BeginFleetSetupInput {
@@ -317,6 +318,7 @@ export class FleetSetupService {
       const run = this.runs.findBySetupId(record.setupId, record.projectRoot)
       const view = run?.assistants?.find(candidate => candidate.sessionId === String(agent.id))?.view
       this.assistant.activate(agent, record.runId, view)
+      this.runs.agentSessionStarted?.(agent)
     }
     else this.assistant.activateGuide(agent, record.setupId)
     return recordSnapshot(record)

@@ -103,6 +103,12 @@ function directConversation(left: string, right: string): string {
   return [left, right].sort().join('\u0000')
 }
 
+function mustReplyInstruction(message: FleetMessage): string {
+  const sender = `@${message.fromName ?? message.from}`
+  const conversation = message.conversation.startsWith('@') ? sender : message.conversation
+  return `Call fleet_send or fleet_followup with to="${conversation}" to send the reply. Ordinary model output is not sent to Fleet and does not satisfy must-reply.`
+}
+
 export interface MessageHubOptions {
   readonly validateTaskReference?: (taskId: string, assigneeId?: string) => void
   readonly beforeSend?: (sender: MessageAgent, input: SendMessageInput) => SendMessageDecision
@@ -578,9 +584,10 @@ export class MessageHub {
     const unread = this.inbox(target, { unreadOnly: true, limit: 1 }).at(-1)?.message
     if (unread === undefined) return undefined
     const sender = `@${unread.fromName ?? unread.from}`
+    const conversation = unread.conversation.startsWith('@') ? sender : unread.conversation
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
-      text: `[Fleet ${unread.conversation}] New message ${unread.id} from ${sender}. Call fleet_messages to read it.`,
+      text: `[Fleet ${unread.conversation}] New message ${unread.id} from ${sender}. Call fleet_messages with action="read" and conversation="${conversation}" to read it. This notification and ordinary model output do not read or mark the message as read.`,
       delivery: 'wakeup',
       coalesceKey: this.messageNoticeKey(unread),
       relatedMessageId: unread.id,
@@ -602,7 +609,7 @@ export class MessageHub {
     const sender = `@${message.fromName ?? message.from}`
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
-      text: `[Fleet ${message.conversation}] Message ${message.id} from ${sender} requires a reply. Send any message in this conversation before going idle.`,
+      text: `[Fleet ${message.conversation}] Message ${message.id} from ${sender} requires a reply before going idle. ${mustReplyInstruction(message)}`,
       delivery: 'wakeup',
       coalesceKey: this.requiredReplyNoticeKey(message),
       relatedMessageId: message.id,
@@ -1599,7 +1606,8 @@ export class MessageHub {
       : `\nResources: ${message.resources.join(', ')}`
     const sender = `@${message.fromName ?? message.from}`
     const replyMarker = message.mustReply === true ? ' | must-reply' : ''
-    const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}`
+    const replyInstruction = message.mustReply === true ? `\n${mustReplyInstruction(message)}` : ''
+    const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}${replyInstruction}`
     const input = createUserMessage({
       content: [{ type: 'text', text }],
       source: message.origin === 'user'
@@ -1757,7 +1765,8 @@ export class MessageHub {
 
   private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
     const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
-    const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.`
+    const replyInstruction = message.mustReply === true ? ` ${mustReplyInstruction(message)}` : ''
+    const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.${replyInstruction}`
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
       text,

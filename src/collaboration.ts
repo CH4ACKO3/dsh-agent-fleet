@@ -85,7 +85,10 @@ export interface FleetCollaborationTeam {
     readonly successor: string
   }): void
   sendUserMessage(input: SendMessageInput): SendMessageResult
-  installTools(ctx: Context, member: string, options?: { readonly exposeHostFleetTools?: boolean }): () => void
+  installTools(ctx: Context, member: string, options?: {
+    readonly exposeHostFleetTools?: boolean
+    readonly toolGroups?: readonly FleetMemberToolGroup[]
+  }): () => void
   refreshAccess(member?: string): void
   activateProductivity(): void
   pauseProductivity(): void
@@ -486,6 +489,7 @@ export class FleetCollaborationService {
       readonly ctx: Context
       readonly member: string
       readonly exposeHostFleetTools: boolean
+      readonly toolGroups?: readonly FleetMemberToolGroup[]
       stop: () => void
     }
     const toolBindings = new Set<ToolBinding>()
@@ -496,11 +500,16 @@ export class FleetCollaborationService {
         binding.stop()
       }
     }
-    const createToolBinding = (ctx: Context, member: string, exposeHostFleetTools: boolean): (() => void) => {
+    const createToolBinding = (
+      ctx: Context,
+      member: string,
+      exposeHostFleetTools: boolean,
+      selectedToolGroups?: readonly FleetMemberToolGroup[],
+    ): (() => void) => {
       const view = memberViews.get(member)
       if (view === undefined) throw new Error(`unknown Fleet member view ${member}`)
       const effective = this.authorization.resolve(input.id, view)
-      const tools = new Set(effective.toolGroups)
+      const tools = new Set(selectedToolGroups ?? effective.toolGroups)
       const permissions = new Set(effective.actions)
       const authorize = (
         agentId: string,
@@ -628,7 +637,12 @@ export class FleetCollaborationService {
     }
     const refreshBinding = (binding: ToolBinding): void => {
       binding.stop()
-      binding.stop = createToolBinding(binding.ctx, binding.member, binding.exposeHostFleetTools)
+      binding.stop = createToolBinding(
+        binding.ctx,
+        binding.member,
+        binding.exposeHostFleetTools,
+        binding.toolGroups,
+      )
     }
     let closed = false
     const team: FleetCollaborationTeam = {
@@ -708,9 +722,10 @@ export class FleetCollaborationService {
           ctx,
           member,
           exposeHostFleetTools: options.exposeHostFleetTools ?? false,
+          ...(options.toolGroups === undefined ? {} : { toolGroups: [...options.toolGroups] }),
           stop: () => {},
         }
-        binding.stop = createToolBinding(ctx, member, binding.exposeHostFleetTools)
+        binding.stop = createToolBinding(ctx, member, binding.exposeHostFleetTools, binding.toolGroups)
         toolBindings.add(binding)
         return () => {
           if (!toolBindings.delete(binding)) return

@@ -121,6 +121,12 @@ describe('MessageHub', () => {
     })
     expect(reviewer.injectedContext[0]?.source).toEqual({ kind: 'user' })
     expect(reviewer.injected[0]).toContain('must-reply')
+    expect(reviewer.injected[0]).toContain(
+      `Call fleet_send or fleet_followup with to="@lead" to send the reply.`,
+    )
+    expect(reviewer.injected[0]).toContain(
+      'Ordinary model output is not sent to Fleet and does not satisfy must-reply.',
+    )
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: human.messageId,
       origin: 'user',
@@ -152,6 +158,13 @@ describe('MessageHub', () => {
       id: direct.messageId,
       mustReply: true,
     })
+    expect(hub.followupRequiredReply(reviewer)).toMatchObject({ id: direct.messageId })
+    expect(reviewer.followedUp.at(-1)).toContain(
+      `Call fleet_send or fleet_followup with to="@lead" to send the reply.`,
+    )
+    expect(reviewer.followedUp.at(-1)).toContain(
+      'Ordinary model output is not sent to Fleet and does not satisfy must-reply.',
+    )
 
     hub.send(reviewer, {
       to: '#general',
@@ -187,6 +200,9 @@ describe('MessageHub', () => {
     hub.read(qa, { conversation: '#general' })
     expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: channel.messageId })
     expect(hub.pendingRequiredReply(qa.id)).toMatchObject({ id: channel.messageId })
+    expect(reviewer.injected.at(-1)).toContain(
+      `Call fleet_send or fleet_followup with to="#general" to send the reply.`,
+    )
 
     hub.send(reviewer, {
       to: '@lead',
@@ -496,6 +512,12 @@ describe('MessageHub', () => {
     })
     expect(hub.followupUnread(reviewer)).toMatchObject({ id: sent.messageId })
     expect(reviewer.inbox.nextTurn).toHaveLength(1)
+    expect(reviewer.followedUp.at(-1)).toContain(
+      `Call fleet_messages with action="read" and conversation="@lead" to read it.`,
+    )
+    expect(reviewer.followedUp.at(-1)).toContain(
+      'This notification and ordinary model output do not read or mark the message as read.',
+    )
 
     hub.readMessageText(reviewer, sent.messageId, undefined, 10)
     expect(reviewer.inbox.nextTurn).toHaveLength(1)

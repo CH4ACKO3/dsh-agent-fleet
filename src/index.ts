@@ -125,6 +125,7 @@ export function apply(ctx: Context): void {
     })
     scope.on('agent/session-start', ({ agent }) => {
       if (meta.restore(agent) === undefined) setups.restore(agent)
+      service.agentSessionStarted(agent)
     })
     scope.on('session/event', (session, event) => {
       service.recordMemberSessionEvent(String(session.id), event)

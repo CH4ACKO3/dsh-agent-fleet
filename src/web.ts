@@ -260,6 +260,7 @@ export class FleetWebRemote extends TypertRemoteService {
         assistantId: offlineAssistant.view.id,
       }).then(attached => {
         this.assistant?.activate(caller, attached.run.id, attached.assistant.view)
+        this.runs.agentSessionStarted?.(caller)
         return send(`@${attached.assistant.sessionId}`)
       })
     }
@@ -325,6 +326,24 @@ export class FleetWebRemote extends TypertRemoteService {
       this.access.removeRule(teamId, id)
       return this.memberAccess(teamId, member)
     }
+    if (input.action === 'configure') {
+      if (input.request === undefined) throw new Error('member configure requires request')
+      return this.runs.configureMemberAsExternal({
+        runId: teamId, member: required(input.member, 'member'), request: input.request,
+      })
+    }
+    if (input.action === 'configure_assistant') {
+      if (input.request === undefined) throw new Error('assistant configure requires request')
+      return this.runs.configureAssistantAsExternal({
+        runId: teamId,
+        ...(input.member === undefined ? {} : { assistant: input.member }),
+        request: input.request,
+      })
+    }
+    if (input.action === 'configure_all') {
+      if (input.request === undefined) throw new Error('Team configure requires request')
+      return this.runs.configureTeamAsExternal({ runId: teamId, request: input.request })
+    }
     this.runs.requireAssistantConnection(caller, teamId)
     switch (input.action) {
       case 'add':
@@ -335,21 +354,6 @@ export class FleetWebRemote extends TypertRemoteService {
         return this.runs.updateMember(caller, {
           runId: teamId, member: required(input.member, 'member'), view: input.view,
         })
-      case 'configure':
-        if (input.request === undefined) throw new Error('member configure requires request')
-        return this.runs.configureMember(caller, {
-          runId: teamId, member: required(input.member, 'member'), request: input.request,
-        })
-      case 'configure_assistant':
-        if (input.request === undefined) throw new Error('assistant configure requires request')
-        return this.runs.configureAssistant(caller, {
-          runId: teamId,
-          ...(input.member === undefined ? {} : { assistant: input.member }),
-          request: input.request,
-        })
-      case 'configure_all':
-        if (input.request === undefined) throw new Error('Team configure requires request')
-        return this.runs.configureTeam(caller, { runId: teamId, request: input.request })
       case 'remove': return this.runs.removeMember(caller, teamId, required(input.member, 'member'))
       default: throw new Error(`unknown Fleet member action ${String(input.action)}`)
     }

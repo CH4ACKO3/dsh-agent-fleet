@@ -296,8 +296,7 @@ describe('FleetWebRemote', () => {
       effectiveFrom: 'next-model-step' as const,
     }
     const runs = {
-      requireAssistantConnection: vi.fn(() => ({ view: { id: 'assistant' } })),
-      configureMember: vi.fn(() => Promise.resolve(configured)),
+      configureMemberAsExternal: vi.fn(() => Promise.resolve(configured)),
     } as unknown as FleetRunService
     const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
 
@@ -308,7 +307,7 @@ describe('FleetWebRemote', () => {
       member: 'lead',
       request: { provider: 'provider-new', model: 'model-new', maxTokens: null },
     }, new AbortController().signal)).resolves.toEqual(configured)
-    expect(runs.configureMember).toHaveBeenCalledWith(caller, {
+    expect(runs.configureMemberAsExternal).toHaveBeenCalledWith({
       runId: 'team-one',
       member: 'lead',
       request: { provider: 'provider-new', model: 'model-new', maxTokens: null },
@@ -330,9 +329,8 @@ describe('FleetWebRemote', () => {
       effectiveFrom: 'next-model-step' as const,
     }
     const runs = {
-      requireAssistantConnection: vi.fn(() => ({ view: { id: 'assistant' } })),
-      configureAssistant: vi.fn(() => Promise.resolve(assistantConfigured)),
-      configureTeam: vi.fn(() => Promise.resolve(teamConfigured)),
+      configureAssistantAsExternal: vi.fn(() => Promise.resolve(assistantConfigured)),
+      configureTeamAsExternal: vi.fn(() => Promise.resolve(teamConfigured)),
     } as unknown as FleetRunService
     const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
     const signal = new AbortController().signal
@@ -342,7 +340,7 @@ describe('FleetWebRemote', () => {
       member: 'assistant',
       request: { provider: 'provider-new', model: 'model-new' },
     }, signal)).resolves.toEqual(assistantConfigured)
-    expect(runs.configureAssistant).toHaveBeenCalledWith(caller, {
+    expect(runs.configureAssistantAsExternal).toHaveBeenCalledWith({
       runId: 'team-one', assistant: 'assistant', request: { provider: 'provider-new', model: 'model-new' },
     })
 
@@ -350,7 +348,7 @@ describe('FleetWebRemote', () => {
       sessionId: 'ui-session', teamId: 'team-one', action: 'configure_all',
       request: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'high' },
     }, signal)).resolves.toEqual(teamConfigured)
-    expect(runs.configureTeam).toHaveBeenCalledWith(caller, {
+    expect(runs.configureTeamAsExternal).toHaveBeenCalledWith({
       runId: 'team-one',
       request: { provider: 'provider-team', model: 'model-team', reasoningEffort: 'high' },
     })
