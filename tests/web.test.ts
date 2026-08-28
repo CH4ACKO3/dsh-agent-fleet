@@ -435,7 +435,7 @@ describe('FleetWebRemote', () => {
         .mockReturnValueOnce({ id: 'team-one', projectRoot: '/workspace', status: 'paused', runtimeState: 'active' }),
       requireAssistantConnection: vi.fn(),
       loadTeamMembersAsExternal: vi.fn(() => Promise.resolve({ id: 'team-one', status: 'running', runtimeState: 'active' })),
-      resumeTeam: vi.fn(() => Promise.resolve({ id: 'team-one', status: 'running', runtimeState: 'active' })),
+      resumeTeamAsExternal: vi.fn(() => Promise.resolve({ id: 'team-one', status: 'running', runtimeState: 'active' })),
     } as unknown as FleetRunService
     const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
     const signal = new AbortController().signal
@@ -447,8 +447,8 @@ describe('FleetWebRemote', () => {
 
     await expect(remote.control({ sessionId: 'ui-session', teamId: 'team-one', action: 'resume' }, signal))
       .resolves.toMatchObject({ status: 'running' })
-    expect(runs.requireAssistantConnection).toHaveBeenCalledWith(caller, 'team-one')
-    expect(runs.resumeTeam).toHaveBeenCalledWith(caller, 'team-one')
+    expect(runs.requireAssistantConnection).not.toHaveBeenCalled()
+    expect(runs.resumeTeamAsExternal).toHaveBeenCalledWith(caller, 'team-one')
   })
 
   it('routes an individual member wake without requiring an assistant connection', async () => {

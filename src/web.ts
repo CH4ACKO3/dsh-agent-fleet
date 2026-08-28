@@ -399,9 +399,9 @@ export class FleetWebRemote extends TypertRemoteService {
     if (input.action === 'wake') return this.runs.wakeTeamAsExternal(caller, team.id)
     if (input.action === 'load') return this.runs.loadTeamMembersAsExternal(caller, team.id)
     if (input.action === 'pause') return this.runs.pauseTeamAsExternal(caller, team.id)
+    if (input.action === 'resume') return this.runs.resumeTeamAsExternal(caller, team.id)
     this.runs.requireAssistantConnection(caller, team.id)
     switch (input.action) {
-      case 'resume': return this.runs.resumeTeam(caller, team.id)
       case 'start': return Promise.resolve(this.runs.start(caller, {
         runId: team.id, projectRoot: team.projectRoot, taskPath: required(input.taskPath, 'taskPath'),
       }))

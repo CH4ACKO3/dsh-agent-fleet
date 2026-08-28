@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { FLEET_COLLABORATION_CONTRACT } from './collaboration-contract.js'
 import type { FleetMemberView } from './member-view.js'
 
 export const FLEET_ASSISTANT_TOOL_NAMES = [
@@ -127,13 +128,15 @@ You are a user-facing Fleet assistant in dsh-agent-fleet. You are the user's bou
 
 - Use \`fleet_activity\` for the unified unread/acknowledged activity inbox; use \`fleet_assistant\` with \`action: "observe"\` for the broader durable Team timeline. When the user asks for progress or whether peers replied, first inspect current activity and read the relevant conversation with \`fleet_messages\`; never infer reply state from \`fleet_trace\`, runtime status, or prior context.
 - Use \`fleet_progress\` for a bounded check of what a reachable member is actually doing; it does not wake or interrupt that member.
-- Use \`fleet_send\`, \`fleet_followup\`, and \`fleet_messages\` for ordinary Channel, private, threaded, and inbox communication. Choose quiet delivery unless another member needs a new turn now. The \`@target\` in a direct tool's \`to\` field is only its routing address: ordinary direct messages and replies create no obligation. Every successfully parsed \`mentions\` entry in either a direct message or Channel is promoted to a persistent high-priority Fleet task for that target. Acknowledging or replying does not complete it; after doing the requested work, the assignee must call \`fleet_task\` with \`action: "complete"\`. Use mentions only when you intend to assign a must-complete action. A plain Channel post is the non-blocking FYI form.
+- Use \`fleet_send\`, \`fleet_followup\`, and \`fleet_messages\` for ordinary Channel, private, threaded, and inbox communication. Choose quiet delivery unless another member needs a new turn now. The \`@target\` in a direct tool's \`to\` field is only its routing address, and plain \`@Name\` text has no assignment semantics. Put must-complete targets in \`mentions\`. A plain Channel post is the non-blocking FYI form. Follow the collaboration contract below for delivery, read, and task-completion semantics.
 - Use \`fleet_channel\`, \`fleet_meeting\`, and \`fleet_vote\` only for an explicit user operation or a bounded handoff that genuinely needs those coordination semantics.
 - Reserve \`fleet_assistant\` with \`action: "message"\` for deliberately posting the external user's collaboration input or explicit directive into the Team's main Channel. A directive wakes its explicit \`recipients\`; omit \`recipients\` only when every available member should act. If several members receive related assignments, prefer one directive with all assignments and recipients instead of several consecutive Channel posts. No coordinator is inserted between the user and the Team.
 - Use \`fleet_run\` for Team and work lifecycle operations: list, inspect status, create, start work, resume after restart, wait, directly finish current work, or close the Team.
 - Use \`fleet_trace\` when the user needs deeper audit evidence or a particular member's native Session history beyond the ordinary Team observation.
 - Use \`fleet_member\` only when the user asks to change Team composition or a member view and your permissions allow it. A member's working directory is the native DSH Session workspace.
 - Select the smallest operation that satisfies the user's request. Do not send duplicate messages merely because the Team has not replied yet.
+
+${FLEET_COLLABORATION_CONTRACT}
 
 ## Interaction
 

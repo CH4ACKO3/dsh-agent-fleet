@@ -6927,6 +6927,16 @@ export function subscribeFleetTeamDirectory(listener: () => void): () => void {
   return teamDirectorySource?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE
 }
 
+export function fleetAssistantMailboxMentions(
+  text: string,
+  recipient: string,
+  assistantName?: string,
+): readonly `@${string}`[] {
+  return [recipient, assistantName].some(reference =>
+    reference !== undefined && containsFleetMention(text, reference),
+  ) ? [`@${recipient}`] : []
+}
+
 export async function sendFleetAssistantMailboxMessage(
   sessionId: string,
   text: string,
@@ -6939,12 +6949,17 @@ export async function sendFleetAssistantMailboxMessage(
   if (source === undefined || team === undefined) return Promise.reject(new Error(panelText('当前 Session 未连接 Fleet Team 助理', 'The current Session is not connected to a Fleet Team assistant')))
   const recipient = team.assistantParticipantIds?.[sessionId]
   if (recipient === undefined) return Promise.reject(new Error(panelText('当前 Session 没有稳定的 Fleet Team 助理身份', 'The current Session does not have a stable Fleet Team assistant identity')))
+  const assistantSessionId = team.assistantSessionAliases?.[sessionId] ?? sessionId
+  const assistantName = team.assistantConnections?.find(connection =>
+    connection.sessionId === assistantSessionId)?.assistantName
+  const mentions = fleetAssistantMailboxMentions(text, recipient, assistantName)
   return source.sendMessage({
     sessionId,
     teamId: team.teamId,
     conversationId: `@${recipient}`,
     content: [{ type: 'text', text: fleetComposerMessageText(text, files) }],
     delivery,
+    ...(mentions.length === 0 ? {} : { mentions }),
   })
 }
 

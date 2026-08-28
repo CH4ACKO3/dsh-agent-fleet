@@ -31,6 +31,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-compaction'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -63,6 +64,7 @@ import { FleetArchiveRegistry } from './archive.js'
 import type { FleetArchiveRestoreReport, FleetArchiveTeam } from './archive.js'
 import type { FleetAuthorizationActor, FleetAuthorizationBaseline, FleetAuthorizationService } from './authorization.js'
 import type { FleetAssistantRuntime, FleetAssistantView } from './assistant.js'
+import { FLEET_COLLABORATION_CONTRACT } from './collaboration-contract.js'
 import type { FleetCollaborationService, FleetCollaborationTeam } from './collaboration.js'
 import {
   FLEET_MESSAGE_MODULE,
@@ -1937,6 +1939,7 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     `Granted Fleet permissions: ${member.permissions.join(', ') || 'none'}.`,
     `Reachable members: ${members || 'none'}.`,
     `Reachable Channels: ${channels || 'none'}.`,
+    FLEET_COLLABORATION_CONTRACT,
     '## Role',
     member.role,
     ...(member.responsibility === undefined ? [] : ['## Responsibility', member.responsibility]),
@@ -4077,10 +4080,23 @@ export class FleetRunService {
   async resumeTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
     const record = this.requireMutableRecord(runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    return this.resumeTeamNow(caller, record)
+  }
+
+  async resumeTeamAsExternal(caller: Agent, runId: string): Promise<FleetRunRecord> {
+    const record = this.requireMutableRecord(runId)
+    this.requireExternalFleetPermission(record, 'team.manage')
+    return this.resumeTeamNow(caller, record)
+  }
+
+  private async resumeTeamNow(caller: Agent, record: FleetRunRecord): Promise<FleetRunRecord> {
     if (record.status !== 'paused') throw new Error(`Fleet team ${record.id} is not paused`)
     for (const memberName of record.teamPausedMembers ?? []) {
-      const member = this.requireRecord(record.id).members.find(candidate => candidate.name === memberName)
-      if (member !== undefined && !this.memberCanReply(member)) await this.resumeMember(caller, record.id, memberName)
+      const current = this.requireRecord(record.id)
+      const member = current.members.find(candidate => candidate.name === memberName)
+      if (member !== undefined && !this.memberCanReply(member)) {
+        await this.resumeMemberNow(caller, current, memberName)
+      }
     }
     const status: FleetRunStatus = record.work?.status === 'running' ? 'running' : 'idle'
     const resumed = this.replaceRecord(record.id, { status, teamPausedMembers: [] })
@@ -4387,6 +4403,23 @@ export class FleetRunService {
         ...this.memberRuntimeOptions(record, view),
         setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
       })
+      const resumedAgent = this.ctx.agents.get(SessionId(resumed.id))
+      if (member.status === 'paused' && resumedAgent !== undefined) {
+        // Put the resume signal in the Session before attachMember refreshes queued
+        // Fleet messages. Otherwise a member can receive "continue after resume"
+        // work while its latest conversational state still says it is paused.
+        resumedAgent.inject(createUserMessage({
+          content: [{
+            type: 'text',
+            text: [
+              '[Fleet pause lifted]',
+              'Your Fleet runtime is active again. This is the explicit resume signal.',
+              'Process queued messages and required tasks now; do not keep waiting because an earlier message said to wait until resume.',
+            ].join('\n\n'),
+          }],
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+        }))
+      }
       if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
       else runtime.rebindMember(member.sessionId, resumed.id, view)
       const active: FleetRunMember = {
@@ -5348,7 +5381,8 @@ export class FleetRunService {
       text: [
         `[Fleet required task] ${task.title} (${task.id})`,
         task.description,
-        'This obligation remains active after an acknowledgement or progress reply. Perform the requested work, record useful progress if needed, then call fleet_task with action="complete" and this task id.',
+        'Fleet currently reports your runtime as active. Do not wait on an earlier pause instruction.',
+        'This obligation remains active after an acknowledgement or progress reply. Perform the requested work, record useful progress if needed, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends that final result to the source conversation before marking the task completed.',
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `required-task:${task.id}`,

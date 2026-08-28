@@ -113,7 +113,7 @@ describe('MessageHub', () => {
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
   })
 
-  it('preserves direct-human origin for trusted host messages without changing ordinary relays', () => {
+  it('preserves direct-human origin without promoting an ordinary private message', () => {
     const { hub, lead, reviewer } = setup()
 
     const human = hub.sendHuman(lead, {
@@ -122,18 +122,12 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(reviewer.injectedContext[0]?.source).toEqual({ kind: 'user' })
-    expect(reviewer.injected[0]).toContain('must-reply')
-    expect(reviewer.injected[0]).toContain(
-      `Call fleet_send or fleet_followup with to="@lead" to send the reply.`,
-    )
-    expect(reviewer.injected[0]).toContain(
-      'Ordinary model output is not sent to Fleet and does not satisfy must-reply.',
-    )
+    expect(reviewer.injected[0]).not.toContain('must-reply')
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: human.messageId,
       origin: 'user',
-      mustReply: true,
     })
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
 
     hub.send(lead, {
       to: '@reviewer',
@@ -152,7 +146,8 @@ describe('MessageHub', () => {
 
     const direct = hub.sendHuman(lead, {
       to: '@reviewer',
-      text: 'Please confirm this direct request.',
+      text: '@reviewer Please confirm this direct request.',
+      mentions: ['@reviewer'],
       delivery: 'quiet',
     })
     hub.read(reviewer, { conversation: '@lead' })
@@ -328,7 +323,7 @@ describe('MessageHub', () => {
     expect(hub.search(lead, { query: 'Do not persist.' })).toEqual([])
   })
 
-  it('records read progress only for text returned by explicit read operations', () => {
+  it('marks addressed inputs read when replying while leaving broadcasts explicit', () => {
     const { hub, lead, reviewer, qa } = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []
     hub.onEvent(event => { events.push(event) })
@@ -366,11 +361,12 @@ describe('MessageHub', () => {
       text: 'Confirmed.',
       delivery: 'quiet',
     })
-    expect(events).not.toContainEqual(expect.objectContaining({
+    expect(events).toContainEqual({
       type: 'inbox', action: 'read', agentId: reviewer.id, messageId: direct.messageId,
-    }))
+      through: 'Please confirm the interface boundary.'.length,
+    })
     expect(hub.inbox(reviewer)).toContainEqual(expect.objectContaining({
-      acknowledged: false,
+      acknowledged: true,
       message: expect.objectContaining({ id: direct.messageId }),
     }))
 

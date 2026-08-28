@@ -106,7 +106,10 @@ describe('Fleet collaboration identities', () => {
     })
     const required = first.tasks.pendingRequirement('reviewer')
     if (required === undefined) throw new Error('expected required task')
-    first.tasks.complete('agent-reviewer', required.id)
+    const completed = first.tasks.complete('agent-reviewer', required.id, {
+      finalReply: 'Release inspection complete.',
+    })
+    expect(completed.requirement?.completionMessageId).toBeDefined()
     const taskState = first.tasks.state()
     expect(first.messages.pendingRequiredReply('reviewer')).toBeUndefined()
 

@@ -1424,7 +1424,7 @@ export class MessageHub {
     // explicitly parsed mention (plus trusted user input or mustReply) creates
     // a reply obligation. This lets an ordinary reply finish the conversation,
     // while a reply that mentions its recipient asks for a final confirmation.
-    const mustReply = input.mustReply === true || origin === 'user' || mentions.includes(targetId)
+    const mustReply = input.mustReply === true || mentions.includes(targetId)
     const { mustReply: _mustReply, ...rest } = input
     const normalizedInput: SendMessageInput = mustReply ? { ...rest, mustReply: true } : rest
     const message = this.appendMessage(
@@ -1437,6 +1437,7 @@ export class MessageHub {
       input.kind ?? 'text',
       origin,
     )
+    this.acknowledgeInputsByReply(sender.id, input.to)
     this.removePendingSystemNotification(sender, this.requiredReplyNoticeKey(message))
     const wake = input.delivery !== 'quiet'
     if (wake) this.addPendingWakeup(targetId, message)
@@ -1470,6 +1471,7 @@ export class MessageHub {
     this.clearPendingWakeups(sender.id, input.to)
     const recipientIds = this.visibleChannelParticipantIds(channel).filter(participantId => participantId !== sender.id)
     const message = this.appendMessage(sender.id, input, text, resources, mentions, recipientIds, input.kind ?? 'text', origin)
+    this.acknowledgeInputsByReply(sender.id, input.to)
     this.removePendingSystemNotification(sender, this.requiredReplyNoticeKey(message))
     const mentioned = new Set(mentions)
     let delivered = 0
@@ -1559,7 +1561,7 @@ export class MessageHub {
     if (!message.conversation.startsWith('meeting:')) {
       const requiredParticipants = message.mustReply === true
         ? message.recipientIds ?? []
-        : message.conversation.startsWith('#') ? message.mentions : []
+        : message.mentions
       for (const participantId of requiredParticipants) {
         const required = this.requiredRepliesByParticipant.get(participantId) ?? new Map<string, FleetMessage>()
         required.set(conversationId, message)
@@ -1976,6 +1978,18 @@ export class MessageHub {
     }
     this.emit({ type: 'inbox', action: 'read', agentId, messageId: message.id, through })
     return true
+  }
+
+  private acknowledgeInputsByReply(agentId: string, conversation: FleetTarget): void {
+    for (const message of this.history) {
+      if (message.from === agentId
+        || this.isFullyRead(agentId, message)
+        || !this.sameConversation(agentId, message, conversation)) continue
+      const addressed = conversation.startsWith('@')
+        || message.mentions.includes(agentId)
+        || (message.mustReply === true && message.recipientIds?.includes(agentId) === true)
+      if (addressed) this.markReadThrough(agentId, message, message.text.length)
+    }
   }
 
   private hasUnreadChannelMessage(agentId: string, conversation: FleetTarget): boolean {

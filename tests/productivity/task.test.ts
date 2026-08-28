@@ -57,9 +57,14 @@ describe('FleetTaskBoard', () => {
   })
 
   it('persists and deduplicates must-complete tasks promoted from messages', () => {
-    const board = new FleetTaskBoard(directory)
+    const finalReplies: string[] = []
+    const completeRequirement = (_callerId: string, _task: unknown, finalReply: string) => {
+      finalReplies.push(finalReply)
+      return { messageId: 'msg_final' }
+    }
+    const board = new FleetTaskBoard(directory, () => false, () => {}, completeRequirement)
     const task = board.ensureMessageTask({
-      messageId: 'msg_42', conversation: '#main', createdBy: 'lead', assignee: 'reviewer',
+      messageId: 'msg_42', conversation: '#main', createdBy: 'lead', assignee: 'reviewer', replyTarget: '#main',
       title: 'Required from @lead: inspect the release', description: 'Inspect the release.',
       resources: ['document:release'],
     })
@@ -69,7 +74,7 @@ describe('FleetTaskBoard', () => {
     }).id).toBe(task.id)
     expect(board.pendingRequirement('agent-reviewer')).toMatchObject({
       id: task.id, priority: 'high', assignees: ['reviewer'], followers: ['lead'],
-      requirement: { kind: 'message', messageId: 'msg_42', conversation: '#main', assignee: 'reviewer' },
+      requirement: { kind: 'message', messageId: 'msg_42', conversation: '#main', assignee: 'reviewer', replyTarget: '#main' },
     })
     expect(() => board.update('agent-reviewer', task.id, { status: 'cancelled' }))
       .toThrow('must be completed')
@@ -80,10 +85,14 @@ describe('FleetTaskBoard', () => {
       id: task.id, assignees: ['qa'], requirement: { assignee: 'qa' },
     })
 
-    const restored = new FleetTaskBoard(directory)
+    const restored = new FleetTaskBoard(directory, () => false, () => {}, completeRequirement)
     restored.restore(parseFleetTaskState(board.state() as never))
     expect(restored.pendingRequirement('qa')?.id).toBe(task.id)
-    restored.complete('agent-qa', task.id)
+    expect(() => restored.complete('agent-qa', task.id)).toThrow('required task final reply cannot be empty')
+    expect(restored.complete('agent-qa', task.id, { finalReply: 'Inspection passed.' })).toMatchObject({
+      status: 'completed', requirement: { completionMessageId: 'msg_final' },
+    })
+    expect(finalReplies).toEqual(['Inspection passed.'])
     expect(restored.pendingRequirement('qa')).toBeUndefined()
   })
 

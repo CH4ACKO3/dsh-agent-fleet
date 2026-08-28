@@ -25,6 +25,10 @@ export interface FleetTaskRequirement {
   readonly messageId: string
   readonly conversation: string
   readonly assignee: string
+  /** Routable source conversation for the final completion reply. */
+  readonly replyTarget?: string
+  /** Durable evidence that the required final reply was sent before completion. */
+  readonly completionMessageId?: string
 }
 
 export interface FleetProjectTask {
@@ -93,9 +97,19 @@ export interface EnsureFleetMessageTaskInput {
   readonly conversation: string
   readonly createdBy: string
   readonly assignee: string
+  readonly replyTarget?: string
   readonly title: string
   readonly description?: string
   readonly resources?: readonly string[]
+}
+
+export interface CompleteFleetProjectTaskInput {
+  /** Required for message obligations; sent to the source conversation before completion. */
+  readonly finalReply?: string
+}
+
+export interface FleetTaskRequirementCompletion {
+  readonly messageId?: string
 }
 
 const EMPTY_STATE: FleetTaskState = { version: 1, tasks: [] }
@@ -137,6 +151,11 @@ export class FleetTaskBoard {
     private readonly directory: FleetMemberDirectory,
     private readonly canManage: (agentId: string) => boolean = () => false,
     private readonly onDue: (task: FleetProjectTask, recipients: readonly string[]) => readonly string[] | void = () => {},
+    private readonly onRequirementComplete: (
+      callerId: string,
+      task: FleetProjectTask,
+      finalReply: string,
+    ) => FleetTaskRequirementCompletion | void = () => {},
   ) {}
 
   state(): FleetTaskState {
@@ -250,6 +269,9 @@ export class FleetTaskBoard {
         messageId: requiredText(input.messageId, 'required message id'),
         conversation: requiredText(input.conversation, 'required message conversation'),
         assignee,
+        ...(input.replyTarget === undefined
+          ? {}
+          : { replyTarget: requiredText(input.replyTarget, 'required message reply target') }),
       },
     }
     this.tasks.set(task.id, task)
@@ -324,15 +346,28 @@ export class FleetTaskBoard {
     return snapshot(updated)
   }
 
-  complete(callerId: string, id: string): FleetProjectTask {
+  complete(callerId: string, id: string, input: CompleteFleetProjectTaskInput = {}): FleetProjectTask {
     const current = this.requireTask(id)
     this.requireResponsible(callerId, current)
     const incomplete = current.dependencies.filter(dependency => this.requireTask(dependency).status !== 'completed')
     if (incomplete.length > 0) throw new Error(`Fleet task ${id} has incomplete dependencies: ${incomplete.join(', ')}`)
     if (current.status === 'completed') return snapshot(current)
+    let completionMessageId: string | undefined
+    if (current.requirement?.kind === 'message') {
+      const finalReply = requiredText(input.finalReply ?? '', 'required task final reply')
+      completionMessageId = this.onRequirementComplete(callerId, snapshot(current), finalReply)?.messageId
+    }
     const now = new Date().toISOString()
     const { duePendingFor: _duePendingFor, ...rest } = current
-    const updated: FleetProjectTask = { ...rest, status: 'completed', completedAt: now, updatedAt: now }
+    const updated: FleetProjectTask = {
+      ...rest,
+      status: 'completed',
+      completedAt: now,
+      updatedAt: now,
+      ...(rest.requirement === undefined || completionMessageId === undefined
+        ? {}
+        : { requirement: { ...rest.requirement, completionMessageId } }),
+    }
     this.replace(updated)
     this.emit({ action: 'completed', task: updated, actor: this.member(callerId) })
     return snapshot(updated)
@@ -531,7 +566,7 @@ const TASK_SCHEMA = {
       type: 'object', additionalProperties: false, properties: {
         kind: { type: 'string', required: true, enum: ['message'] },
         messageId: { type: 'string', required: true }, conversation: { type: 'string', required: true },
-        assignee: { type: 'string', required: true },
+        assignee: { type: 'string', required: true }, replyTarget: { type: 'string' }, completionMessageId: { type: 'string' },
       },
     },
   },
@@ -560,7 +595,7 @@ export function installTaskTools(
 ): () => void {
   return ctx.tools.register(defineTool({
     name: 'fleet_task',
-    description: 'Manage persistent Team tasks, owners, reviewers, dependencies, subtasks, comments, progress, deadlines, and resources. Parsed message mentions and must_reply directives appear as high-priority required tasks: replying or acknowledging is not completion, and the assignee must use action="complete" after performing the work.',
+    description: 'Manage persistent Team tasks, owners, reviewers, dependencies, subtasks, comments, progress, deadlines, and resources. Parsed message mentions and must_reply directives appear as high-priority required tasks. An acknowledgement or progress reply does not complete one. After the work is done, put the final user- or peer-facing result only in final_reply and complete the task; do not send the same final result separately with fleet_send. Fleet sends it to the source conversation before completion.',
     parameters: {
       action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'update', 'comment', 'progress', 'complete', 'reopen'] },
       id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' },
@@ -568,6 +603,7 @@ export function installTaskTools(
       assignees: { type: 'array', items: { type: 'string' } }, reviewers: { type: 'array', items: { type: 'string' } },
       followers: { type: 'array', items: { type: 'string' } }, dependencies: { type: 'array', items: { type: 'string' } },
       parent_id: { type: 'string' }, due_at: { type: 'string' }, resources: { type: 'array', items: { type: 'string' } }, text: { type: 'string' },
+      final_reply: { type: 'string', description: 'Required only when completing a message-created required task. Put the final result here instead of sending it separately with fleet_send. Fleet sends it back to the source conversation before completion.' },
     },
     output: jsonOutput(RESULT_SCHEMA),
     execute(args, exec) {
@@ -610,7 +646,12 @@ export function installTaskTools(
         if (args.text === undefined) throw new Error(`fleet_task ${args.action} requires text`)
         return Promise.resolve({ action: args.action, task: tasks.addEntry(callerId, args.id, args.action, args.text, args.resources) })
       }
-      return Promise.resolve({ action: args.action, task: args.action === 'complete' ? tasks.complete(callerId, args.id) : tasks.reopen(callerId, args.id) })
+      return Promise.resolve({
+        action: args.action,
+        task: args.action === 'complete'
+          ? tasks.complete(callerId, args.id, { ...(args.final_reply === undefined ? {} : { finalReply: args.final_reply }) })
+          : tasks.reopen(callerId, args.id),
+      })
     },
   }))
 }

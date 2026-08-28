@@ -78,6 +78,15 @@ describe('FleetAssistantRuntime', () => {
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'omit `recipients` only when every available member should act',
     )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Writing `@Name` only in message text is display text and creates no obligation',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      '`action: "complete"`, the task id, and `final_reply`',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'A delivery notice alone does not',
+    )
     expect(fixture.restrict).not.toHaveBeenCalled()
 
     runtime.activate(fixture.agent)

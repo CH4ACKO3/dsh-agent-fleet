@@ -8,6 +8,7 @@ import {
   expandFleetTargetFold,
   fleetActivityGroups,
   fleetActivityWindow,
+  fleetAssistantMailboxMentions,
   fleetPanelSelectedMemberId,
   fleetTimelineTicks,
   fleetPanelMemberRunControls,
@@ -33,6 +34,17 @@ import {
   fleetMemberPresence,
   fleetMemberPresenceLabel,
 } from '../packages/ui/src/runtime-chat.js'
+
+describe('Fleet assistant mailbox mentions', () => {
+  it('promotes only explicit stable-id or display-name mentions', () => {
+    expect(fleetAssistantMailboxMentions('@Albany confirm this.', 'team-assistant', 'Albany'))
+      .toEqual(['@team-assistant'])
+    expect(fleetAssistantMailboxMentions('@team-assistant confirm this.', 'team-assistant', 'Albany'))
+      .toEqual(['@team-assistant'])
+    expect(fleetAssistantMailboxMentions('Send this to Albany.', 'team-assistant', 'Albany')).toEqual([])
+    expect(fleetAssistantMailboxMentions('@AlbanySuffix is different.', 'team-assistant', 'Albany')).toEqual([])
+  })
+})
 
 describe('Fleet activity grouping', () => {
   it('groups only adjacent records with the same exact event type', () => {

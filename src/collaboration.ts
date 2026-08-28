@@ -19,6 +19,7 @@ import type {
   FleetCoordinationEvent,
   FleetMessage,
   FleetMessagePermission,
+  FleetTarget,
   FleetSystemNotificationKind,
   MessageAgent,
   SendMessageInput,
@@ -358,11 +359,11 @@ export class FleetCollaborationService {
       },
     }
     const memberDirectory: FleetMemberDirectory = {
-      list: () => [...memberIdsByName].map(([name, id]) => ({ id, name })),
+      list: () => [...memberViews.keys()].map(name => ({ id: memberIdsByName.get(name) ?? name, name })),
       nameForAgent: id => memberNamesById.get(id),
       resolve: reference => {
         const value = reference.startsWith('@') ? reference.slice(1) : reference
-        if (memberIdsByName.has(value)) return value
+        if (memberViews.has(value)) return value
         const memberId = memberIdForDisplayName(value)
         if (memberId !== undefined) return memberId
         return memberNamesById.get(value)
@@ -378,7 +379,7 @@ export class FleetCollaborationService {
         { sender, input: message },
         () => ({ kind: 'send', input: message }),
       ),
-      requiredActionInstruction: () => 'Fleet promotes this obligation to a persistent high-priority task. Call fleet_task with action="list" to find it, perform the requested work, then call fleet_task with action="complete". Sending a message alone does not complete the task.',
+      requiredActionInstruction: () => 'Fleet promotes this obligation to a persistent high-priority task. Call fleet_task with action="list" to find it. An acknowledgement or progress reply does not complete it. Perform the requested work, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends final_reply to the source conversation before marking the task completed; ordinary native output is internal and does not count.',
     })
     const canManage = (agentId: string, namespace: string): boolean => {
       const member = memberNamesById.get(agentId)
@@ -404,17 +405,51 @@ export class FleetCollaborationService {
       }
       return delivered
     }
-    const tasks = new FleetTaskBoard(memberDirectory, agentId => canManage(agentId, 'task'), (task, recipients) =>
-      notifyMembers(
+    const replyTargetFor = (message: FleetMessage): FleetTarget =>
+      message.conversation.startsWith('@') ? `@${message.from}` : message.conversation
+    const tasks = new FleetTaskBoard(
+      memberDirectory,
+      agentId => canManage(agentId, 'task'),
+      (task, recipients) => notifyMembers(
         recipients,
         `[Fleet task due] ${task.title} (${task.id})`,
         'task_notice',
         `task:${task.id}`,
         'wakeup',
-      ))
+      ),
+      (callerId, task, finalReply) => {
+        if (task.requirement?.kind !== 'message') return
+        const sender = agentDirectory.get(callerId)
+        if (sender === undefined) throw new Error(`Fleet task ${task.id} assignee is not an active Team participant`)
+        let source: FleetMessage | undefined
+        try {
+          source = messages.getMessage(sender, task.requirement.messageId)
+        } catch {}
+        const replyTarget = task.requirement.replyTarget ?? (source === undefined ? undefined : replyTargetFor(source))
+        if (replyTarget === undefined) {
+          throw new Error(`Fleet task ${task.id} cannot resolve the source conversation for its final reply`)
+        }
+        const existingFinal = messages.search(sender, {
+          conversation: replyTarget as FleetTarget,
+          limit: 100,
+        }).reverse().find(message =>
+          message.kind === 'text'
+          && message.from === sender.id
+          && message.createdAt >= task.createdAt
+          && message.text.trim() === finalReply)
+        if (existingFinal !== undefined) return { messageId: existingFinal.id }
+        const result = messages.send(sender, {
+          to: replyTarget as FleetTarget,
+          text: finalReply,
+          delivery: 'quiet',
+          ...(source === undefined ? {} : { replyTo: source.id }),
+        })
+        return { messageId: result.messageId }
+      },
+    )
     const requiredRecipients = (message: FleetMessage): string[] => {
       if (message.mustReply === true) return [...new Set(message.recipientIds ?? [])]
-      return message.conversation.startsWith('#') ? [...new Set(message.mentions)] : []
+      return [...new Set(message.mentions)]
     }
     const requiredTitle = (message: FleetMessage): string => {
       const preview = message.text.replace(/\s+/gu, ' ').trim()
@@ -431,6 +466,7 @@ export class FleetCollaborationService {
           conversation: message.conversationId ?? message.conversation,
           createdBy,
           assignee,
+          replyTarget: replyTargetFor(message),
           title: requiredTitle(message),
           description: [
             `Required action created from Fleet message ${message.id} in ${message.conversation}.`,
@@ -493,7 +529,7 @@ export class FleetCollaborationService {
             recipients,
             event.task.requirement === undefined
               ? `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`
-              : `[Fleet required task ${event.action}] ${event.task.title} (${event.task.id}). A reply does not complete this obligation; use fleet_task action="complete" after the requested work is done.`,
+              : `[Fleet required task ${event.action}] ${event.task.title} (${event.task.id}). An acknowledgement or progress reply does not complete this obligation. After the work is done, use fleet_task action="complete" with final_reply; Fleet sends that final result to the source conversation before completion.`,
             'task_notice',
             `task:${event.task.id}`,
             event.task.requirement === undefined && (event.action === 'created' || event.action === 'completed')

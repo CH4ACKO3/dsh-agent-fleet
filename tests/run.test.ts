@@ -636,8 +636,10 @@ describe('FleetRunService', () => {
     ])
     expect(service.messageHub(run.id).read(reviewer, { conversation: `@${leadMember.displayName}` }).messages)
       .toContainEqual(expect.objectContaining({ fromName: leadMember.displayName }))
-    expect(runtime.creates.find(input => input.label === leadMember.displayName)?.persona)
-      .toContain(`You are @${leadMember.displayName}`)
+    const leadPersona = runtime.creates.find(input => input.label === leadMember.displayName)?.persona
+    expect(leadPersona).toContain(`You are @${leadMember.displayName}`)
+    expect(leadPersona).toContain('Writing `@Name` only in message text is display text and creates no obligation')
+    expect(leadPersona).toContain('`action: "complete"`, the task id, and `final_reply`')
 
     service.end(launcher as unknown as Agent, 'Display name messaging test complete.', run.id)
     await service.wait(run.id, 1_000)
@@ -2094,8 +2096,10 @@ describe('FleetRunService', () => {
       .toContainEqual(expect.objectContaining({
         id: userDirectMessage.messageId,
         origin: 'user',
-        mustReply: true,
       }))
+    expect(service.taskBoard(run.id).state().tasks.some(task =>
+      task.requirement?.kind === 'message' && task.requirement.messageId === userDirectMessage.messageId,
+    )).toBe(false)
     expect(service.messageHub(run.id).send(lead, {
       to: '@User',
       text: 'I received the user message.',
@@ -3897,7 +3901,9 @@ describe('FleetRunService', () => {
       expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
     ]))
     if (requiredTask === undefined) throw new Error('expected required task')
-    service.taskBoard(run.id).complete(reviewer.id, requiredTask.id)
+    service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
+      finalReply: 'Latest result inspection complete.',
+    })
     expect(service.messageHub(run.id).pendingRequiredReply(reviewer.id)).toBeUndefined()
 
     service.finish(launcher as unknown as Agent, 'cancelled', 'Unread continuation verified.', run.id)
@@ -3926,7 +3932,8 @@ describe('FleetRunService', () => {
     const sent = service.sendUserConversationMessage({
       runId: run.id,
       to: `@${reviewer.id}`,
-      text: 'Confirm the result before going idle.',
+      text: '@reviewer Confirm the result before going idle.',
+      mentions: ['@reviewer'],
       delivery: 'quiet',
     })
     expect(messages.read(reviewer, { conversation: `@fleet-user:${run.id}` }).messages)
@@ -3958,7 +3965,28 @@ describe('FleetRunService', () => {
     service.agentIdle(reviewer as unknown as Agent)
     expect(reviewer.messages).toHaveLength(messagesAfterReply + 1)
     if (requiredTask === undefined) throw new Error('expected required task')
-    service.taskBoard(run.id).complete(reviewer.id, requiredTask.id)
+    expect(() => service.taskBoard(run.id).complete(reviewer.id, requiredTask.id))
+      .toThrow('required task final reply cannot be empty')
+    const separatelySentFinal = messages.send(reviewer, {
+      to: '@User',
+      text: 'Final confirmation: the result is confirmed.',
+      replyTo: sent.messageId,
+      delivery: 'quiet',
+    })
+    const sourceMessagesBeforeCompletion = messages.search(reviewer, {
+      conversation: '@User',
+      limit: 100,
+    }).length
+    const completed = service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
+      finalReply: 'Final confirmation: the result is confirmed.',
+    })
+    expect(completed.requirement?.completionMessageId).toBe(separatelySentFinal.messageId)
+    expect(messages.search(reviewer, { conversation: '@User', limit: 100 }))
+      .toHaveLength(sourceMessagesBeforeCompletion)
+    expect(messages.getMessage(reviewer, completed.requirement?.completionMessageId ?? '')).toMatchObject({
+      text: 'Final confirmation: the result is confirmed.',
+      replyTo: sent.messageId,
+    })
     expect(service.taskBoard(run.id).pendingRequirement('reviewer')).toBeUndefined()
     const messagesAfterCompletion = reviewer.messages.length
     service.agentIdle(reviewer as unknown as Agent)
@@ -4016,7 +4044,8 @@ describe('FleetRunService', () => {
     const sent = service.sendUserConversationMessage({
       runId: run.id,
       to: `@${assistantId}`,
-      text: 'Reply before becoming idle.',
+      text: `@${assistantId} Reply before becoming idle.`,
+      mentions: [`@${assistantId}`],
       delivery: 'wakeup',
     })
     expect(service.status(run.id)).toMatchObject({ status: 'idle' })
@@ -4058,20 +4087,14 @@ describe('FleetRunService', () => {
       }),
     ])
     if (requiredTask === undefined) throw new Error('expected required task')
-    service.taskBoard(run.id).complete(launcher.id, requiredTask.id)
+    service.taskBoard(run.id).complete(launcher.id, requiredTask.id, {
+      finalReply: 'Final result: the required reply is complete.',
+    })
     const afterComplete = launcher.messages.length
     service.agentStatusChanged(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterComplete + 1)
-    expect(launcher.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining('Call fleet_messages with action="read"'),
-      }),
-    ])
-    messages.read(launcher as unknown as Agent, { conversation: '@User' })
-    const afterRead = launcher.messages.length
+    expect(launcher.messages).toHaveLength(afterComplete)
     service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterRead)
+    expect(launcher.messages).toHaveLength(afterComplete)
     second.disconnect()
   })
 
@@ -4128,7 +4151,9 @@ describe('FleetRunService', () => {
     service.agentIdle(launcher as unknown as Agent)
     expect(launcher.messages).toHaveLength(afterReply + 1)
     if (requiredTask === undefined) throw new Error('expected required task')
-    service.taskBoard(run.id).complete(launcher.id, requiredTask.id)
+    service.taskBoard(run.id).complete(launcher.id, requiredTask.id, {
+      finalReply: 'Final result: analysis received and reviewed.',
+    })
     const afterComplete = launcher.messages.length
     service.agentIdle(launcher as unknown as Agent)
     expect(launcher.messages).toHaveLength(afterComplete)
@@ -4198,7 +4223,8 @@ describe('FleetRunService', () => {
     const sent = service.sendUserConversationMessage({
       runId: run.id,
       to: `@${assistantId}`,
-      text: 'Complete this after the Team resumes.',
+      text: `@${assistantId} Complete this after the Team resumes.`,
+      mentions: [`@${assistantId}`],
       delivery: 'quiet',
     })
     const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
@@ -4267,7 +4293,19 @@ describe('FleetRunService', () => {
     expect(paused.assistants[0]).toMatchObject({ status: 'idle' })
     expect(duplicatePause).toEqual(paused)
 
-    const resumed = await service.resumeTeam(launcher as unknown as Agent, run.id)
+    const pausedRequest = service.sendUserConversationMessage({
+      runId: run.id,
+      to: '#main',
+      text: '@lead Continue this after the Team resumes.',
+      mentions: ['@lead'],
+      delivery: 'wakeup',
+    })
+    expect(service.taskBoard(run.id).pendingRequirement('lead')?.requirement).toMatchObject({
+      messageId: pausedRequest.messageId,
+      assignee: 'lead',
+    })
+
+    const resumed = await service.resumeTeamAsExternal(launcher as unknown as Agent, run.id)
     expect(resumed).toMatchObject({
       status: 'running',
       teamPausedMembers: [],
@@ -4277,12 +4315,30 @@ describe('FleetRunService', () => {
       ],
     })
     const resumedLead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    expect(resumedLead?.messages).toHaveLength(0)
+    const resumedLeadTexts = resumedLead?.messages.map(message => message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('\n')) ?? []
+    const resumeSignalIndex = resumedLeadTexts.findIndex(text => text.includes('[Fleet pause lifted]'))
+    const queuedMessageIndex = resumedLeadTexts.findIndex(text => text.includes('Continue this after the Team resumes.'))
+    expect(resumeSignalIndex).toBeGreaterThanOrEqual(0)
+    expect(queuedMessageIndex).toBeGreaterThan(resumeSignalIndex)
+    expect(resumedLead?.messages).toContainEqual(expect.objectContaining({
+      content: [expect.objectContaining({ text: expect.stringContaining('Continue this after the Team resumes.') })],
+    }))
+    expect(service.taskBoard(run.id).pendingRequirement('lead')?.requirement).toMatchObject({
+      messageId: pausedRequest.messageId,
+      assignee: 'lead',
+    })
     expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
+    const resumedLeadMessages = resumedLead?.messages.length ?? 0
     await service.wakeTeam(launcher as unknown as Agent, run.id)
-    expect(resumedLead?.messages).toHaveLength(1)
+    expect(resumedLead?.messages).toHaveLength(resumedLeadMessages + 1)
     expect(service.status(run.id).members).toContainEqual(expect.objectContaining({ name: 'reviewer', status: 'idle' }))
-    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')?.messages).toHaveLength(1)
+    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')?.messages)
+      .toContainEqual(expect.objectContaining({
+        content: [expect.objectContaining({ text: expect.stringContaining('explicitly woken') })],
+      }))
 
     service.end(launcher as unknown as Agent, 'Team pause controls verified.', run.id)
     await service.wait(run.id, 1_000)
@@ -4724,7 +4780,7 @@ describe('FleetRunService', () => {
     expect(sequences.length).toBeGreaterThan(1_000)
     expect(sequences).toEqual([...sequences].sort((left, right) => left - right))
     expect(new Set(sequences).size).toBe(sequences.length)
-    expect(messages.read(reviewer, { conversation: '@lead', limit: 50 }).messages).toHaveLength(50)
+    expect(messages.read(reviewer, { conversation: '@lead', limit: 50, unreadOnly: false }).messages).toHaveLength(50)
 
     service.end(launcher as unknown as Agent, 'Sustained collaboration test complete.', run.id)
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'closed', settled: true })
