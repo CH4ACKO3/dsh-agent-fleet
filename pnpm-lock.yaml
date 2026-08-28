@@ -29,9 +29,6 @@ importers:
       dsh-harmony-react:
         specifier: ^0.3.2
         version: 0.3.2(dsh-harmony@0.8.8(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)(@deepseek-ai/dsh-brand@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)))
-      dsh-hover-hint:
-        specifier: workspace:*
-        version: link:packages/dsh-hover-hint
       human-names:
         specifier: ^1.0.13
         version: 1.0.13
@@ -177,6 +174,9 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
+      dsh-hover-hint:
+        specifier: workspace:*
+        version: link:packages/dsh-hover-hint
       react:
         specifier: ^18.2.0
         version: 18.3.1
