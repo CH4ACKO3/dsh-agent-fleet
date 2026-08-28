@@ -3792,7 +3792,7 @@ describe('FleetRunService', () => {
     expect(messages.pendingWakeups(reviewer.id)).toEqual([])
     expect(service.readTrace(run.id, 0, 100).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('team_quiescent') }),
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('pending_wakeup') }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
     ]))
 
     await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
@@ -3810,7 +3810,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('starts another member turn with a system notification when a quiet mentioned message remains unread', async () => {
+  it('starts another member turn with a required-reply notice for a quiet mentioned message', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -3843,16 +3843,16 @@ describe('FleetRunService', () => {
     reviewer.completeTurn()
     service.agentStatusChanged(reviewer as unknown as Agent)
 
-    expect(reviewer.messages).toHaveLength(messagesAfterInjection + 1)
+    expect(reviewer.messages).toHaveLength(messagesAfterInjection + 2)
     expect(reviewer.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining(`[Fleet #main] New message ${sent.messageId}`),
+        text: expect.stringContaining(`Message ${sent.messageId}`),
       }),
     ])
     expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'coordination.system_notification', data: expect.stringContaining('message_notice') }),
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('unread_message') }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_reply') }),
     ]))
 
     service.finish(launcher as unknown as Agent, 'cancelled', 'Unread continuation verified.', run.id)
@@ -4032,7 +4032,7 @@ describe('FleetRunService', () => {
     expect(launcher.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining(`Call fleet_messages with action="read" and conversation="#main"`),
+        text: expect.stringContaining(`Message ${sent.messageId}`),
       }),
     ])
     expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
@@ -4047,7 +4047,15 @@ describe('FleetRunService', () => {
     })
     const afterRead = launcher.messages.length
     service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterRead)
+    expect(launcher.messages).toHaveLength(afterRead + 1)
+    service.messageHub(run.id).send(launcher as unknown as Agent, {
+      to: '#main',
+      text: 'Analysis received; thank you.',
+      delivery: 'quiet',
+    })
+    const afterReply = launcher.messages.length
+    service.agentIdle(launcher as unknown as Agent)
+    expect(launcher.messages).toHaveLength(afterReply)
     disconnect()
   })
 

@@ -480,8 +480,7 @@ export class MessageHub {
     sender = this.requireParticipant(sender)
     const target = input.to
     if (origin === 'user') {
-      if (input.to.startsWith('@')) input = { ...input, mustReply: true }
-      else if (input.to.startsWith('#')) {
+      if (input.to.startsWith('#')) {
         const { mustReply: _mustReply, ...channelInput } = input
         input = channelInput
       }
@@ -489,8 +488,7 @@ export class MessageHub {
     const decision = this.options.beforeSend?.(sender, snapshot(input)) ?? { kind: 'send', input }
     if (decision.kind === 'reject') throw new Error(decision.reason.trim() || 'Fleet message was rejected')
     if (decision.input.to !== target) throw new Error('Fleet message hooks cannot change the sender or target')
-    if (origin === 'user' && decision.input.to.startsWith('@')) input = { ...decision.input, mustReply: true }
-    else if (origin === 'user' && decision.input.to.startsWith('#')) {
+    if (origin === 'user' && decision.input.to.startsWith('#')) {
       const { mustReply: _mustReply, ...channelInput } = decision.input
       input = channelInput
     } else input = decision.input
@@ -1397,7 +1395,25 @@ export class MessageHub {
     this.requireContact(sender.id, targetId)
     this.requireKnownParticipant(targetId)
     this.clearPendingWakeups(sender.id, input.to)
-    const message = this.appendMessage(sender.id, input, text, resources, [], [targetId], input.kind ?? 'text', origin)
+    const conversationId = this.conversationId(sender.id, input.to)
+    const completingRequiredReply = this.requiredRepliesByParticipant.get(sender.id)?.has(conversationId) === true
+    // Every direct @target is a request by default. A response that is already
+    // satisfying the same direct conversation is exempt, otherwise two Agents
+    // would create an endless reciprocal must-reply chain. Explicit mustReply
+    // and trusted user messages still override that cycle guard.
+    const mustReply = input.mustReply === true || origin === 'user' || !completingRequiredReply
+    const { mustReply: _mustReply, ...rest } = input
+    const normalizedInput: SendMessageInput = mustReply ? { ...rest, mustReply: true } : rest
+    const message = this.appendMessage(
+      sender.id,
+      normalizedInput,
+      text,
+      resources,
+      [],
+      [targetId],
+      input.kind ?? 'text',
+      origin,
+    )
     this.removePendingSystemNotification(sender, this.requiredReplyNoticeKey(message))
     const wake = input.delivery !== 'quiet'
     if (wake) this.addPendingWakeup(targetId, message)
@@ -1517,8 +1533,11 @@ export class MessageHub {
     const senderReplies = this.requiredRepliesByParticipant.get(message.from)
     senderReplies?.delete(conversationId)
     if (senderReplies?.size === 0) this.requiredRepliesByParticipant.delete(message.from)
-    if (message.mustReply === true && !message.conversation.startsWith('meeting:')) {
-      for (const participantId of message.recipientIds ?? []) {
+    if (!message.conversation.startsWith('meeting:')) {
+      const requiredParticipants = message.mustReply === true
+        ? message.recipientIds ?? []
+        : message.conversation.startsWith('#') ? message.mentions : []
+      for (const participantId of requiredParticipants) {
         const required = this.requiredRepliesByParticipant.get(participantId) ?? new Map<string, FleetMessage>()
         required.set(conversationId, message)
         this.requiredRepliesByParticipant.set(participantId, required)
@@ -1605,8 +1624,9 @@ export class MessageHub {
       ? ''
       : `\nResources: ${message.resources.join(', ')}`
     const sender = `@${message.fromName ?? message.from}`
-    const replyMarker = message.mustReply === true ? ' | must-reply' : ''
-    const replyInstruction = message.mustReply === true ? `\n${mustReplyInstruction(message)}` : ''
+    const mustReply = this.requiresReply(message, target.id)
+    const replyMarker = mustReply ? ' | must-reply' : ''
+    const replyInstruction = mustReply ? `\n${mustReplyInstruction(message)}` : ''
     const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}${replyInstruction}`
     const input = createUserMessage({
       content: [{ type: 'text', text }],
@@ -1765,7 +1785,7 @@ export class MessageHub {
 
   private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
     const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
-    const replyInstruction = message.mustReply === true ? ` ${mustReplyInstruction(message)}` : ''
+    const replyInstruction = this.requiresReply(message, target.id) ? ` ${mustReplyInstruction(message)}` : ''
     const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.${replyInstruction}`
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
@@ -1774,6 +1794,11 @@ export class MessageHub {
       coalesceKey: this.messageNoticeKey(message),
       relatedMessageId: message.id,
     })
+  }
+
+  private requiresReply(message: FleetMessage, participantId: string): boolean {
+    if (message.mustReply === true) return message.recipientIds?.includes(participantId) ?? false
+    return message.conversation.startsWith('#') && message.mentions.includes(participantId)
   }
 
   private deliverMeeting(

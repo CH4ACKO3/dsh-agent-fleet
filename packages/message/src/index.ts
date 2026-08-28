@@ -445,12 +445,13 @@ export function installMessageTools(
   if (options.messages !== false) {
   register(defineTool({
     name: 'fleet_send',
-    description: 'Send a process-local Fleet message without waking an idle Agent. Use #channel as a shared asynchronous coordination log and reply_to to continue a task thread without creating an Agent hierarchy. Meeting messages enter every other participant\'s context in full.',
+    description: 'Send a process-local Fleet message without waking an idle Agent. A direct @target automatically requires that target to reply. Resolved Channel mentions require only those targets to reply. Use #channel as a shared asynchronous coordination log and reply_to to continue a task thread without creating an Agent hierarchy. Meeting messages enter every other participant\'s context in full.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form.' },
+      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target is automatically must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in a Channel. Every mentioned target must reply; quiet delivery does not wake them immediately.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Require each recipient to send a later message in this direct conversation or Channel before remaining idle.' },
+      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Direct @targets and Channel mentions already apply target-level must-reply automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(SEND_SCHEMA),
@@ -461,6 +462,7 @@ export function installMessageTools(
         to: args.to as FleetTarget,
         text: args.message,
         delivery: 'quiet',
+        ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
         ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
@@ -470,13 +472,13 @@ export function installMessageTools(
 
   register(defineTool({
     name: 'fleet_followup',
-    description: 'Send a process-local Fleet message and start selected Agents\' next turns. Set interrupt only for urgent information that makes in-flight work unsafe or obsolete. In a Channel, only explicitly mentioned peers wake or interrupt.',
+    description: 'Send a process-local Fleet message and start selected Agents\' next turns. A direct @target automatically requires a reply. In a Channel, resolved mentions both require those targets to reply and select who wakes or is interrupted. Set interrupt only for urgent information that makes in-flight work unsafe or obsolete.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form.' },
+      to: { type: 'string', required: true, description: 'Target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target is automatically must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Required explicit @agent-id targets for a Channel follow-up.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets for a Channel follow-up. Every mentioned target must reply and is woken or interrupted.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Require each recipient to send a later message in this direct conversation or Channel before remaining idle.' },
+      must_reply: { type: 'boolean', description: 'Explicitly require every recipient to send a later message before remaining idle. Direct @targets and Channel mentions already apply target-level must-reply automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
       interrupt: { type: 'boolean', description: 'Cancel the recipients current Agent step, preserve pending inbox work, and steer this message immediately.' },
     },

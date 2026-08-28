@@ -91,7 +91,7 @@ function setup(): {
 }
 
 describe('MessageHub', () => {
-  it('sends quiet direct messages through inject and keeps readable history', () => {
+  it('promotes quiet direct Agent messages to must-reply requests', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {
       to: '@reviewer',
@@ -104,11 +104,14 @@ describe('MessageHub', () => {
     expect(reviewer.injected).toHaveLength(1)
     expect(reviewer.followedUp).toHaveLength(0)
     expect(reviewer.injected[0]).toContain('Please inspect the parser.')
+    expect(reviewer.injected[0]).toContain('must-reply')
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
       from: 'lead',
+      mustReply: true,
       resources: ['res_parser'],
     })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
   })
 
   it('preserves direct-human origin for trusted host messages without changing ordinary relays', () => {
@@ -179,6 +182,7 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+    expect(hub.pendingRequiredReply(lead.id)).toBeUndefined()
 
     const userChannel = hub.sendHuman(lead, {
       to: '#general',
@@ -220,6 +224,28 @@ describe('MessageHub', () => {
     expect(hub.pendingRequiredReply(qa.id)).toMatchObject({ id: channel.messageId })
   })
 
+  it('requires replies only from parsed Channel mentions, regardless of delivery urgency', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: '@reviewer Please inspect this when available.',
+      mentions: ['@reviewer'],
+      delivery: 'quiet',
+    })
+
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
+    expect(hub.pendingRequiredReply(qa.id)).toBeUndefined()
+    expect(reviewer.injected.at(-1)).toContain('does not satisfy must-reply')
+    expect(qa.injected.at(-1)).not.toContain('does not satisfy must-reply')
+
+    hub.send(reviewer, {
+      to: '#general',
+      text: 'The inspection is complete.',
+      delivery: 'quiet',
+    })
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+  })
+
   it('restores required-reply state from durable message history', () => {
     const first = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []
@@ -244,6 +270,23 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(second.hub.pendingRequiredReply(second.reviewer.id)).toBeUndefined()
+  })
+
+  it('restores mention-scoped required replies from durable Channel history', () => {
+    const first = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    first.hub.onEvent(event => { events.push(event) })
+    const sent = first.hub.send(first.lead, {
+      to: '#general',
+      text: '@reviewer Continue after restart.',
+      mentions: ['@reviewer'],
+      delivery: 'quiet',
+    })
+
+    const second = setup()
+    second.hub.restore(events)
+    expect(second.hub.pendingRequiredReply(second.reviewer.id)).toMatchObject({ id: sent.messageId })
+    expect(second.hub.pendingRequiredReply(second.qa.id)).toBeUndefined()
   })
 
   it('rejects mustReply on Meeting messages', () => {
