@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { HostConnectionPeers, HostPeerRemote } from 'the-binding-of-dsh'
 import * as Core from '@dsh-agent-fleet/core'
+import * as Gateway from '@dsh-agent-fleet/gateway'
 import { FLEET_WEB_PEER_REMOTE, type FleetWebPeerClient } from '@dsh-agent-fleet/core/web'
 import * as Message from '@dsh-agent-fleet/message'
 import * as Resources from '@dsh-agent-fleet/resources'
@@ -19,6 +20,14 @@ import { FleetSetupService, installSetupTool } from './setup.js'
 import { FLEET_WEB_LOCAL, FleetWebRemote } from './web.js'
 
 export { Authorization, Core, Data, Message, Resources }
+export {
+  FleetGatewayService,
+  type FleetGatewayConnector,
+  type FleetGatewayConnectorContext,
+  type FleetGatewayInbound,
+  type FleetGatewayMailbox,
+  type FleetGatewayOutbound,
+} from '@dsh-agent-fleet/gateway'
 export * from './authorization/index.js'
 export * from './data/index.js'
 export * from './authorization.js'
@@ -96,6 +105,7 @@ async function installFleetWebNotifications(ctx: FleetWebBindingContext, runs: F
 
 export function apply(ctx: Context): void {
   ctx.plugin(Core)
+  ctx.plugin(Gateway)
   ctx.inject(['fleetCore', 'agents', 'sessions', 'tools', 'fs', 'llm'], (scope) => {
     const archives = new FleetArchiveRegistry()
     const authorization = new FleetAuthorizationService()

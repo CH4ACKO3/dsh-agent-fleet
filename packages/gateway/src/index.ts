@@ -1,7 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from 'dsh-agent-fleet'
-
-export const name = '@ch4acko3/dsh-agent-fleet-gateway'
+export const name = '@dsh-agent-fleet/gateway'
 
 export interface FleetGatewayInbound {
   readonly connector: string

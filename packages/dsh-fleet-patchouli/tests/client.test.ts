@@ -8,7 +8,7 @@ describe('Fleet memory panel entries', () => {
       id: 'stored-1',
       kind: 'memory',
       type: 'memory.stored',
-      data: { storedCount: 2, conversation: '#research', providers: ['dsh-fleet-patchouli'] },
+      data: { storedCount: 2, conversation: '#research', providers: ['dsh-agent-fleet-patchouli'] },
       text: '已写入团队记忆库',
       createdAt: '2026-08-25T10:00:00.000Z',
     })).toMatchObject({ operation: 'stored', count: 2, conversation: '#research' })

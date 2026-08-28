@@ -12,7 +12,7 @@ import type {
 import type {
   FleetGatewayConnector,
   FleetGatewayConnectorContext,
-} from '@ch4acko3/dsh-agent-fleet-gateway'
+} from 'dsh-agent-fleet'
 
 export type FleetLarkBotInbound =
   | { readonly kind: 'message'; readonly identity: 'bot'; readonly accountId: string; readonly message: NormalizedMessage }

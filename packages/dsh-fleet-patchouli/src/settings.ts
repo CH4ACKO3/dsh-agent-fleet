@@ -3,7 +3,7 @@ import z from '@deepseek-ai/schemastery'
 
 import type { FleetMemoryEffort } from './patchouli.js'
 
-export const FLEET_PATCHOULI_SETTINGS_NAMESPACE = 'dsh-fleet-patchouli'
+export const FLEET_PATCHOULI_SETTINGS_NAMESPACE = 'dsh-agent-fleet-patchouli'
 
 export interface FleetPatchouliSettings {
   effort: FleetMemoryEffort

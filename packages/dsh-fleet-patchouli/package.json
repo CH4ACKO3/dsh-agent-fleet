@@ -1,5 +1,5 @@
 {
-  "name": "dsh-fleet-patchouli",
+  "name": "dsh-agent-fleet-patchouli",
   "version": "0.1.0",
   "description": "Patchouli memory integration for DSH Agent Fleet",
   "type": "module",

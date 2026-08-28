@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsdown'
 
 const moduleHeader = `window.__ModuleLoader__.load({
-  id: "dsh-fleet-patchouli",
+  id: "dsh-agent-fleet-patchouli",
   factory: (require) => {
     const module = { exports: {} };
     const exports = module.exports;`

@@ -1,5 +1,6 @@
 packages:
   - packages/*
+nodeLinker: hoisted
 autoInstallPeers: false
 allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': true

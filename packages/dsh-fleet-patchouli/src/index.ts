@@ -29,7 +29,7 @@ export {
   FLEET_TEAM_STATE_ALGORITHM_ID,
 } from './team-state.js'
 
-export const name = 'dsh-fleet-patchouli'
+export const name = 'dsh-agent-fleet-patchouli'
 
 export type Config = Partial<FleetPatchouliSettings>
 

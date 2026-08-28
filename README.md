@@ -6,7 +6,8 @@ Core, Message, Resources, and Authorization provide the runtime components. The 
 Team workflows and trace inspection. UI adds the embedded Team entry and startup configuration
 surface to the native DSH Web new-session view.
 
-Load `dsh-agent-fleet` to install all implemented components together. They can also be loaded separately.
+Load `dsh-agent-fleet` to install the complete base runtime. Core, Message, Resources, Authorization, and the
+connector gateway are internal modules bundled with the main plugin rather than separately installed plugins.
 
 ## Installation
 
@@ -17,6 +18,14 @@ DSH launcher because its patches must run before the profile loads:
 npm install --global dsh-harmony@^0.8.4
 dsh plugin --profile web add dsh-agent-fleet
 dsh web
+```
+
+Install only the optional integrations that the profile uses:
+
+```sh
+dsh plugin --profile web add @ch4acko3/dsh-agent-fleet-git
+dsh plugin --profile web add @ch4acko3/dsh-agent-fleet-lark
+dsh plugin --profile web add dsh-agent-fleet-patchouli
 ```
 
 Instead of the global command, Harmony can be installed into the profile first; on the next WebUI start, choose

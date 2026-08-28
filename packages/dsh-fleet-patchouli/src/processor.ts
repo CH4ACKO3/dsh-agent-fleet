@@ -25,7 +25,7 @@ import type {
 } from './patchouli.js'
 import type { FleetPatchouliSettings } from './settings.js'
 
-export const name = 'dsh-fleet-patchouli/processor'
+export const name = 'dsh-agent-fleet-patchouli/processor'
 
 export interface FleetMemoryProcessorOptions {
   readonly recordRecallAudit?: (audit: FleetMemoryCommittedRecallAudit) => void

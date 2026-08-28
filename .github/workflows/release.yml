@@ -1,0 +1,107 @@
+name: Release package
+
+on:
+  push:
+    tags:
+      - 'fleet/v*'
+      - 'hover-hint/v*'
+      - 'git/v*'
+      - 'lark/v*'
+      - 'patchouli/v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.1
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Select package from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF_NAME" in
+            fleet/v*)
+              package_name=dsh-agent-fleet
+              package_dir=.
+              version="${GITHUB_REF_NAME#fleet/v}"
+              ;;
+            hover-hint/v*)
+              package_name=dsh-hover-hint
+              package_dir=packages/dsh-hover-hint
+              version="${GITHUB_REF_NAME#hover-hint/v}"
+              ;;
+            git/v*)
+              package_name=@ch4acko3/dsh-agent-fleet-git
+              package_dir=packages/git
+              version="${GITHUB_REF_NAME#git/v}"
+              ;;
+            lark/v*)
+              package_name=@ch4acko3/dsh-agent-fleet-lark
+              package_dir=packages/lark
+              version="${GITHUB_REF_NAME#lark/v}"
+              ;;
+            patchouli/v*)
+              package_name=dsh-agent-fleet-patchouli
+              package_dir=packages/dsh-fleet-patchouli
+              version="${GITHUB_REF_NAME#patchouli/v}"
+              ;;
+            *)
+              echo "Unsupported release tag: $GITHUB_REF_NAME" >&2
+              exit 1
+              ;;
+          esac
+          manifest_name=$(node -p "require('./${package_dir}/package.json').name")
+          manifest_version=$(node -p "require('./${package_dir}/package.json').version")
+          test "$manifest_name" = "$package_name"
+          test "$manifest_version" = "$version"
+          echo "PACKAGE_NAME=$package_name" >> "$GITHUB_ENV"
+          echo "PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify repository
+        run: pnpm test
+
+      - name: Pack selected package
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/fleet-release"
+          mkdir -p "$artifact_dir"
+          pnpm --filter "$PACKAGE_NAME" pack --pack-destination "$artifact_dir"
+          package_tarballs=("$artifact_dir"/*.tgz)
+          test "${#package_tarballs[@]}" -eq 1
+          echo "PACKAGE_TARBALL=${package_tarballs[0]}" >> "$GITHUB_ENV"
+
+      - name: Publish npm package
+        run: npm publish "$PACKAGE_TARBALL" --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub release
+        run: gh release create "$GITHUB_REF_NAME" "$PACKAGE_TARBALL" --generate-notes --verify-tag --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

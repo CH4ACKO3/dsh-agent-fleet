@@ -1,9 +1,9 @@
-# dsh-fleet-patchouli
+# dsh-agent-fleet-patchouli
 
 Optional Patchouli integration for Agent Fleet. The package has two modules:
 
-- `dsh-fleet-patchouli/adapter` mounts on Fleet and routes runtime events into Patchouli.
-- `dsh-fleet-patchouli/processor` registers directly with Patchouli Core as a third-party processor and fans matching calls out to independently registered algorithm blocks. No ranking or automatic algorithm-selection policy is imposed yet.
+- `dsh-agent-fleet-patchouli/adapter` mounts on Fleet and routes runtime events into Patchouli.
+- `dsh-agent-fleet-patchouli/processor` registers directly with Patchouli Core as a third-party processor and fans matching calls out to independently registered algorithm blocks. No ranking or automatic algorithm-selection policy is imposed yet.
 - `fleet-conversation-history` searches the stable Fleet message log visible to the calling participant. Shared conversations do not depend on which native Session happened to receive or send a relay.
 - `fleet-team-state` and `fleet-team-activity` expose current Team state and bounded durable activity history.
 - `fleet-shared-resources` searches Team resource metadata at low effort and bounded textual content at higher effort.

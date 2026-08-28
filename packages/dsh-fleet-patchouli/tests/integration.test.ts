@@ -48,7 +48,7 @@ function setup(
   }
 }
 
-describe('dsh-fleet-patchouli', () => {
+describe('dsh-agent-fleet-patchouli', () => {
   it('activates only after Fleet and Patchouli services are available and routes durable events by visibility scope', async () => {
     const fixture = setup()
     expect(fixture.dependencies).toEqual(['fleetRuns', 'patchouli'])

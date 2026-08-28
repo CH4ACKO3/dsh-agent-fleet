@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const TOOL_ID = 'memory'
-const STYLE_ID = 'dsh-fleet-patchouli-panel-style'
+const STYLE_ID = 'dsh-agent-fleet-patchouli-panel-style'
 
 function fleetText(chinese: string, english: string): string {
   const locale = typeof document !== 'undefined'
@@ -393,7 +393,7 @@ function installStyles(): void {
   document.head.append(style)
 }
 
-export const name = 'dsh-fleet-patchouli'
+export const name = 'dsh-agent-fleet-patchouli'
 export const inject = ['slots'] as const
 
 export function apply(ctx: ClientContext): void {

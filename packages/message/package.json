@@ -1,6 +1,7 @@
 {
   "name": "@dsh-agent-fleet/message",
   "version": "0.1.0",
+  "private": true,
   "description": "Process-local messaging and coordination tools for DSH Agent Fleet",
   "type": "module",
   "engines": {
@@ -24,9 +25,6 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

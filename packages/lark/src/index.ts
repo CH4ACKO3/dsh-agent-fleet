@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createLarkChannel } from '@larksuite/channel'
-import type {} from '@ch4acko3/dsh-agent-fleet-gateway'
 import type { FleetAuthorizationService } from 'dsh-agent-fleet'
 import { FleetLarkBotConnector, larkBotConnectorId } from './bot.js'
 import {

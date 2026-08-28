@@ -1,6 +1,6 @@
 export type MemoryData = unknown
 
-export const FLEET_MEMORY_PROCESSOR_ID = 'dsh-fleet-patchouli'
+export const FLEET_MEMORY_PROCESSOR_ID = 'dsh-agent-fleet-patchouli'
 export const FLEET_MEMORY_EFFORTS = ['low', 'medium', 'high'] as const
 export type FleetMemoryEffort = typeof FLEET_MEMORY_EFFORTS[number]
 export const DEFAULT_FLEET_MEMORY_EFFORT: FleetMemoryEffort = 'medium'

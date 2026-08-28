@@ -7,7 +7,7 @@ import type {} from 'dsh-agent-fleet'
 import { FLEET_MEMORY_PROCESSOR_ID } from './patchouli.js'
 import type { MemoryData, MemoryPluginOutcome, PatchouliCore } from './patchouli.js'
 
-export const name = 'dsh-fleet-patchouli/adapter'
+export const name = 'dsh-agent-fleet-patchouli/adapter'
 
 const SOURCE = { type: 'fleet', id: name } as const
 
@@ -291,7 +291,7 @@ function install(scope: IntegrationContext): () => Promise<void> {
   const stopEvents = scope.on('fleet/team/event', ({ team, event }) => { enqueue(team, event) })
   return async () => {
     stopEvents()
-    lifetime.abort(new Error('dsh-fleet-patchouli disposed'))
+    lifetime.abort(new Error('dsh-agent-fleet-patchouli disposed'))
     await Promise.allSettled([...queues.values()].map(queue => queue.worker))
     queues.clear()
   }
