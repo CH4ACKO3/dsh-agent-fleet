@@ -105,9 +105,6 @@ jobs:
           else
             npm publish "$PACKAGE_TARBALL" --access public --provenance
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Create GitHub release
         run: gh release create "$GITHUB_REF_NAME" "$PACKAGE_TARBALL" --generate-notes --verify-tag --title "$GITHUB_REF_NAME"
         env:
