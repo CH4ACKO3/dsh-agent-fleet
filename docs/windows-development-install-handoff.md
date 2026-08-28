@@ -17,8 +17,11 @@ Use three separate roots:
 | Development repositories | `%USERPROFILE%\Documents\dsh-dev\<repository>` |
 
 The initial runtime must use registry packages. Do not copy macOS `node_modules`, pnpm links, `/Users/...` profile
-entries, or launchd files. Start the Web instance on `127.0.0.1:3080`; the Memorax bridge listens on
-`127.0.0.1:3081`.
+entries, or launchd files. Start the Web instance on `127.0.0.1:3080`.
+
+Keep model providers and memory integrations separate. This public guide includes the public Patchouli memory stack,
+but it must not install the internal `dsh-llm-memorax` model provider, its local bridge, its gateway configuration, or
+its credentials. Public Memorax memory plugins are independent integrations and are not internal model providers.
 
 ## Loading model
 
@@ -101,7 +104,6 @@ $RuntimePackages = @(
   "dsh-patchouli@0.1.6"
   "dsh-patchouli-native-context-service@0.1.6"
   "dsh-patchouli-memory-ui@0.1.0"
-  "dsh-llm-memorax@0.1.0"
   "dsh-webui-studio@0.2.1"
   "@ch4acko3/dsh-turn-fold@0.4.2"
   "@ch4acko3/dsh-ansi-render@0.1.2"
@@ -148,7 +150,6 @@ Set `dsh.profile.bundles` in `%DSH_HOME%\profiles\web\package.json` to the follo
   "@ch4acko3/dsh-diff-engine",
   "@ch4acko3/dsh-diff-render",
   "@ch4acko3/dsh-ansi-render",
-  "dsh-llm-memorax",
   "dsh-webui-studio"
 ]
 ```
@@ -169,53 +170,28 @@ dsh web --help
 This command must exit normally. If it reports a duplicate `patchouli-native-context`, first remove
 `dsh-patchouli-native-context-service` from `dsh.profile.bundles`; keep it in `dependencies`.
 
-## 4. Configure Memorax and Patchouli
+## 4. Configure the public memory stack
 
-Do not commit the API key. Put it in a user-owned file, for example
-`%USERPROFILE%\.dsh\credentials\deepseek-flash-api.key`, then load it into the user environment:
+Patchouli is a public memory integration. It does not require or imply the internal Memorax model provider or bridge.
+Configure the model provider and its credentials separately through the standard DSH model settings for the target
+deployment.
 
-```powershell
-$KeyFile = Join-Path $DshHome "credentials\deepseek-flash-api.key"
-$ApiKey = (Get-Content $KeyFile -Raw).Trim()
-$env:DEEPSEEK_FLASH_API_KEY = $ApiKey
-[Environment]::SetEnvironmentVariable("DEEPSEEK_FLASH_API_KEY", $ApiKey, "User")
-```
-
-Add these entries to `%DSH_HOME%\profiles\web\cordis.patch.yml`:
+Add this entry to `%DSH_HOME%\profiles\web\cordis.patch.yml`:
 
 ```yaml
-- id: patchouli-native-context
-  config:
-    standardProvider: memorax
-    standardModel: deepseek-v4-flash
-    standardReasoningEffort: ""
-    standardMaxTokens: 2048
-
 - id: patchouli
   config:
     retrieveTimeoutMs: 120000
 ```
 
-For the first run, use two PowerShell windows.
-
-Bridge window:
+For the first run, start Web interactively:
 
 ```powershell
 $env:DSH_HOME = Join-Path $env:USERPROFILE ".dsh"
-$env:DEEPSEEK_FLASH_API_KEY = [Environment]::GetEnvironmentVariable("DEEPSEEK_FLASH_API_KEY", "User")
-dsh plugin --profile web exec dsh-llm-memorax-bridge
-```
-
-Web window:
-
-```powershell
-$env:DSH_HOME = Join-Path $env:USERPROFILE ".dsh"
-$env:DEEPSEEK_FLASH_API_KEY = [Environment]::GetEnvironmentVariable("DEEPSEEK_FLASH_API_KEY", "User")
 dsh web --port 3080
 ```
 
-Only after the interactive run succeeds should the Windows agent turn these two commands into startup tasks or
-services.
+Only after the interactive run succeeds should the Windows agent turn this command into a startup task or service.
 
 ## 5. Optional integrations
 
@@ -293,7 +269,6 @@ git clone https://github.com/CH4ACKO3/dsh-render-engine.git
 git clone https://github.com/CH4ACKO3/dsh-turn-fold.git
 git clone https://github.com/memorax-ai/dsh-harmony.git
 git clone https://github.com/CH4ACKO3/the-binding-of-dsh.git
-git clone https://github.com/memorax-ai/dsh-llm-memorax.git
 ```
 
 Run `pnpm install` and the repository's own build/check command inside the repository being edited. Keep the clean
@@ -314,13 +289,12 @@ First prove a new empty team works. Then migrate data, not runtime installation 
 The receiving agent should not call the migration complete until all of these pass:
 
 1. `dsh web --help` builds the Loader tree without duplicate IDs.
-2. `dsh-llm-memorax-bridge` listens on `127.0.0.1:3081` and reaches the upstream gateway.
-3. `dsh web --port 3080` serves the UI and survives a cold restart.
-4. A team can be created, all assistants load, and a must-reply message is sent with the Fleet message tool.
-5. Memorax `deepseek-v4-flash` completes a normal request.
-6. Patchouli records the interaction, and a later request retrieves it through the Memorax retrieval model.
-7. Markdown rendering, source/comparison views, Git integration, and the budget panel load without browser errors.
-8. The Patchouli Windows daemon restarts with the Web process and preserves its database.
+2. `dsh web --port 3080` serves the UI and survives a cold restart.
+3. A team can be created, all assistants load, and a must-reply message is sent with the Fleet message tool.
+4. The deployment's configured public model provider completes a normal request.
+5. Patchouli records the interaction, and a later request retrieves it through the configured retrieval model.
+6. Markdown rendering, source/comparison views, Git integration, and the budget panel load without browser errors.
+7. The Patchouli Windows daemon restarts with the Web process and preserves its database.
 
 Session Archive and Joyride remain unpublished optional Fleet integrations. Their absence should be recorded as an
 optional capability gap, not treated as a failure of the core Windows install.

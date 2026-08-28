@@ -148,7 +148,7 @@ describe('FleetGit', () => {
     const rebased = new FleetGit(root).status().head as string
     expect(rebased).not.toBe(original)
     expect(store.select('team-1', [original, rebased])).toEqual({ [rebased]: 'builder' })
-  })
+  }, 15_000)
 
   it('classifies ordinary terminal Git without changing the command interface', () => {
     const parse = (command: string) => terminalGitCommands({

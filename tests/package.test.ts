@@ -16,3 +16,10 @@ test('installs and activates required Harmony Providers', () => {
   expect(manifest.peerDependencies?.['the-binding-of-dsh']).toBeUndefined()
   expect(readFileSync(resolve('cordis.patch.yml'), 'utf8')).not.toContain('the-binding-of-dsh')
 })
+
+test('bundles browser-only dependencies into the published client module', () => {
+  const client = readFileSync(resolve('lib/client.js'), 'utf8')
+
+  expect(client).not.toContain('require("zod")')
+  expect(client).toContain('node_modules/zod/')
+})

@@ -419,7 +419,7 @@ export class FleetGit {
   get root(): string {
     const root = git(this.projectRoot, ['rev-parse', '--show-toplevel'], true)
     if (root.length === 0) throw new FleetGitNotRepositoryError(this.projectRoot)
-    return root
+    return canonical(root)
   }
 
   private commonDirectory(cwd: string): string {
@@ -489,7 +489,7 @@ export class FleetGit {
   }
 
   status(cwd = this.projectRoot): FleetGitStatus {
-    const root = git(cwd, ['rev-parse', '--show-toplevel'])
+    const root = canonical(git(cwd, ['rev-parse', '--show-toplevel']))
     const branch = git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], true)
     const head = git(cwd, ['rev-parse', '--verify', 'HEAD'], true)
     return {

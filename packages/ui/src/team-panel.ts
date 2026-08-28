@@ -9331,7 +9331,7 @@ function TeamSettingsDialog({ sessionId, team, initialTab = 'general', loadSetti
                   jsx('h3', { children: panelText('模型与推理', 'Model & reasoning') }),
                   jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('统一修改普通成员和团队助理；不会暂停或重启 Agent，从下一次模型调用开始生效。', 'Apply one configuration to members and Team assistants without pausing or restarting Agents. It takes effect on the next model call.') }),
                   manualModelEntry ? jsxs('div', { className: 'dsh-fleet-panel-settings-model-grid', children: [
-                    jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: 'Provider' }), jsx('input', { value: providerName, placeholder: settings.request.mixed.model && !modelDirty ? panelText('当前成员配置不一致', 'Current member settings differ') : 'memorax', onChange: (event: ChangeEvent<HTMLInputElement>) => { setProviderName(event.currentTarget.value); setModelDirty(true) } })] }),
+                    jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: 'Provider' }), jsx('input', { value: providerName, placeholder: settings.request.mixed.model && !modelDirty ? panelText('当前成员配置不一致', 'Current member settings differ') : 'provider-id', onChange: (event: ChangeEvent<HTMLInputElement>) => { setProviderName(event.currentTarget.value); setModelDirty(true) } })] }),
                     jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('模型名称', 'Model name') }), jsx('input', { value: modelName, placeholder: settings.request.mixed.model && !modelDirty ? panelText('当前成员配置不一致', 'Current member settings differ') : 'deepseek-v4-flash', onChange: (event: ChangeEvent<HTMLInputElement>) => { setModelName(event.currentTarget.value); setModelDirty(true) } })] }),
                   ] }) : jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('模型', 'Model') }), jsx('select', { value: modelKey, disabled: modelDirectoryState.status === 'loading', onChange: (event: ChangeEvent<HTMLSelectElement>) => { setModelKey(event.currentTarget.value); setModelDirty(true) }, children: [
                     settings.request.mixed.model && !modelDirty && jsx('option', { value: '', children: panelText('当前成员配置不一致', 'Current member settings differ') }),
@@ -13681,7 +13681,7 @@ function MemberRequestConfiguration({ owner, member, assistant }: {
         manualModelEntry ? jsxs(Fragment, { children: [
           jsxs('label', { className: 'dsh-fleet-panel-member-request-field', children: [
             jsx('span', { children: 'Provider' }),
-            jsx('input', { value: providerName, disabled: saving || configure === undefined, placeholder: 'memorax', onChange: (event: ChangeEvent<HTMLInputElement>) => { setProviderName(event.currentTarget.value); setModelDirty(true); setNotice(undefined) } }),
+            jsx('input', { value: providerName, disabled: saving || configure === undefined, placeholder: 'provider-id', onChange: (event: ChangeEvent<HTMLInputElement>) => { setProviderName(event.currentTarget.value); setModelDirty(true); setNotice(undefined) } }),
           ] }),
           jsxs('label', { className: 'dsh-fleet-panel-member-request-field', children: [
             jsx('span', { children: panelText('模型名称', 'Model name') }),
