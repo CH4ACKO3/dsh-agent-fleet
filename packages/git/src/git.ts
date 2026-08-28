@@ -273,7 +273,7 @@ function canonical(path: string): string {
     suffix.unshift(basename(cursor))
     cursor = parent
   }
-  return resolve(realpathSync(cursor), ...suffix)
+  return resolve(realpathSync.native(cursor), ...suffix)
 }
 
 function parseChanges(output: string): FleetGitChange[] {
@@ -296,7 +296,7 @@ function parseWorktrees(output: string): FleetGitWorktree[] {
     }))
     const branch = fields.get('branch')?.replace(/^refs\/heads\//, '')
     return {
-      path: fields.get('worktree') ?? '',
+      path: canonical(fields.get('worktree') ?? ''),
       head: fields.get('HEAD') ?? '',
       ...(branch === undefined ? {} : { branch }),
       detached: fields.has('detached'),

@@ -62,7 +62,7 @@ describe('FleetGitRecallService', () => {
     const hash = snapshot?.commits[0]?.hash ?? ''
 
     expect(snapshot).toMatchObject({
-      status: { root: realpathSync(fixture.root), changes: [expect.objectContaining({ path: 'README.md' })] },
+      status: { root: realpathSync.native(fixture.root), changes: [expect.objectContaining({ path: 'README.md' })] },
     })
     expect(fixture.service.commit({ ...fixture.input, hash }, signal)).toMatchObject({ hash })
     expect(fixture.service.diff({ ...fixture.input, path: 'README.md' }, signal)).toMatchObject({
@@ -73,7 +73,7 @@ describe('FleetGitRecallService', () => {
       teamId: 'team-1',
       subject: { kind: 'member', id: 'lead' },
       action: 'git.inspect',
-      resource: { kind: 'git-repository', id: realpathSync(fixture.root) },
+      resource: { kind: 'git-repository', id: realpathSync.native(fixture.root) },
     })
     expect('fetch' in fixture.service).toBe(false)
   })

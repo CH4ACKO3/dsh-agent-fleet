@@ -107,7 +107,7 @@ describe('FleetGitWebRemote', () => {
 
     const snapshot = remote.snapshot({ root, limit: 20 }, signal)
     expect(snapshot).toMatchObject({
-      status: { root: realpathSync(root), changes: [expect.objectContaining({ path: 'README.md', worktree: 'M' })] },
+      status: { root: realpathSync.native(root), changes: [expect.objectContaining({ path: 'README.md', worktree: 'M' })] },
       commits: [expect.objectContaining({ subject: 'Initial commit' })],
     })
     const hash = snapshot?.commits[0]?.hash ?? ''
@@ -117,7 +117,7 @@ describe('FleetGitWebRemote', () => {
     })
     expect(remote.diff({ root, path: 'README.md' }, signal)).toMatchObject({ staged: false, truncated: false })
     expect(remote.fetch({ root }, signal)).toMatchObject({
-      status: { root: realpathSync(root) },
+      status: { root: realpathSync.native(root) },
       commits: [expect.objectContaining({ subject: 'Initial commit' })],
     })
     expect(FLEET_GIT_WEB_REMOTE.descriptors.every(descriptor =>

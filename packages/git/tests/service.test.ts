@@ -342,7 +342,7 @@ describe('FleetGit', () => {
   it('checks repository, workspace, branch, and path scope before terminal Git operations', () => {
     const root = repository()
     const fleetGit = new FleetGit(root)
-    const canonicalRoot = realpathSync(root)
+    const canonicalRoot = realpathSync.native(root)
     writeFileSync(join(root, 'README.md'), '# Fleet\n')
     commit(root, 'Initialize Fleet project', ['README.md'])
     const branch = fleetGit.status().branch as string
@@ -361,7 +361,7 @@ describe('FleetGit', () => {
   it('binds writes to a created member worktree while retaining read access to the main workspace', () => {
     const root = repository()
     const fleetGit = new FleetGit(root)
-    const canonicalRoot = realpathSync(root)
+    const canonicalRoot = realpathSync.native(root)
     writeFileSync(join(root, 'README.md'), '# Fleet\n')
     commit(root, 'Initialize Fleet project', ['README.md'])
     const worktree = fleetGit.createWorktree('reviewer')
@@ -370,8 +370,8 @@ describe('FleetGit', () => {
     expect(() => fleetGit.scope('reviewer', root, workspaces, 'write')).toThrow('is bound to worktree')
     expect(fleetGit.scope('reviewer', root, workspaces, 'read')).toMatchObject({ cwd: canonicalRoot })
     expect(fleetGit.scope('reviewer', worktree.path, workspaces, 'write')).toMatchObject({
-      cwd: realpathSync(worktree.path),
-      worktree: realpathSync(worktree.path),
+      cwd: realpathSync.native(worktree.path),
+      worktree: realpathSync.native(worktree.path),
       boundBranch: 'fleet/team/reviewer',
       branch: 'fleet/team/reviewer',
     })
@@ -393,7 +393,7 @@ describe('FleetGit', () => {
     expect(context).toMatchObject({
       member: 'lead',
       changes: [],
-      peers: [{ member: 'reviewer', path: realpathSync(reviewer.path), branch: 'fleet/team/reviewer' }],
+      peers: [{ member: 'reviewer', path: realpathSync.native(reviewer.path), branch: 'fleet/team/reviewer' }],
     })
     expect(context.recentCommits[0]).toMatchObject({ subject: 'Implement lead work' })
     expect(fleetGit.compare('lead', 'reviewer', root)).toMatchObject({
