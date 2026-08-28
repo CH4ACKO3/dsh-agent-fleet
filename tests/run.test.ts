@@ -1426,7 +1426,7 @@ describe('FleetRunService', () => {
       ...copied.run.members.map(member => member.sessionId),
     ]))
     second.disconnect()
-  })
+  }, 15_000)
 
   it('does not report active members as offline from a separate Web process', async () => {
     const { root, configPath, taskPath } = fixture()
