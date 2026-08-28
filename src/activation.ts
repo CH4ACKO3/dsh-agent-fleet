@@ -109,6 +109,17 @@ export async function activateFleetFromMessages(
           delivery: 'wakeup',
           mentions: created.run.members.map(member => `@${member.name}`),
         })
+        const assistant = created.run.assistants.find(candidate => candidate.sessionId === String(agent.id))
+          ?? created.run.assistants[0]
+        if (assistant !== undefined) {
+          connection.runs.sendUserConversationMessage({
+            runId: created.run.id,
+            to: `@${assistant.view.id}`,
+            text: activation.initialIdea,
+            delivery: 'wakeup',
+            mustReply: true,
+          })
+        }
       }
     }
   }

@@ -4666,19 +4666,25 @@ export class FleetRunService {
     }
     const registeredHere = this.assistantToolAgents.has(caller)
     if (registeredHere) return
-    if (typeof ready.tools?.register === 'function') {
-      const configured = runtime.memberViews.get(assistantId)?.toolGroups ?? []
-      const hostHasProgress = typeof ready.tools.get === 'function'
-        && ready.tools.get('fleet_progress') !== undefined
+    const configured = runtime.memberViews.get(assistantId)?.toolGroups ?? []
+    // Lightweight Agent test/runtime adapters sometimes expose services as
+    // ordinary own properties. That path is safe to inspect synchronously.
+    // Real Cordis contexts expose services through a proxy, where even an
+    // optional `ctx.fs` probe without inject is intentionally an error.
+    const directTools = Object.hasOwn(ready, 'tools') ? ready.tools : undefined
+    const directFs = Object.hasOwn(ready, 'fs')
+    if (typeof directTools?.register === 'function') {
+      const hostHasProgress = typeof directTools.get === 'function'
+        && directTools.get('fleet_progress') !== undefined
       const stop = runtime.installTools(callerCtx, assistantId, {
         exposeHostFleetTools: true,
         toolGroups: configured.filter(group =>
-          (ready.fs !== undefined || group !== 'resources')
+          (directFs || group !== 'resources')
           && (!hostHasProgress || group !== 'status'),
         ),
       })
-      if (typeof ready.tools.get === 'function'
-        && ready.tools.get('fleet_messages', caller) === undefined) {
+      if (typeof directTools.get === 'function'
+        && directTools.get('fleet_messages', caller) === undefined) {
         stop()
         throw new Error('Fleet assistant message tools were not visible in the Agent scope after installation')
       }
@@ -4686,11 +4692,23 @@ export class FleetRunService {
       return
     }
     if (typeof ready.inject !== 'function') return
-    // Mark the binding only after Cordis has actually supplied its dependencies.
-    // Previously a pending inject was treated as installed, so a later attach
-    // could not retry and a foreground assistant could permanently miss fleet_send.
+    // Agent contexts can expose one service (for example tools) without granting
+    // direct access to another one. Probing `callerCtx.fs` outside an injected
+    // fiber is therefore not an availability check: Cordis correctly throws
+    // "cannot get property ... without inject". Always create the durable tool
+    // binding from a scope that explicitly injects both services.
     await callerCtx.inject(['fs', 'tools'], (scope) => {
-      const stop = runtime.installTools(scope, assistantId, { exposeHostFleetTools: true })
+      const hostHasProgress = scope.tools.get('fleet_progress') !== undefined
+      const stop = runtime.installTools(scope, assistantId, {
+        exposeHostFleetTools: true,
+        toolGroups: configured.filter(group =>
+          !hostHasProgress || group !== 'status',
+        ),
+      })
+      if (scope.tools.get('fleet_messages', caller) === undefined) {
+        stop()
+        throw new Error('Fleet assistant message tools were not visible in the Agent scope after installation')
+      }
       this.assistantToolAgents.add(caller)
       return stop
     })

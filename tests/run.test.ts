@@ -418,6 +418,44 @@ function setup(root: string, options?: {
 }
 
 describe('FleetRunService', () => {
+  it('injects filesystem access before installing foreground assistant resource tools', async () => {
+    const { root, configPath } = fixture()
+    const configuration = JSON.parse(readFileSync(configPath, 'utf8')) as {
+      core: { assistant: { toolGroups?: string[] } }
+    }
+    configuration.core.assistant.toolGroups = ['messages', 'resources']
+    writeFileSync(configPath, JSON.stringify(configuration))
+    const { service, launcher, context, disconnect } = setup(root)
+    const registered = new Map<string, unknown>()
+    context.provide('tools', {
+      register: (tool: { readonly name: string }) => {
+        registered.set(tool.name, tool)
+        return () => { registered.delete(tool.name) }
+      },
+      restrict: () => () => {},
+      guard: () => () => {},
+      get: (name: string) => registered.get(name),
+    })
+    await context.plugin((scope) => {
+      launcher.ctx = scope
+    })
+
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    expect(run).toMatchObject({
+      status: 'idle',
+      assistants: [expect.objectContaining({
+        view: expect.objectContaining({ toolGroups: expect.arrayContaining(['resources']) }),
+      })],
+    })
+    expect(registered.has('fleet_messages')).toBe(true)
+    expect(registered.has('fleet_tools')).toBe(true)
+    disconnect()
+  })
+
   it('interrupts a Team assistant without pausing or disconnecting it', async () => {
     const { root, configPath } = fixture()
     const { service, launcher, disconnect } = setup(root)

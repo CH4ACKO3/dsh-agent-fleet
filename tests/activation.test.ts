@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { encodeFleetActivation } from '@dsh-agent-fleet/core/activation'
 import { activateFleetFromMessages } from '../src/activation.js'
 
-const agent = {} as Agent
+const agent = { id: 'setup-session' } as Agent
 
 describe('Fleet UI activation bridge', () => {
   it('activates guide mode and strips the private envelope before the turn enters', async () => {
@@ -39,7 +39,11 @@ describe('Fleet UI activation bridge', () => {
     const stage = vi.fn(() => ({ phase: 'setup', configuration }))
     const create = vi.fn(async () => ({
       setup: { phase: 'operating', configuration },
-      run: { id: 'team-created', members: [{ name: 'lead' }, { name: 'reviewer' }] },
+      run: {
+        id: 'team-created',
+        members: [{ name: 'lead' }, { name: 'reviewer' }],
+        assistants: [{ sessionId: 'setup-session', view: { id: 'team-assistant' } }],
+      },
     }))
     const sendUserConversationMessage = vi.fn()
     const incoming = createUserMessage({
@@ -61,13 +65,22 @@ describe('Fleet UI activation bridge', () => {
 
     expect(stage).toHaveBeenCalledWith(agent, { configuration })
     expect(create).toHaveBeenCalledWith(agent)
-    expect(sendUserConversationMessage).toHaveBeenCalledWith({
-      runId: 'team-created',
-      to: '#main',
-      text: '开始工作',
-      delivery: 'wakeup',
-      mentions: ['@lead', '@reviewer'],
-    })
+    expect(sendUserConversationMessage.mock.calls).toEqual([
+      [{
+        runId: 'team-created',
+        to: '#main',
+        text: '开始工作',
+        delivery: 'wakeup',
+        mentions: ['@lead', '@reviewer'],
+      }],
+      [{
+        runId: 'team-created',
+        to: '@team-assistant',
+        text: '开始工作',
+        delivery: 'wakeup',
+        mustReply: true,
+      }],
+    ])
     expect(decision).toMatchObject({
       kind: 'enter',
       messages: [{ content: [{ type: 'text', text: '开始工作' }] }],
