@@ -58,16 +58,18 @@ export async function activateResidentFleetAssistants(
           const handle = await ctx.agents.resume({
             resumeSessionId: SessionId(assistant.sessionId),
             agentOptions: assistantAgentOptions(run, assistant),
-            setup: async agentCtx => {
-              if (agentCtx.agent === undefined) throw new Error('Fleet assistant resume requires ctx.agent')
-              await activate(agentCtx.agent, run, assistant)
-            },
           })
+          try {
+            // The MessageHub resolves agents from the published registry, so
+            // collaboration attachment must happen after resume returns.
+            await activate(handle.agent, run, assistant)
+          } catch (error) {
+            await handle.dispose()
+            throw error
+          }
           handles.set(assistant.sessionId, handle)
-          // `setup` runs while the resumed Agent is unpublished. Effects added
-          // there belong to that temporary setup fiber and can unwind when the
-          // callback returns. Bind Fleet tools only after resume has published
-          // the Agent and returned its durable handle.
+          // Bind Fleet tools only after resume has published the Agent and
+          // collaboration attachment can resolve it from the live registry.
           runs.agentSessionStarted?.(handle.agent)
         } catch (error) {
           ctx.logger('dsh-agent-fleet').warn(

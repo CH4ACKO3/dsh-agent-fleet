@@ -214,8 +214,10 @@ describe('resident Fleet assistants', () => {
     const live = { id: 'session-live' } as Agent
     const resumed = { id: 'session-resumed' } as Agent
     const dispose = vi.fn(() => Promise.resolve())
+    let resumedPublished = false
     const resume = vi.fn(async (options: ResumeAgentOptions) => {
       await options.setup?.({ agent: resumed } as unknown as Context)
+      resumedPublished = true
       return { agent: resumed, dispose }
     })
     const warn = vi.fn()
@@ -236,10 +238,15 @@ describe('resident Fleet assistants', () => {
       agentOptions: { provider: 'provider-fallback', model: 'model-fallback', maxTokens: 512 },
       assistants,
     }
-    const attachAssistant = vi.fn(async (agent: Agent, input: { readonly assistantId?: string }) => ({
-      run,
-      assistant: assistants.find(assistant => assistant.view.id === input.assistantId) ?? assistants[0]!,
-    }))
+    const attachAssistant = vi.fn(async (agent: Agent, input: { readonly assistantId?: string }) => {
+      if (agent === resumed && !resumedPublished) {
+        throw new Error('resumed assistant was attached before publication')
+      }
+      return {
+        run,
+        assistant: assistants.find(assistant => assistant.view.id === input.assistantId) ?? assistants[0]!,
+      }
+    })
     const activate = vi.fn()
 
     const residents = await activateResidentFleetAssistants(

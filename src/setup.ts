@@ -52,7 +52,8 @@ export interface FleetSetupServiceOptions {
 interface FleetSetupRunService {
   create(launcher: Agent, input: CreateRunInput): Promise<FleetRunRecord>
   findBySetupId(setupId: string, projectRoot: string): FleetRunRecord | undefined
-  agentSessionStarted?(agent: Agent): void
+  attachAssistant?(caller: Agent, input: { readonly runId: string; readonly assistantId?: string }): Promise<unknown>
+  agentSessionStarted?(agent: Agent, recoverRequiredTask?: boolean): void
 }
 
 export interface BeginFleetSetupInput {
@@ -276,6 +277,7 @@ export class FleetSetupService {
   private readonly directory: string
   private readonly configuration: FleetConfigurationRegistry
   private readonly creations = new Map<string, Promise<FleetSetupCreation>>()
+  private readonly reconnections = new Map<string, Promise<void>>()
 
   constructor(
     private readonly assistant: FleetAssistantRuntime,
@@ -318,7 +320,24 @@ export class FleetSetupService {
       const run = this.runs.findBySetupId(record.setupId, record.projectRoot)
       const view = run?.assistants?.find(candidate => candidate.sessionId === String(agent.id))?.view
       this.assistant.activate(agent, record.runId, view)
-      this.runs.agentSessionStarted?.(agent)
+      const attach = this.runs.attachAssistant
+      if (run === undefined || attach === undefined) {
+        this.runs.agentSessionStarted?.(agent)
+      } else {
+        const sessionId = String(agent.id)
+        if (!this.reconnections.has(sessionId)) {
+          const reconnect = attach.call(this.runs, agent, {
+            runId: run.id,
+            ...(view === undefined ? {} : { assistantId: view.id }),
+          })
+            .then(() => { this.runs.agentSessionStarted?.(agent, true) })
+            .finally(() => {
+              if (this.reconnections.get(sessionId) === reconnect) this.reconnections.delete(sessionId)
+            })
+          this.reconnections.set(sessionId, reconnect)
+          void reconnect.catch(() => {})
+        }
+      }
     }
     else this.assistant.activateGuide(agent, record.setupId)
     return recordSnapshot(record)

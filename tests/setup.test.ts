@@ -44,6 +44,10 @@ function runRecord(id: string, sourceSetupId: string, projectRoot: string): Flee
     coordinator: 'fleet-coordinator',
     launcherSessionId: 'assistant-session',
     members: [],
+    assistants: [{
+      sessionId: 'assistant-session',
+      view: { id: 'team-assistant', name: 'River', role: 'Team Assistant', prompt: '' },
+    }],
     status: 'idle',
     settled: true,
     startedAt: new Date().toISOString(),
@@ -226,6 +230,31 @@ describe('FleetSetupService', () => {
     expect(restored?.initialIdea).toBeUndefined()
     expect(restored?.configuration).toMatchObject({ core: { name: 'Product engineering' } })
     expect(restartedAssistant.status(fixture.agent).phase).toBe('setup')
+  })
+
+  it('reattaches an operating assistant before checking its pending work', async () => {
+    const fixture = setupFixture()
+    const begun = fixture.service.begin(fixture.agent)
+    fixture.service.stage(fixture.agent, { configuration: configuration() })
+    const created = await fixture.service.create(fixture.agent)
+    const attachAssistant = vi.fn(async () => created)
+    const agentSessionStarted = vi.fn()
+    const restartedAssistant = new FleetAssistantRuntime()
+    const restarted = new FleetSetupService(restartedAssistant, {
+      create: fixture.create,
+      findBySetupId: setupId => setupId === begun.setupId ? created.run : undefined,
+      attachAssistant,
+      agentSessionStarted,
+    }, { directory: fixture.setupDirectory })
+
+    const restored = restarted.restore(fixture.agent)
+
+    expect(restored?.phase).toBe('operating')
+    await vi.waitFor(() => expect(attachAssistant).toHaveBeenCalledWith(fixture.agent, {
+      runId: created.run.id,
+      assistantId: 'team-assistant',
+    }))
+    await vi.waitFor(() => expect(agentSessionStarted).toHaveBeenCalledWith(fixture.agent, true))
   })
 
   it('rejects incomplete members', () => {

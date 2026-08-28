@@ -117,6 +117,11 @@ class FakeAgent implements RuntimeAgent {
     this.accept(message)
   }
 
+  steer(message: UserMessage): void {
+    this.inbox.nextStep.push(message)
+    this.accept(message)
+  }
+
   completeTurn(): void {
     this.status = 'idle'
     for (const resolvePromise of this.idleWaiters.splice(0)) resolvePromise()
@@ -531,6 +536,38 @@ describe('FleetRunService', () => {
 
     await residents.dispose()
     second.disconnect()
+  })
+
+  it('loads a persisted Team with an unfinished assistant must-reply task', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+    first.service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${assistantId}`,
+      text: 'Persist this required assistant task.',
+      delivery: 'quiet',
+      mustReply: true,
+    })
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, {
+      launcherId: 'replacement-launcher',
+      persisted: first.persisted,
+      persistedHeaders: first.persistedHeaders,
+    })
+
+    expect(second.service.list().map(candidate => candidate.id)).toContain(run.id)
+    expect(second.service.status(run.id).assistants[0]?.view.id).toBe(assistantId)
+    second.disconnect()
+    await second.core.close()
   })
 
   it('notifies web observers after durable and live member changes', async () => {
@@ -4095,6 +4132,56 @@ describe('FleetRunService', () => {
     const afterComplete = launcher.messages.length
     service.agentIdle(launcher as unknown as Agent)
     expect(launcher.messages).toHaveLength(afterComplete)
+    disconnect()
+  })
+
+  it('restarts a required assistant task after its Session is reattached', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected attached Fleet assistant')
+    service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${assistantId}`,
+      text: 'Resume this required task after reconnecting.',
+      delivery: 'quiet',
+      mustReply: true,
+    })
+    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
+    if (requiredTask === undefined) throw new Error('expected required task')
+    const scoped = new FakeAgentContext() as FakeAgentContext & {
+      tools: {
+        register(tool: { readonly name: string }): () => void
+        restrict(): () => void
+        guard(): () => void
+        get(name: string): unknown
+      }
+    }
+    scoped.tools = {
+      register: () => () => {},
+      restrict: () => () => {},
+      guard: () => () => {},
+      get: name => ['fleet_send', 'fleet_followup', 'fleet_progress', 'fleet_messages'].includes(name) ? { name } : undefined,
+    }
+    launcher.ctx = scoped as unknown as Context
+    launcher.status = 'idle'
+    const beforeReconnect = launcher.messages.length
+    const beforeNextTurn = launcher.inbox.nextTurn.length
+    const beforeNextStep = launcher.inbox.nextStep.length
+
+    service.agentSessionStarted(launcher as unknown as Agent, true)
+
+    await vi.waitFor(() => expect(launcher.messages).toHaveLength(beforeReconnect + 1))
+    expect(launcher.inbox.nextTurn).toHaveLength(beforeNextTurn + 1)
+    expect(launcher.inbox.nextStep).toHaveLength(beforeNextStep)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining(requiredTask.id) }),
+    ])
     disconnect()
   })
 

@@ -2142,7 +2142,7 @@ export class FleetRunService {
   }
 
   /** Complete assistant tool binding once the native Agent scope is composed. */
-  agentSessionStarted(agent: Agent): void {
+  agentSessionStarted(agent: Agent, recoverRequiredTask = false): void {
     const sessionId = String(agent.id)
     const entry = this.collaboration.entries().find(([runId, runtime]) =>
       runtime.memberNamesById.has(sessionId)
@@ -2154,6 +2154,13 @@ export class FleetRunService {
     if (assistantId === undefined) return
     void this.installAssistantTools(agent, runtime, assistantId)
       .then(() => {
+        const record = this.records.get(runId)
+        if (
+          recoverRequiredTask
+          && agent.status !== 'running'
+          && record !== undefined
+          && this.continueRequiredTask(runId, runtime, record, agent)
+        ) return
         if (agent.status === 'idle') this.agentIdle(agent)
       })
       .catch((error: unknown) => {
@@ -7784,6 +7791,13 @@ export class FleetRunService {
     for (const member of record.members) {
       runtime.memberIdsByName.set(member.name, member.sessionId)
       runtime.memberNamesById.set(member.sessionId, member.name)
+    }
+    // Coordination replay can recreate durable must-reply tasks before a
+    // resident assistant Session is resumed. Seed its persisted identity now
+    // so task assignees resolve during replay; live attachment follows later.
+    for (const assistant of record.assistants) {
+      runtime.memberIdsByName.set(assistant.view.id, assistant.sessionId)
+      runtime.memberNamesById.set(assistant.sessionId, assistant.view.id)
     }
     runtime.restore(this.collaborationState(record, events))
   }

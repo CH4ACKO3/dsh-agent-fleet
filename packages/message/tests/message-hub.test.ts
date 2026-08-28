@@ -882,6 +882,16 @@ describe('MessageHub', () => {
       expect.objectContaining({ type: 'text', text: 'Task due reminder updated.' }),
     ])
 
+    const rewoken = hub.sendSystemNotification(reviewer.id, {
+      kind: 'task_notice',
+      text: 'Task is still due after reconnecting.',
+      delivery: 'wakeup',
+      coalesceKey: 'task:task_1',
+    })
+    expect(rewoken).toEqual({ contextMessageId: quiet.contextMessageId, disposition: 'followed-up' })
+    expect(reviewer.inbox.nextTurn).toHaveLength(1)
+    expect(reviewer.followedUp.at(-1)).toBe('Task is still due after reconnecting.')
+
     expect(hub.sendSystemNotification(reviewer.id, {
       kind: 'network_recovery',
       text: 'Retry only after checking external side effects.',
@@ -894,7 +904,7 @@ describe('MessageHub', () => {
     expect(hub.search(reviewer)).toEqual([])
     expect(hub.inbox(reviewer)).toEqual([])
     expect(events.filter(event => event.type === 'system_notification').map(event => event.action))
-      .toEqual(['injected', 'followed-up', 'replaced', 'interrupted'])
+      .toEqual(['injected', 'followed-up', 'replaced', 'followed-up', 'interrupted'])
   })
 
   it('keeps quiet direct and Meeting messages non-waking across restore', () => {

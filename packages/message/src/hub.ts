@@ -562,8 +562,7 @@ export class MessageHub {
     const pending = coalesceKey === undefined
       ? undefined
       : this.findPendingSystemNotification(target, coalesceKey)
-    if (pending !== undefined && notification.delivery !== 'interrupt'
-      && (notification.delivery === 'quiet' || pending.queue === 'nextTurn')) {
+    if (pending !== undefined && notification.delivery === 'quiet') {
       const replacement = { ...created, id: pending.message.id }
       if (typeof target.inbox?.replace === 'function'
         && target.inbox.replace(pending.message.id, replacement)) {
