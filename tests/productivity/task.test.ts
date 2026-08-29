@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { FleetMemberDirectory } from '@dsh-agent-fleet/core'
-import { FleetTaskBoard, parseFleetTaskState } from '../../src/productivity/task.js'
+import { FleetTaskBoard, installTaskTools, parseFleetTaskState } from '../../src/productivity/task.js'
 
 const members = [
   { id: 'agent-lead', name: 'lead' },
@@ -94,6 +94,33 @@ describe('FleetTaskBoard', () => {
     })
     expect(finalReplies).toEqual(['Inspection passed.'])
     expect(restored.pendingRequirement('qa')).toBeUndefined()
+  })
+
+  it('lets an assignee complete only their own message requirement without task.update', async () => {
+    const board = new FleetTaskBoard(directory)
+    const required = board.ensureMessageTask({
+      messageId: 'msg_required', conversation: '@reviewer', createdBy: 'lead', assignee: 'reviewer',
+      title: 'Required reply', description: 'Return a final answer.',
+    })
+    const ordinary = board.create('agent-lead', { title: 'Ordinary task', assignees: ['reviewer'] })
+    const registered: Array<{
+      readonly name: string
+      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
+    }> = []
+    installTaskTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} } },
+    } as never, board, (_agentId, action) => action === 'task.read')
+    const tool = registered.find(candidate => candidate.name === 'fleet_task')
+    if (tool === undefined) throw new Error('expected fleet_task')
+
+    await expect(tool.execute(
+      { action: 'complete', id: required.id, final_reply: 'Completed result.' },
+      { agent: { id: 'agent-reviewer' } },
+    )).resolves.toMatchObject({ task: { status: 'completed' } })
+    await expect(async () => tool.execute(
+      { action: 'complete', id: ordinary.id },
+      { agent: { id: 'agent-reviewer' } },
+    )).rejects.toThrow('not authorized for task.update')
   })
 
   it('freezes deadline timers while paused and persists before waking', async () => {

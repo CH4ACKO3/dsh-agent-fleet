@@ -1652,7 +1652,10 @@ export class MessageHub {
     const mustReply = this.requiresReply(message, target.id)
     const replyMarker = mustReply ? ' | must-reply' : ''
     const replyInstruction = mustReply ? `\n${this.requiredActionInstruction(message)}` : ''
-    const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}${replyInstruction}`
+    const directInstruction = message.conversation.startsWith('@')
+      ? '\nThis direct message is complete in context; do not call fleet_messages merely to read it again.'
+      : ''
+    const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}${replyInstruction}${directInstruction}`
     const input = createUserMessage({
       content: [{ type: 'text', text }],
       source: message.origin === 'user'
@@ -1662,6 +1665,14 @@ export class MessageHub {
     this.dispatchContext(target, input, wake ? message.delivery : 'quiet')
     const sessionId = target.sessionId ?? target.id
     this.rememberDelivery(target.id, message.id, String(input.id), sessionId, 'full')
+    const stillPending = target.inbox === undefined
+      ? undefined
+      : [...target.inbox.nextStep, ...target.inbox.nextTurn].some(candidate => candidate.id === input.id)
+    // An idle Agent may synchronously claim a wakeup inside followup()/steer(),
+    // before rememberDelivery has installed the context-to-message mapping.
+    // Reconcile that narrow race after dispatch; queued input remains unread
+    // until the ordinary agent/inbox/claimed event consumes it.
+    if (stillPending === false) this.markDeliveredContextRead(target.id, String(input.id))
     this.emit({
       type: 'inbox',
       action: 'delivered',

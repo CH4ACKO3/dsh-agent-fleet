@@ -34,6 +34,8 @@ const MESSAGE_SCHEMA = {
     conversationId: { type: 'string' },
     from: { type: 'string', required: true },
     fromName: { type: 'string' },
+    origin: { type: 'string', enum: ['user'] },
+    recipientIds: { type: 'array', items: { type: 'string' } },
     text: { type: 'string', required: true },
     replyTo: { type: 'string' },
     mustReply: { type: 'boolean' },
@@ -445,7 +447,7 @@ export function installMessageTools(
   if (options.messages !== false) {
   register(defineTool({
     name: 'fleet_send',
-    description: 'Send a process-local Fleet message without waking an idle Agent. The @ in to is routing only, and writing @Name only in message text is display text. Put must-complete targets in mentions; a full Fleet host promotes each resolved mention to a persistent task. Ordinary direct messages and replies create no obligation. Use #channel as a shared asynchronous log and reply_to for a message thread.',
+    description: 'Send a process-local Fleet message without waking an idle Agent. The @ in to is routing only, and writing @Name only in message text is display text. Put must-complete targets in mentions; a full Fleet host promotes each resolved mention to a persistent task. Ordinary direct messages and replies create no obligation. Use #channel as a shared asynchronous log and reply_to for a message thread. After this satisfies the current communication need, avoid unrelated follow-up tools.',
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },

@@ -98,6 +98,27 @@ function boundedRetrieval(
   )))
 }
 
+function isAutomaticAgentRecall(request: MemoryRequest): boolean {
+  if (request.meta.source.type !== 'agent-loop') return false
+  const point = request.meta.attributes?.point
+  return typeof point === 'string' && point !== 'tool/memory-retrieve'
+}
+
+function automaticRecallResult(
+  result: Record<string, unknown>,
+  handled: boolean,
+): MemoryData {
+  const items = Array.isArray(result.items) ? result.items : []
+  if (!handled || items.length === 0) return null
+  return {
+    items,
+    ...(result.truncated === true ? { truncated: true } : {}),
+    ...(result.truncated === true && typeof result.totalItems === 'number'
+      ? { totalItems: result.totalItems }
+      : {}),
+  }
+}
+
 function selectAlgorithms(
   algorithms: readonly FleetMemoryAlgorithm[],
   call: MemoryRouteCall,
@@ -234,7 +255,8 @@ async function dispatch(
       : undefined
     return Array.isArray(value?.items) ? value.items : []
   })
-  return boundedRetrieval(base, items, effort)
+  const result = boundedRetrieval(base, items, effort)
+  return isAutomaticAgentRecall(request) ? automaticRecallResult(result, handled) : result
 }
 
 export function createFleetMemoryProcessor(

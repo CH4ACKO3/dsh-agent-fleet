@@ -1,14 +1,17 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { encodeFleetActivation } from '@dsh-agent-fleet/core/activation'
 import { activateFleetFromMessages } from '../src/activation.js'
 
-const agent = { id: 'setup-session' } as Agent
+const followup = vi.fn()
+const agent = { id: 'setup-session', followup } as unknown as Agent
 
 describe('Fleet UI activation bridge', () => {
-  it('activates guide mode and strips the private envelope before the turn enters', async () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('activates guide mode and requeues the clean message after its prompt is installed', async () => {
     const begin = vi.fn(() => ({ phase: 'setup' }))
     const setups = { begin, stage: vi.fn(), create: vi.fn() }
     const incoming = createUserMessage({
@@ -20,13 +23,13 @@ describe('Fleet UI activation bridge', () => {
 
     expect(begin).toHaveBeenCalledWith(agent, { initialIdea: '帮我组建长期团队' })
     expect(setups.stage).not.toHaveBeenCalled()
-    expect(decision).toMatchObject({
-      kind: 'enter',
-      messages: [{ id: incoming.id, content: [{ type: 'text', text: '帮我组建长期团队' }] }],
-    })
+    expect(decision).toEqual({ kind: 'reject' })
+    expect(followup).toHaveBeenCalledWith(expect.objectContaining({
+      content: [{ type: 'text', text: '帮我组建长期团队' }],
+    }))
   })
 
-  it('stages and creates a configured Team before the clean first turn enters', async () => {
+  it('delivers a configured Team first input once, privately to its assistant, then rejects the stale turn', async () => {
     const configuration = {
       core: { name: 'Fleet', positioning: '', assistant: {}, members: [] },
       modules: {
@@ -65,26 +68,15 @@ describe('Fleet UI activation bridge', () => {
 
     expect(stage).toHaveBeenCalledWith(agent, { configuration })
     expect(create).toHaveBeenCalledWith(agent)
-    expect(sendUserConversationMessage.mock.calls).toEqual([
-      [{
-        runId: 'team-created',
-        to: '#main',
-        text: '开始工作',
-        delivery: 'wakeup',
-        mentions: ['@lead', '@reviewer'],
-      }],
-      [{
+    expect(sendUserConversationMessage).toHaveBeenCalledTimes(1)
+    expect(sendUserConversationMessage).toHaveBeenCalledWith({
         runId: 'team-created',
         to: '@team-assistant',
         text: '开始工作',
         delivery: 'wakeup',
-        mustReply: true,
-      }],
-    ])
-    expect(decision).toMatchObject({
-      kind: 'enter',
-      messages: [{ content: [{ type: 'text', text: '开始工作' }] }],
     })
+    expect(followup).not.toHaveBeenCalled()
+    expect(decision).toEqual({ kind: 'reject' })
   })
 
   it('attaches the conversation as an assistant when connecting to an existing Team', async () => {
@@ -100,6 +92,7 @@ describe('Fleet UI activation bridge', () => {
       run: { id: 'team-existing-42' },
       assistant: { view },
     }))
+    const sendUserConversationMessage = vi.fn()
     const activate = vi.fn()
     const incoming = createUserMessage({
       source: { kind: 'user' },
@@ -119,7 +112,7 @@ describe('Fleet UI activation bridge', () => {
       [incoming],
       undefined,
       {
-        runs: { attachAssistant } as never,
+        runs: { attachAssistant, sendUserConversationMessage } as never,
         assistant: { activate } as never,
         meta: { activate: vi.fn() } as never,
       },
@@ -131,10 +124,13 @@ describe('Fleet UI activation bridge', () => {
       assistantId: 'assistant-river',
     })
     expect(activate).toHaveBeenCalledWith(agent, 'team-existing-42', view)
-    expect(decision).toMatchObject({
-      kind: 'enter',
-      messages: [{ content: [{ type: 'text', text: '继续发布前检查' }] }],
+    expect(sendUserConversationMessage).toHaveBeenCalledWith({
+      runId: 'team-existing-42',
+      to: '@assistant-river',
+      text: '继续发布前检查',
+      delivery: 'wakeup',
     })
+    expect(decision).toEqual({ kind: 'reject' })
   })
 
   it('activates Fleet Help without starting setup or attaching to a Team', async () => {
@@ -166,9 +162,9 @@ describe('Fleet UI activation bridge', () => {
     expect(setups.begin).not.toHaveBeenCalled()
     expect(attachAssistant).not.toHaveBeenCalled()
     expect(activateAssistant).not.toHaveBeenCalled()
-    expect(decision).toMatchObject({
-      kind: 'enter',
-      messages: [{ content: [{ type: 'text', text: '团队和任务有什么区别？' }] }],
-    })
+    expect(decision).toEqual({ kind: 'reject' })
+    expect(followup).toHaveBeenCalledWith(expect.objectContaining({
+      content: [{ type: 'text', text: '团队和任务有什么区别？' }],
+    }))
   })
 })

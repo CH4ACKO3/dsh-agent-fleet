@@ -373,6 +373,14 @@ export class FleetTaskBoard {
     return snapshot(updated)
   }
 
+  canCompleteRequirement(callerId: string, id: string): boolean {
+    const current = this.requireTask(id)
+    const member = this.member(callerId)
+    return current.requirement?.kind === 'message'
+      && current.requirement.assignee === member
+      && current.assignees.includes(member)
+  }
+
   reopen(callerId: string, id: string): FleetProjectTask {
     const current = this.requireTask(id)
     this.requireResponsible(callerId, current)
@@ -613,7 +621,10 @@ export function installTaskTools(
         : args.action === 'create' ? 'task.create'
           : args.action === 'comment' ? 'task.comment'
             : args.action === 'progress' ? 'task.progress' : 'task.update'
-      if (!authorize(callerId, action) && !authorize(callerId, 'task.manage')) {
+      const canCompleteOwnRequirement = args.action === 'complete'
+        && args.id !== undefined
+        && tasks.canCompleteRequirement(callerId, args.id)
+      if (!canCompleteOwnRequirement && !authorize(callerId, action) && !authorize(callerId, 'task.manage')) {
         throw new Error(`Agent ${callerId} is not authorized for ${action}`)
       }
       if (args.action === 'list') return Promise.resolve({ action: 'list' as const, tasks: tasks.list(callerId, {

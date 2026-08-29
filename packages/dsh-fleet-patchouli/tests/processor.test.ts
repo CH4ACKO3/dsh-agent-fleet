@@ -161,6 +161,38 @@ describe('Fleet Patchouli processor', () => {
     )
   })
 
+  it('omits empty automatic recall context and keeps successful injections minimal', async () => {
+    const meta = {
+      source: { type: 'agent-loop', id: 'dsh-patchouli-agent-loop' },
+      scope: '/workspace',
+      attributes: { point: 'agent/pre-step' },
+    }
+    const empty = createFleetMemoryProcessor([{
+      id: 'empty',
+      filter: () => true,
+      retrieve: async () => ({ handled: false, items: [] }),
+    }])
+    await expect(empty.retrieve({ meta, data: { query: 'unmatched' } }, {})).resolves.toBeNull()
+
+    const recalled = createFleetMemoryProcessor([{
+      id: 'history',
+      filter: () => true,
+      retrieve: async () => ({ handled: true, items: [{ text: 'recalled fact' }] }),
+    }])
+    await expect(recalled.retrieve({ meta, data: { query: 'fact' } }, {})).resolves.toEqual({
+      items: [{ text: 'recalled fact' }],
+    })
+
+    await expect(recalled.retrieve({
+      meta: { ...meta, attributes: { point: 'tool/memory-retrieve' } },
+      data: { query: 'fact' },
+    }, {})).resolves.toMatchObject({
+      handled: true,
+      algorithms: [{ algorithm: 'history', ok: true }],
+      items: [{ text: 'recalled fact' }],
+    })
+  })
+
   it('commits deferred recall audit only after a successful uncancelled request', async () => {
     const recordRecallAudit = vi.fn()
     const controller = new AbortController()

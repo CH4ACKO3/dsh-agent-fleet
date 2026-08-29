@@ -1,6 +1,6 @@
 import { parseFleetActivation, type FleetActivationRequest } from '@dsh-agent-fleet/core/activation'
 import type { Context } from '@deepseek-ai/cordis'
-import { freezeMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 
@@ -21,27 +21,6 @@ interface FleetConnectionServices {
   }
   readonly assistant: Pick<FleetAssistantRuntime, 'activate'>
   readonly meta: Pick<FleetMetaAssistantService, 'activate'>
-}
-
-function configuredChannel(configuration: Record<string, unknown>): `#${string}` {
-  const modules = configuration.modules
-  const message = typeof modules === 'object'
-    && modules !== null
-    && !Array.isArray(modules)
-    ? (modules as Record<string, unknown>)['dsh-agent-fleet/message']
-    : undefined
-  const channel = typeof message === 'object'
-    && message !== null
-    && !Array.isArray(message)
-    ? (message as Record<string, unknown>).defaultChannel
-    : undefined
-  const id = typeof channel === 'object'
-    && channel !== null
-    && !Array.isArray(channel)
-    && typeof (channel as Record<string, unknown>).id === 'string'
-    ? (channel as Record<string, unknown>).id as string
-    : 'main'
-  return `#${id.trim() || 'main'}`
 }
 
 function activatedMessage(message: UserMessage): {
@@ -67,6 +46,11 @@ function activatedMessage(message: UserMessage): {
   }
 }
 
+function requeueAfterActivation(agent: Agent, message: UserMessage): PreStepDecision {
+  agent.followup(createUserMessage({ source: message.source, content: [...message.content] }))
+  return { kind: 'reject' }
+}
+
 /** Activate a staged Fleet request and return clean messages for the durable turn. */
 export async function activateFleetFromMessages(
   setups: FleetActivationSetups,
@@ -83,6 +67,7 @@ export async function activateFleetFromMessages(
   if (activation.request.mode === 'meta') {
     if (connection === undefined) throw new Error('Fleet Meta assistant service is unavailable')
     connection.meta.activate(agent)
+    return requeueAfterActivation(agent, activation.message)
   } else if (activation.request.mode === 'connection') {
     if (connection === undefined) throw new Error('Fleet connection services are unavailable')
     const attached = await connection.runs.attachAssistant(agent, {
@@ -91,6 +76,15 @@ export async function activateFleetFromMessages(
     })
     connection.assistant.activate(agent, attached.run.id, attached.assistant.view)
     connection.runs.agentSessionStarted?.(agent)
+    if (activation.initialIdea !== undefined) {
+      connection.runs.sendUserConversationMessage({
+        runId: attached.run.id,
+        to: `@${attached.assistant.view.id}`,
+        text: activation.initialIdea,
+        delivery: 'wakeup',
+      })
+      return { kind: 'reject' }
+    }
   } else {
     const setup = setups.begin(agent, {
       ...(activation.initialIdea === undefined ? {} : { initialIdea: activation.initialIdea }),
@@ -102,13 +96,6 @@ export async function activateFleetFromMessages(
       if (activation.initialIdea !== undefined
         && created.setup.phase === 'operating'
         && connection !== undefined) {
-        connection.runs.sendUserConversationMessage({
-          runId: created.run.id,
-          to: configuredChannel(created.setup.configuration ?? activation.request.configuration),
-          text: activation.initialIdea,
-          delivery: 'wakeup',
-          mentions: created.run.members.map(member => `@${member.name}`),
-        })
         const assistant = created.run.assistants.find(candidate => candidate.sessionId === String(agent.id))
           ?? created.run.assistants[0]
         if (assistant !== undefined) {
@@ -117,10 +104,13 @@ export async function activateFleetFromMessages(
             to: `@${assistant.view.id}`,
             text: activation.initialIdea,
             delivery: 'wakeup',
-            mustReply: true,
           })
+          return { kind: 'reject' }
         }
       }
+    }
+    if (activation.request.mode === 'interactive') {
+      return requeueAfterActivation(agent, activation.message)
     }
   }
   const clean = [...messages]

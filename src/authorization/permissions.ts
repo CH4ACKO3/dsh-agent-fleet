@@ -408,7 +408,7 @@ export class FleetPermissionService implements FleetActionPolicy {
   }
 
   canManage(teamId: string, member: FleetMemberView): boolean {
-    return this.authorization.has(teamId, member, 'permissions.manage') || this.authorization.has(teamId, member, 'team.manage')
+    return this.authorization.has(teamId, member, 'permissions.manage')
   }
 
   private requireMember(teamId: string, member: string): FleetMemberView {

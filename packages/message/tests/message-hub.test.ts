@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 
 import { MessageHub } from '../src/hub.js'
 import { installMessageTools } from '../src/index.js'
@@ -104,6 +105,7 @@ describe('MessageHub', () => {
     expect(reviewer.injected).toHaveLength(1)
     expect(reviewer.followedUp).toHaveLength(0)
     expect(reviewer.injected[0]).toContain('Please inspect the parser.')
+    expect(reviewer.injected[0]).toContain('do not call fleet_messages merely to read it again')
     expect(reviewer.injected[0]).not.toContain('must-reply')
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
@@ -539,6 +541,42 @@ describe('MessageHub', () => {
       unreadParticipantIds: [],
       readThrough: { reviewer: 'This full body is delivered through the native inbox.'.length },
     })
+  })
+
+  it('reconciles a wakeup claimed synchronously before delivery bookkeeping completes', () => {
+    const lead = new FakeAgent('lead')
+    const reviewer: MessageAgent = {
+      id: 'reviewer',
+      inbox: {
+        nextTurn: [],
+        nextStep: [],
+        replace: () => false,
+        remove: () => false,
+      },
+      inject: () => {},
+      followup: () => {},
+      steer: () => {},
+      cancel: () => {},
+    }
+    const agents = new Map<string, MessageAgent>([[lead.id, lead], [reviewer.id, reviewer]])
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    })
+
+    const sent = hub.send(lead, {
+      to: '@reviewer',
+      text: 'Start immediately without a duplicate unread wakeup.',
+      delivery: 'wakeup',
+    })
+
+    expect(hub.receipt(sent.messageId)).toMatchObject({
+      readParticipantIds: [reviewer.id],
+      unreadParticipantIds: [],
+      readThrough: { reviewer: 'Start immediately without a duplicate unread wakeup.'.length },
+    })
+    expect(hub.followupUnread(reviewer)).toBeUndefined()
   })
 
   it('removes a pending message notification only after the related message is fully read', () => {
@@ -1352,6 +1390,31 @@ describe('MessageHub', () => {
       hasMore: false,
       readThrough: 5_000,
     })
+  })
+
+  it('declares internal routing metadata returned by every fleet_messages action', async () => {
+    const { hub, lead, reviewer } = setup()
+    hub.sendHuman(lead, { to: '@reviewer', text: 'One private user input.', delivery: 'quiet' })
+    const registered: Array<{
+      readonly name: string
+      readonly output: { readonly schema: unknown }
+      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
+    }> = []
+    installMessageTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+    } as never, hub, { coordination: false })
+    const tool = registered.find(candidate => candidate.name === 'fleet_messages')
+    if (tool === undefined) throw new Error('expected fleet_messages')
+
+    const read = await tool.execute(
+      { action: 'read', conversation: '@lead', unread_only: false },
+      { agent: reviewer },
+    )
+    expect(read).toMatchObject({ messages: [expect.objectContaining({ origin: 'user', recipientIds: [reviewer.id] })] })
+    expect(validateJsonSchemaValue(tool.output.schema as never, read)).toEqual([])
+
+    const inbox = await tool.execute({ action: 'inbox', unread_only: false }, { agent: reviewer })
+    expect(validateJsonSchemaValue(tool.output.schema as never, inbox)).toEqual([])
   })
 
   it('checks current action authorization when a previously visible tool executes', async () => {

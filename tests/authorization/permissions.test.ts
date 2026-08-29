@@ -172,6 +172,23 @@ describe('FleetPermissionService', () => {
     expect(authorization.resolve('team-1', alice).actions).not.toContain('team.manage')
   })
 
+  it('does not let Team lifecycle authority mutate permissions', () => {
+    const lifecycle = fixture()
+    lifecycle.permissions.setMember('team-1', 'alice', {
+      groups: [], grants: ['team.manage'], denies: [], toolGroups: [], denyToolGroups: [],
+    })
+    expect(lifecycle.permissions.canManage('team-1', alice)).toBe(false)
+
+    const permission = fixture()
+    permission.authorization.registerNamespace({
+      namespace: 'permissions', actions: [{ id: 'manage', description: 'Manage permissions.' }],
+    })
+    permission.permissions.setMember('team-1', 'alice', {
+      groups: ['maintainer'], grants: [], denies: [], toolGroups: [], denyToolGroups: [],
+    })
+    expect(permission.permissions.canManage('team-1', alice)).toBe(true)
+  })
+
   it('supports OP, DEOP, and reset to the fixed profile', () => {
     const { authorization, permissions } = fixture()
     authorization.registerNamespace({
