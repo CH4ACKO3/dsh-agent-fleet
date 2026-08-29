@@ -23,3 +23,9 @@ test('bundles browser-only dependencies into the published client module', () =>
   expect(client).not.toContain('require("zod")')
   expect(client).toContain('node_modules/zod/')
 })
+
+test('passes native new-Session workspace readiness into the Fleet Hero entry', () => {
+  const patch = readFileSync(resolve('harmony/hero-team-entry.cjs'), 'utf8')
+
+  expect(patch).toContain('renderSlot("conversation.hero.agentPreset", { sessionId, workspaceSelected: chipTitle !== void 0 })')
+})

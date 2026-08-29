@@ -6228,7 +6228,14 @@ function teamStatusLabel(status: FleetPanelTeamSummary['status'], chinese: boole
   return labels[status][chinese ? 0 : 1]
 }
 
-export function FleetTeamButton({ sessionId: propSessionId }: { readonly sessionId?: string } = {}): ReactElement {
+export function FleetTeamButton({
+  sessionId: propSessionId,
+  workspaceSelected,
+}: {
+  readonly sessionId?: string
+  /** Native new-Session workspace state, present only on the Hero surface. */
+  readonly workspaceSelected?: boolean
+} = {}): ReactElement {
   installStyles()
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<FleetMode | null>(null)
@@ -6254,6 +6261,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   const assistantNoticeAction = useRef<HTMLButtonElement>(null)
   const workspaceWarningTarget = useRef<HTMLButtonElement | null>(null)
   const workspaceWarningTimer = useRef<number | null>(null)
+  const ownedNextSessionActivation = useRef<number | null>(null)
   const menuId = useId()
   const connectionMenuId = useId()
   const directory = useSyncExternalStore(
@@ -6266,17 +6274,36 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
     getCurrentFleetSessionId,
     getCurrentFleetSessionId,
   )
-  const sessionId = propSessionId ?? currentSessionId
+  // A Hero without a materialized Session must not inherit the previously open Session.
+  const sessionId = workspaceSelected === undefined ? propSessionId ?? currentSessionId : propSessionId
+  const workspaceReady = workspaceSelected ?? sessionId !== undefined
   const activation = useSyncExternalStore(
     subscribeFleetActivation,
-    () => getFleetActivationSnapshot(sessionId),
-    () => getFleetActivationSnapshot(sessionId),
+    () => getFleetActivationSnapshot(sessionId, workspaceSelected === true),
+    () => getFleetActivationSnapshot(sessionId, workspaceSelected === true),
   )
   const chinese = isChineseLocale()
   const label = modeLabel(mode, chinese, connectedTeam?.teamName)
+  const stageActivation = (request: Parameters<typeof stageFleetActivation>[1]): void => {
+    const staged = stageFleetActivation(sessionId, request)
+    ownedNextSessionActivation.current = sessionId === undefined ? staged.id : null
+  }
+  const clearActivation = (): void => {
+    if (sessionId !== undefined) clearFleetActivation(sessionId)
+    else if (ownedNextSessionActivation.current !== null) {
+      clearFleetActivation(undefined, ownedNextSessionActivation.current)
+    }
+    ownedNextSessionActivation.current = null
+  }
   const configuredActivation = async (draft: FleetConfigurationDraft): Promise<Record<string, unknown>> => {
-    if (sessionId === undefined) throw new Error(chinese ? '当前会话尚未就绪。' : 'The current Session is not ready.')
-    const uploaded = await Promise.all(draft.sharedResources.map(file => uploadFleetSetupFile(sessionId, file)))
+    if (sessionId === undefined && draft.sharedResources.length > 0) {
+      throw new Error(chinese
+        ? '新会话建立后才能上传团队共享文件。请先发送第一条消息，或暂时移除共享文件。'
+        : 'Team files can be uploaded after the new Session exists. Send its first message or remove the files for now.')
+    }
+    const uploaded = sessionId === undefined
+      ? []
+      : await Promise.all(draft.sharedResources.map(file => uploadFleetSetupFile(sessionId, file)))
     return configurationForHost(draft, readPresetLibrary(), chinese, uploaded)
   }
 
@@ -6296,6 +6323,9 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   useEffect(() => () => {
     if (workspaceWarningTimer.current !== null) window.clearTimeout(workspaceWarningTimer.current)
     workspaceWarningTarget.current?.removeAttribute('data-dsh-fleet-workspace-required')
+    if (ownedNextSessionActivation.current !== null) {
+      clearFleetActivation(undefined, ownedNextSessionActivation.current)
+    }
   }, [])
 
   useEffect(() => {
@@ -6372,7 +6402,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   }, [assistantNotice, connectionOpen, open])
 
   const toggleMenu = (): void => {
-    if (sessionId === undefined) {
+    if (!workspaceReady) {
       const workspaceButton = anchor.current
         ?.closest('[class*="_heroWorkspaceRow"]')
         ?.querySelector<HTMLButtonElement>('button')
@@ -6433,8 +6463,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
   }
 
   const stageTeamConnection = (team: FleetPanelTeamSummary, assistantId?: string): void => {
-    if (sessionId === undefined) return
-    stageFleetActivation(sessionId, {
+    stageActivation({
       mode: 'connection',
       teamId: team.teamId,
       ...(assistantId === undefined ? {} : { assistantId }),
@@ -6502,7 +6531,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
             onClick: () => {
               if (mode === 'configuration') setConfigurationDiscardOpen(true)
               else {
-                if (sessionId !== undefined) clearFleetActivation(sessionId)
+                clearActivation()
                 setConnectedTeam(null)
                 setMode(null)
               }
@@ -6581,8 +6610,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
             className: 'dsh-fleet-team-menu-item',
             role: 'menuitem',
             onClick: () => {
-              if (sessionId === undefined) return
-              stageFleetActivation(sessionId, { mode: 'interactive' })
+              stageActivation({ mode: 'interactive' })
               setConnectedTeam(null)
               setMode('interactive')
               setConnectionOpen(false)
@@ -6764,10 +6792,9 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
           setConfigurationOpen(true)
         },
         onUse: async (draft: FleetConfigurationDraft) => {
-          if (sessionId === undefined) return
           const hostConfiguration = await configuredActivation(draft)
           setConfiguration(draft)
-          stageFleetActivation(sessionId, { mode: 'configuration', configuration: hostConfiguration })
+          stageActivation({ mode: 'configuration', configuration: hostConfiguration })
           setConnectedTeam(null)
           setMode('configuration')
           setConfigurationChooserOpen(false)
@@ -6787,10 +6814,9 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
           setConfigurationChooserOpen(true)
         },
         onConfirm: async (draft: FleetConfigurationDraft) => {
-          if (sessionId === undefined) return
           const hostConfiguration = await configuredActivation(draft)
           setConfiguration(draft)
-          stageFleetActivation(sessionId, { mode: 'configuration', configuration: hostConfiguration })
+          stageActivation({ mode: 'configuration', configuration: hostConfiguration })
           setConnectedTeam(null)
           setMode('configuration')
           setConfigurationOpen(false)
@@ -6807,7 +6833,7 @@ export function FleetTeamButton({ sessionId: propSessionId }: { readonly session
         onCancel: () => setConfigurationDiscardOpen(false),
         onConfirm: () => {
           setConfiguration(emptyConfiguration())
-          if (sessionId !== undefined) clearFleetActivation(sessionId)
+          clearActivation()
           setConnectedTeam(null)
           setMode(null)
           setConfigurationDiscardOpen(false)
@@ -6856,7 +6882,7 @@ function submitWithFleetActivation(
   setDraft: (text: string) => void,
   submit: () => void,
 ): void {
-  const encoded = sessionId === undefined ? undefined : consumeFleetActivation(sessionId, draft)
+  const encoded = consumeFleetActivation(sessionId, draft)
   if (encoded !== undefined) setDraft(encoded)
   submit()
 }
@@ -7300,6 +7326,9 @@ export function withFleetTeamButton(
         jsx(AgentPresetSeat, { ...props }),
         jsx(FleetTeamButton, {
           ...(typeof props.sessionId === 'string' ? { sessionId: props.sessionId } : {}),
+          ...(typeof props.workspaceSelected === 'boolean'
+            ? { workspaceSelected: props.workspaceSelected }
+            : {}),
         }),
       ],
     })

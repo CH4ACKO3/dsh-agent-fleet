@@ -6,7 +6,8 @@ import {
 
 export interface StagedFleetActivation {
   readonly id: number
-  readonly sessionId: string
+  /** Undefined while a workspace-backed native new Session is still being materialized. */
+  readonly sessionId?: string
   readonly request: FleetActivationRequest
 }
 
@@ -42,6 +43,7 @@ let sequence = 0
 let sessions: FleetActivationClientSessions | undefined
 let workspaces: FleetActivationClientWorkspaces | undefined
 const snapshots = new Map<string, StagedFleetActivation>()
+let nextSessionSnapshot: StagedFleetActivation | undefined
 const listeners = new Set<() => void>()
 
 function publish(): void {
@@ -101,27 +103,37 @@ export function subscribeCurrentFleetSession(listener: () => void): () => void {
 }
 
 export function stageFleetActivation(
-  sessionId: string,
+  sessionId: string | undefined,
   request: FleetActivationRequest,
 ): StagedFleetActivation {
-  const activation = { id: ++sequence, sessionId, request } as const
-  snapshots.set(sessionId, activation)
+  const activation: StagedFleetActivation = {
+    id: ++sequence,
+    request,
+    ...(sessionId === undefined ? {} : { sessionId }),
+  }
+  if (sessionId === undefined) nextSessionSnapshot = activation
+  else snapshots.set(sessionId, activation)
   publish()
   return activation
 }
 
-export function clearFleetActivation(sessionId: string, id?: number): void {
-  const snapshot = snapshots.get(sessionId)
+export function clearFleetActivation(sessionId: string | undefined, id?: number): void {
+  const snapshot = sessionId === undefined ? nextSessionSnapshot : snapshots.get(sessionId)
   if (id !== undefined && snapshot?.id !== id) return
-  if (!snapshots.delete(sessionId)) return
+  if (sessionId === undefined) {
+    if (nextSessionSnapshot === undefined) return
+    nextSessionSnapshot = undefined
+  } else if (!snapshots.delete(sessionId)) return
   publish()
 }
 
-export function consumeFleetActivation(sessionId: string, text: string): string | undefined {
-  const activation = snapshots.get(sessionId)
+export function consumeFleetActivation(sessionId: string | undefined, text: string): string | undefined {
+  const activation = sessionId === undefined
+    ? nextSessionSnapshot
+    : snapshots.get(sessionId) ?? nextSessionSnapshot
   if (activation === undefined) return undefined
   const encoded = encodeFleetActivation(activation.request, text)
-  clearFleetActivation(sessionId, activation.id)
+  clearFleetActivation(activation.sessionId, activation.id)
   return encoded
 }
 
@@ -133,8 +145,12 @@ export function recoverFleetActivationDraft(sessionId: string, text: string): st
   return parsed.text
 }
 
-export function getFleetActivationSnapshot(sessionId: string | undefined): StagedFleetActivation | null {
-  return sessionId === undefined ? null : snapshots.get(sessionId) ?? null
+export function getFleetActivationSnapshot(
+  sessionId: string | undefined,
+  includeNextSession = false,
+): StagedFleetActivation | null {
+  const exact = sessionId === undefined ? undefined : snapshots.get(sessionId)
+  return exact ?? (includeNextSession ? nextSessionSnapshot : undefined) ?? null
 }
 
 export function subscribeFleetActivation(listener: () => void): () => void {

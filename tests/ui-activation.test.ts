@@ -14,6 +14,7 @@ const firstSession = 'session-one'
 const secondSession = 'session-two'
 
 afterEach(() => {
+  clearFleetActivation(undefined)
   clearFleetActivation(firstSession)
   clearFleetActivation(secondSession)
 })
@@ -49,6 +50,39 @@ describe('Fleet composer activation state', () => {
 
     expect(consumeFleetActivation(secondSession, '另一个会话的消息')).toBeUndefined()
     expect(getFleetActivationSnapshot(firstSession)?.request).toEqual({ mode: 'interactive' })
+  })
+
+  it('stages activation before a workspace-backed new Session has an id', () => {
+    stageFleetActivation(undefined, { mode: 'interactive' })
+
+    expect(getFleetActivationSnapshot(undefined)).toBeNull()
+    expect(getFleetActivationSnapshot(undefined, true)?.request).toEqual({ mode: 'interactive' })
+    expect(parseFleetActivation(consumeFleetActivation(undefined, '第一条消息')!)).toEqual({
+      request: { mode: 'interactive' },
+      text: '第一条消息',
+    })
+    expect(getFleetActivationSnapshot(undefined, true)).toBeNull()
+  })
+
+  it('carries next-Session activation across native Session materialization', () => {
+    stageFleetActivation(undefined, { mode: 'configuration', configuration: { name: 'Fleet' } })
+
+    expect(parseFleetActivation(consumeFleetActivation(firstSession, '开始工作')!)).toEqual({
+      request: { mode: 'configuration', configuration: { name: 'Fleet' } },
+      text: '开始工作',
+    })
+    expect(getFleetActivationSnapshot(undefined, true)).toBeNull()
+  })
+
+  it('prefers an exact Session activation over the staged next Session', () => {
+    stageFleetActivation(undefined, { mode: 'interactive' })
+    stageFleetActivation(firstSession, { mode: 'configuration', configuration: { name: 'Exact' } })
+
+    expect(parseFleetActivation(consumeFleetActivation(firstSession, 'exact')!)?.request).toEqual({
+      mode: 'configuration',
+      configuration: { name: 'Exact' },
+    })
+    expect(getFleetActivationSnapshot(undefined, true)?.request).toEqual({ mode: 'interactive' })
   })
 })
 

@@ -32,6 +32,24 @@ module.exports = [
     },
   }),
   {
+    id: 'fleet-new-session-workspace-state',
+    description: 'Passes the native Hero workspace state to Fleet before the first Session id exists.',
+    target: {
+      package: '@deepseek-ai/dsh-client-ui-conversation',
+      version: DSH_CLIENT_VERSION,
+      file: 'lib/client.js',
+    },
+    select: 'SourceFile',
+    expect: 1,
+    apply(context) {
+      replaceExactly(
+        context,
+        'renderSlot("conversation.hero.agentPreset", {})',
+        'renderSlot("conversation.hero.agentPreset", { sessionId, workspaceSelected: chipTitle !== void 0 })',
+      )
+    },
+  },
+  {
     id: 'fleet-agent-session-scope',
     description: 'Lets the native session provider scope Fleet Agent context rendering to a member Session.',
     patches: [
