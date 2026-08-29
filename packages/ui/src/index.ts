@@ -56,7 +56,6 @@ import {
   getFleetModelDirectory,
   getFleetTeamDirectorySnapshot,
   parseFleetConversationCommand,
-  sendFleetAssistantMailboxMessage,
   subscribeFleetTeamDirectory,
   type FleetModelDirectory,
   type FleetModelDirectoryState,
@@ -64,11 +63,6 @@ import {
 } from './team-panel.js'
 import { useFleetMetaAssistantSession } from './meta-assistant.js'
 import { uploadFleetSetupFile } from './web-client.js'
-import {
-  FleetComposerAttachmentButton,
-  FleetComposerAttachmentList,
-  useFleetComposerAttachments,
-} from './composer-attachments.js'
 
 const STYLE_ID = 'dsh-agent-fleet-team-entry'
 
@@ -79,38 +73,6 @@ const styles = `
 
 .dsh-fleet-meta-composer-marker {
   display: none;
-}
-
-.dsh-fleet-assistant-composer-attachment-dropzone {
-  display: contents;
-}
-
-.dsh-fleet-assistant-composer-urgent {
-  height: 28px;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  padding: 0 7px;
-  font: var(--dsw-font-xs-13);
-}
-
-.dsh-fleet-assistant-composer-urgent:hover,
-.dsh-fleet-assistant-composer-urgent[aria-pressed="true"] {
-  color: var(--dsw-alias-state-business-primary);
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
-}
-
-.dsh-fleet-assistant-composer-urgent:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: 1px;
-}
-
-.dsh-fleet-assistant-composer-urgent:disabled {
-  color: var(--dsw-alias-label-dimmed);
-  cursor: default;
-  background: transparent;
 }
 
 .dsh-fleet-assistant-composer-status {
@@ -6949,16 +6911,11 @@ export function withFleetComposerActivation(
     const teamArchived = teamAssistant && assistantTeam.status === 'closed'
     const inputActions = props.inputActions as NativeInputActions | undefined
     const keyboard = props.keyboard as NativeComposerKeyboard | undefined
-    const [assistantSending, setAssistantSending] = useState(false)
-    const [assistantUrgent, setAssistantUrgent] = useState(false)
     const [assistantError, setAssistantError] = useState<string>()
     const [assistantCommandOpen, setAssistantCommandOpen] = useState(false)
     const [assistantCommandQuery, setAssistantCommandQuery] = useState('')
     const [assistantCommandHighlight, setAssistantCommandHighlight] = useState(0)
-    const assistantAttachments = useFleetComposerAttachments(sessionId ?? '')
-    const assistantComposer = useRef<HTMLDivElement>(null)
     const assistantCommandMenu = useRef<HTMLDivElement>(null)
-    const [assistantComposerVisible, setAssistantComposerVisible] = useState(false)
     const [, assistantModelState] = useFleetModelDirectory(teamAssistant && !teamArchived ? sessionId : undefined)
     const assistantModelSignature = assistantModelState.current === null
       ? undefined
@@ -7014,19 +6971,6 @@ export function withFleetComposerActivation(
       setAssistantCommandHighlight(0)
     }, [sessionId])
 
-    useLayoutEffect(() => {
-      const card = assistantComposer.current?.querySelector<HTMLElement>('[data-composer-card="true"]')
-      if (card === undefined || card === null) return
-      const update = (): void => {
-        const rect = card.getBoundingClientRect()
-        setAssistantComposerVisible(rect.width > 0 && rect.height > 0)
-      }
-      update()
-      const observer = new ResizeObserver(update)
-      observer.observe(card)
-      return () => { observer.disconnect() }
-    }, [sessionId, teamAssistant])
-
     useEffect(() => {
       if (input?.phase !== 'plain' || inputActions === undefined) return
       if (sessionId === undefined) return
@@ -7060,7 +7004,7 @@ export function withFleetComposerActivation(
         : commandEntries.filter(entry => entry.name.toLocaleLowerCase()
             .startsWith(assistantCommandQuery.toLocaleLowerCase()))
       const runAssistantCommand = (name: typeof commandEntries[number]['name']): void => {
-        if (assistantSending || teamArchived || inputActions === undefined) return
+        if (teamArchived || inputActions === undefined) return
         const entry = commandEntries.find(candidate => candidate.name === name)
         if (entry === undefined) return
         if (entry.behavior === 'input') {
@@ -7085,7 +7029,7 @@ export function withFleetComposerActivation(
         })
       }
       const submitAssistant = (): void => {
-        if (assistantSending || inputActions === undefined) return
+        if (inputActions === undefined) return
         if (teamArchived) {
           setAssistantError(isChineseLocale()
             ? '团队已归档，助理会话不能继续发送消息'
@@ -7093,38 +7037,29 @@ export function withFleetComposerActivation(
           return
         }
         const draft = input?.draft ?? ''
-        const files = assistantAttachments.files
-        if (draft.trim() === '' && files.length === 0) return
-        if (files.length === 0 && (draft.trim() === '/goal' || draft.trim() === '/plan')) {
+        if (draft.trim() === '' && (input?.imageIds?.length ?? 0) === 0) return
+        if ((input?.imageIds?.length ?? 0) === 0 && (draft.trim() === '/goal' || draft.trim() === '/plan')) {
           inputActions.setDraft(`${draft.trim()} `)
           return
         }
-        setAssistantSending(true)
         setAssistantError(undefined)
-        void (async () => {
-          if (files.length === 0
-            && parseFleetConversationCommand(draft, 'direct') !== undefined
-            && command !== undefined) {
-            const matched = await command(draft.trim())
-            if (matched) {
-              inputActions.setDraft('')
-              return
-            }
+        if ((input?.imageIds?.length ?? 0) > 0
+          || parseFleetConversationCommand(draft, 'direct') === undefined
+          || command === undefined) {
+          inputActions.submit()
+          return
+        }
+        void command(draft.trim()).then(matched => {
+          if (!matched) {
+            inputActions.submit()
+            return
           }
-          await sendFleetAssistantMailboxMessage(
-            sessionId,
-            draft,
-            files,
-            assistantUrgent ? 'interrupt' : 'wakeup',
-          )
           inputActions.setDraft('')
-          assistantAttachments.clearFiles()
-          setAssistantUrgent(false)
-        })().catch((error: unknown) => {
+        }).catch((error: unknown) => {
           setAssistantError(error instanceof Error
             ? error.message
-            : isChineseLocale() ? '消息发送失败' : 'Message could not be sent')
-        }).finally(() => { setAssistantSending(false) })
+            : isChineseLocale() ? 'Session 命令执行失败' : 'Session command failed')
+        })
       }
       const assistantActions = inputActions === undefined
         ? undefined
@@ -7182,7 +7117,7 @@ export function withFleetComposerActivation(
         ref: assistantCommandMenu,
         className: 'dsh-fleet-conversation-command-menu',
         role: 'listbox',
-        'aria-label': isChineseLocale() ? '助理私聊命令' : 'Assistant private conversation commands',
+        'aria-label': isChineseLocale() ? '助理会话命令' : 'Assistant conversation commands',
         'aria-activedescendant': `dsh-fleet-assistant-command-${visibleCommandEntries[assistantCommandHighlight]?.name ?? 'none'}`,
         children: [
           jsx('div', {
@@ -7213,92 +7148,42 @@ export function withFleetComposerActivation(
           }),
         ],
       })
-      const assistantUseInput: NativeUseInput = selector => useInput(snapshot => selector(snapshot === undefined
-        ? undefined
-        : { ...snapshot, imageIds: assistantAttachments.items.map(item => item.id) }))
-      return jsx('div', {
-        ref: assistantComposer,
-        className: 'dsh-fleet-assistant-composer-attachment-dropzone',
-        children: jsx(InputBar, {
-          ...props,
-          disabled: assistantSending || teamArchived,
-          blocked: undefined,
-          workspacePickerOpen: false,
-          onRequestWorkspace: undefined,
-          placeholder: isChineseLocale()
-            ? teamArchived ? '团队已归档，无法继续发送消息' : `发送消息给 ${assistantName ?? '团队助理'}`
-            : teamArchived ? 'Team archived — messaging unavailable' : `Send a message to ${assistantName ?? 'Team assistant'}`,
-          useInput: assistantUseInput,
-          useMenuLauncher: assistantUseMenuLauncher,
-          inputActions: assistantActions,
-          keyboard: assistantKeyboard,
-          command: undefined,
-          toggleCommandMenu: () => {
-            assistantKeyboardBase?.dismissPopup?.()
-            setAssistantCommandQuery('')
-            setAssistantCommandHighlight(0)
-            setAssistantCommandOpen(current => !current)
-          },
-          overlay: jsxs(Fragment, {
-            children: [
-              props.overlay as ReactNode,
-              assistantCommandOverlay,
-            ],
-          }),
-          renderSlot: (name: string, owner: Readonly<Record<string, unknown>>, options?: Readonly<Record<string, unknown>>) => {
-            if (name === 'conversation.input.model') return null
-            if (name !== 'conversation.input.attachments') return renderSlot(name, owner, options)
-            return jsxs(Fragment, {
-              children: [
-                renderSlot(name, {
-                  ...owner,
-                  attachments: assistantAttachments.imageItems,
-                  canAcceptDrop: owner.canAcceptDrop === true && assistantComposerVisible,
-                }, options),
-                jsx(FleetComposerAttachmentList, { attachments: assistantAttachments }),
-              ],
-            })
-          },
-          leftItems: jsxs('span', {
-            className: 'dsh-fleet-official-composer-actions',
-            children: [
-              props.leftItems as ReactNode,
-              jsx(FleetComposerAttachmentButton, {
-                attachments: assistantAttachments,
-                disabled: assistantSending || teamArchived,
-              }),
-              jsx('button', {
-                type: 'button',
-                className: 'dsh-fleet-assistant-composer-urgent',
-                'aria-pressed': assistantUrgent,
-                disabled: teamArchived,
-                title: isChineseLocale()
-                  ? '紧急消息会打断助理当前步骤'
-                  : 'An urgent message interrupts the assistant’s current step',
-                onClick: () => { setAssistantUrgent(current => !current) },
-                children: isChineseLocale() ? '紧急' : 'Urgent',
-              }),
-            ],
-          }),
-          addImages: (files: readonly File[]) => {
-            if (!assistantSending && !teamArchived) assistantAttachments.addFiles(files)
-            return null
-          },
-          removeImage: assistantAttachments.removeFile,
-          draftImages: (ids: readonly string[]) => ids.flatMap(id => assistantAttachments.items.filter(item => item.id === id)),
-          accessory: props.accessory,
-          usageMeter: jsx(FleetBudgetMeter, { teamId: assistantTeam.teamId }),
-          footer: !teamArchived && !assistantSending && assistantError === undefined ? undefined : jsx('span', {
-            className: 'dsh-fleet-assistant-composer-status',
-            'data-error': assistantError === undefined ? undefined : 'true',
-            role: assistantError === undefined ? 'status' : 'alert',
-            'aria-live': 'polite',
-            children: teamArchived
-              ? isChineseLocale() ? '团队已归档，此助理会话为只读。' : 'The Team is archived. This assistant Session is read-only.'
-              : assistantSending
-              ? isChineseLocale() ? '发送中…' : 'Sending…'
-              : assistantError,
-          }),
+      return jsx(InputBar, {
+        ...props,
+        disabled: teamArchived,
+        blocked: undefined,
+        workspacePickerOpen: false,
+        onRequestWorkspace: undefined,
+        placeholder: isChineseLocale()
+          ? teamArchived ? '团队已归档，无法继续发送消息' : `发送消息给 ${assistantName ?? '团队助理'}`
+          : teamArchived ? 'Team archived — messaging unavailable' : `Send a message to ${assistantName ?? 'Team assistant'}`,
+        useMenuLauncher: assistantUseMenuLauncher,
+        inputActions: assistantActions,
+        keyboard: assistantKeyboard,
+        command: undefined,
+        toggleCommandMenu: () => {
+          assistantKeyboardBase?.dismissPopup?.()
+          setAssistantCommandQuery('')
+          setAssistantCommandHighlight(0)
+          setAssistantCommandOpen(current => !current)
+        },
+        overlay: jsxs(Fragment, {
+          children: [
+            props.overlay as ReactNode,
+            assistantCommandOverlay,
+          ],
+        }),
+        renderSlot: (name: string, owner: Readonly<Record<string, unknown>>, options?: Readonly<Record<string, unknown>>) =>
+          name === 'conversation.input.model' ? null : renderSlot(name, owner, options),
+        usageMeter: jsx(FleetBudgetMeter, { teamId: assistantTeam.teamId }),
+        footer: !teamArchived && assistantError === undefined ? undefined : jsx('span', {
+          className: 'dsh-fleet-assistant-composer-status',
+          'data-error': assistantError === undefined ? undefined : 'true',
+          role: assistantError === undefined ? 'status' : 'alert',
+          'aria-live': 'polite',
+          children: teamArchived
+            ? isChineseLocale() ? '团队已归档，此助理会话为只读。' : 'The Team is archived. This assistant Session is read-only.'
+            : assistantError,
         }),
       })
     }

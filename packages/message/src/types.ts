@@ -145,7 +145,18 @@ export interface FleetReadMessage extends FleetMessage {
 export interface ReadMessagesResult {
   readonly messages: FleetReadMessage[]
   readonly hasMore: boolean
+  /** Number of messages in this conversation that remain unread after this read. */
+  readonly remainingUnread: number
+  /** Total unread text characters still waiting in this conversation. */
+  readonly remainingUnreadChars: number
   readonly revision: number
+}
+
+export interface FleetUnreadInbox {
+  readonly conversation: FleetTarget
+  readonly latestMessageId: string
+  readonly unreadMessages: number
+  readonly unreadChars: number
 }
 
 export interface FleetMessageTextChunk {

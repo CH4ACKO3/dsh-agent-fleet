@@ -351,7 +351,9 @@ export class FleetTaskBoard {
     this.requireResponsible(callerId, current)
     const incomplete = current.dependencies.filter(dependency => this.requireTask(dependency).status !== 'completed')
     if (incomplete.length > 0) throw new Error(`Fleet task ${id} has incomplete dependencies: ${incomplete.join(', ')}`)
-    if (current.status === 'completed') return snapshot(current)
+    if (current.status === 'completed') {
+      throw new Error(`Fleet task ${id} is already completed; completing it again does not complete another task`)
+    }
     let completionMessageId: string | undefined
     if (current.requirement?.kind === 'message') {
       const finalReply = requiredText(input.finalReply ?? '', 'required task final reply')
@@ -603,7 +605,7 @@ export function installTaskTools(
 ): () => void {
   return ctx.tools.register(defineTool({
     name: 'fleet_task',
-    description: 'Manage persistent Team tasks, owners, reviewers, dependencies, subtasks, comments, progress, deadlines, and resources. Parsed message mentions and must_reply directives appear as high-priority required tasks. An acknowledgement or progress reply does not complete one. After the work is done, put the final user- or peer-facing result only in final_reply and complete the task; do not send the same final result separately with fleet_send. Fleet sends it to the source conversation before completion.',
+    description: 'Manage persistent Team tasks, owners, reviewers, dependencies, subtasks, comments, progress, deadlines, and resources. Parsed message mentions and must_reply directives appear as high-priority required tasks. A reply alone does not complete one: after satisfying the request, explicitly complete its exact task id. If a reply was already sent in the source conversation, completion reuses the latest reply without sending a duplicate; otherwise Fleet sends final_reply there before completion.',
     parameters: {
       action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'update', 'comment', 'progress', 'complete', 'reopen'] },
       id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' },
@@ -611,7 +613,7 @@ export function installTaskTools(
       assignees: { type: 'array', items: { type: 'string' } }, reviewers: { type: 'array', items: { type: 'string' } },
       followers: { type: 'array', items: { type: 'string' } }, dependencies: { type: 'array', items: { type: 'string' } },
       parent_id: { type: 'string' }, due_at: { type: 'string' }, resources: { type: 'array', items: { type: 'string' } }, text: { type: 'string' },
-      final_reply: { type: 'string', description: 'Required only when completing a message-created required task. Put the final result here instead of sending it separately with fleet_send. Fleet sends it back to the source conversation before completion.' },
+      final_reply: { type: 'string', description: 'Required when completing a message-created task as the Agent confirmation of the result. If a reply already exists in the source conversation, Fleet reuses it without sending a duplicate; otherwise Fleet sends final_reply there.' },
     },
     output: jsonOutput(RESULT_SCHEMA),
     execute(args, exec) {

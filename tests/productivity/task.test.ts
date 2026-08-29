@@ -92,6 +92,8 @@ describe('FleetTaskBoard', () => {
     expect(restored.complete('agent-qa', task.id, { finalReply: 'Inspection passed.' })).toMatchObject({
       status: 'completed', requirement: { completionMessageId: 'msg_final' },
     })
+    expect(() => restored.complete('agent-qa', task.id, { finalReply: 'Inspection passed.' }))
+      .toThrow('already completed; completing it again does not complete another task')
     expect(finalReplies).toEqual(['Inspection passed.'])
     expect(restored.pendingRequirement('qa')).toBeUndefined()
   })

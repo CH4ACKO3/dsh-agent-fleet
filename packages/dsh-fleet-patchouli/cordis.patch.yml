@@ -1,6 +1,3 @@
 - insert:
-    - id: patchouli-native-context
-      name: dsh-patchouli-native-context-service
-
     - id: dsh-agent-fleet-patchouli
       name: dsh-agent-fleet-patchouli

@@ -29,7 +29,7 @@ describe('Fleet UI activation bridge', () => {
     }))
   })
 
-  it('delivers a configured Team first input once, privately to its assistant, then rejects the stale turn', async () => {
+  it('requeues a configured Team first input into the attached native assistant Session', async () => {
     const configuration = {
       core: { name: 'Fleet', positioning: '', assistant: {}, members: [] },
       modules: {
@@ -48,7 +48,6 @@ describe('Fleet UI activation bridge', () => {
         assistants: [{ sessionId: 'setup-session', view: { id: 'team-assistant' } }],
       },
     }))
-    const sendUserConversationMessage = vi.fn()
     const incoming = createUserMessage({
       source: { kind: 'user' },
       content: [{ type: 'text', text: encodeFleetActivation({ mode: 'configuration', configuration }, '开始工作') }],
@@ -60,7 +59,7 @@ describe('Fleet UI activation bridge', () => {
       [incoming],
       undefined,
       {
-        runs: { attachAssistant: vi.fn(), sendUserConversationMessage } as never,
+        runs: { attachAssistant: vi.fn() } as never,
         assistant: { activate: vi.fn() } as never,
         meta: { activate: vi.fn() } as never,
       },
@@ -68,14 +67,9 @@ describe('Fleet UI activation bridge', () => {
 
     expect(stage).toHaveBeenCalledWith(agent, { configuration })
     expect(create).toHaveBeenCalledWith(agent)
-    expect(sendUserConversationMessage).toHaveBeenCalledTimes(1)
-    expect(sendUserConversationMessage).toHaveBeenCalledWith({
-        runId: 'team-created',
-        to: '@team-assistant',
-        text: '开始工作',
-        delivery: 'wakeup',
-    })
-    expect(followup).not.toHaveBeenCalled()
+    expect(followup).toHaveBeenCalledWith(expect.objectContaining({
+      content: [{ type: 'text', text: '开始工作' }],
+    }))
     expect(decision).toEqual({ kind: 'reject' })
   })
 
@@ -92,7 +86,6 @@ describe('Fleet UI activation bridge', () => {
       run: { id: 'team-existing-42' },
       assistant: { view },
     }))
-    const sendUserConversationMessage = vi.fn()
     const activate = vi.fn()
     const incoming = createUserMessage({
       source: { kind: 'user' },
@@ -112,7 +105,7 @@ describe('Fleet UI activation bridge', () => {
       [incoming],
       undefined,
       {
-        runs: { attachAssistant, sendUserConversationMessage } as never,
+        runs: { attachAssistant } as never,
         assistant: { activate } as never,
         meta: { activate: vi.fn() } as never,
       },
@@ -124,12 +117,9 @@ describe('Fleet UI activation bridge', () => {
       assistantId: 'assistant-river',
     })
     expect(activate).toHaveBeenCalledWith(agent, 'team-existing-42', view)
-    expect(sendUserConversationMessage).toHaveBeenCalledWith({
-      runId: 'team-existing-42',
-      to: '@assistant-river',
-      text: '继续发布前检查',
-      delivery: 'wakeup',
-    })
+    expect(followup).toHaveBeenCalledWith(expect.objectContaining({
+      content: [{ type: 'text', text: '继续发布前检查' }],
+    }))
     expect(decision).toEqual({ kind: 'reject' })
   })
 

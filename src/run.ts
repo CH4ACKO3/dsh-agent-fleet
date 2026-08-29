@@ -1935,7 +1935,8 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     'Keep your short Fleet member status text current when the work you are doing meaningfully changes. Clear it when the note is no longer useful. This self-declared text is separate from automatic runtime state.',
     '## Member view',
     `Configured Fleet tool groups: ${member.toolGroups.join(', ') || 'none'}. Optional groups are available only when their sub-plugin is installed.`,
-    'Messaging and member status tools stay available. Use fleet_tools to search for and load other granted Fleet capabilities only when needed.',
+    'These groups and fleet_tools cover Fleet capabilities only; host tools such as bash, read, and edit come from the Agent preset and are not listed here.',
+    'Every granted Fleet capability with at least one authorized action stays directly available. Use fleet_tools only to search or list capabilities; its load action is an idempotent compatibility operation, not a prerequisite.',
     `Granted Fleet permissions: ${member.permissions.join(', ') || 'none'}.`,
     `Reachable members: ${members || 'none'}.`,
     `Reachable Channels: ${channels || 'none'}.`,
@@ -2508,6 +2509,8 @@ export class FleetRunService {
           `Team: ${record.name}`,
           `Your Fleet identity: @${member.displayName ?? member.name}`,
           `Members:\n${roster}`,
+          'Before substantive work, inspect the current Fleet tasks, messages, member status, and work claims. Claim one bounded responsibility and coordinate with the relevant peers. Do not independently repeat another member\'s active task or remote job; review or take an unowned dependency instead.',
+          'Fleet tool groups and fleet_tools describe Fleet capabilities only. Host tools such as bash, read, and edit come from the Agent preset. Determine host-tool availability from the tool schemas visible in this turn; if bash is visible, call it directly. Never infer that bash is unavailable merely because it is absent from Fleet tool groups or the fleet_tools catalog.',
           `Work:\n${acceptedTask}`,
         ].join('\n\n'),
         delivery: 'wakeup',
@@ -5113,6 +5116,18 @@ export class FleetRunService {
     const voteBindings = this.voteWorkIds.get(runId)
     if (record === undefined || runtime === undefined || voteBindings === undefined) return
     this.appendEvent(record.id, `coordination.${event.type}`, event)
+    if (event.type === 'message') {
+      const recipientIds = event.message.recipientIds ?? []
+      queueMicrotask(() => {
+        const current = this.records.get(runId)
+        if (current === undefined) return
+        for (const participant of this.participants(current)) {
+          if (!recipientIds.includes(participant.name)) continue
+          const agent = this.ctx.agents.get(SessionId(participant.sessionId))
+          if (agent?.status === 'idle') this.agentIdle(agent)
+        }
+      })
+    }
     if (
       event.type === 'vote'
       && event.action === 'opened'
@@ -5376,13 +5391,25 @@ export class FleetRunService {
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const task = runtime.tasks.pendingRequirement(participant.name)
     if (task === undefined) return false
+    const replyAlreadySent = task.requirement !== undefined
+      && runtime.messages.pendingRequiredReply(participant.sessionId) === undefined
+    const source = task.requirement === undefined
+      ? undefined
+      : `Source Fleet message: ${task.requirement.messageId} in ${task.requirement.conversation}.`
+    const replyPhase = task.requirement === undefined
+      ? undefined
+      : replyAlreadySent
+        ? 'A Fleet reply to the source message has already been sent. Do not repeat the work, rerun checks, or send another separate reply. Review the preceding result only to confirm it satisfies the request, then close this exact task with fleet_task action="complete" and final_reply.'
+        : 'No Fleet reply to the source message has been recorded yet. Review the preceding turn before acting; if its work already satisfies the request, do not rerun checks and close this exact task now with fleet_task action="complete" and final_reply.'
     runtime.messages.sendSystemNotification(participant.name, {
       kind: 'task_notice',
       text: [
-        `[Fleet required task] ${task.title} (${task.id})`,
-        task.description,
+        `[Fleet required task] A complete response is still required (${task.id}).`,
+        source,
+        replyPhase,
+        'The original input is not repeated here. Review the immediately preceding turns and tool results before acting. If the requirement is already satisfied, do not repeat checks or expand the work; call fleet_task with action="complete", this task id, and final_reply now. Use fleet_messages to read the source conversation only when the original input is actually needed.',
         'Fleet currently reports your runtime as active. Do not wait on an earlier pause instruction.',
-        'This obligation remains active after an acknowledgement or progress reply. Perform the requested work, record useful progress if needed, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends that final result to the source conversation before marking the task completed.',
+        'Otherwise continue the unfinished work, record useful progress if needed, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends that final result to the source conversation before marking the task completed.',
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `required-task:${task.id}`,
@@ -5393,6 +5420,52 @@ export class FleetRunService {
       reason: 'required_task',
       tasks: [task.id],
       ...(task.requirement === undefined ? {} : { messages: [task.requirement.messageId] }),
+    })
+    return true
+  }
+
+  private continueAssignedTask(
+    runId: string,
+    runtime: FleetCollaborationTeam,
+    record: FleetRunRecord,
+    agent: Agent,
+  ): boolean {
+    if (record.status !== 'running' || record.work?.status !== 'running') return false
+    const participant = this.participants(record)
+      .find(candidate => candidate.sessionId === String(agent.id))
+    if (participant === undefined
+      || this.autoContinuationPaused(record, participant.name)
+      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
+    const tasks = runtime.tasks.state().tasks
+    const terminal = new Set(tasks
+      .filter(task => task.status === 'completed' || task.status === 'cancelled')
+      .map(task => task.id))
+    const task = tasks
+      .filter(candidate => candidate.requirement === undefined
+        && candidate.assignees.includes(participant.name)
+        && (candidate.status === 'open' || candidate.status === 'in_progress')
+        && candidate.dependencies.every(dependency => terminal.has(dependency)))
+      .sort((left, right) => {
+        if (left.status !== right.status) return left.status === 'in_progress' ? -1 : 1
+        const priority = { high: 0, normal: 1, low: 2 } as const
+        return priority[left.priority] - priority[right.priority]
+          || left.createdAt.localeCompare(right.createdAt)
+      })[0]
+    if (task === undefined) return false
+    runtime.messages.sendSystemNotification(participant.sessionId, {
+      kind: 'task_notice',
+      text: [
+        `[Fleet assigned task remains active] ${task.title} (${task.id})`,
+        task.description,
+        'This task belongs to the current active Fleet work and is still actionable. Continue it now, or explicitly update it to blocked/completed with evidence before going idle. Inspect existing messages, artifacts, and peer results first; do not repeat work that is already complete.',
+      ].filter(Boolean).join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `assigned-task:${task.id}`,
+    })
+    this.appendEvent(runId, 'member_continued', {
+      member: participant.name,
+      reason: 'assigned_task',
+      tasks: [task.id],
     })
     return true
   }
@@ -5414,7 +5487,8 @@ export class FleetRunService {
     this.appendEvent(runId, 'member_continued', {
       member: participant.name,
       reason: pending.length > 0 ? 'pending_wakeup' : 'unread_message',
-      messages: [unread.id],
+      messages: [unread.latestMessageId],
+      inbox: unread.conversation,
     })
     return true
   }
@@ -5446,6 +5520,9 @@ export class FleetRunService {
     // user-facing assistant must consume member replies before answering later
     // progress questions from stale context.
     if (this.continueUnread(runId, runtime, record, agent)) return
+    // During an active work item, an actionable assigned task is durable work,
+    // not a suggestion that may disappear when a model emits ordinary text.
+    if (this.continueAssignedTask(runId, runtime, record, agent)) return
     if (record?.status !== 'running' || record.work?.status !== 'running') return
 
     let wokeUnread = false
@@ -5464,12 +5541,15 @@ export class FleetRunService {
       const requiredReply = unread === undefined ? runtime.messages.followupRequiredReply(live) : undefined
       const waitingMessage = unread ?? requiredReply
       if (waitingMessage === undefined) continue
+      const waitingMessageId = unread?.latestMessageId ?? requiredReply?.id
+      if (waitingMessageId === undefined) continue
       this.appendEvent(runId, 'member_continued', {
         member: member.name,
         reason: pending.length > 0
           ? 'pending_wakeup'
           : unread === undefined ? 'required_reply' : 'unread_message',
-        messages: [waitingMessage.id],
+        messages: [waitingMessageId],
+        ...(unread === undefined ? {} : { inbox: unread.conversation }),
       })
       wokeUnread = true
     }
@@ -5482,28 +5562,41 @@ export class FleetRunService {
     })
     const allIdle = online.length > 0 && online.every(member => member.status === 'idle')
     if (!allIdle) return
-    for (const member of record.members.filter(candidate =>
+    const idleCandidates = record.members.filter(candidate =>
       this.memberCanReply(candidate)
       && !this.networkRecoveries.has(candidate.sessionId)
       && this.budgetRemaining(record, candidate.name).exhaustedScope === undefined,
-    )) {
-      const agent = this.ctx.agents.get(SessionId(member.sessionId))
-      if (agent?.status !== 'idle') continue
-      runtime.messages.sendSystemNotification(member.sessionId, {
-        kind: 'team_quiescent',
-        text: [
-          `[Fleet work ${record.work.id} continuation]`,
-          'The Team still has active work, but every member is idle and no explicit wake-up reply is pending.',
-          'Inspect the current Channels, Meetings, Votes, shared files, and member status. Claim the next useful step, ask the relevant peers for review, or propose a finish/blocked Vote with evidence.',
-        ].join('\n\n'),
-        delivery: 'wakeup',
-        coalesceKey: `team-quiescent:${record.work.id}`,
-      })
-      this.appendEvent(runId, 'member_continued', {
-        member: member.name,
-        reason: 'team_quiescent',
-      })
-    }
+    ).filter(candidate => this.ctx.agents.get(SessionId(candidate.sessionId))?.status === 'idle')
+    const activeTaskAssignees = new Set(runtime.tasks.state().tasks
+      .filter(task => task.status === 'open' || task.status === 'in_progress')
+      .flatMap(task => task.assignees))
+    const voteReader = idleCandidates
+      .map(candidate => this.liveMember(candidate))
+      .find(candidate => candidate !== undefined)
+    const pendingTerminalVoters = new Set(voteReader === undefined ? [] : runtime.messages
+      .listVotes(voteReader)
+      .filter(vote => vote.status === 'open' && (vote.kind === 'finish' || vote.kind === 'blocked'))
+      .flatMap(vote => vote.voters.filter(voter => !vote.approvals.includes(voter))))
+    const member = idleCandidates.find(candidate => pendingTerminalVoters.has(candidate.name))
+      ?? idleCandidates.find(candidate => activeTaskAssignees.has(candidate.name))
+      ?? idleCandidates.find(candidate => runtime.memberViews.get(candidate.name)?.permissions.includes('vote.create') === true)
+      ?? idleCandidates[0]
+    if (member === undefined) return
+    runtime.messages.sendSystemNotification(member.sessionId, {
+      kind: 'team_quiescent',
+      text: [
+        `[Fleet work ${record.work.id} continuation]`,
+        'The Team still has active work, but every member is idle and no explicit wake-up reply is pending.',
+        'You are the single member selected for this continuation so the whole Team does not duplicate the same work. Inspect the current Tasks, Channels, Meetings, Votes, shared files, work claims, and member status. Continue an assigned open task or claim one unowned next step; wake only the relevant peers for review.',
+        'Ordinary model output and member status text do not finish Fleet work. If the evidence shows the work is complete or blocked, call fleet_vote now with action="create", channel="#main", kind="finish" or "blocked", and an evidence-backed statement. If a terminal Vote is already open, cast approve or reject instead of merely saying that you agree.',
+      ].join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `team-quiescent:${record.work.id}`,
+    })
+    this.appendEvent(runId, 'member_continued', {
+      member: member.name,
+      reason: 'team_quiescent',
+    })
   }
 
   agentStatusChanged(agent: Agent): void {
@@ -8401,7 +8494,7 @@ export function installRunTools(
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient. Quiet delivery does not wake them immediately.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural targets merged with valid @Name or @member-id mentions parsed from the text. Every resolved target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a persistent must-complete task for every recipient. Parsed message mentions already create target-level required tasks automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
@@ -8427,7 +8520,7 @@ export function installRunTools(
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Resolved @member targets in the message. Every mentioned target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural targets merged with valid @Name or @member-id mentions parsed from the text. Every resolved target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a persistent must-complete task for every recipient. Parsed message mentions already create target-level required tasks automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
@@ -8455,17 +8548,17 @@ export function installRunTools(
   // shadow this definition with the same semantics and richer discovery groups.
   ctx.tools.register(defineTool({
     name: 'fleet_messages',
-    description: 'Read and inspect Fleet conversations for the calling Fleet participant. Reading returned text advances persistent read progress; notifications and ordinary model output do not.',
+    description: 'Read a Fleet conversation inbox in one character-bounded batch. Unread reads return the newest messages that fit max_chars and report remainingUnread when older information is still waiting. Reading returned text advances the existing persistent per-message progress; notifications and ordinary model output do not.',
     parameters: {
       action: { type: 'string', enum: ['read', 'search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'], description: 'Defaults to read.' },
       conversation: { type: 'string', description: 'Conversation in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
-      limit: { type: 'integer', description: 'Bound the number of returned items or text characters, depending on action.' },
-      max_chars: { type: 'integer', description: 'Maximum total text returned by read.' },
+      limit: { type: 'integer', description: 'Optional history ceiling when unread_only=false. Unread inbox reads always batch by max_chars, so retained limit values from older Sessions cannot split a short inbox across model steps.' },
+      max_chars: { type: 'integer', description: 'Maximum total text returned by read. When unread text is longer, the newest messages are returned and older messages remain unread.' },
       query: { type: 'string', description: 'Case-insensitive text query for search.' },
       from: { type: 'string', description: 'Optional sender filter for search.' },
       resource: { type: 'string', description: 'Optional resource id filter for search.' },
-      unread_only: { type: 'boolean', description: 'For read, defaults true. For inbox, return only unread items.' },
+      unread_only: { type: 'boolean', description: 'For read, defaults true and batch-loads unread messages from the conversation inbox. For inbox, return only unread activity items.' },
       message_id: { type: 'string', description: 'Message id for text, reaction, or pin actions.' },
       offset: { type: 'integer', description: 'Character offset for text continuation.' },
       reaction: { type: 'string', description: 'Reaction label for react.' },

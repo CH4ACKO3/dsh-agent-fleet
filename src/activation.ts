@@ -16,7 +16,7 @@ interface FleetActivationSetups {
 }
 
 interface FleetConnectionServices {
-  readonly runs: Pick<FleetRunService, 'attachAssistant' | 'sendUserConversationMessage'> & {
+  readonly runs: Pick<FleetRunService, 'attachAssistant'> & {
     agentSessionStarted?(agent: Agent): void
   }
   readonly assistant: Pick<FleetAssistantRuntime, 'activate'>
@@ -76,15 +76,7 @@ export async function activateFleetFromMessages(
     })
     connection.assistant.activate(agent, attached.run.id, attached.assistant.view)
     connection.runs.agentSessionStarted?.(agent)
-    if (activation.initialIdea !== undefined) {
-      connection.runs.sendUserConversationMessage({
-        runId: attached.run.id,
-        to: `@${attached.assistant.view.id}`,
-        text: activation.initialIdea,
-        delivery: 'wakeup',
-      })
-      return { kind: 'reject' }
-    }
+    if (activation.initialIdea !== undefined) return requeueAfterActivation(agent, activation.message)
   } else {
     const setup = setups.begin(agent, {
       ...(activation.initialIdea === undefined ? {} : { initialIdea: activation.initialIdea }),
@@ -98,15 +90,7 @@ export async function activateFleetFromMessages(
         && connection !== undefined) {
         const assistant = created.run.assistants.find(candidate => candidate.sessionId === String(agent.id))
           ?? created.run.assistants[0]
-        if (assistant !== undefined) {
-          connection.runs.sendUserConversationMessage({
-            runId: created.run.id,
-            to: `@${assistant.view.id}`,
-            text: activation.initialIdea,
-            delivery: 'wakeup',
-          })
-          return { kind: 'reject' }
-        }
+        if (assistant !== undefined) return requeueAfterActivation(agent, activation.message)
       }
     }
     if (activation.request.mode === 'interactive') {

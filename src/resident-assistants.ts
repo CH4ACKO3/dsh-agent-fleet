@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
 import type { FleetAssistantRuntime } from './assistant.js'
@@ -14,6 +15,13 @@ function assistantAgentOptions(run: FleetRunRecord, assistant: FleetRunAssistant
     ...(model === undefined ? {} : { model }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
   }
+}
+
+async function mountPersistedAgentPreset(ctx: Context): Promise<void> {
+  const presets = ctx.get('agentPresets', false)
+  if (presets === undefined) return
+  if (ctx.agent === undefined) throw new Error('Resident Fleet assistant setup requires ctx.agent')
+  await presets.mount(ctx, resolveSessionPreset(ctx.agent.session))
 }
 
 /** Keep every persisted Team assistant ready without resuming the formal member roster. */
@@ -58,6 +66,7 @@ export async function activateResidentFleetAssistants(
           const handle = await ctx.agents.resume({
             resumeSessionId: SessionId(assistant.sessionId),
             agentOptions: assistantAgentOptions(run, assistant),
+            setup: mountPersistedAgentPreset,
           })
           try {
             // The MessageHub resolves agents from the published registry, so

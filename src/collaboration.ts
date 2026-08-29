@@ -39,7 +39,7 @@ const SPECIAL_TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
 }
 
 import type { FleetMemberToolGroup } from './member-view.js'
-import { FLEET_TOOL_CATALOG, installFleetToolDiscovery } from './tool-discovery.js'
+import { FLEET_TOOL_CATALOG, fleetToolHasAuthorizedAction, installFleetToolDiscovery } from './tool-discovery.js'
 import type { FleetAuthorizationChange, FleetAuthorizationService } from './authorization.js'
 import {
   FleetTaskBoard,
@@ -374,13 +374,15 @@ export class FleetCollaborationService {
     const memberStatuses = new FleetMemberStatusBoard(memberDirectory)
     let events: FleetTeamEventDispatch
     let teamScope: Scope
+    let requiredActionInstruction = (_message: FleetMessage, _participantId: string): string =>
+      'Fleet promotes this obligation to a persistent high-priority task. Call fleet_task with action="list" to find it. An acknowledgement or progress reply does not complete it. Perform the requested work, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends final_reply to the source conversation before marking the task completed; ordinary native output is internal and does not count.'
     const messages = new MessageHub(agentDirectory, {
       beforeSend: (sender, message) => events.waterfall(
         'fleet/message/pre-send',
         { sender, input: message },
         () => ({ kind: 'send', input: message }),
       ),
-      requiredActionInstruction: () => 'Fleet promotes this obligation to a persistent high-priority task. Call fleet_task with action="list" to find it. An acknowledgement or progress reply does not complete it. Perform the requested work, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends final_reply to the source conversation before marking the task completed; ordinary native output is internal and does not count.',
+      requiredActionInstruction: (message, participantId) => requiredActionInstruction(message, participantId),
     })
     const canManage = (agentId: string, namespace: string): boolean => {
       const member = memberNamesById.get(agentId)
@@ -430,15 +432,14 @@ export class FleetCollaborationService {
         if (replyTarget === undefined) {
           throw new Error(`Fleet task ${task.id} cannot resolve the source conversation for its final reply`)
         }
-        const existingFinal = messages.search(sender, {
+        const existingReply = messages.search(sender, {
           conversation: replyTarget as FleetTarget,
           limit: 100,
         }).reverse().find(message =>
           message.kind === 'text'
           && message.from === sender.id
-          && message.createdAt >= task.createdAt
-          && message.text.trim() === finalReply)
-        if (existingFinal !== undefined) return { messageId: existingFinal.id }
+          && message.createdAt >= task.createdAt)
+        if (existingReply !== undefined) return { messageId: existingReply.id }
         const result = messages.send(sender, {
           to: replyTarget as FleetTarget,
           text: finalReply,
@@ -448,19 +449,31 @@ export class FleetCollaborationService {
         return { messageId: result.messageId }
       },
     )
+    requiredActionInstruction = (message, participantId) => {
+      const assignee = participantName(participantId)
+      const task = tasks.state().tasks.find(candidate =>
+        candidate.requirement?.kind === 'message'
+        && candidate.requirement.messageId === message.id
+        && (assignee === undefined || candidate.requirement.assignee === assignee))
+      const taskReference = task === undefined
+        ? 'Call fleet_task with action="list" to find the required task for this message.'
+        : `The required task for this exact message is ${task.id}. Use this exact id; do not reuse a task id from an earlier turn.`
+      return `Fleet promotes this obligation to a persistent high-priority task. ${taskReference} An acknowledgement or progress reply does not complete it. Perform the requested work, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends final_reply to the source conversation before marking the task completed; ordinary native output is internal and does not count.`
+    }
     const hasPendingRequirement = (member: string): boolean => {
       const task = tasks.pendingRequirement(member)
       return task !== undefined && task.status !== 'cancelled'
     }
     const requiredRecipients = (message: FleetMessage): string[] => {
-      if (message.mustReply === true) return [...new Set(message.recipientIds ?? [])]
+      if (message.mustReply === true
+        || (message.origin === 'user' && message.conversation.startsWith('@'))) {
+        return [...new Set(message.recipientIds ?? [])]
+      }
       return [...new Set(message.mentions)]
     }
-    const requiredTitle = (message: FleetMessage): string => {
-      const preview = message.text.replace(/\s+/gu, ' ').trim()
-      const shortened = preview.length > 120 ? `${preview.slice(0, 117)}...` : preview
-      return `Required from @${message.fromName ?? message.from}: ${shortened}`
-    }
+    const requiredTitle = (message: FleetMessage): string => message.origin === 'user'
+      ? '对用户输入进行完整回复'
+      : '对必答消息进行完整回复'
     const ensureMessageTasks = (message: FleetMessage): void => {
       if (message.kind !== 'text') return
       const createdBy = participantName(message.from) ?? message.fromName ?? 'User'
@@ -473,11 +486,7 @@ export class FleetCollaborationService {
           assignee,
           replyTarget: replyTargetFor(message),
           title: requiredTitle(message),
-          description: [
-            `Required action created from Fleet message ${message.id} in ${message.conversation}.`,
-            '',
-            message.text,
-          ].join('\n'),
+          description: `Reply obligation for Fleet message ${message.id} in ${message.conversation}. Read the source conversation with fleet_messages if the original input is needed.`,
           resources: message.resources,
         })
         revealRequiredTaskTool(assignee)
@@ -530,14 +539,18 @@ export class FleetCollaborationService {
         if (event.action === 'completed' && event.task.requirement?.kind === 'message') {
           messages.completeRequiredReply(event.task.requirement.assignee, event.task.requirement.messageId)
         }
-        if (event.action !== 'due' && event.action !== 'notification') {
+        const initialRequiredTask = event.action === 'created' && event.task.requirement?.kind === 'message'
+        if (event.action !== 'due' && event.action !== 'notification' && !initialRequiredTask) {
           const recipients = [...event.task.assignees, ...event.task.reviewers, ...event.task.followers]
             .filter(member => member !== event.actor)
+          const requiredTaskNotice = event.action === 'completed'
+            ? `[Fleet required task completed] ${event.task.title} (${event.task.id}). No further completion action is required.`
+            : `[Fleet required task ${event.action}] ${event.task.title} (${event.task.id}). An acknowledgement or progress reply does not complete this obligation. After the work is done, use fleet_task action="complete" with final_reply.`
           notifyMembers(
             recipients,
             event.task.requirement === undefined
               ? `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`
-              : `[Fleet required task ${event.action}] ${event.task.title} (${event.task.id}). An acknowledgement or progress reply does not complete this obligation. After the work is done, use fleet_task action="complete" with final_reply; Fleet sends that final result to the source conversation before completion.`,
+              : requiredTaskNotice,
             'task_notice',
             `task:${event.task.id}`,
             event.task.requirement === undefined && (event.action === 'created' || event.action === 'completed')
@@ -573,8 +586,8 @@ export class FleetCollaborationService {
       readonly member: string
       readonly exposeHostFleetTools: boolean
       readonly toolGroups?: readonly FleetMemberToolGroup[]
-      loadedTools: Set<string>
-      loadTool: (name: string) => void
+      residentTools: Set<string>
+      installTool: (name: string) => void
       stop: () => void
     }
     const toolBindings = new Set<ToolBinding>()
@@ -590,8 +603,7 @@ export class FleetCollaborationService {
       member: string,
       exposeHostFleetTools: boolean,
       selectedToolGroups?: readonly FleetMemberToolGroup[],
-      previouslyLoaded: readonly string[] = [],
-    ): Pick<ToolBinding, 'loadedTools' | 'loadTool' | 'stop'> => {
+    ): Pick<ToolBinding, 'residentTools' | 'installTool' | 'stop'> => {
       const view = memberViews.get(member)
       if (view === undefined) throw new Error(`unknown Fleet member view ${member}`)
       const effective = this.authorization.resolve(input.id, view)
@@ -643,12 +655,7 @@ export class FleetCollaborationService {
         else if (entry.source === 'coordination' && tools.has('coordination')) allowed.add(entry.name)
         else if (entry.source === 'resources' && tools.has('resources')) allowed.add(entry.name)
       }
-      const loadedTools = new Set<string>(previouslyLoaded.filter(name => allowed.has(name)))
-      if (tools.has('messages')) {
-        loadedTools.add('fleet_send')
-        loadedTools.add('fleet_messages')
-      }
-      if (hasPendingRequirement(member) && allowed.has('fleet_task')) loadedTools.add('fleet_task')
+      const residentTools = new Set<string>()
       const localStops: Array<() => void> = []
       const add = (stop: (() => void) | void): (() => void) | void => {
         if (stop !== undefined) localStops.push(stop)
@@ -659,14 +666,17 @@ export class FleetCollaborationService {
         hostRestrictionStop?.()
         const deny = [
           'fleet_agent', 'fleet_archive', 'fleet_setup',
-          ...FLEET_TOOL_CATALOG.filter(entry => entry.source === 'host' && (!allowed.has(entry.name) || !loadedTools.has(entry.name))).map(entry => entry.name),
+          ...FLEET_TOOL_CATALOG.filter(entry => entry.source === 'host' && (!allowed.has(entry.name) || !residentTools.has(entry.name))).map(entry => entry.name),
         ]
         hostRestrictionStop = ctx.tools.restrict({ deny: [...new Set(deny)] })
       }
-      const loadTool = (name: string): void => {
-        if (!allowed.has(name) || loadedTools.has(name)) return
+      const installTool = (name: string): void => {
+        if (!allowed.has(name) || residentTools.has(name)) return
         const entry = FLEET_TOOL_CATALOG.find(candidate => candidate.name === name)
         if (entry === undefined) return
+        const available = (entry.name === 'fleet_task' && hasPendingRequirement(member))
+          || fleetToolHasAuthorizedAction(entry, permissions)
+        if (!available) return
         let stop: (() => void) | void = undefined
         if (entry.source === 'messages' || entry.source === 'coordination') {
           stop = installMessageTools(ctx, messages, {
@@ -713,7 +723,8 @@ export class FleetCollaborationService {
             ?? (entry.name === 'fleet_task' && hasPendingRequirement(member)
               ? authorizationNamespaces.get(entry.namespace)
               : undefined)
-          stop = namespace?.installTools?.(ctx, {
+          if (namespace?.installTools === undefined) return
+          stop = namespace.installTools(ctx, {
             teamId: input.id,
             projectRoot: input.projectRoot,
             member: view,
@@ -721,23 +732,19 @@ export class FleetCollaborationService {
             authorization: effective,
           })
         } else if (entry.source === 'host') {
-          loadedTools.add(name)
-          refreshHostRestriction()
+          residentTools.add(name)
           return
         }
         add(stop)
-        loadedTools.add(name)
+        residentTools.add(name)
       }
       try {
-        for (const name of [...loadedTools]) {
-          loadedTools.delete(name)
-          loadTool(name)
-        }
+        for (const name of allowed) installTool(name)
         add(installFleetToolDiscovery(ctx, {
           allowedTools: allowed,
-          loadedTools,
+          residentTools,
           permissions,
-          load: loadTool,
+          load: installTool,
         }))
         for (const namespace of this.authorization.namespaces()) {
           if (!this.authorization.visible(namespace, effective)) continue
@@ -769,27 +776,25 @@ export class FleetCollaborationService {
         for (const stop of localStops.reverse()) stop()
         throw error
       }
-      return { loadedTools, loadTool, stop: () => {
+      return { residentTools, installTool, stop: () => {
         hostRestrictionStop?.()
         for (const stop of localStops.reverse()) stop()
       } }
     }
     const refreshBinding = (binding: ToolBinding): void => {
-      const previouslyLoaded = [...binding.loadedTools]
       binding.stop()
       const runtime = createToolBinding(
         binding.ctx,
         binding.member,
         binding.exposeHostFleetTools,
         binding.toolGroups,
-        previouslyLoaded,
       )
-      binding.loadedTools = runtime.loadedTools
-      binding.loadTool = runtime.loadTool
+      binding.residentTools = runtime.residentTools
+      binding.installTool = runtime.installTool
       binding.stop = runtime.stop
     }
     revealRequiredTaskTool = () => {
-      for (const binding of toolBindings) if (hasPendingRequirement(binding.member)) binding.loadTool('fleet_task')
+      for (const binding of toolBindings) if (hasPendingRequirement(binding.member)) binding.installTool('fleet_task')
     }
     let closed = false
     const team: FleetCollaborationTeam = {
@@ -870,18 +875,18 @@ export class FleetCollaborationService {
           member,
           exposeHostFleetTools: options.exposeHostFleetTools ?? false,
           ...(options.toolGroups === undefined ? {} : { toolGroups: [...options.toolGroups] }),
-          loadedTools: new Set(),
-          loadTool: () => {},
+          residentTools: new Set(),
+          installTool: () => {},
           stop: () => {},
         }
         const runtime = createToolBinding(ctx, member, binding.exposeHostFleetTools, binding.toolGroups)
-        binding.loadedTools = runtime.loadedTools
-        binding.loadTool = runtime.loadTool
+        binding.residentTools = runtime.residentTools
+        binding.installTool = runtime.installTool
         binding.stop = runtime.stop
         toolBindings.add(binding)
-        if (hasPendingRequirement(member)) binding.loadTool('fleet_task')
+        if (hasPendingRequirement(member)) binding.installTool('fleet_task')
         queueMicrotask(() => {
-          if (toolBindings.has(binding) && hasPendingRequirement(member)) binding.loadTool('fleet_task')
+          if (toolBindings.has(binding) && hasPendingRequirement(member)) binding.installTool('fleet_task')
         })
         return () => {
           if (!toolBindings.delete(binding)) return

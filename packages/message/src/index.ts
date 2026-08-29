@@ -153,6 +153,8 @@ const MESSAGE_RESULT_SCHEMA = {
     pin: PIN_SCHEMA,
     pins: { type: 'array', items: PIN_SCHEMA },
     hasMore: { type: 'boolean' },
+    remainingUnread: { type: 'integer' },
+    remainingUnreadChars: { type: 'integer' },
     revision: { type: 'integer' },
     chunk: {
       type: 'object',
@@ -250,6 +252,8 @@ function messageOutput(): {
           ...(value.action === undefined ? {} : { action: value.action }),
           messages: rendered,
           ...(value.hasMore === undefined ? {} : { hasMore: value.hasMore }),
+          ...(value.remainingUnread === undefined ? {} : { remainingUnread: value.remainingUnread }),
+          ...(value.remainingUnreadChars === undefined ? {} : { remainingUnreadChars: value.remainingUnreadChars }),
           ...(value.revision === undefined ? {} : { revision: value.revision }),
         }) }]
       }
@@ -450,11 +454,11 @@ export function installMessageTools(
   if (options.messages !== false) {
   register(defineTool({
     name: 'fleet_send',
-    description: 'Send a process-local Fleet message without waking an idle Agent. The @ in to is routing only, and writing @Name only in message text is display text. Put must-complete targets in mentions; a full Fleet host promotes each resolved mention to a persistent task. Ordinary direct messages and replies create no obligation. Use #channel as a shared asynchronous log and reply_to for a message thread. After this satisfies the current communication need, avoid unrelated follow-up tools.',
+    description: 'Send a process-local Fleet message without urgent interruption. The @ in to is routing only. Valid @Name or @member-id text is parsed as a must-complete mention; mentions may also supply targets structurally, and a full Fleet host promotes each resolved mention to a persistent task. Ordinary direct messages and replies create no obligation. Use #channel as a shared asynchronous log and reply_to for a message thread. After this satisfies the current communication need, avoid unrelated follow-up tools.',
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Actual assignment targets. Plain @Name text is not parsed from message. Every resolved target receives a required action; a full Fleet host persists it as a must-complete task. A direct message may mention only its recipient. Quiet delivery does not wake them immediately.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural assignment targets, merged with valid @Name or @member-id mentions parsed from the text. Every resolved target receives a required action; a full Fleet host persists it as a must-complete task. A direct message may mention only its recipient.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a required action for every recipient. A full Fleet host persists these as must-complete tasks.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
@@ -477,11 +481,11 @@ export function installMessageTools(
 
   register(defineTool({
     name: 'fleet_followup',
-    description: 'Send a process-local Fleet message and start selected Agents\' next turns. The @ in to is routing only, and plain @Name message text has no assignment semantics. Put must-complete targets in mentions; in a Channel resolved mentions also select who wakes or is interrupted. Set interrupt only when current work has become unsafe or obsolete.',
+    description: 'Send a process-local Fleet message and start selected Agents\' next turns. The @ in to is routing only. Valid @Name or @member-id text is parsed as a must-complete mention; mentions may also supply targets structurally. In a Channel resolved mentions select who wakes or is interrupted. Set interrupt only when current work has become unsafe or obsolete.',
     parameters: {
       to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
       message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Actual assignment targets. Plain @Name text is not parsed from message. Every resolved target receives a required action; a full Fleet host persists it as a must-complete task. A direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural assignment targets, merged with valid @Name or @member-id mentions parsed from the text. Every resolved target receives a required action; a full Fleet host persists it as a must-complete task. A direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a required action for every recipient. A full Fleet host persists these as must-complete tasks.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
@@ -510,17 +514,17 @@ export function installMessageTools(
 
   register(defineTool({
     name: 'fleet_messages',
-    description: 'Read Fleet message text progressively, search without marking results read, continue long text in bounded chunks, inspect the calling member inbox, react to messages, and manage pinned messages. Text returned by read or text advances read progress. A direct reply also acknowledges the addressed input; delivery notices alone do not. Channel recipients may receive only a notice, so use read for the full body.',
+    description: 'Read a Fleet conversation inbox in a character-bounded batch, search without marking results read, continue one long message, inspect inbox activity, react, and manage pins. Read returns the newest unread messages that fit max_chars and reports remainingUnread when older information is still waiting. Text returned by read or text advances the existing per-message read progress; delivery notices alone do not.',
     parameters: {
       action: { type: 'string', enum: ['read', 'search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'], description: 'Defaults to read. Use text with message_id and the returned offset to continue a partially read message.' },
       conversation: { type: 'string', description: 'Conversation in @fleet-name, @agent-id, #channel, or meeting:id form.' },
       after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
-      limit: { type: 'integer', description: 'For read, 1-50 messages (default 10). For other list actions, up to 100. For text continuation, 1-12000 characters (default 12000).' },
-      max_chars: { type: 'integer', description: 'For read, total returned message text budget from 1 through 12000 characters (default 12000).' },
+      limit: { type: 'integer', description: 'For read with unread_only=false, optional 1-1000 history ceiling. Unread inbox reads always batch by max_chars. For other list actions, up to 100. For text continuation, 1-12000 characters (default 12000).' },
+      max_chars: { type: 'integer', description: 'For read, total returned message text budget from 1 through 12000 characters (default 12000). When unread text is longer, the newest messages are returned and older messages remain unread.' },
       query: { type: 'string', description: 'Case-insensitive text query for search.' },
       from: { type: 'string', description: 'Optional sender filter for search.' },
       resource: { type: 'string', description: 'Optional resource id filter for search.' },
-      unread_only: { type: 'boolean', description: 'For read, defaults true and skips fully read messages; set false to inspect history. For inbox, return only unread items.' },
+      unread_only: { type: 'boolean', description: 'For read, defaults true and batch-loads unread messages from the conversation inbox; set false to inspect history. For inbox, return only unread activity items.' },
       message_id: { type: 'string', description: 'Message id for text continuation, react, reactions, pin, or unpin.' },
       offset: { type: 'integer', description: 'Character offset for text continuation. Omit to continue from recorded progress, or use the exact offset returned in text_more.' },
       reaction: { type: 'string', description: 'Reaction label for react.' },

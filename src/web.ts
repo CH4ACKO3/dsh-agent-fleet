@@ -87,7 +87,7 @@ export interface FleetWebMemberInput {
 export interface FleetWebControlInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'start' | 'finish' | 'load' | 'pause' | 'resume' | 'wake' | 'close' | 'configure' | 'budget'
+  readonly action: 'start' | 'finish' | 'load' | 'pause' | 'resume' | 'wake' | 'close' | 'detach' | 'configure' | 'budget'
   readonly taskPath?: string
   readonly status?: Exclude<FleetWorkStatus, 'running'>
   readonly summary?: string
@@ -406,6 +406,7 @@ export class FleetWebRemote extends TypertRemoteService {
         runId: team.id, projectRoot: team.projectRoot, taskPath: required(input.taskPath, 'taskPath'),
       }))
       case 'close': return Promise.resolve(this.runs.end(caller, required(input.summary, 'summary'), team.id))
+      case 'detach': return Promise.resolve(this.runs.detachAssistant(caller, team.id))
       case 'finish':
         if (input.status === undefined) throw new Error('work finish requires status')
         return Promise.resolve(this.runs.finish(caller, input.status, required(input.summary, 'summary'), team.id))

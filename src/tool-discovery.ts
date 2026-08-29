@@ -27,10 +27,10 @@ export const FLEET_TOOL_CATALOG: readonly FleetToolCatalogEntry[] = [
   { name: 'fleet_member_status', group: 'status', family: 'team-awareness', source: 'status', description: 'Read or update members current work status.', keywords: 'member status presence 状态 成员', aliases: ['成员状态', '工作状态', '状态文本'], actions: ['list', 'get', 'set', 'clear'], privilegedActions: { list: 'member-status.read', get: 'member-status.read', set: 'member-status.write', clear: 'member-status.write' } },
   { name: 'fleet_progress', group: 'status', family: 'team-awareness', source: 'host', description: 'Read a reachable member current runtime state and bounded recent Session progress.', keywords: 'member progress latest session status inspect 成员 进度 最新 会话', aliases: ['谁在做什么', '正在做什么', '当前工作', '成员进度'], actions: ['read'], privilegedActions: { read: 'member-status.read' } },
   { name: 'fleet_assistant', group: 'core', family: 'assistant-control', source: 'host', description: 'Start, inspect, steer, pause, resume, or stop assistant sessions.', keywords: 'assistant session start steer pause resume stop 助理 会话 启动 暂停 恢复', aliases: ['助理会话', '启动助理', '暂停助理'], actions: ['list', 'get', 'start', 'steer', 'pause', 'resume', 'stop'] },
-  { name: 'fleet_run', group: 'core', family: 'team-awareness', source: 'host', description: 'Inspect the current Fleet run and its members.', keywords: 'run runtime team members state current 团队 运行 成员 状态', aliases: ['团队运行状态', '团队状态', '当前运行'], actions: ['get', 'list'] },
+  { name: 'fleet_run', group: 'core', family: 'team-awareness', source: 'host', description: 'Inspect and control the Fleet Team lifecycle, including waking or resuming all unloaded member runtimes.', keywords: 'run runtime team members state current create start pause resume wake unload reload dormant lifecycle all entire 团队 运行 成员 状态 创建 启动 暂停 恢复 唤醒 未加载 重新加载 休眠 生命周期 全体 整个', aliases: ['团队运行状态', '团队状态', '当前运行', '唤醒团队', '唤醒整个团队', '加载团队', '加载整个团队', '恢复全体成员'], actions: ['create', 'start', 'pause', 'resume', 'wake', 'list', 'status', 'wait', 'finish', 'close'], privilegedActions: { pause: 'team.manage', resume: 'team.manage', wake: 'team.manage', finish: 'team.manage', close: 'team.manage' } },
   { name: 'fleet_trace', group: 'core', family: 'team-awareness', source: 'host', description: 'Inspect bounded Fleet coordination traces when debugging collaboration.', keywords: 'trace debug coordination events diagnostics 追踪 调试 协作 事件', aliases: ['协作异常', '调试协作', '查看追踪'], actions: ['list', 'get'] },
   { name: 'fleet_activity', group: 'core', family: 'team-awareness', source: 'host', description: 'Inspect recent Fleet activity without opening full traces.', keywords: 'activity recent events audit 活动 最近 事件', aliases: ['最近动态', '最近发生了什么', '团队活动'], actions: ['list'] },
-  { name: 'fleet_member', group: 'administration', family: 'governance', source: 'host', description: 'Manage Team membership and member settings.', keywords: 'member manage team add remove configure 成员 管理 团队 添加 删除 配置', aliases: ['团队成员', '成员配置', '添加成员', '删除成员'], actions: ['list', 'add', 'update', 'remove'], privilegedActions: { add: 'team.manage', update: 'team.manage', remove: 'team.manage' } },
+  { name: 'fleet_member', group: 'administration', family: 'governance', source: 'host', description: 'Manage Team membership and settings, or pause and resume one member runtime even when it is unloaded.', keywords: 'member manage team add remove configure pause resume wake unload reload dormant 成员 管理 团队 添加 删除 配置 暂停 恢复 唤醒 未加载 重新加载 休眠', aliases: ['团队成员', '成员配置', '添加成员', '删除成员', '恢复单个成员', '拉起成员', '唤醒成员'], actions: ['list', 'add', 'update', 'configure', 'configure_all', 'pause', 'resume', 'remove'], privilegedActions: { add: 'team.manage', update: 'team.manage', configure: 'team.manage', configure_all: 'team.manage', pause: 'team.manage', resume: 'team.manage', remove: 'team.manage' } },
   { name: 'fleet_channel', group: 'coordination', family: 'coordination', source: 'coordination', description: 'List and manage shared channels.', keywords: 'channel topic group archive 频道 群聊 主题 归档', aliases: ['创建频道', '频道管理', '群聊'], actions: ['list', 'create', 'update', 'archive'], privilegedActions: { create: 'channel.manage', update: 'channel.manage', archive: 'channel.manage' } },
   { name: 'fleet_vote', group: 'coordination', family: 'coordination', source: 'coordination', description: 'Create, inspect, or cast a Team vote.', keywords: 'vote consensus approve reject decision 投票 共识 同意 拒绝 决策', aliases: ['投票决定', '决定是否', '征求表决'], actions: ['list', 'get', 'create', 'cast'], privilegedActions: { create: 'vote.create' } },
   { name: 'fleet_meeting', group: 'coordination', family: 'coordination', source: 'coordination', description: 'Open, join, inspect, or close a meeting.', keywords: 'meeting agenda decision participants 会议 议程 决议 参会', aliases: ['开会', '讨论会', '召开会议'], actions: ['list', 'open', 'join', 'leave', 'close'], privilegedActions: { open: 'meeting.manage', close: 'meeting.manage' }, constraints: ['close is additionally limited to the meeting initiator'] },
@@ -110,7 +110,14 @@ function grantedActions(entry: FleetToolCatalogEntry, permissions: ReadonlySet<s
   }
 }
 
-export function searchFleetTools(query: string, allowedTools: ReadonlySet<string>, loadedTools: ReadonlySet<string>, permissions: ReadonlySet<string> = new Set(), catalog: readonly FleetToolCatalogEntry[] = FLEET_TOOL_CATALOG) {
+export function fleetToolHasAuthorizedAction(
+  entry: FleetToolCatalogEntry,
+  permissions: ReadonlySet<string>,
+): boolean {
+  return grantedActions(entry, permissions).actions.length > 0
+}
+
+export function searchFleetTools(query: string, allowedTools: ReadonlySet<string>, residentTools: ReadonlySet<string>, permissions: ReadonlySet<string> = new Set(), catalog: readonly FleetToolCatalogEntry[] = FLEET_TOOL_CATALOG) {
   const normalized = normalize(query)
   const tokens = queryTokens(normalized)
   const queryGrams = chineseNgrams(normalized)
@@ -174,7 +181,7 @@ export function searchFleetTools(query: string, allowedTools: ReadonlySet<string
       group: candidate.entry.group,
       family: candidate.entry.family,
       description: candidate.entry.description,
-      loaded: loadedTools.has(candidate.entry.name),
+      loaded: residentTools.has(candidate.entry.name),
       matched: normalized.length === 0 || candidate.score > 0,
       actions: candidate.actions,
       restrictedActions: candidate.restrictedActions,
@@ -182,26 +189,26 @@ export function searchFleetTools(query: string, allowedTools: ReadonlySet<string
     }))
 }
 
-export function installFleetToolDiscovery(ctx: Context, options: { readonly catalog?: readonly FleetToolCatalogEntry[]; readonly allowedTools: ReadonlySet<string>; readonly loadedTools: Set<string>; readonly permissions: ReadonlySet<string>; readonly load: (name: string) => void }): () => void {
+export function installFleetToolDiscovery(ctx: Context, options: { readonly catalog?: readonly FleetToolCatalogEntry[]; readonly allowedTools: ReadonlySet<string>; readonly residentTools: Set<string>; readonly permissions: ReadonlySet<string>; readonly load: (name: string) => void }): () => void {
   const catalog = options.catalog ?? FLEET_TOOL_CATALOG
   return ctx.tools.register(defineTool({
     name: 'fleet_tools',
-    description: 'Discover Fleet capabilities on demand. Search results expand the small related-capability family of a direct match; matched=false marks a related suggestion. Load one exact returned tool name. Only loaded tools enter this Agent context, and permissions remain enforced.',
-    parameters: { action: { type: 'string', enum: ['search', 'load', 'list'], description: 'Defaults to search.' }, query: { type: 'string', description: 'Natural-language capability or tool name to search.' }, name: { type: 'string', description: 'Exact Fleet tool name returned by search; required for load.' } },
+    description: 'Search or list the granted Fleet capabilities that are already resident for this Agent. This catalog does not list host tools such as bash, read, or edit. Search expands the small related-capability family of a direct match; matched=false marks a related suggestion. The load action is retained as an idempotent compatibility operation and does not make a tool more available.',
+    parameters: { action: { type: 'string', enum: ['search', 'load', 'list'], description: 'Defaults to search. Load is an idempotent compatibility operation.' }, query: { type: 'string', description: 'Natural-language capability or tool name to search.' }, name: { type: 'string', description: 'Exact Fleet tool name returned by search; required only for the compatibility load action.' } },
     output: { schema: TOOL_DISCOVERY_RESULT_SCHEMA, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(args) {
       if ((args.action ?? 'search') === 'load') {
         if (args.name === undefined) throw new Error('fleet_tools load requires name')
         const entry = catalog.find(candidate => normalize(candidate.name) === normalize(args.name ?? ''))
         if (entry === undefined || !options.allowedTools.has(entry.name)) throw new Error(`Fleet tool ${args.name} is not available to this member`)
-        if (!searchFleetTools(entry.name, options.allowedTools, options.loadedTools, options.permissions, catalog)
+        if (!searchFleetTools(entry.name, options.allowedTools, options.residentTools, options.permissions, catalog)
           .some(candidate => candidate.name === entry.name)) {
           throw new Error(`Fleet tool ${args.name} has no actions available to this member`)
         }
-        if (!options.loadedTools.has(entry.name)) options.load(entry.name)
-        return { matches: searchFleetTools(entry.name, options.allowedTools, options.loadedTools, options.permissions, catalog), loadedTools: [...options.loadedTools].sort() }
+        if (!options.residentTools.has(entry.name)) options.load(entry.name)
+        return { matches: searchFleetTools(entry.name, options.allowedTools, options.residentTools, options.permissions, catalog), loadedTools: [...options.residentTools].sort() }
       }
-      return { matches: searchFleetTools(args.action === 'list' ? '' : (args.query ?? ''), options.allowedTools, options.loadedTools, options.permissions, catalog), loadedTools: [...options.loadedTools].sort() }
+      return { matches: searchFleetTools(args.action === 'list' ? '' : (args.query ?? ''), options.allowedTools, options.residentTools, options.permissions, catalog), loadedTools: [...options.residentTools].sort() }
     },
   }))
 }

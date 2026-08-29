@@ -93,6 +93,7 @@ import {
 
 const PANEL_STYLE_ID = 'dsh-agent-fleet-team-panel'
 const RENDER_ENGINE_STYLE_ID = 'dsh-agent-fleet-render-engine'
+const FLEET_ASSISTANT_PRIVATE_CHAT_ENABLED = false
 
 const panelStyles = `
 [data-conversation-scroll]:has(.dsh-fleet-panel) {
@@ -6078,7 +6079,7 @@ export interface FleetPanelRemoveResourceInput {
 export interface FleetPanelTeamControlInput {
   readonly sessionId: string
   readonly teamId: string
-  readonly action: 'load' | 'pause' | 'resume' | 'wake' | 'close'
+  readonly action: 'load' | 'pause' | 'resume' | 'wake' | 'close' | 'detach'
   readonly summary?: string
 }
 
@@ -7548,7 +7549,7 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
             target: 'context',
           })
         }
-    const content = welcome === null && !fleetAssistant
+    const content = welcome === null && (!fleetAssistant || !FLEET_ASSISTANT_PRIVATE_CHAT_ENABLED)
       ? jsx(ChatView, props)
       : jsx(AgentFleetPrivateChat, {
           key: welcome?.sessionId ?? `fleet-assistant:${sessionId ?? ''}`,

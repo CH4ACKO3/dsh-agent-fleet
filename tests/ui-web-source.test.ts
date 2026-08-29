@@ -537,6 +537,7 @@ describe('Fleet Web panel source', () => {
     await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'load' })
     await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'pause' })
     await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'wake' })
+    await source.controlTeam?.({ sessionId: 'observer-session', teamId: 'team-1', action: 'detach' })
     await expect(source.loadTeamSettings?.('team-1')).resolves.toMatchObject({
       name: 'Runtime Team', updateDensity: 'balanced', projectRoot: '/workspace/fleet',
       budget: { mode: 'tokens', team: { limit: 1000, used: 250 }, members: [expect.objectContaining({ memberId: 'builder', limit: 500 })] },
@@ -571,6 +572,7 @@ describe('Fleet Web panel source', () => {
     expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'load' })
     expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'pause' })
     expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'wake' })
+    expect(controlled).toContainEqual({ sessionId: 'observer-session', teamId: 'team-1', action: 'detach' })
     expect(controlled).toContainEqual(expect.objectContaining({
       sessionId: 'observer-session', teamId: 'team-1', action: 'configure',
       settings: expect.objectContaining({ updateDensity: 'detailed' }),

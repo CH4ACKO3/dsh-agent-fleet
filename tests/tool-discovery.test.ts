@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { FLEET_TOOL_CATALOG, installFleetToolDiscovery, searchFleetTools } from '../src/tool-discovery.js'
 
@@ -56,6 +56,8 @@ describe('Fleet tool discovery', () => {
       ['修改成员权限组', 'fleet_permission'],
       ['看看最近发生了什么', 'fleet_activity'],
       ['启动一个用户助理会话', 'fleet_assistant'],
+      ['唤醒整个团队', 'fleet_run'],
+      ['恢复单个成员', 'fleet_member'],
     ] as const
     for (const [query, expected] of cases) {
       expect(searchFleetTools(query, allAllowed, new Set(), permissions)[0]?.name, query).toBe(expected)
@@ -102,14 +104,19 @@ describe('Fleet tool discovery', () => {
     expect(searchFleetTools('team run', visible, new Set(['fleet_run']))[0]).toMatchObject({
       name: 'fleet_run', loaded: true,
     })
+    expect(searchFleetTools('唤醒整个团队', visible, new Set(), new Set(['team.manage']))[0])
+      .toMatchObject({ name: 'fleet_run', actions: expect.arrayContaining(['wake', 'resume']) })
+    expect(searchFleetTools('拉起未加载的团队成员', visible, new Set(), new Set(['team.manage']))[0])
+      .toMatchObject({ name: 'fleet_member', actions: expect.arrayContaining(['resume']) })
     expect(searchFleetTools('manage members', visible, new Set(), new Set())
       .find(match => match.name === 'fleet_member')).toMatchObject({ actions: ['list'] })
     expect(searchFleetTools('manage members', visible, new Set(), new Set(['team.manage']))
-      .find(match => match.name === 'fleet_member')?.actions).toEqual(['list', 'add', 'update', 'remove'])
+      .find(match => match.name === 'fleet_member')?.actions)
+      .toEqual(['list', 'add', 'update', 'configure', 'configure_all', 'pause', 'resume', 'remove'])
   })
 
   it('rejects an exact load when none of that tool actions are authorized', async () => {
-    let discovery: { execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown> } | undefined
+    let discovery: { readonly description: string; execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown> } | undefined
     installFleetToolDiscovery({
       tools: {
         register: tool => {
@@ -119,12 +126,38 @@ describe('Fleet tool discovery', () => {
       },
     } as never, {
       allowedTools: new Set(['fleet_followup']),
-      loadedTools: new Set(),
+      residentTools: new Set(),
       permissions: new Set(),
       load: () => { throw new Error('must not load') },
     })
     if (discovery === undefined) throw new Error('expected fleet_tools discovery')
+    expect(discovery.description).toContain('does not list host tools such as bash')
+    expect(discovery.description).toContain('already resident')
     await expect(discovery.execute({ action: 'load', name: 'fleet_followup' }))
       .rejects.toThrow('no actions available')
+  })
+
+  it('keeps compatibility load idempotent for a resident tool', async () => {
+    let discovery: { execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown> } | undefined
+    const load = vi.fn()
+    installFleetToolDiscovery({
+      tools: {
+        register: tool => {
+          discovery = tool as typeof discovery
+          return () => {}
+        },
+      },
+    } as never, {
+      allowedTools: new Set(['fleet_vote']),
+      residentTools: new Set(['fleet_vote']),
+      permissions: new Set(['vote.create']),
+      load,
+    })
+    if (discovery === undefined) throw new Error('expected fleet_tools discovery')
+    await expect(discovery.execute({ action: 'load', name: 'fleet_vote' })).resolves.toMatchObject({
+      loadedTools: ['fleet_vote'],
+      matches: [expect.objectContaining({ name: 'fleet_vote', loaded: true })],
+    })
+    expect(load).not.toHaveBeenCalled()
   })
 })

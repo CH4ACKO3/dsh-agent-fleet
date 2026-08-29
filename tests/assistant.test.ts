@@ -76,16 +76,22 @@ describe('FleetAssistantRuntime', () => {
       'first inspect current activity and read the relevant conversation with `fleet_messages`',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'send that answer before ending the turn even when no must-complete task exists',
+      'Reply to foreground native user messages directly with ordinary native assistant output',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'Only `fleet_tools`, `fleet_send`, and `fleet_messages` are normally resident',
+      'do not duplicate it through `fleet_send`',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Every granted Fleet capability with at least one authorized action is resident and directly callable',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      '`action: "load"` is an idempotent compatibility operation and is never a prerequisite',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'omit `recipients` only when every available member should act',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'Writing `@Name` only in message text is display text and creates no obligation',
+      'A valid `@Name` or `@member-id` in message text is parsed as a mention',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       '`action: "complete"`, the task id, and `final_reply`',
@@ -227,11 +233,19 @@ describe('resident Fleet assistants', () => {
 
   it('activates live and persisted assistants while owning only resumed Sessions', async () => {
     const live = { id: 'session-live' } as Agent
-    const resumed = { id: 'session-resumed' } as Agent
+    const resumed = {
+      id: 'session-resumed',
+      session: { header: { agentPreset: 'standard' }, events: [] },
+    } as unknown as Agent
     const dispose = vi.fn(() => Promise.resolve())
+    const mount = vi.fn(() => Promise.resolve())
+    const resumedCtx = {
+      agent: resumed,
+      get: (name: string) => name === 'agentPresets' ? { mount } : undefined,
+    } as unknown as Context
     let resumedPublished = false
     const resume = vi.fn(async (options: ResumeAgentOptions) => {
-      await options.setup?.({ agent: resumed } as unknown as Context)
+      await options.setup?.(resumedCtx)
       resumedPublished = true
       return { agent: resumed, dispose }
     })
@@ -277,13 +291,16 @@ describe('resident Fleet assistants', () => {
     expect(resume).toHaveBeenCalledWith(expect.objectContaining({
       resumeSessionId: 'session-resumed',
       agentOptions: { provider: 'provider-team', model: 'model-team', maxTokens: 2_048 },
+      setup: expect.any(Function),
     }))
+    expect(mount).toHaveBeenCalledWith(resumedCtx, 'standard')
     expect(warn).not.toHaveBeenCalled()
 
     expect(await residents.release('session-resumed')).toBe(true)
     expect(dispose).toHaveBeenCalledOnce()
     await residents.restore('session-resumed')
     expect(resume).toHaveBeenCalledTimes(2)
+    expect(mount).toHaveBeenCalledTimes(2)
 
     await residents.dispose()
     expect(dispose).toHaveBeenCalledTimes(2)
@@ -298,7 +315,7 @@ describe('resident Fleet assistants', () => {
         get: () => undefined,
         resume: vi.fn(async (options: ResumeAgentOptions) => {
           if (String(options.resumeSessionId) === 'session-missing') throw new Error('Session is unavailable')
-          await options.setup?.({ agent: available } as unknown as Context)
+          await options.setup?.({ agent: available, get: () => undefined } as unknown as Context)
           return { agent: available, dispose: () => Promise.resolve() }
         }),
       },

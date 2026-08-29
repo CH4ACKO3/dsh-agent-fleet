@@ -641,8 +641,8 @@ function FleetSessionArchiveDialog({
         jsx('p', {
           id: descriptionId,
           children: chinese
-            ? `这个会话连接到“${target.teamName}”。你可以只归档当前助理会话，让团队继续运行；也可以归档整个团队。`
-            : `This Session is connected to “${target.teamName}”. Archive only this assistant Session and keep the Team running, or archive the entire Team.`,
+            ? `这个会话${target.connected ? '连接到' : '曾连接到'}“${target.teamName}”。你可以只归档这个助理会话，让团队继续运行；也可以归档整个团队。`
+            : `This Session ${target.connected ? 'is connected' : 'was connected'} to “${target.teamName}”. Archive only this assistant Session and keep the Team running, or archive the entire Team.`,
         }),
         jsxs('p', {
           className: 'dsh-fleet-session-archive-impact',
@@ -713,7 +713,10 @@ export function withFleetMetaWorkspaceBrowser(
     }
     const archiveSession = async (sessionId: string): Promise<void> => {
       if (nativeArchiveSession === undefined) throw new Error('Session archive service is unavailable')
-      const target = resolveFleetAssistantArchiveTarget(sessionId, teams)
+      const archivedSessionIds = new Set(workspaces?.list.getSnapshot().archivedSessionIds ?? [])
+      const liveSessionIds = Object.keys(sessions?.list.getSnapshot().byId ?? {})
+        .filter(candidate => !archivedSessionIds.has(candidate))
+      const target = resolveFleetAssistantArchiveTarget(sessionId, teams, liveSessionIds)
       if (target === undefined) {
         await nativeArchiveSession(sessionId)
         return
@@ -723,9 +726,29 @@ export function withFleetMetaWorkspaceBrowser(
     }
     const archiveCurrentSession = (): void => {
       if (archiveTarget === undefined || nativeArchiveSession === undefined || archiveBusy) return
+      const target = archiveTarget
+      const source = assistantTeamSource
+      const controlTeam = source?.controlTeam
       setArchiveBusy(true)
       setArchiveError(undefined)
-      void nativeArchiveSession(archiveTarget.sessionId).then(() => {
+      let archive: Promise<void>
+      if (!target.connected) {
+        archive = nativeArchiveSession(target.sessionId)
+      } else if (controlTeam === undefined) {
+        setArchiveBusy(false)
+        setArchiveError(isChineseLocale() ? '团队连接服务不可用' : 'Team connection service is unavailable')
+        return
+      } else {
+        archive = archiveFleetAssistantSession({
+          archiveSession: () => nativeArchiveSession(target.sessionId),
+          detachAssistant: () => controlTeam({
+            sessionId: target.sessionId,
+            teamId: target.teamId,
+            action: 'detach',
+          }),
+        })
+      }
+      void archive.then(() => {
         setArchiveTarget(undefined)
       }).catch((reason: unknown) => {
         setArchiveError(reason instanceof Error ? reason.message : String(reason))
@@ -800,6 +823,7 @@ interface FleetAssistantTeamSource {
         readonly teamName: string
         readonly status: string
         readonly assistantSessionIds?: readonly string[]
+        readonly assistantConnections?: readonly { readonly sessionId: string }[]
       }[]
     }
   }
@@ -807,8 +831,8 @@ interface FleetAssistantTeamSource {
   controlTeam?(input: {
     readonly sessionId: string
     readonly teamId: string
-    readonly action: 'close'
-    readonly summary: string
+    readonly action: 'close' | 'detach'
+    readonly summary?: string
   }): Promise<void>
 }
 
@@ -823,6 +847,7 @@ export interface FleetAssistantArchiveTarget {
   readonly teamId: string
   readonly teamName: string
   readonly sessionId: string
+  readonly connected: boolean
   readonly assistantSessionIds: readonly string[]
 }
 
@@ -834,17 +859,37 @@ export function resolveFleetAssistantArchiveTarget(
     readonly teamName: string
     readonly status: string
     readonly assistantSessionIds?: readonly string[]
+    readonly assistantConnections?: readonly { readonly sessionId: string }[]
   }[],
+  liveSessionIds: readonly string[],
 ): FleetAssistantArchiveTarget | undefined {
+  const live = new Set(liveSessionIds)
   const team = teams.find(candidate =>
-    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+    candidate.status !== 'closed'
+    && live.has(sessionId)
+    && candidate.assistantSessionIds?.includes(sessionId) === true)
   if (team === undefined) return undefined
+  const connected = team.assistantConnections?.some(connection => connection.sessionId === sessionId) === true
   return {
     teamId: team.teamId,
     teamName: team.teamName,
     sessionId,
-    assistantSessionIds: [...new Set([...(team.assistantSessionIds ?? []), sessionId])],
+    connected,
+    assistantSessionIds: [...new Set([
+      sessionId,
+      ...(team.assistantConnections ?? []).map(connection => connection.sessionId),
+    ])]
+      .filter(candidate => live.has(candidate)),
   }
+}
+
+/** Hide one assistant Session, then disconnect it while preserving the Team and assistant identity. */
+export async function archiveFleetAssistantSession(input: {
+  readonly archiveSession: () => Promise<void>
+  readonly detachAssistant: () => Promise<void>
+}): Promise<void> {
+  await input.archiveSession()
+  await input.detachAssistant()
 }
 
 /** Close one Team, then archive all of its assistant Sessions without racing archive-list snapshots. */

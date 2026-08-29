@@ -425,6 +425,25 @@ describe('FleetWebRemote', () => {
     expect(runs.wakeTeamAsExternal).toHaveBeenCalledWith(caller, 'team-one')
   })
 
+  it('detaches an archived assistant Session through Team control', async () => {
+    const caller = { id: 'ui-session' } as Agent
+    const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
+    const detached = { id: 'team-one', status: 'running' }
+    const runs = {
+      status: vi.fn(() => ({ id: 'team-one', status: 'running' })),
+      requireAssistantConnection: vi.fn(),
+      detachAssistant: vi.fn(() => detached),
+    } as unknown as FleetRunService
+    const remote = new FleetWebRemote(ctx, runs, {} as FleetSetupService)
+
+    await expect(remote.control({
+      sessionId: 'ui-session', teamId: 'team-one', action: 'detach',
+    }, new AbortController().signal)).resolves.toEqual(detached)
+    expect(runs.requireAssistantConnection).toHaveBeenCalledWith(caller, 'team-one')
+    expect(runs.detachAssistant).toHaveBeenCalledWith(caller, 'team-one')
+  })
+
   it('keeps Team loading separate from resuming a loaded paused Team', async () => {
     const caller = { id: 'ui-session' } as Agent
     const ctx = new Context()

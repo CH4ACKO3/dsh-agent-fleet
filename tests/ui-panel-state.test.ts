@@ -35,32 +35,82 @@ import {
   fleetMemberPresenceLabel,
 } from '../packages/ui/src/runtime-chat.js'
 import {
+  archiveFleetAssistantSession,
   archiveFleetAssistantTeam,
   resolveFleetAssistantArchiveTarget,
 } from '../packages/ui/src/meta-assistant.js'
 
 describe('Fleet assistant Session archive choices', () => {
-  it('offers Team archive only for a live assistant Session and includes every known assistant Session', () => {
+  it('offers Team archive only for a live assistant Session and includes every current assistant connection', () => {
     const teams = [{
       teamId: 'team-one',
       teamName: 'Long-lived Team',
       status: 'running',
       assistantSessionIds: ['assistant-one', 'assistant-two', 'assistant-one'],
+      assistantConnections: [{ sessionId: 'assistant-one' }, { sessionId: 'assistant-two' }],
     }, {
       teamId: 'team-closed',
       teamName: 'Archived Team',
       status: 'closed',
       assistantSessionIds: ['assistant-closed'],
+      assistantConnections: [{ sessionId: 'assistant-closed' }],
     }]
 
-    expect(resolveFleetAssistantArchiveTarget('assistant-one', teams)).toEqual({
+    expect(resolveFleetAssistantArchiveTarget('assistant-one', teams, [
+      'assistant-one',
+      'assistant-two',
+      'assistant-closed',
+    ])).toEqual({
       teamId: 'team-one',
       teamName: 'Long-lived Team',
       sessionId: 'assistant-one',
+      connected: true,
       assistantSessionIds: ['assistant-one', 'assistant-two'],
     })
-    expect(resolveFleetAssistantArchiveTarget('ordinary-session', teams)).toBeUndefined()
-    expect(resolveFleetAssistantArchiveTarget('assistant-closed', teams)).toBeUndefined()
+    expect(resolveFleetAssistantArchiveTarget('ordinary-session', teams, ['ordinary-session'])).toBeUndefined()
+    expect(resolveFleetAssistantArchiveTarget('assistant-closed', teams, ['assistant-closed'])).toBeUndefined()
+  })
+
+  it('offers Team archive for a historical assistant Session without counting unrelated aliases', () => {
+    const teams = [{
+      teamId: 'team-one',
+      teamName: 'Long-lived Team',
+      status: 'running',
+      assistantSessionIds: [
+        'assistant-current',
+        'assistant-old-one',
+        'assistant-old-two',
+      ],
+      assistantConnections: [{ sessionId: 'assistant-current' }],
+    }]
+
+    expect(resolveFleetAssistantArchiveTarget(
+      'assistant-current',
+      teams,
+      ['assistant-current', 'assistant-old-one'],
+    )).toEqual({
+      teamId: 'team-one',
+      teamName: 'Long-lived Team',
+      sessionId: 'assistant-current',
+      connected: true,
+      assistantSessionIds: ['assistant-current'],
+    })
+    expect(resolveFleetAssistantArchiveTarget(
+      'assistant-old-one',
+      teams,
+      ['assistant-current', 'assistant-old-one'],
+    )).toEqual({
+      teamId: 'team-one',
+      teamName: 'Long-lived Team',
+      sessionId: 'assistant-old-one',
+      connected: false,
+      assistantSessionIds: ['assistant-old-one', 'assistant-current'],
+    })
+    expect(resolveFleetAssistantArchiveTarget(
+      'assistant-old-two',
+      teams,
+      ['assistant-current', 'assistant-old-one'],
+    )).toBeUndefined()
   })
 
   it('closes the Team before archiving assistant Sessions sequentially', async () => {
@@ -70,6 +120,7 @@ describe('Fleet assistant Session archive choices', () => {
         teamId: 'team-one',
         teamName: 'Long-lived Team',
         sessionId: 'assistant-one',
+        connected: true,
         assistantSessionIds: ['assistant-one', 'assistant-two'],
       },
       closeTeam: async () => { calls.push('close') },
@@ -79,6 +130,26 @@ describe('Fleet assistant Session archive choices', () => {
     expect(calls).toEqual(['close', 'archive:assistant-one', 'archive:assistant-two'])
   })
 
+  it('archives one assistant Session before disconnecting it from the live Team', async () => {
+    const calls: string[] = []
+    await archiveFleetAssistantSession({
+      archiveSession: async () => { calls.push('archive') },
+      detachAssistant: async () => { calls.push('detach') },
+    })
+
+    expect(calls).toEqual(['archive', 'detach'])
+  })
+
+  it('keeps the assistant connected when native Session archive fails', async () => {
+    const detachAssistant = vi.fn(async () => undefined)
+    await expect(archiveFleetAssistantSession({
+      archiveSession: async () => { throw new Error('archive failed') },
+      detachAssistant,
+    })).rejects.toThrow('archive failed')
+
+    expect(detachAssistant).not.toHaveBeenCalled()
+  })
+
   it('tries every assistant Session and reports partial archive failures after closing the Team', async () => {
     const calls: string[] = []
     await expect(archiveFleetAssistantTeam({
@@ -86,6 +157,7 @@ describe('Fleet assistant Session archive choices', () => {
         teamId: 'team-one',
         teamName: 'Long-lived Team',
         sessionId: 'assistant-one',
+        connected: true,
         assistantSessionIds: ['assistant-one', 'assistant-two'],
       },
       closeTeam: async () => { calls.push('close') },

@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-fleet-patchouli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Patchouli memory integration for DSH Agent Fleet",
   "repository": {
     "type": "git",
