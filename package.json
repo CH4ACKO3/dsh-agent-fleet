@@ -77,7 +77,7 @@
     "build:client": "pnpm run generate:team-templates && tsdown --config-loader unrun && tsc -p tsconfig.client.build.json",
     "build:host": "tsc -p tsconfig.package.json",
     "test": "pnpm run build && pnpm -r --if-present test && vitest run --dir tests",
-    "typecheck": "pnpm --filter @dsh-agent-fleet/core build && pnpm --filter @dsh-agent-fleet/message build && pnpm -r --if-present typecheck && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.package.json --noEmit"
+    "typecheck": "pnpm --filter @dsh-agent-fleet/core build && pnpm --filter @dsh-agent-fleet/message build && pnpm --filter @dsh-agent-fleet/resources build && pnpm -r --if-present typecheck && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.package.json --noEmit"
   },
   "dependencies": {
     "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",

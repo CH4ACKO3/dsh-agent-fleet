@@ -76,6 +76,12 @@ describe('FleetAssistantRuntime', () => {
       'first inspect current activity and read the relevant conversation with `fleet_messages`',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'send that answer before ending the turn even when no must-complete task exists',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Only `fleet_tools`, `fleet_send`, and `fleet_messages` are normally resident',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'omit `recipients` only when every available member should act',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(

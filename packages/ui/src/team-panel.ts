@@ -6918,7 +6918,7 @@ export function getFleetTeamDirectorySnapshot(): FleetPanelTeamDirectory {
 export function getFleetAssistantDisplayName(sessionId: string | undefined): string | undefined {
   if (sessionId === undefined) return undefined
   const team = getFleetTeamDirectorySnapshot().teams.find(candidate =>
-    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+    candidate.assistantSessionIds?.includes(sessionId) === true)
   const currentSessionId = team?.assistantSessionAliases?.[sessionId] ?? sessionId
   return team?.assistantConnections?.find(connection => connection.sessionId === currentSessionId)?.assistantName
 }
@@ -6945,8 +6945,9 @@ export async function sendFleetAssistantMailboxMessage(
 ): Promise<void> {
   const source = teamDirectorySource
   const team = source?.getSnapshot().directory.teams.find(candidate =>
-    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+    candidate.assistantSessionIds?.includes(sessionId) === true)
   if (source === undefined || team === undefined) return Promise.reject(new Error(panelText('当前 Session 未连接 Fleet Team 助理', 'The current Session is not connected to a Fleet Team assistant')))
+  if (team.status === 'closed') return Promise.reject(new Error(panelText('团队已归档，助理会话不能继续发送消息', 'The Team is archived and its assistant Sessions can no longer send messages')))
   const recipient = team.assistantParticipantIds?.[sessionId]
   if (recipient === undefined) return Promise.reject(new Error(panelText('当前 Session 没有稳定的 Fleet Team 助理身份', 'The current Session does not have a stable Fleet Team assistant identity')))
   const assistantSessionId = team.assistantSessionAliases?.[sessionId] ?? sessionId
@@ -6970,9 +6971,9 @@ export async function configureFleetAssistantSessionModel(
 ): Promise<void> {
   const source = teamDirectorySource
   const team = source?.getSnapshot().directory.teams.find(candidate =>
-    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+    candidate.assistantSessionIds?.includes(sessionId) === true)
   const assistantId = team?.assistantParticipantIds?.[sessionId]
-  if (source?.configureMemberRequest === undefined || team === undefined || assistantId === undefined) {
+  if (source?.configureMemberRequest === undefined || team === undefined || team.status === 'closed' || assistantId === undefined) {
     throw new Error(panelText('当前 Session 的 Fleet 助理模型配置不可用', 'Fleet assistant model configuration is unavailable for the current Session'))
   }
   await source.configureMemberRequest({

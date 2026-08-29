@@ -418,6 +418,8 @@ export function apply(ctx: Context): void {
 export interface FleetMessageToolOptions {
   readonly messages?: boolean
   readonly coordination?: boolean
+  /** Register only these exact tool names. Omit to keep the legacy group behavior. */
+  readonly tools?: ReadonlySet<string>
   readonly permissions?: ReadonlySet<import('./types.js').FleetMessagePermission>
   readonly authorize?: (
     agentId: string,
@@ -433,6 +435,7 @@ export function installMessageTools(
 ): () => void {
   const stops: Array<() => void> = []
   const register = (tool: Parameters<typeof ctx.tools.register>[0]): void => {
+    if (options.tools !== undefined && !options.tools.has(tool.name)) return
     stops.push(ctx.tools.register(tool))
   }
   const requireAction = (

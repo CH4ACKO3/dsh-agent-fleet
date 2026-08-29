@@ -127,6 +127,8 @@ function callingAgent(agent: Agent | undefined): Agent {
 }
 
 export interface FleetCollaborationToolOptions {
+  /** Register only these exact tool names. */
+  readonly tools?: ReadonlySet<string>
   readonly authorize?: (agentId: string, action: 'member-status.read' | 'member-status.write') => boolean
 }
 
@@ -135,6 +137,7 @@ export function installCollaborationTools(
   statuses: FleetMemberStatusBoard,
   options: FleetCollaborationToolOptions = {},
 ): () => void {
+  if (options.tools !== undefined && !options.tools.has('fleet_member_status')) return () => {}
   const stop = ctx.tools.register(defineTool({
     name: 'fleet_member_status',
     description: `Read Team members' current work, or update your own short status text. Status text is limited to ${FLEET_MEMBER_STATUS_MAX_LENGTH} characters.`,

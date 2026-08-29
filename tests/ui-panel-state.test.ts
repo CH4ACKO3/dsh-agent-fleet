@@ -34,6 +34,69 @@ import {
   fleetMemberPresence,
   fleetMemberPresenceLabel,
 } from '../packages/ui/src/runtime-chat.js'
+import {
+  archiveFleetAssistantTeam,
+  resolveFleetAssistantArchiveTarget,
+} from '../packages/ui/src/meta-assistant.js'
+
+describe('Fleet assistant Session archive choices', () => {
+  it('offers Team archive only for a live assistant Session and includes every known assistant Session', () => {
+    const teams = [{
+      teamId: 'team-one',
+      teamName: 'Long-lived Team',
+      status: 'running',
+      assistantSessionIds: ['assistant-one', 'assistant-two', 'assistant-one'],
+    }, {
+      teamId: 'team-closed',
+      teamName: 'Archived Team',
+      status: 'closed',
+      assistantSessionIds: ['assistant-closed'],
+    }]
+
+    expect(resolveFleetAssistantArchiveTarget('assistant-one', teams)).toEqual({
+      teamId: 'team-one',
+      teamName: 'Long-lived Team',
+      sessionId: 'assistant-one',
+      assistantSessionIds: ['assistant-one', 'assistant-two'],
+    })
+    expect(resolveFleetAssistantArchiveTarget('ordinary-session', teams)).toBeUndefined()
+    expect(resolveFleetAssistantArchiveTarget('assistant-closed', teams)).toBeUndefined()
+  })
+
+  it('closes the Team before archiving assistant Sessions sequentially', async () => {
+    const calls: string[] = []
+    await archiveFleetAssistantTeam({
+      target: {
+        teamId: 'team-one',
+        teamName: 'Long-lived Team',
+        sessionId: 'assistant-one',
+        assistantSessionIds: ['assistant-one', 'assistant-two'],
+      },
+      closeTeam: async () => { calls.push('close') },
+      archiveSession: async sessionId => { calls.push(`archive:${sessionId}`) },
+    })
+
+    expect(calls).toEqual(['close', 'archive:assistant-one', 'archive:assistant-two'])
+  })
+
+  it('tries every assistant Session and reports partial archive failures after closing the Team', async () => {
+    const calls: string[] = []
+    await expect(archiveFleetAssistantTeam({
+      target: {
+        teamId: 'team-one',
+        teamName: 'Long-lived Team',
+        sessionId: 'assistant-one',
+        assistantSessionIds: ['assistant-one', 'assistant-two'],
+      },
+      closeTeam: async () => { calls.push('close') },
+      archiveSession: async sessionId => {
+        calls.push(`archive:${sessionId}`)
+        if (sessionId === 'assistant-one') throw new Error('archive failed')
+      },
+    })).rejects.toThrow()
+    expect(calls).toEqual(['close', 'archive:assistant-one', 'archive:assistant-two'])
+  })
+})
 
 describe('Fleet assistant mailbox mentions', () => {
   it('promotes only explicit stable-id or display-name mentions', () => {

@@ -1,5 +1,5 @@
-import type { ComponentType, ReactElement } from 'react'
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import type { ComponentType, MouseEvent as ReactMouseEvent, ReactElement } from 'react'
+import { Fragment, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 import { clearFleetActivation, stageFleetActivation } from './activation.js'
@@ -131,6 +131,122 @@ const styles = `
 
 .dsh-fleet-meta-pinned[data-opening="true"] {
   opacity: .58;
+}
+
+.dsh-fleet-session-archive-backdrop {
+  z-index: 1800;
+  box-sizing: border-box;
+  background: var(--dsw-alias-bg-mask-1);
+  backdrop-filter: var(--dsw-mask-blur);
+  place-items: center;
+  padding: 16px;
+  display: grid;
+  position: fixed;
+  inset: 0;
+}
+
+.dsh-fleet-session-archive-dialog {
+  box-sizing: border-box;
+  width: min(460px, 100%);
+  max-height: min(620px, calc(100vh - 32px));
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-menu);
+  border-radius: 14px;
+  box-shadow: var(--dsw-shadow-lv3);
+  padding: 20px;
+  overflow: auto;
+}
+
+.dsh-fleet-session-archive-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.dsh-fleet-session-archive-dialog p {
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dsh-fleet-session-archive-dialog p + p {
+  margin-top: 8px;
+}
+
+.dsh-fleet-session-archive-impact strong {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+
+.dsh-fleet-session-archive-error {
+  color: var(--dsw-alias-state-error-primary) !important;
+}
+
+.dsh-fleet-session-archive-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+  display: flex;
+}
+
+.dsh-fleet-session-archive-actions button {
+  min-height: 34px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dsh-fleet-session-archive-actions button:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-fleet-session-archive-actions button[data-primary="true"] {
+  color: var(--dsw-alias-label-primary-foreground);
+  background: var(--dsw-alias-button-primary-fill);
+}
+
+.dsh-fleet-session-archive-actions button[data-primary="true"]:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover);
+}
+
+.dsh-fleet-session-archive-actions button[data-danger="true"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-fleet-session-archive-actions button[data-danger="true"]:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+}
+
+.dsh-fleet-session-archive-actions button:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.dsh-fleet-session-archive-actions button:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
+  opacity: .7;
+}
+
+@media (max-width: 520px) {
+  .dsh-fleet-session-archive-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .dsh-fleet-session-archive-actions button {
+    width: 100%;
+  }
 }
 
 `
@@ -422,6 +538,8 @@ type NativeUseWorkspaces = <Selection>(
   selector: (snapshot: NativeWorkspaceSnapshot) => Selection,
 ) => Selection
 
+type NativeArchiveSession = (sessionId: string) => Promise<void>
+
 let cachedWorkspaceSource: NativeWorkspaceSnapshot | undefined
 let cachedWorkspaceSessionId: string | undefined
 let cachedWorkspaceView: NativeWorkspaceSnapshot | undefined
@@ -443,19 +561,216 @@ function hideMetaSession(
   return cachedWorkspaceView
 }
 
+function FleetSessionArchiveDialog({
+  target,
+  busy,
+  error,
+  canArchiveTeam,
+  onCancel,
+  onArchiveSession,
+  onArchiveTeam,
+}: {
+  readonly target: FleetAssistantArchiveTarget
+  readonly busy: boolean
+  readonly error?: string
+  readonly canArchiveTeam: boolean
+  readonly onCancel: () => void
+  readonly onArchiveSession: () => void
+  readonly onArchiveTeam: () => void
+}): ReactElement {
+  const titleId = useId()
+  const descriptionId = useId()
+  const dialog = useRef<HTMLElement>(null)
+  const sessionButton = useRef<HTMLButtonElement>(null)
+  const chinese = isChineseLocale()
+  const sessionCount = target.assistantSessionIds.length
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+    const frame = window.requestAnimationFrame(() => sessionButton.current?.focus())
+    return () => {
+      window.cancelAnimationFrame(frame)
+      const fallback = document.querySelector<HTMLElement>('[role="treeitem"][aria-selected="true"] button')
+      window.requestAnimationFrame(() => (previouslyFocused?.isConnected === true ? previouslyFocused : fallback)?.focus())
+    }
+  }, [target.sessionId])
+
+  useEffect(() => {
+    if (busy) return
+    const handleDialogKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onCancel()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const buttons = [...(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
+      const first = buttons[0]
+      const last = buttons.at(-1)
+      if (first === undefined || last === undefined) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleDialogKeyDown)
+    return () => document.removeEventListener('keydown', handleDialogKeyDown)
+  }, [busy, onCancel])
+
+  return jsx('div', {
+    className: 'dsh-fleet-session-archive-backdrop',
+    role: 'presentation',
+    onMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (!busy && event.target === event.currentTarget) onCancel()
+    },
+    children: jsxs('section', {
+      ref: dialog,
+      className: 'dsh-fleet-session-archive-dialog',
+      role: 'dialog',
+      'aria-modal': true,
+      'aria-labelledby': titleId,
+      'aria-describedby': descriptionId,
+      children: [
+        jsx('h2', {
+          id: titleId,
+          children: chinese ? '归档团队助理会话？' : 'Archive Team assistant Session?',
+        }),
+        jsx('p', {
+          id: descriptionId,
+          children: chinese
+            ? `这个会话连接到“${target.teamName}”。你可以只归档当前助理会话，让团队继续运行；也可以归档整个团队。`
+            : `This Session is connected to “${target.teamName}”. Archive only this assistant Session and keep the Team running, or archive the entire Team.`,
+        }),
+        jsxs('p', {
+          className: 'dsh-fleet-session-archive-impact',
+          children: chinese
+            ? [jsx('strong', { children: '归档整个团队' }), `会结束当前工作并归档 ${String(sessionCount)} 个助理会话；这些会话将不能继续发送消息。`]
+            : [jsx('strong', { children: 'Archiving the entire Team' }), ` ends current work and archives ${String(sessionCount)} assistant Session${sessionCount === 1 ? '' : 's'}. Those Sessions can no longer send messages.`],
+        }),
+        error !== undefined && jsx('p', {
+          className: 'dsh-fleet-session-archive-error',
+          role: 'alert',
+          children: error,
+        }),
+        jsxs('div', {
+          className: 'dsh-fleet-session-archive-actions',
+          children: [
+            jsx('button', {
+              type: 'button',
+              disabled: busy,
+              onClick: onCancel,
+              children: chinese ? '取消' : 'Cancel',
+            }),
+            jsx('button', {
+              ref: sessionButton,
+              type: 'button',
+              'data-primary': true,
+              disabled: busy,
+              onClick: onArchiveSession,
+              children: busy ? (chinese ? '正在归档…' : 'Archiving…') : (chinese ? '仅归档此会话' : 'Archive this Session only'),
+            }),
+            jsx('button', {
+              type: 'button',
+              'data-danger': true,
+              disabled: busy || !canArchiveTeam,
+              title: canArchiveTeam ? undefined : (chinese ? '当前无法归档整个团队' : 'The entire Team cannot be archived right now'),
+              onClick: onArchiveTeam,
+              children: busy ? (chinese ? '正在归档…' : 'Archiving…') : (chinese ? '归档整个团队' : 'Archive entire Team'),
+            }),
+          ],
+        }),
+      ],
+    }),
+  })
+}
+
 /** Keep the dedicated Meta Session out of the ordinary Session tree without archiving it. */
 export function withFleetMetaWorkspaceBrowser(
   WorkspaceBrowser: ComponentType<Record<string, unknown>>,
 ): ComponentType<Record<string, unknown>> {
   function FleetMetaWorkspaceBrowser(props: Record<string, unknown>): ReactElement {
     const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+    const teams = useSyncExternalStore(
+      listener => assistantTeamSource?.subscribe(listener) ?? (() => {}),
+      () => assistantTeamSource?.getSnapshot().directory.teams ?? EMPTY_ASSISTANT_TEAMS,
+      () => EMPTY_ASSISTANT_TEAMS,
+    )
     const useWorkspaces = props.useWorkspaces as NativeUseWorkspaces
+    const nativeArchiveSession = props.archiveSession as NativeArchiveSession | undefined
+    const [archiveTarget, setArchiveTarget] = useState<FleetAssistantArchiveTarget>()
+    const [archiveBusy, setArchiveBusy] = useState(false)
+    const [archiveError, setArchiveError] = useState<string>()
     const decoratedUseWorkspaces: NativeUseWorkspaces = selector => useWorkspaces(
       source => selector(hideMetaSession(source, state.sessionId)),
     )
-    return jsx(WorkspaceBrowser, {
-      ...props,
-      useWorkspaces: decoratedUseWorkspaces,
+    const closeArchiveDialog = (): void => {
+      if (archiveBusy) return
+      setArchiveTarget(undefined)
+      setArchiveError(undefined)
+    }
+    const archiveSession = async (sessionId: string): Promise<void> => {
+      if (nativeArchiveSession === undefined) throw new Error('Session archive service is unavailable')
+      const target = resolveFleetAssistantArchiveTarget(sessionId, teams)
+      if (target === undefined) {
+        await nativeArchiveSession(sessionId)
+        return
+      }
+      setArchiveTarget(target)
+      setArchiveError(undefined)
+    }
+    const archiveCurrentSession = (): void => {
+      if (archiveTarget === undefined || nativeArchiveSession === undefined || archiveBusy) return
+      setArchiveBusy(true)
+      setArchiveError(undefined)
+      void nativeArchiveSession(archiveTarget.sessionId).then(() => {
+        setArchiveTarget(undefined)
+      }).catch((reason: unknown) => {
+        setArchiveError(reason instanceof Error ? reason.message : String(reason))
+      }).finally(() => { setArchiveBusy(false) })
+    }
+    const archiveEntireTeam = (): void => {
+      const source = assistantTeamSource
+      if (archiveTarget === undefined || nativeArchiveSession === undefined || source?.controlTeam === undefined || archiveBusy) return
+      setArchiveBusy(true)
+      setArchiveError(undefined)
+      const target = archiveTarget
+      void archiveFleetAssistantTeam({
+        target,
+        closeTeam: () => source.controlTeam?.({
+          sessionId: target.sessionId,
+          teamId: target.teamId,
+          action: 'close',
+          summary: isChineseLocale()
+            ? '从助理会话归档整个团队。'
+            : 'Archived the entire Team from an assistant Session.',
+        }) ?? Promise.resolve(),
+        archiveSession: nativeArchiveSession,
+      }).then(() => {
+        setArchiveTarget(undefined)
+      }).catch((reason: unknown) => {
+        setArchiveError(reason instanceof Error ? reason.message : String(reason))
+      }).finally(() => { setArchiveBusy(false) })
+    }
+    return jsxs(Fragment, {
+      children: [
+        jsx(WorkspaceBrowser, {
+          ...props,
+          useWorkspaces: decoratedUseWorkspaces,
+          ...(nativeArchiveSession === undefined ? {} : { archiveSession }),
+        }),
+        archiveTarget !== undefined && jsx(FleetSessionArchiveDialog, {
+          target: archiveTarget,
+          busy: archiveBusy,
+          error: archiveError,
+          canArchiveTeam: assistantTeamSource?.controlTeam !== undefined,
+          onCancel: closeArchiveDialog,
+          onArchiveSession: archiveCurrentSession,
+          onArchiveTeam: archiveEntireTeam,
+        }),
+      ],
     })
   }
 
@@ -481,25 +796,84 @@ interface FleetAssistantTeamSource {
   getSnapshot(): {
     readonly directory: {
       readonly teams: readonly {
+        readonly teamId: string
+        readonly teamName: string
         readonly status: string
         readonly assistantSessionIds?: readonly string[]
       }[]
     }
   }
   subscribe(listener: () => void): () => void
+  controlTeam?(input: {
+    readonly sessionId: string
+    readonly teamId: string
+    readonly action: 'close'
+    readonly summary: string
+  }): Promise<void>
 }
 
 let assistantTeamSource: FleetAssistantTeamSource | undefined
+const EMPTY_ASSISTANT_TEAMS: readonly never[] = []
 
 export function configureFleetMetaAssistantTeams(source: FleetAssistantTeamSource | undefined): void {
   assistantTeamSource = source
+}
+
+export interface FleetAssistantArchiveTarget {
+  readonly teamId: string
+  readonly teamName: string
+  readonly sessionId: string
+  readonly assistantSessionIds: readonly string[]
+}
+
+/** Resolve only live Team assistant Sessions; ordinary and already-closed Sessions keep native archive behavior. */
+export function resolveFleetAssistantArchiveTarget(
+  sessionId: string,
+  teams: readonly {
+    readonly teamId: string
+    readonly teamName: string
+    readonly status: string
+    readonly assistantSessionIds?: readonly string[]
+  }[],
+): FleetAssistantArchiveTarget | undefined {
+  const team = teams.find(candidate =>
+    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+  if (team === undefined) return undefined
+  return {
+    teamId: team.teamId,
+    teamName: team.teamName,
+    sessionId,
+    assistantSessionIds: [...new Set([...(team.assistantSessionIds ?? []), sessionId])],
+  }
+}
+
+/** Close one Team, then archive all of its assistant Sessions without racing archive-list snapshots. */
+export async function archiveFleetAssistantTeam(input: {
+  readonly target: FleetAssistantArchiveTarget
+  readonly closeTeam: () => Promise<void>
+  readonly archiveSession: (sessionId: string) => Promise<void>
+}): Promise<void> {
+  await input.closeTeam()
+  const failures: string[] = []
+  for (const sessionId of input.target.assistantSessionIds) {
+    try {
+      await input.archiveSession(sessionId)
+    } catch {
+      failures.push(sessionId)
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(isChineseLocale()
+      ? `团队已归档，但 ${String(failures.length)} 个助理会话未能归档；这些会话已禁止发送消息。`
+      : `The Team was archived, but ${String(failures.length)} assistant Session(s) could not be archived. Messaging is disabled in those Sessions.`)
+  }
 }
 
 export function useFleetMetaAssistantSession(sessionId: string | undefined): boolean {
   return useSyncExternalStore(
     listener => assistantTeamSource?.subscribe(listener) ?? (() => {}),
     () => sessionId !== undefined && assistantTeamSource?.getSnapshot().directory.teams.some(
-      team => team.status !== 'closed' && team.assistantSessionIds?.includes(sessionId) === true,
+      team => team.assistantSessionIds?.includes(sessionId) === true,
     ) === true,
     () => false,
   )

@@ -45,6 +45,8 @@ describe('Fleet productivity authorization', () => {
         get: () => undefined,
       },
     } as unknown as Context, member.id)
+    expect(registered.find(candidate => candidate.name === 'fleet_task')).toBeUndefined()
+    team.sendUserMessage({ to: '@alice', text: 'Complete the required check.', mentions: ['@alice'], delivery: 'quiet' })
     const tool = registered.find(candidate => candidate.name === 'fleet_task')
     if (tool === undefined) throw new Error('expected fleet_task to be visible')
     await expect(tool.execute({ action: 'list' }, { agent })).resolves.toMatchObject({ action: 'list' })

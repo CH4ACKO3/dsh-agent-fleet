@@ -1557,7 +1557,7 @@ describe('FleetRunService', () => {
       },
     } as unknown as Context)
     expect(restrict).toHaveBeenCalledWith({
-      deny: ['fleet_agent', 'fleet_run', 'fleet_archive', 'fleet_assistant', 'fleet_trace', 'fleet_setup', 'fleet_progress', 'fleet_member'],
+      deny: ['fleet_agent', 'fleet_archive', 'fleet_setup', 'fleet_progress', 'fleet_assistant', 'fleet_run', 'fleet_trace', 'fleet_activity', 'fleet_member'],
     })
     expect(restrict).toHaveBeenCalledWith({
       deny: ['joyride_catalog', 'joyride_act', 'joyride_control', 'live_stream', 'live_stage'],
@@ -1567,30 +1567,18 @@ describe('FleetRunService', () => {
     expect(specialToolGuard({ name: 'fleet_send' })).toBeUndefined()
     expect(register.mock.calls.map(call => (call[0] as { name: string }).name)).toEqual([
       'fleet_send',
-      'fleet_followup',
       'fleet_messages',
-      'fleet_wait',
       'fleet_tools',
-      'fleet_task',
-      'fleet_schedule',
-      'fleet_calendar',
     ])
-    const discovery = register.mock.calls[4]?.[0] as {
+    const discovery = register.mock.calls[2]?.[0] as {
       execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown>
     }
     await discovery.execute({ action: 'load', name: 'fleet_vote' })
     expect(register.mock.calls.map(call => (call[0] as { name: string }).name)).toEqual([
       'fleet_send',
-      'fleet_followup',
       'fleet_messages',
-      'fleet_wait',
       'fleet_tools',
-      'fleet_task',
-      'fleet_schedule',
-      'fleet_calendar',
-      'fleet_channel',
       'fleet_vote',
-      'fleet_meeting',
     ])
     expect(memberSetup).toHaveBeenCalledWith(expect.objectContaining({
       team: expect.objectContaining({ id: run.id }),
@@ -1601,9 +1589,9 @@ describe('FleetRunService', () => {
       (register.mock.calls.find(call => (call[0] as { name: string }).name === name)?.[0] as {
         parameters?: { readonly properties?: { readonly action?: { readonly enum?: readonly string[] } } }
       } | undefined)?.parameters?.properties?.action?.enum
-    expect(actionEnum('fleet_channel')).toEqual(['list'])
+    expect(actionEnum('fleet_channel')).toBeUndefined()
     expect(actionEnum('fleet_vote')).toEqual(['list', 'get', 'create', 'cast'])
-    expect(actionEnum('fleet_meeting')).toEqual(['list', 'join', 'leave'])
+    expect(actionEnum('fleet_meeting')).toBeUndefined()
     const productLead = runtime.get(run.members[0]?.sessionId ?? '')
     if (productLead === undefined) throw new Error('expected product lead')
     expect(messages.listChannels(productLead).find(channel => channel.id === 'delivery')).toMatchObject({
@@ -4034,12 +4022,12 @@ describe('FleetRunService', () => {
       register: tool => { registeredTools.push(tool.name); return () => {} },
       restrict: () => () => {},
       guard: () => () => {},
-      get: name => ['fleet_send', 'fleet_followup', 'fleet_progress'].includes(name) ? { name } : undefined,
+      get: name => [...registeredTools, 'fleet_send', 'fleet_followup', 'fleet_progress'].includes(name) ? { name } : undefined,
     }
     service.agentSessionStarted(launcher as unknown as Agent)
     expect(registeredTools).toContain('fleet_send')
     expect(registeredTools).toContain('fleet_messages')
-    expect(registeredTools).toContain('fleet_task')
+    expect(registeredTools).not.toContain('fleet_task')
     const messages = service.messageHub(run.id)
     const sent = service.sendUserConversationMessage({
       runId: run.id,
@@ -4050,6 +4038,7 @@ describe('FleetRunService', () => {
     })
     expect(service.status(run.id)).toMatchObject({ status: 'idle' })
     expect(messages.pendingRequiredReply(assistantId)).toMatchObject({ id: sent.messageId })
+    expect(registeredTools).toContain('fleet_task')
     const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
     expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: assistantId })
 

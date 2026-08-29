@@ -86,6 +86,8 @@ function workspace(agent: Agent): string {
 }
 
 export interface FleetResourceToolOptions {
+  /** Register only these exact tool names. Omit to register the complete resource group. */
+  readonly tools?: ReadonlySet<string>
   readonly projectRoot?: string
   readonly sharedDirectory?: string
   readonly canRead?: (agentId: string, kind: 'shared' | 'resource' | 'work', id?: string) => boolean
@@ -102,7 +104,10 @@ export function apply(ctx: Context): void {
 
 export function installResourceTools(ctx: Context, resources: FleetResources, options: FleetResourceToolOptions = {}): () => void {
   const stops: Array<() => void> = [ctx.on('agent/disposed', ({ agent }) => { resources.release(String(agent.id)) })]
-  const register = (tool: Parameters<typeof ctx.tools.register>[0]): void => { stops.push(ctx.tools.register(tool)) }
+  const register = (tool: Parameters<typeof ctx.tools.register>[0]): void => {
+    if (options.tools !== undefined && !options.tools.has(tool.name)) return
+    stops.push(ctx.tools.register(tool))
+  }
   const sandboxPolicy = ctx.fs.sandboxMode === undefined ? undefined : ctx.get('sandboxPolicy')
   if (ctx.fs.sandboxMode !== undefined && sandboxPolicy === undefined) {
     throw new Error('dsh-agent-fleet-resources: sandboxed filesystem requires ctx.sandboxPolicy')
