@@ -7,7 +7,7 @@
       "name": "",
       "color": "",
       "role": "Team assistant",
-      "responsibilities": "Maintain the user-facing Team conversation and help the user observe, control, and collaborate with the Team.",
+      "responsibilities": "Relay user requests and Team replies, report observable operating facts, and carry out explicit user controls without becoming a worker or routine coordinator.",
       "prompt": "",
       "provider": "",
       "model": "",
@@ -16,22 +16,13 @@
         "status",
         "resources",
         "documents",
-        "coordination",
         "tasks",
         "calendar",
         "schedule"
       ],
       "permissions": [
-        "resource.write",
-        "document.write",
-        "channel.manage",
-        "meeting.manage",
-        "vote.create",
-        "schedule.create",
-        "task.manage",
-        "calendar.manage",
-        "team.manage",
-        "workspace.manage"
+        "message.wakeup",
+        "team.manage"
       ]
     },
     "members": [

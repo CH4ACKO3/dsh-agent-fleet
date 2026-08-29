@@ -69,14 +69,28 @@ describe('complete Team template locales', () => {
       }
     }
   })
-  it('keeps the research assistant operating capabilities stable', () => {
-    const research = FULL_TEAM_TEMPLATES.find(template => template.id === 'research-full')
-    if (research === undefined) throw new Error('missing research Team template')
-    for (const assistant of [research.configuration.en.core.assistant, research.configuration.zh.core.assistant]) {
-      expect(assistant.toolGroups).toEqual([
-        'messages', 'status', 'resources', 'documents', 'tasks', 'calendar', 'schedule',
-      ])
-      expect(assistant.permissions).toEqual(['message.wakeup', 'team.manage'])
+  it('keeps every built-in assistant bounded to observation, relay, wakeup, and explicit Team control', () => {
+    for (const template of FULL_TEAM_TEMPLATES) {
+      for (const assistant of [template.configuration.en.core.assistant, template.configuration.zh.core.assistant]) {
+        expect(assistant.toolGroups).toEqual([
+          'messages', 'status', 'resources', 'documents', 'tasks', 'calendar', 'schedule',
+        ])
+        expect(assistant.permissions).toEqual(['message.wakeup', 'team.manage'])
+        expect(assistant.toolGroups).not.toContain('coordination')
+        const workerAndCoordinatorPermissions = [
+          'resource.write',
+          'document.write',
+          'channel.manage',
+          'meeting.manage',
+          'vote.create',
+          'schedule.create',
+          'task.manage',
+          'calendar.manage',
+          'workspace.manage',
+        ]
+        expect(assistant.permissions.some(permission =>
+          workerAndCoordinatorPermissions.includes(permission))).toBe(false)
+      }
     }
   })
 

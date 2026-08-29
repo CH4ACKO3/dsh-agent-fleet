@@ -14,7 +14,7 @@ export const FULL_TEAM_TEMPLATES = [
             "name": "",
             "color": "",
             "role": "Team assistant",
-            "responsibilities": "Maintain the user-facing Team conversation and help the user observe, control, and collaborate with the Team.",
+            "responsibilities": "Relay user requests and Team replies, report observable operating facts, and carry out explicit user controls without becoming a worker or routine coordinator.",
             "prompt": "",
             "provider": "",
             "model": "",
@@ -23,22 +23,13 @@ export const FULL_TEAM_TEMPLATES = [
               "status",
               "resources",
               "documents",
-              "coordination",
               "tasks",
               "calendar",
               "schedule"
             ],
             "permissions": [
-              "resource.write",
-              "document.write",
-              "channel.manage",
-              "meeting.manage",
-              "vote.create",
-              "schedule.create",
-              "task.manage",
-              "calendar.manage",
-              "team.manage",
-              "workspace.manage"
+              "message.wakeup",
+              "team.manage"
             ]
           },
           "members": [
@@ -170,7 +161,7 @@ export const FULL_TEAM_TEMPLATES = [
             "name": "",
             "color": "",
             "role": "团队助理",
-            "responsibilities": "维护面向用户的团队会话，帮助用户观察、控制并与团队协作。",
+            "responsibilities": "转述用户请求与团队回复，报告可观察的运行事实，并执行用户明确要求的控制操作，但不成为执行成员或日常协调者。",
             "prompt": "",
             "provider": "",
             "model": "",
@@ -179,22 +170,13 @@ export const FULL_TEAM_TEMPLATES = [
               "status",
               "resources",
               "documents",
-              "coordination",
               "tasks",
               "calendar",
               "schedule"
             ],
             "permissions": [
-              "resource.write",
-              "document.write",
-              "channel.manage",
-              "meeting.manage",
-              "vote.create",
-              "schedule.create",
-              "task.manage",
-              "calendar.manage",
-              "team.manage",
-              "workspace.manage"
+              "message.wakeup",
+              "team.manage"
             ]
           },
           "members": [
@@ -333,7 +315,7 @@ export const FULL_TEAM_TEMPLATES = [
             "name": "",
             "color": "",
             "role": "Team assistant",
-            "responsibilities": "Maintain the user-facing Team conversation and help the user observe, control, and collaborate with the Team.",
+            "responsibilities": "Relay user requests and Team replies, report observable operating facts, and carry out explicit user controls without becoming a worker or routine coordinator.",
             "prompt": "",
             "provider": "",
             "model": "",
@@ -342,22 +324,13 @@ export const FULL_TEAM_TEMPLATES = [
               "status",
               "resources",
               "documents",
-              "coordination",
               "tasks",
               "calendar",
               "schedule"
             ],
             "permissions": [
-              "resource.write",
-              "document.write",
-              "channel.manage",
-              "meeting.manage",
-              "vote.create",
-              "schedule.create",
-              "task.manage",
-              "calendar.manage",
-              "team.manage",
-              "workspace.manage"
+              "message.wakeup",
+              "team.manage"
             ]
           },
           "members": [
@@ -586,7 +559,7 @@ export const FULL_TEAM_TEMPLATES = [
             "name": "",
             "color": "",
             "role": "团队助理",
-            "responsibilities": "维护面向用户的团队会话，帮助用户观察、控制并与团队协作。",
+            "responsibilities": "转述用户请求与团队回复，报告可观察的运行事实，并执行用户明确要求的控制操作，但不成为执行成员或日常协调者。",
             "prompt": "",
             "provider": "",
             "model": "",
@@ -595,22 +568,13 @@ export const FULL_TEAM_TEMPLATES = [
               "status",
               "resources",
               "documents",
-              "coordination",
               "tasks",
               "calendar",
               "schedule"
             ],
             "permissions": [
-              "resource.write",
-              "document.write",
-              "channel.manage",
-              "meeting.manage",
-              "vote.create",
-              "schedule.create",
-              "task.manage",
-              "calendar.manage",
-              "team.manage",
-              "workspace.manage"
+              "message.wakeup",
+              "team.manage"
             ]
           },
           "members": [
@@ -846,7 +810,7 @@ export const FULL_TEAM_TEMPLATES = [
             "name": "",
             "color": "",
             "role": "Team assistant",
-            "responsibilities": "Maintain the user-facing Team conversation and help the user observe, control, and collaborate with the Team.",
+            "responsibilities": "Relay user requests and Team replies, report observable operating facts, and carry out explicit user controls without becoming a worker or routine coordinator.",
             "prompt": "",
             "provider": "",
             "model": "",
@@ -855,22 +819,13 @@ export const FULL_TEAM_TEMPLATES = [
               "status",
               "resources",
               "documents",
-              "coordination",
               "tasks",
               "calendar",
               "schedule"
             ],
             "permissions": [
-              "resource.write",
-              "document.write",
-              "channel.manage",
-              "meeting.manage",
-              "vote.create",
-              "schedule.create",
-              "task.manage",
-              "calendar.manage",
-              "team.manage",
-              "workspace.manage"
+              "message.wakeup",
+              "team.manage"
             ]
           },
           "members": [
@@ -1168,7 +1123,7 @@ export const FULL_TEAM_TEMPLATES = [
             "name": "",
             "color": "",
             "role": "团队助理",
-            "responsibilities": "维护面向用户的团队会话，帮助用户观察、控制并与团队协作。",
+            "responsibilities": "转述用户请求与团队回复，报告可观察的运行事实，并执行用户明确要求的控制操作，但不成为执行成员或日常协调者。",
             "prompt": "",
             "provider": "",
             "model": "",
@@ -1177,22 +1132,13 @@ export const FULL_TEAM_TEMPLATES = [
               "status",
               "resources",
               "documents",
-              "coordination",
               "tasks",
               "calendar",
               "schedule"
             ],
             "permissions": [
-              "resource.write",
-              "document.write",
-              "channel.manage",
-              "meeting.manage",
-              "vote.create",
-              "schedule.create",
-              "task.manage",
-              "calendar.manage",
-              "team.manage",
-              "workspace.manage"
+              "message.wakeup",
+              "team.manage"
             ]
           },
           "members": [
