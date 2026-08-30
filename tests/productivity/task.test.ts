@@ -40,18 +40,19 @@ function complete(board: FleetTaskBoard, actor: string, taskId: string, result =
 
 afterEach(() => { vi.useRealTimers() })
 
-describe('FleetTaskBoard v3', () => {
-  it('accepts only the breaking v3 persistence format', () => {
-    expect(parseFleetTaskState(undefined)).toEqual({ version: 3, tasks: [] })
-    expect(() => parseFleetTaskState({ version: 2, tasks: [] } as never)).toThrow('version is incompatible')
+describe('FleetTaskBoard v4', () => {
+  it('accepts only the breaking v4 persistence format', () => {
+    expect(parseFleetTaskState(undefined)).toEqual({ version: 4, tasks: [] })
+    expect(() => parseFleetTaskState({ version: 3, tasks: [] } as never)).toThrow('version is incompatible')
 
     const board = new FleetTaskBoard(directory)
-    const task = board.create('agent-lead', { title: 'Persist v3', assignees: ['reviewer'] })
+    const task = board.create('agent-lead', { title: 'Persist v4', assignees: ['reviewer'], owners: ['qa'] })
     const restored = new FleetTaskBoard(directory)
     restored.restore(parseFleetTaskState(board.state() as never))
     expect(restored.get('agent-reviewer', task.id)).toMatchObject({
       stateVersion: 1,
       stableState: { kind: 'running' },
+      owners: [expect.objectContaining({ member: 'qa', state: 'running' })],
       activeReconcile: { status: 'ready', target: 'reviewer' },
     })
   })
@@ -72,6 +73,7 @@ describe('FleetTaskBoard v3', () => {
     const settled = board.settle('agent-reviewer', task.id, {
       attemptId: attempt,
       progress: 'Remote build started.',
+      owners: ['qa'],
       next: {
         kind: 'dormant', reason: 'Waiting for the build window.',
         reconcilers: [reconciler('reviewer', { kind: 'at', at: '2026-08-21T00:01:00.000Z' })],
@@ -80,6 +82,7 @@ describe('FleetTaskBoard v3', () => {
     expect(settled).toMatchObject({
       stateVersion: 2,
       stableState: { kind: 'dormant', reason: 'Waiting for the build window.' },
+      owners: [expect.objectContaining({ member: 'qa', state: 'running' })],
       entries: [expect.objectContaining({ text: 'Remote build started.' })],
     })
     expect(settled.activeReconcile).toBeUndefined()
@@ -221,6 +224,59 @@ describe('FleetTaskBoard v3', () => {
     board.close()
   })
 
+  it('derives each member owner list from running implicit owner Tasks', () => {
+    const board = new FleetTaskBoard(directory)
+    const unowned = board.create('agent-lead', { title: 'Unowned coordination', assignees: ['lead'] })
+    expect(unowned.owners).toEqual([])
+    const task = board.create('agent-lead', {
+      title: 'Parallel implementation', assignees: ['lead'], owners: ['@reviewer', 'agent-qa'],
+    })
+    expect(task.owners).toEqual([
+      expect.objectContaining({ member: 'reviewer', state: 'running' }),
+      expect.objectContaining({ member: 'qa', state: 'running' }),
+    ])
+    expect(board.ownerTasks('reviewer').map(candidate => candidate.id)).toEqual([task.id])
+    expect(board.ownerTasks('qa').map(candidate => candidate.id)).toEqual([task.id])
+    expect(() => board.update('agent-lead', task.id, { owners: ['reviewer'] }))
+      .toThrow('owners must be changed by settling its current ReconcileAttempt')
+
+    const reviewed = board.settleOwner('agent-reviewer', task.id, 'completed', 'Review evidence attached.')
+    expect(reviewed).toMatchObject({
+      stableState: { kind: 'running' },
+      owners: [
+        { member: 'reviewer', state: 'completed', result: 'Review evidence attached.' },
+        expect.objectContaining({ member: 'qa', state: 'running' }),
+      ],
+    })
+    expect(board.ownerTasks('reviewer')).toEqual([])
+    expect(board.ownerTasks('qa')).toHaveLength(1)
+
+    board.settleOwner('agent-qa', task.id, 'blocked', 'Test environment unavailable.')
+    expect(board.ownerTasks('qa')).toEqual([])
+    expect(() => board.settleOwner('agent-reviewer', task.id, 'completed', 'Duplicate.')).toThrow('already completed')
+    expect(() => board.create('agent-lead', { title: 'Invalid owner', owners: ['outsider'] })).toThrow('unknown Fleet member')
+  })
+
+  it('reconciles after a composable owner completion barrier becomes true', () => {
+    const board = new FleetTaskBoard(directory)
+    const task = board.create('agent-lead', {
+      title: 'Owner barrier', assignees: ['lead'], owners: ['reviewer', 'qa'],
+      initialState: {
+        kind: 'running',
+        reconcilers: [reconciler('lead', {
+          kind: 'owner_count', states: ['completed', 'blocked'], op: 'eq', value: 'owners',
+        })],
+      },
+    })
+    expect(task.activeReconcile).toBeUndefined()
+    board.settleOwner('agent-reviewer', task.id, 'completed', 'Implementation complete.')
+    expect(board.get('agent-lead', task.id).activeReconcile).toBeUndefined()
+    const ready = board.settleOwner('agent-qa', task.id, 'blocked', 'Validation returned a blocker.')
+    expect(ready.activeReconcile).toMatchObject({
+      status: 'ready', target: 'lead', reason: expect.stringContaining('Owner predicate matched 2 owners'),
+    })
+  })
+
   it('represents collaborative decisions as Vote child Tasks', () => {
     const requests: Array<{ id: string; voters?: readonly string[] }> = []
     const board = new FleetTaskBoard(
@@ -305,6 +361,15 @@ describe('FleetTaskBoard v3', () => {
       action: 'complete', id: required.id, attempt_id: claimed.activeReconcile?.attemptId,
       result: 'Completed result.', final_reply: 'Completed result.',
     }, { agent: { id: 'agent-reviewer' } })).resolves.toMatchObject({ task: { stableState: { kind: 'completed' } } })
+
+    const owned = board.create('agent-lead', { title: 'Owned work', assignees: ['lead'], owners: ['reviewer'] })
+    await expect(tool.execute({ action: 'owner_list' }, { agent: { id: 'agent-reviewer' } }))
+      .resolves.toMatchObject({ tasks: [expect.objectContaining({ id: owned.id })] })
+    await expect(tool.execute({
+      action: 'owner_complete', id: owned.id, text: 'Owner work complete.',
+    }, { agent: { id: 'agent-reviewer' } })).resolves.toMatchObject({
+      task: { owners: [expect.objectContaining({ member: 'reviewer', state: 'completed' })] },
+    })
   })
 
   it('freezes deadline timers while paused and persists before waking', async () => {

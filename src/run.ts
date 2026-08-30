@@ -5477,6 +5477,41 @@ export class FleetRunService {
     return true
   }
 
+  private continueOwnedTasks(
+    runId: string,
+    runtime: FleetCollaborationTeam,
+    record: FleetRunRecord,
+    agent: Agent,
+  ): boolean {
+    if (record.status !== 'running' || record.work?.status !== 'running') return false
+    const participant = this.participants(record)
+      .find(candidate => candidate.sessionId === String(agent.id))
+    if (participant === undefined
+      || this.autoContinuationPaused(record, participant.name)
+      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
+    const tasks = runtime.tasks.ownerTasks(participant.name)
+    if (tasks.length === 0) return false
+    runtime.messages.sendSystemNotification(participant.sessionId, {
+      kind: 'task_notice',
+      text: [
+        '[Fleet owner task list]',
+        'Your running owner Tasks:',
+        ...tasks.map(task => `- ${task.title} (${task.id})`),
+        'Each ownership is an implicit child Task. Use fleet_task action="owner_list" to read the complete Task descriptions, states, and owner results, then work your part independently.',
+        'For each finished item call fleet_task action="owner_complete" with its task id and concrete result; if your part cannot proceed, call action="owner_block" with the blocking reason.',
+        'Until every ownership is settled or its Task leaves running, this non-empty list will wake you again.',
+      ].join('\n'),
+      delivery: 'wakeup',
+      coalesceKey: `owner-task-list:${participant.name}`,
+    })
+    this.appendEvent(runId, 'member_continued', {
+      member: participant.name,
+      reason: 'owner_task_list',
+      tasks: tasks.map(task => task.id),
+    })
+    return true
+  }
+
   private reconcileReadyTasks(runId: string): void {
     const record = this.records.get(runId)
     if (record === undefined || record.status !== 'running' || record.work?.status !== 'running'
@@ -5496,6 +5531,24 @@ export class FleetRunService {
       } else {
         this.continueAssignedTask(runId, runtime, record, agent)
       }
+    }
+  }
+
+  private reconcileOwnerTasks(runId: string): void {
+    const record = this.records.get(runId)
+    if (record === undefined || record.status !== 'running' || record.work?.status !== 'running'
+      || this.dormantRunIds.has(runId)) return
+    const runtime = this.collaboration.get(runId)
+    if (runtime === undefined) return
+    for (const participant of this.participants(record)) {
+      if (this.autoContinuationPaused(record, participant.name)
+        || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined
+        || this.networkRecoveries.has(participant.sessionId)
+        || runtime.tasks.runningFor(participant.name).length > 0
+        || runtime.tasks.readyTasks(participant.name).length > 0
+        || runtime.tasks.ownerTasks(participant.name).length === 0) continue
+      const agent = this.ctx.agents.get(SessionId(participant.sessionId))
+      if (agent?.status === 'idle') this.continueOwnedTasks(runId, runtime, record, agent)
     }
   }
 
@@ -5552,6 +5605,9 @@ export class FleetRunService {
     // During an active work item, an actionable assigned task is durable work,
     // not a suggestion that may disappear when a model emits ordinary text.
     if (this.continueAssignedTask(runId, runtime, record, agent)) return
+    // An owner entry is an implicit child Task. Keep waking only that owner
+    // until they settle their entry or the parent Task leaves running.
+    if (this.continueOwnedTasks(runId, runtime, record, agent)) return
     if (record?.status !== 'running' || record.work?.status !== 'running') return
 
     let wokeUnread = false
@@ -5585,6 +5641,7 @@ export class FleetRunService {
     if (wokeUnread) return
     if (this.manualWakeRequiredRunIds.has(runId)) return
     this.reconcileReadyTasks(runId)
+    this.reconcileOwnerTasks(runId)
     if (runtime.tasks.activeWorkIsCovered()) return
 
     const online = record.members.flatMap(member => {
@@ -7273,15 +7330,17 @@ export class FleetRunService {
       onTask: (event, state) => {
         this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
         if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
-        if (event.task.activeReconcile?.status === 'ready'
-          && (event.action === 'created'
-            || event.action === 'reconcile_ready'
-            || event.action === 'reconciled'
-            || event.action === 'retrying'
-            || event.action === 'signaled'
-            || event.action === 'reopened'
-            || event.action === 'updated')) {
-          queueMicrotask(() => { this.reconcileReadyTasks(record.id) })
+        if (event.action === 'created'
+          || event.action === 'reconcile_ready'
+          || event.action === 'reconciled'
+          || event.action === 'retrying'
+          || event.action === 'signaled'
+          || event.action === 'reopened'
+          || event.action === 'updated') {
+          queueMicrotask(() => {
+            this.reconcileReadyTasks(record.id)
+            this.reconcileOwnerTasks(record.id)
+          })
         }
       },
       onSchedule: (event, state) => {

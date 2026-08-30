@@ -3884,7 +3884,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('keeps an actionable assigned task active until its owner changes the task state', async () => {
+  it('keeps an actionable assigned task active until its assignee settles the state', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -3964,6 +3964,85 @@ describe('FleetRunService', () => {
     service.finish(launcher as unknown as Agent, 'cancelled', 'Concurrent dispatch verified.', run.id)
     await service.wait(run.id, 1_000)
     service.end(launcher as unknown as Agent, 'Concurrent dispatch Team closed.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('continuously wakes every member with a non-empty owner task list', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    lead.status = 'idle'
+    reviewer.status = 'idle'
+    const leadMessages = lead.messages.length
+    const reviewerMessages = reviewer.messages.length
+
+    const task = service.taskBoard(run.id).create(lead.id, {
+      title: 'Complete the parallel owner work',
+      assignees: ['lead'],
+      owners: ['lead', 'reviewer'],
+      initialState: {
+        kind: 'running',
+        reconcilers: [{
+          id: 'collect-owner-results',
+          when: { kind: 'owner_count', states: ['completed', 'blocked'], op: 'eq', value: 'owners' },
+          target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
+          onTimeout: { kind: 'blocked', reason: 'Owner result reconciliation exhausted.' },
+        }],
+      },
+    })
+
+    await vi.waitFor(() => {
+      expect(lead.messages).toHaveLength(leadMessages + 1)
+      expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
+    })
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet owner task list]') }),
+    ])
+    expect(reviewer.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining(`- ${task.title} (${task.id})`) }),
+    ])
+
+    lead.inbox.clear()
+    reviewer.inbox.clear()
+    const reviewerBeforePeerIdle = reviewer.messages.length
+    service.taskBoard(run.id).settleOwner(lead.id, task.id, 'completed', 'Implementation complete.')
+    const afterLeadSettlement = lead.messages.length
+    service.agentIdle(lead as unknown as Agent)
+    expect(lead.messages).toHaveLength(afterLeadSettlement)
+    expect(reviewer.messages).toHaveLength(reviewerBeforePeerIdle + 1)
+
+    reviewer.inbox.clear()
+    const reviewerBeforeRetry = reviewer.messages.length
+    service.agentIdle(reviewer as unknown as Agent)
+    expect(reviewer.messages).toHaveLength(reviewerBeforeRetry + 1)
+    expect(reviewer.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('owner_block') }),
+    ])
+
+    reviewer.inbox.clear()
+    service.taskBoard(run.id).settleOwner(reviewer.id, task.id, 'blocked', 'External validation is unavailable.')
+    await vi.waitFor(() => expect(service.taskBoard(run.id).get(lead.id, task.id).activeReconcile)
+      .toMatchObject({ status: 'running', target: 'lead' }))
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet task attempt]') }),
+    ])
+    expect(service.taskBoard(run.id).ownerTasks('lead')).toEqual([])
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
+    expect(service.readTrace(run.id, 0, 300).events.filter(event =>
+      event.type === 'member_continued' && event.data.includes('owner_task_list'))).toHaveLength(4)
+
+    service.finish(launcher as unknown as Agent, 'cancelled', 'Owner task list continuation verified.', run.id)
+    await service.wait(run.id, 1_000)
+    service.end(launcher as unknown as Agent, 'Owner task list Team closed.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })

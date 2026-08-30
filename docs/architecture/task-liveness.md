@@ -7,7 +7,8 @@ fallbacks use the same atomic state replacement path.
 
 This is a breaking replacement for the old `ready`, `waiting_time`,
 `waiting_event`, and `waiting_vote` execution-state model. Persisted Task state
-uses schema version 3 only.
+uses schema version 4 only. Version 4 adds persisted owner records and does not
+migrate older Task state.
 
 ## Stable states
 
@@ -30,7 +31,8 @@ Supported leaves are:
 - state entry (`on_enter`);
 - a durable named event;
 - an absolute time;
-- a count of cohort children in selected stable states.
+- a count of cohort children in selected stable states;
+- a count of implicit owner Tasks in `running`, `completed`, or `blocked`.
 
 `all` and `any` compose these leaves recursively. For example, a time-boxed
 iteration can reconcile when all children have returned a result or when the
@@ -54,6 +56,40 @@ review deadline arrives:
 Event receipts are latched on their Task. An event that arrives before the
 Task enters a matching dormant state is therefore observed immediately after
 settlement instead of being lost.
+
+## Owners and member task lists
+
+A Task has zero or more owners. Every owner is one concrete Fleet member,
+including a formal Agent or an attached user-facing assistant. Owners are
+independent from assignees: an assignee receives an exact ReconcileAttempt,
+while an owner performs one implicit child Task alongside the other owners.
+
+An owner record starts in `running` and is settled by that same member as
+`completed` with a result or `blocked` with a reason. The parent Task does not
+change stable state when an owner settles. Instead, an `owner_count` trigger
+can start the parent's next ReconcileAttempt when, for example, every owner has
+returned either outcome:
+
+```json
+{
+  "kind": "owner_count",
+  "states": ["completed", "blocked"],
+  "op": "eq",
+  "value": "owners"
+}
+```
+
+A member's owner task list is derived rather than persisted separately. It
+contains exactly the Tasks that are currently in stable state `running` and
+have that member's owner record still `running`. A non-empty list generates a
+targeted continuation for that member whenever they become idle; no unrelated
+member is woken. The continuation stops as soon as the ownership is completed
+or blocked, or the parent Task leaves `running`.
+
+Owners may be declared when a Task is created. If a ReconcileAttempt is active,
+changing the owner set is part of that attempt's atomic settlement; otherwise
+an administrative Task update may change it directly. Retained owners keep
+their existing outcome, while newly added owners start in `running`.
 
 ## ReconcileAttempt lifecycle
 
@@ -97,7 +133,9 @@ atomically applies the configured `blocked`, `paused`, or `cancelled` fallback.
 The liveness invariant is therefore:
 
 > Every automatically live Task has either an active ReconcileAttempt or an
-> armed durable reconciler. A model process does not need to remain online.
+> armed durable reconciler, while every running owner has a derived member task
+> list that targets only that owner. A model process does not need to remain
+> online between continuations.
 
 ## Recursive children and Votes
 
