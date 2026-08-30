@@ -478,7 +478,7 @@ export class FleetCollaborationService {
     }
     const hasPendingRequirement = (member: string): boolean => {
       const task = tasks.pendingRequirement(member)
-      return task !== undefined && task.status !== 'cancelled'
+      return task !== undefined && task.stableState.kind !== 'cancelled'
     }
     const requiredRecipients = (message: FleetMessage): string[] => {
       if (message.mustReply === true
@@ -942,7 +942,7 @@ export class FleetCollaborationService {
       restore: (state) => {
         messages.restore(state.coordination)
         for (const task of tasks.state().tasks) {
-          if (task.status === 'completed' && task.requirement?.kind === 'message') {
+          if (task.stableState.kind === 'completed' && task.requirement?.kind === 'message') {
             messages.completeRequiredReply(task.requirement.assignee, task.requirement.messageId)
           }
         }

@@ -5394,12 +5394,14 @@ export class FleetRunService {
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const pending = runtime.tasks.pendingRequirement(participant.name)
     if (pending === undefined) return false
-    const task = pending.execution.kind === 'ready'
+    const task = pending.activeReconcile?.status === 'ready'
       ? runtime.tasks.claim(participant.sessionId, pending.id)
-      : pending.execution.kind === 'running' && pending.execution.actor === participant.name
+      : pending.activeReconcile?.status === 'running' && pending.activeReconcile.target === participant.name
         ? pending
         : undefined
-    if (task?.execution.kind !== 'running') return false
+    if (task === undefined) return false
+    const reconcile = task.activeReconcile
+    if (reconcile?.status !== 'running' || reconcile.attemptId === undefined) return false
     const replyAlreadySent = task.requirement !== undefined
       && runtime.messages.pendingRequiredReply(participant.sessionId) === undefined
     const source = task.requirement === undefined
@@ -5414,12 +5416,12 @@ export class FleetRunService {
       kind: 'task_notice',
       text: [
         `[Fleet required task] A complete response is still required (${task.id}).`,
-        `Current attempt: ${task.execution.attemptId}${task.execution.timeoutAt === undefined ? '' : ` (timeout ${task.execution.timeoutAt})`}.`,
+        `Current ReconcileAttempt: ${reconcile.attemptId}${reconcile.timeoutAt === undefined ? '' : ` (timeout ${reconcile.timeoutAt})`}.`,
         source,
         replyPhase,
         'The original input is not repeated here. Review the immediately preceding turns and tool results before acting. If the requirement is already satisfied, do not repeat checks or expand the work; call fleet_task with action="complete", this task id, the current attempt_id, and final_reply now. Use fleet_messages to read the source conversation only when the original input is actually needed.',
         'Fleet currently reports your runtime as active. Do not wait on an earlier pause instruction.',
-        'Otherwise continue the unfinished work. Before this turn ends, either complete this exact task with final_reply, or call fleet_task action="settle" with this attempt_id, progress text, and a durable next state. Fleet persists the successor before retiring this attempt.',
+        'Otherwise continue the unfinished work. Before this turn ends, either complete this exact task with final_reply, or call fleet_task action="settle" with this attempt_id, progress text, and one explicit stable state. A running or dormant state must include its next durable reconcilers.',
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `required-task:${task.id}`,
@@ -5450,19 +5452,18 @@ export class FleetRunService {
     const pending = runtime.tasks.readyTasks(participant.name)
       .find(task => task.requirement === undefined)
     if (pending === undefined) return false
-    const readyReason = pending.execution.kind === 'ready'
-      ? pending.execution.reason
-      : 'Task is ready for its next attempt.'
+    const readyReason = pending.activeReconcile?.reason ?? 'Task is ready for reconciliation.'
     const task = runtime.tasks.claim(participant.sessionId, pending.id)
-    if (task.execution.kind !== 'running') return false
+    const reconcile = task.activeReconcile
+    if (reconcile?.status !== 'running' || reconcile.attemptId === undefined) return false
     runtime.messages.sendSystemNotification(participant.sessionId, {
       kind: 'task_notice',
       text: [
         `[Fleet task attempt] ${task.title} (${task.id})`,
-        `Current attempt: ${task.execution.attemptId}${task.execution.timeoutAt === undefined ? '' : ` (timeout ${task.execution.timeoutAt})`}.`,
+        `Current ReconcileAttempt: ${reconcile.attemptId}${reconcile.timeoutAt === undefined ? '' : ` (timeout ${reconcile.timeoutAt})`}.`,
         task.description,
         readyReason,
-        'Work only this attempt. Before the turn ends, call fleet_task action="settle" with this attempt_id, progress text, and exactly one next state: ready, waiting_time, waiting_event, vote, blocked, completed, or cancelled. The next state is persisted before this attempt is retired. Inspect existing evidence first and do not repeat completed work.',
+        'Work only this ReconcileAttempt. Before the turn ends, call fleet_task action="settle" with this attempt_id, progress text, and one explicit stable state. A running or dormant state must include durable reconcilers; child_ops may atomically create, link, cancel, or open Vote child Tasks. Fleet commits the state, child operations, and next triggers before releasing you.',
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `assigned-task:${task.id}`,
@@ -5471,7 +5472,7 @@ export class FleetRunService {
       member: participant.name,
       reason: 'assigned_task',
       tasks: [task.id],
-      attempt: task.execution.attemptId,
+      attempt: reconcile.attemptId,
     })
     return true
   }
@@ -5598,7 +5599,7 @@ export class FleetRunService {
       && this.budgetRemaining(record, candidate.name).exhaustedScope === undefined,
     ).filter(candidate => this.ctx.agents.get(SessionId(candidate.sessionId))?.status === 'idle')
     const activeTaskAssignees = new Set(runtime.tasks.state().tasks
-      .filter(task => task.status === 'open' || task.status === 'in_progress')
+      .filter(task => task.stableState.kind !== 'completed' && task.stableState.kind !== 'cancelled')
       .flatMap(task => task.assignees))
     const voteReader = idleCandidates
       .map(candidate => this.liveMember(candidate))
@@ -7272,10 +7273,11 @@ export class FleetRunService {
       onTask: (event, state) => {
         this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
         if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
-        if (event.task.execution.kind === 'ready'
+        if (event.task.activeReconcile?.status === 'ready'
           && (event.action === 'created'
-            || event.action === 'settled'
-            || event.action === 'timed_out'
+            || event.action === 'reconcile_ready'
+            || event.action === 'reconciled'
+            || event.action === 'retrying'
             || event.action === 'signaled'
             || event.action === 'reopened'
             || event.action === 'updated')) {

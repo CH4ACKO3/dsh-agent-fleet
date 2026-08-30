@@ -1,69 +1,118 @@
-# Durable Task liveness
+# Recursive Task reconciliation
 
-Fleet keeps long-running work alive through durable Task execution state, not by
-keeping an Agent turn running. A Team has no global concurrency limit: every
-runnable Task may dispatch independently. A single Task has at most one valid
-execution attempt at a time.
+Fleet models long-running work as a recursive Task tree. A Task keeps one
+durable stable state. Agent work can change that state only by settling its
+current ReconcileAttempt; administrative reopen and deterministic engine
+fallbacks use the same atomic state replacement path.
 
-## Invariant
+This is a breaking replacement for the old `ready`, `waiting_time`,
+`waiting_event`, and `waiting_vote` execution-state model. Persisted Task state
+uses schema version 3 only.
 
-Every non-terminal Task has exactly one durable execution state:
+## Stable states
 
-- `ready`: a Team member can claim the next attempt now;
-- `running`: one named member owns the current attempt;
-- `waiting_time`: a persisted timer will make the Task ready;
-- `waiting_event`: a named durable event or its timeout will make the Task ready;
-- `waiting_vote`: a Fleet Vote or its timeout decides the requested transition;
-- `blocked`: the Task explicitly requires outside intervention.
+- `running`: the Task owns an immutable cohort of child Task ids for this state
+  version and has one or more armed reconcilers;
+- `dormant`: no work should run now, but one or more deterministic triggers can
+  reopen reconciliation later;
+- `blocked`: progress requires intervention that is not currently predictable;
+- `paused`: automatic progression is intentionally suppressed;
+- `completed` and `cancelled`: terminal states.
 
-`completed` and `cancelled` are terminal. There is no `active + no continuation`
-state.
+`running` describes an active orchestration scope, not a live model call. All
+Agents may sleep while a running parent waits for its children.
 
-## One-turn handoff
+## Triggers
 
-Dispatch claims `ready` before waking an Agent, producing a unique `attemptId`.
-The Agent settles that attempt exactly once. Settlement records progress and the
-next execution state in the same Task update, then invalidates the old attempt.
-Late settlement with an old `attemptId` is rejected.
+A reconciler is addressed to one exact member and has a trigger expression.
+Supported leaves are:
 
-External event receipts are stored on the Task by event key. If an operation
-finishes before the Agent settles into `waiting_event`, settlement observes the
-already-persisted receipt and moves directly to `ready`; it cannot lose the
-completion between starting the operation and installing the wait.
+- state entry (`on_enter`);
+- a durable named event;
+- an absolute time;
+- a count of cohort children in selected stable states.
 
-Legal settlements are:
+`all` and `any` compose these leaves recursively. For example, a time-boxed
+iteration can reconcile when all children have returned a result or when the
+review deadline arrives:
 
-- continue immediately (`ready`);
-- resume at a time (`waiting_time`);
-- resume on an event (`waiting_event`);
-- request a completion or blocked Vote (`waiting_vote`);
-- block explicitly;
-- complete or cancel.
+```json
+{
+  "kind": "any",
+  "items": [
+    {
+      "kind": "child_count",
+      "states": ["completed", "blocked"],
+      "op": "eq",
+      "value": "cohort"
+    },
+    { "kind": "at", "at": "2026-09-01T09:00:00.000Z" }
+  ]
+}
+```
 
-If a model turn ends while its attempt is still `running`, the host first
-returns it to `ready` with a reconciliation reason. If the process disappears,
-the running timeout performs the same transition. Thus the old attempt is never
-removed before a successor state exists.
+Event receipts are latched on their Task. An event that arrives before the
+Task enters a matching dormant state is therefore observed immediately after
+settlement instead of being lost.
 
-## Timeouts
+## ReconcileAttempt lifecycle
 
-Tasks may configure independent ready, running, and event timeout durations.
-Timeouts do not complete work. They atomically move the Task to `ready` with the
-timed-out state in its reason and mark the continuation as reconciliation. A
-normal ready Task is claimable only by its assignees; a reconciliation attempt
-is claimable by any available member, so a stuck original assignee cannot block
-the fallback.
-Timers are restored from persisted state after restart.
+When a trigger becomes true, Fleet atomically attaches one ready
+ReconcileAttempt to the source Task state version. A Task version can have at
+most one active ReconcileAttempt. If several reconcilers match, Fleet selects
+the highest priority and then the lexically smallest id.
 
-## Collaborative decisions
+Claiming an attempt:
 
-A Task may require a Vote for completion. The executing member settles its
-attempt by requesting a Vote. Fleet first persists `waiting_vote` with a
-deterministic Vote id, then idempotently opens the Vote and wakes its voters.
+1. verifies the exact target member and completed dependencies;
+2. reserves that member for this reconciliation;
+3. creates a fresh per-turn `attemptId` fence;
+4. increments the configured wake count.
 
-- approval completes the Task (or authorizes the final required-message reply);
-- rejection returns the Task to `ready` with the rejection reason;
-- timeout returns the Task to `ready` for reconciliation.
+Settlement validates the Task version, reconcile id, target member, and current
+turn fence. It then commits all of the following as one state update:
 
-The Vote is the continuation event, so the initiating Agent may sleep while the
-other members decide.
+- the progress entry;
+- child Task creation, linking, cancellation, or Vote creation;
+- the next explicit stable state;
+- the next cohort and reconciler definitions;
+- retirement of the old ReconcileAttempt.
+
+The new stable state is evaluated for already-true triggers before the caller
+is released. A non-terminal settlement is invalid unless `running` or
+`dormant` includes at least one reconciler.
+
+## Retry and timeout
+
+A ReconcileAttempt configures one target member, a retry delay, a maximum wake
+count, an optional absolute timeout, and a deterministic fallback stable state.
+If an Agent turn ends without settlement, Fleet keeps the same ReconcileAttempt,
+removes the old turn fence, and wakes only that target again. Other members are
+not woken.
+
+The member is logically reserved while the attempt is waiting or running, but
+no model call is kept alive between retries. Reaching the wake limit or timeout
+atomically applies the configured `blocked`, `paused`, or `cancelled` fallback.
+
+The liveness invariant is therefore:
+
+> Every automatically live Task has either an active ReconcileAttempt or an
+> armed durable reconciler. A model process does not need to remain online.
+
+## Recursive children and Votes
+
+`parentId` defines lifecycle ownership as a strict tree. A running state's
+`cohort` is the immutable child membership snapshot observed by its triggers.
+Adding children requires a new parent state version, so an `all children`
+barrier cannot race with late child creation.
+
+Links may include existing Tasks without changing their lifecycle parent.
+Creating a child inside settlement assigns the current Task as its parent and
+adds it to the new cohort before the settlement is visible.
+
+A collaborative decision is represented as a Vote child Task. The child stays
+`dormant` while ballots are open, then a deterministic system reconciler marks
+it completed or blocked. That child transition can trigger the parent's next
+ReconcileAttempt. A parent whose decision mode is `vote` cannot enter
+`completed` or `blocked` until its current cohort contains the corresponding
+approved Vote child.

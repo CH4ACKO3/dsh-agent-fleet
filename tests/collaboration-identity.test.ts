@@ -106,7 +106,9 @@ describe('Fleet collaboration identities', () => {
     })
     const required = first.tasks.pendingRequirement('reviewer')
     if (required === undefined) throw new Error('expected required task')
+    const claimed = first.tasks.claim('agent-reviewer', required.id)
     const completed = first.tasks.complete('agent-reviewer', required.id, {
+      attemptId: claimed.activeReconcile?.attemptId,
       finalReply: 'Release inspection complete.',
     })
     expect(completed.requirement?.completionMessageId).toBeDefined()
@@ -126,7 +128,8 @@ describe('Fleet collaboration identities', () => {
     expect(restored.tasks.pendingRequirement('reviewer')).toBeUndefined()
     expect(restored.messages.pendingRequiredReply('reviewer')).toBeUndefined()
     expect(restored.tasks.state().tasks).toContainEqual(expect.objectContaining({
-      id: required.id, status: 'completed', requirement: expect.objectContaining({ messageId: sent.messageId }),
+      id: required.id, stableState: expect.objectContaining({ kind: 'completed' }),
+      requirement: expect.objectContaining({ messageId: sent.messageId }),
     }))
     collaboration.close()
   })
