@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { FleetRunService } from '../src/run.js'
 import type { FleetResourcePreview, FleetRunMember } from '../src/run.js'
+import type { FleetTaskBoard } from '../src/productivity/task.js'
 import { FleetArchiveRegistry } from '../src/archive.js'
 import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
@@ -31,6 +32,21 @@ interface FakeEvent {
   readonly time: number
   readonly type: string
   readonly data: unknown
+}
+
+function settleCompletedTask(
+  board: FleetTaskBoard,
+  actorId: string,
+  taskId: string,
+  attemptId: string,
+  result: string,
+  finalReply?: string,
+) {
+  return board.settle(actorId, taskId, {
+    attemptId,
+    progress: result,
+    next: { kind: 'completed', result, ...(finalReply === undefined ? {} : { finalReply }) },
+  })
 }
 
 type FakeWaterfallListener = (...args: unknown[]) => unknown
@@ -657,7 +673,7 @@ describe('FleetRunService', () => {
     expect(leadPersona).toContain('fleet_tools cover Fleet capabilities only')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
     expect(leadPersona).toContain('A valid `@Name` or `@member-id` in message text is parsed as a mention')
-    expect(leadPersona).toContain('`action: "complete"`, the task id, and `final_reply`')
+    expect(leadPersona).toContain('settle its current ReconcileAttempt to state `{kind:"completed",result,finalReply}`')
 
     service.end(launcher as unknown as Agent, 'Display name messaging test complete.', run.id)
     await service.wait(run.id, 1_000)
@@ -3920,7 +3936,7 @@ describe('FleetRunService', () => {
 
     const currentTask = service.taskBoard(run.id).get(reviewer.id, task.id)
     if (currentTask.activeReconcile?.status !== 'running') throw new Error('expected running ReconcileAttempt')
-    service.taskBoard(run.id).complete(reviewer.id, task.id, { attemptId: currentTask.activeReconcile.attemptId })
+    settleCompletedTask(service.taskBoard(run.id), reviewer.id, task.id, currentTask.activeReconcile.attemptId, 'Task completed.')
     service.finish(launcher as unknown as Agent, 'cancelled', 'Assigned-task continuation verified.', run.id)
     await service.wait(run.id, 1_000)
     service.end(launcher as unknown as Agent, 'Assigned-task Team closed.', run.id)
@@ -3993,7 +4009,7 @@ describe('FleetRunService', () => {
         kind: 'running',
         reconcilers: [{
           id: 'collect-owner-results',
-          when: { kind: 'owner_count', states: ['completed', 'blocked'], op: 'eq', value: 'owners' },
+          when: { kind: 'owner_intent_count', intents: ['complete', 'block'], op: 'eq', value: 'owners' },
           target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
           onTimeout: { kind: 'blocked', reason: 'Owner result reconciliation exhausted.' },
         }],
@@ -4014,7 +4030,7 @@ describe('FleetRunService', () => {
     lead.inbox.clear()
     reviewer.inbox.clear()
     const reviewerBeforePeerIdle = reviewer.messages.length
-    service.taskBoard(run.id).settleOwner(lead.id, task.id, 'completed', 'Implementation complete.')
+    service.taskBoard(run.id).markOwnerIntent(lead.id, task.id, 'complete', 'Implementation complete.')
     const afterLeadSettlement = lead.messages.length
     service.agentIdle(lead as unknown as Agent)
     expect(lead.messages).toHaveLength(afterLeadSettlement)
@@ -4025,11 +4041,11 @@ describe('FleetRunService', () => {
     service.agentIdle(reviewer as unknown as Agent)
     expect(reviewer.messages).toHaveLength(reviewerBeforeRetry + 1)
     expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('owner_block') }),
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('action="block"') }),
     ])
 
     reviewer.inbox.clear()
-    service.taskBoard(run.id).settleOwner(reviewer.id, task.id, 'blocked', 'External validation is unavailable.')
+    service.taskBoard(run.id).markOwnerIntent(reviewer.id, task.id, 'block', 'External validation is unavailable.')
     await vi.waitFor(() => expect(service.taskBoard(run.id).get(lead.id, task.id).activeReconcile)
       .toMatchObject({ status: 'running', target: 'lead' }))
     expect(lead.messages.at(-1)?.content).toEqual([
@@ -4103,7 +4119,7 @@ describe('FleetRunService', () => {
     const finalClaim = service.taskBoard(run.id).claim(lead.id, task.id)
     const finalAttempt = finalClaim.activeReconcile?.attemptId
     if (finalAttempt === undefined) throw new Error('expected final ReconcileAttempt')
-    service.taskBoard(run.id).complete(lead.id, task.id, { attemptId: finalAttempt, result: 'Approved by Vote.' })
+    settleCompletedTask(service.taskBoard(run.id), lead.id, task.id, finalAttempt, 'Approved by Vote.')
     expect(service.taskBoard(run.id).get(lead.id, task.id).stableState)
       .toMatchObject({ kind: 'completed', result: expect.stringContaining('Approved by Vote') })
 
@@ -4206,10 +4222,10 @@ describe('FleetRunService', () => {
     if (requiredTask === undefined) throw new Error('expected required task')
     const currentRequiredTask = service.taskBoard(run.id).get(reviewer.id, requiredTask.id)
     if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
-      attemptId: currentRequiredTask.activeReconcile.attemptId,
-      finalReply: 'Latest result inspection complete.',
-    })
+    settleCompletedTask(
+      service.taskBoard(run.id), reviewer.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
+      'Latest result inspection complete.', 'Latest result inspection complete.',
+    )
     expect(service.messageHub(run.id).pendingRequiredReply(reviewer.id)).toBeUndefined()
     const completionNotice = lead.messages.flatMap(message => message.content)
       .flatMap(block => block.type === 'text' ? [block.text] : [])
@@ -4309,9 +4325,10 @@ describe('FleetRunService', () => {
     if (requiredTask === undefined) throw new Error('expected required task')
     const currentRequiredTask = service.taskBoard(run.id).get(reviewer.id, requiredTask.id)
     if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    expect(() => service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
-      attemptId: currentRequiredTask.activeReconcile.attemptId,
-    }))
+    expect(() => settleCompletedTask(
+      service.taskBoard(run.id), reviewer.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
+      'Completion without final reply.',
+    ))
       .toThrow('required task final reply cannot be empty')
     const existingReply = messages.search(reviewer, {
       conversation: '@User',
@@ -4321,10 +4338,10 @@ describe('FleetRunService', () => {
       conversation: '@User',
       limit: 100,
     }).length
-    const completed = service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
-      attemptId: currentRequiredTask.activeReconcile.attemptId,
-      finalReply: 'Final confirmation: the result is confirmed.',
-    })
+    const completed = settleCompletedTask(
+      service.taskBoard(run.id), reviewer.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
+      'Final confirmation: the result is confirmed.', 'Final confirmation: the result is confirmed.',
+    )
     expect(completed.requirement?.completionMessageId).toBe(existingReply?.id)
     expect(messages.search(reviewer, { conversation: '@User', limit: 100 }))
       .toHaveLength(sourceMessagesBeforeCompletion)
@@ -4433,10 +4450,10 @@ describe('FleetRunService', () => {
     if (requiredTask === undefined) throw new Error('expected required task')
     const currentRequiredTask = service.taskBoard(run.id).get(launcher.id, requiredTask.id)
     if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    service.taskBoard(run.id).complete(launcher.id, requiredTask.id, {
-      attemptId: currentRequiredTask.activeReconcile.attemptId,
-      finalReply: 'Final result: the required reply is complete.',
-    })
+    settleCompletedTask(
+      service.taskBoard(run.id), launcher.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
+      'Final result: the required reply is complete.', 'Final result: the required reply is complete.',
+    )
     const afterComplete = launcher.messages.length
     service.agentStatusChanged(launcher as unknown as Agent)
     expect(launcher.messages).toHaveLength(afterComplete)
@@ -4533,10 +4550,10 @@ describe('FleetRunService', () => {
     if (requiredTask === undefined) throw new Error('expected required task')
     const currentRequiredTask = service.taskBoard(run.id).get(launcher.id, requiredTask.id)
     if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    service.taskBoard(run.id).complete(launcher.id, requiredTask.id, {
-      attemptId: currentRequiredTask.activeReconcile.attemptId,
-      finalReply: 'Final result: analysis received and reviewed.',
-    })
+    settleCompletedTask(
+      service.taskBoard(run.id), launcher.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
+      'Final result: analysis received and reviewed.', 'Final result: analysis received and reviewed.',
+    )
     const afterComplete = launcher.messages.length
     service.agentIdle(launcher as unknown as Agent)
     expect(launcher.messages).toHaveLength(afterComplete)

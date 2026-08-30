@@ -5410,8 +5410,8 @@ export class FleetRunService {
     const replyPhase = task.requirement === undefined
       ? undefined
       : replyAlreadySent
-        ? 'A Fleet reply to the source message has already been sent. Do not repeat the work, rerun checks, or send another separate reply. Review the preceding result only to confirm it satisfies the request, then close this exact task with fleet_task action="complete", the current attempt_id, and final_reply.'
-        : 'No Fleet reply to the source message has been recorded yet. Review the preceding turn before acting; if its work already satisfies the request, do not rerun checks and close this exact task now with fleet_task action="complete", the current attempt_id, and final_reply.'
+        ? 'A Fleet reply to the source message has already been sent. Do not repeat the work, rerun checks, or send another separate reply. Review the preceding result only to confirm it satisfies the request, then settle this exact ReconcileAttempt to {kind:"completed",result,finalReply}.'
+        : 'No Fleet reply to the source message has been recorded yet. Review the preceding turn before acting; if its work already satisfies the request, do not rerun checks and settle this exact ReconcileAttempt now to {kind:"completed",result,finalReply}.'
     runtime.messages.sendSystemNotification(participant.name, {
       kind: 'task_notice',
       text: [
@@ -5419,9 +5419,9 @@ export class FleetRunService {
         `Current ReconcileAttempt: ${reconcile.attemptId}${reconcile.timeoutAt === undefined ? '' : ` (timeout ${reconcile.timeoutAt})`}.`,
         source,
         replyPhase,
-        'The original input is not repeated here. Review the immediately preceding turns and tool results before acting. If the requirement is already satisfied, do not repeat checks or expand the work; call fleet_task with action="complete", this task id, the current attempt_id, and final_reply now. Use fleet_messages to read the source conversation only when the original input is actually needed.',
+        'The original input is not repeated here. Review the immediately preceding turns and tool results before acting. If the requirement is already satisfied, do not repeat checks or expand the work; call fleet_task action="settle" with this task id, the current attempt_id, progress text, and state {kind:"completed",result,finalReply}. Use fleet_messages to read the source conversation only when the original input is actually needed.',
         'Fleet currently reports your runtime as active. Do not wait on an earlier pause instruction.',
-        'Otherwise continue the unfinished work. Before this turn ends, either complete this exact task with final_reply, or call fleet_task action="settle" with this attempt_id, progress text, and one explicit stable state. A running or dormant state must include its next durable reconcilers.',
+        'Otherwise continue the unfinished work. Before this turn ends, call fleet_task action="settle" with this attempt_id, progress text, and one explicit stable state. Completion uses {kind:"completed",result,finalReply}; a running or dormant state must include its next durable reconcilers.',
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `required-task:${task.id}`,
@@ -5497,9 +5497,9 @@ export class FleetRunService {
         '[Fleet owner task list]',
         'Your running owner Tasks:',
         ...tasks.map(task => `- ${task.title} (${task.id})`),
-        'Each ownership is an implicit child Task. Use fleet_task action="owner_list" to read the complete Task descriptions, states, and owner results, then work your part independently.',
-        'For each finished item call fleet_task action="owner_complete" with its task id and concrete result; if your part cannot proceed, call action="owner_block" with the blocking reason.',
-        'Until every ownership is settled or its Task leaves running, this non-empty list will wake you again.',
+        'Each ownership behaves like an implicit child work item but records only intent, not Task state. Use fleet_task action="owner_list" to read the complete Task descriptions, states, and owner intents, then work your part independently.',
+        'For each finished item call fleet_task action="complete" with its task id and concrete evidence to mark complete intent; if your part cannot proceed, call action="block" with the blocking reason. These are intentions only: a ReconcileAttempt decides the Task state.',
+        'Until every ownership has an intent or its Task leaves running, this non-empty list will wake you again.',
       ].join('\n'),
       delivery: 'wakeup',
       coalesceKey: `owner-task-list:${participant.name}`,
@@ -6777,7 +6777,7 @@ export class FleetRunService {
       const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'vote' }>
       return coordination.action === 'opened' || coordination.action === 'closed' ? 'vote' : undefined
     }
-    if (/^task\.(created|updated|commented|progressed|completed|reopened|due)$/.test(event.type)) return 'task'
+    if (/^task\.(created|updated|commented|progressed|owner_intent_marked|completed|cancelled|due)$/.test(event.type)) return 'task'
     if (/^calendar\.(created|updated|rsvp|started|closed|cancelled)$/.test(event.type)) return 'calendar'
     if (event.type === 'resource.document_commented' || event.type === 'resource.document_resolved') return 'document'
     if (event.type === 'schedule.triggered') return 'schedule'
@@ -7335,7 +7335,6 @@ export class FleetRunService {
           || event.action === 'reconciled'
           || event.action === 'retrying'
           || event.action === 'signaled'
-          || event.action === 'reopened'
           || event.action === 'updated') {
           queueMicrotask(() => {
             this.reconcileReadyTasks(record.id)

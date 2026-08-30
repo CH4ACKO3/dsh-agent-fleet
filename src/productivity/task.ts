@@ -11,7 +11,7 @@ export const FLEET_TASK_STATE_NAMESPACE = 'productivity-tasks'
 export type FleetProjectTaskPriority = 'low' | 'normal' | 'high'
 export type FleetTaskDecision = 'direct' | 'vote'
 export type FleetTaskStableKind = 'running' | 'dormant' | 'blocked' | 'paused' | 'completed' | 'cancelled'
-export type FleetTaskOwnerState = 'running' | 'completed' | 'blocked'
+export type FleetTaskOwnerIntentKind = 'complete' | 'block'
 
 export type FleetTaskTrigger =
   | { readonly kind: 'on_enter' }
@@ -24,8 +24,8 @@ export type FleetTaskTrigger =
       readonly value: number | 'cohort'
     }
   | {
-      readonly kind: 'owner_count'
-      readonly states: FleetTaskOwnerState[]
+      readonly kind: 'owner_intent_count'
+      readonly intents: FleetTaskOwnerIntentKind[]
       readonly op: 'eq' | 'gte' | 'lte'
       readonly value: number | 'owners'
     }
@@ -127,10 +127,17 @@ export interface FleetTaskVoteNode {
   readonly rejection?: { readonly voter: string; readonly reason: string }
 }
 
-export type FleetTaskOwner =
-  | { readonly member: string; readonly state: 'running'; readonly since: string }
-  | { readonly member: string; readonly state: 'completed'; readonly completedAt: string; readonly result: string }
-  | { readonly member: string; readonly state: 'blocked'; readonly blockedAt: string; readonly reason: string }
+export interface FleetTaskOwnerIntent {
+  readonly kind: FleetTaskOwnerIntentKind
+  readonly text: string
+  readonly markedAt: string
+}
+
+export interface FleetTaskOwner {
+  readonly member: string
+  readonly since: string
+  readonly intent?: FleetTaskOwnerIntent
+}
 
 export interface FleetProjectTask {
   readonly id: string
@@ -161,12 +168,12 @@ export interface FleetProjectTask {
 }
 
 export interface FleetTaskState {
-  readonly version: 4
+  readonly version: 5
   readonly tasks: readonly FleetProjectTask[]
 }
 
 export interface FleetProjectTaskEvent {
-  readonly action: 'created' | 'updated' | 'commented' | 'progressed' | 'owner_completed' | 'owner_blocked' | 'reconcile_ready' | 'reconcile_started' | 'reconciled' | 'retrying' | 'timed_out' | 'signaled' | 'completed' | 'reopened' | 'due' | 'notification'
+  readonly action: 'created' | 'updated' | 'commented' | 'progressed' | 'owner_intent_marked' | 'reconcile_ready' | 'reconcile_started' | 'reconciled' | 'retrying' | 'timed_out' | 'signaled' | 'completed' | 'cancelled' | 'due' | 'notification'
   readonly task: FleetProjectTask
   readonly actor?: string
 }
@@ -212,12 +219,6 @@ export interface EnsureFleetMessageTaskInput {
   readonly resources?: readonly string[]
 }
 
-export interface CompleteFleetProjectTaskInput {
-  readonly finalReply?: string
-  readonly attemptId?: string
-  readonly result?: string
-}
-
 export type FleetTaskChildOperation =
   | { readonly kind: 'create'; readonly task: Omit<CreateFleetProjectTaskInput, 'parentId'> }
   | { readonly kind: 'link'; readonly taskId: string }
@@ -255,7 +256,7 @@ export interface FleetTaskVoteResult {
 
 export interface FleetTaskRequirementCompletion { readonly messageId?: string }
 
-const EMPTY_STATE: FleetTaskState = { version: 4, tasks: [] }
+const EMPTY_STATE: FleetTaskState = { version: 5, tasks: [] }
 const SYSTEM_TARGET = '$system'
 
 function requiredText(value: string, label: string): string {
@@ -271,10 +272,10 @@ export function parseFleetTaskState(value: JsonValue | undefined): FleetTaskStat
   if (value === undefined) return snapshot(EMPTY_STATE)
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Fleet Task state must be an object')
   const input = value as Record<string, JsonValue>
-  if (input.version !== 4 || !Array.isArray(input.tasks)) {
+  if (input.version !== 5 || !Array.isArray(input.tasks)) {
     throw new Error('Fleet Task state version is incompatible; remove the old productivity-tasks state and recreate Tasks')
   }
-  return { version: 4, tasks: snapshot(input.tasks) as unknown as FleetProjectTask[] }
+  return { version: 5, tasks: snapshot(input.tasks) as unknown as FleetProjectTask[] }
 }
 
 export class FleetTaskBoard {
@@ -301,7 +302,7 @@ export class FleetTaskBoard {
     ) => FleetTaskVoteResult = () => { throw new Error('Fleet task voting is unavailable') },
   ) {}
 
-  state(): FleetTaskState { return { version: 4, tasks: [...this.tasks.values()].map(snapshot) } }
+  state(): FleetTaskState { return { version: 5, tasks: [...this.tasks.values()].map(snapshot) } }
 
   restore(state: FleetTaskState): void {
     this.assertOpen()
@@ -457,7 +458,7 @@ export class FleetTaskBoard {
     const owner = this.resolve(reference)
     return [...this.tasks.values()]
       .filter(task => task.stableState.kind === 'running')
-      .filter(task => task.owners.some(candidate => candidate.member === owner && candidate.state === 'running'))
+      .filter(task => task.owners.some(candidate => candidate.member === owner && candidate.intent === undefined))
       .sort((left, right) => {
         const priority = { high: 0, normal: 1, low: 2 } as const
         return priority[left.priority] - priority[right.priority] || left.createdAt.localeCompare(right.createdAt)
@@ -477,32 +478,32 @@ export class FleetTaskBoard {
     return [...this.tasks.values()].filter(task => task.activeReconcile?.target === target).map(snapshot)
   }
 
-  canSettleOwner(callerId: string, id: string): boolean {
+  canMarkOwnerIntent(callerId: string, id: string): boolean {
     const owner = this.member(callerId)
     const task = this.requireTask(id)
     return task.stableState.kind === 'running'
-      && task.owners.some(candidate => candidate.member === owner && candidate.state === 'running')
+      && task.owners.some(candidate => candidate.member === owner && candidate.intent === undefined)
   }
 
-  settleOwner(callerId: string, id: string, state: 'completed' | 'blocked', text: string): FleetProjectTask {
+  markOwnerIntent(callerId: string, id: string, kind: FleetTaskOwnerIntentKind, text: string): FleetProjectTask {
     const owner = this.member(callerId)
     const current = this.requireTask(id)
     if (current.stableState.kind !== 'running') throw new Error(`Fleet task ${id} is not running`)
     const ownership = current.owners.find(candidate => candidate.member === owner)
     if (ownership === undefined) throw new Error(`Fleet member ${owner} is not an owner of task ${id}`)
-    if (ownership.state !== 'running') throw new Error(`Fleet task ${id} ownership for ${owner} is already ${ownership.state}`)
-    const detail = requiredText(text, `task owner ${state} result`)
+    if (ownership.intent !== undefined) {
+      throw new Error(`Fleet task ${id} owner ${owner} already marked ${ownership.intent.kind} intent`)
+    }
+    const detail = requiredText(text, `task owner ${kind} intent`)
     const now = new Date().toISOString()
     const owners: FleetTaskOwner[] = current.owners.map(candidate => candidate.member !== owner
       ? candidate
-      : state === 'completed'
-        ? { member: owner, state: 'completed', completedAt: now, result: detail }
-        : { member: owner, state: 'blocked', blockedAt: now, reason: detail })
+      : { ...candidate, intent: { kind, text: detail, markedAt: now } })
     const entry: FleetTaskEntry = {
       id: `entry_${randomUUID()}`,
       kind: 'progress',
       author: owner,
-      text: `Owner ${owner} ${state}: ${detail}`,
+      text: `Owner ${owner} marked ${kind} intent: ${detail}`,
       resources: [],
       createdAt: now,
     }
@@ -514,7 +515,7 @@ export class FleetTaskBoard {
     }
     const updated = this.materialize(base, new Map(this.tasks).set(id, base))
     this.replace(updated)
-    this.emit({ action: state === 'completed' ? 'owner_completed' : 'owner_blocked', task: updated, actor: owner })
+    this.emit({ action: 'owner_intent_marked', task: updated, actor: owner })
     if (current.activeReconcile === undefined && updated.activeReconcile !== undefined) {
       this.emit({ action: 'reconcile_ready', task: updated })
     }
@@ -789,50 +790,37 @@ export class FleetTaskBoard {
     return snapshot(updated)
   }
 
-  complete(callerId: string, id: string, input: CompleteFleetProjectTaskInput = {}): FleetProjectTask {
-    const current = this.requireTask(id)
-    this.requireResponsible(callerId, current)
-    if (current.stableState.kind === 'completed') {
-      throw new Error(`Fleet task ${id} is already completed; completing it again does not complete another task`)
-    }
-    const attemptId = input.attemptId
-    if (current.activeReconcile?.status !== 'running' || attemptId === undefined || attemptId !== current.activeReconcile.attemptId) {
-      throw new Error(`Fleet task ${id} completion requires its current ReconcileAttempt`)
-    }
-    const result = input.result ?? current.entries.at(-1)?.text ?? current.title
-    return this.settle(callerId, id, {
-      attemptId,
-      progress: input.result ?? `Completed ${current.title}.`,
-      next: { kind: 'completed', result, ...(input.finalReply === undefined ? {} : { finalReply: input.finalReply }) },
-    })
-  }
-
-  canCompleteRequirement(callerId: string, id: string): boolean {
+  canSettleAttempt(callerId: string, id: string): boolean {
     const current = this.requireTask(id)
     const member = this.member(callerId)
-    return current.requirement?.kind === 'message' && current.requirement.assignee === member
-      && current.assignees.includes(member)
+    return current.activeReconcile?.status === 'running' && current.activeReconcile.target === member
   }
 
-  reopen(callerId: string, id: string): FleetProjectTask {
-    const current = this.requireTask(id)
-    this.requireResponsible(callerId, current)
-    if (current.stableState.kind === 'running' || current.stableState.kind === 'dormant') {
-      throw new Error(`Fleet task ${id} is already active`)
-    }
+  cancel(callerId: string, id: string, reason: string): FleetProjectTask {
     const actor = this.member(callerId)
+    if (!this.canManage(callerId)) throw new Error(`Fleet member ${actor} cannot cancel task ${id} without task.manage`)
+    const current = this.requireTask(id)
+    if (current.requirement !== undefined) throw new Error(`required Fleet task ${id} cannot be cancelled`)
+    if (current.stableState.kind === 'completed' || current.stableState.kind === 'cancelled') {
+      throw new Error(`Fleet task ${id} is already ${current.stableState.kind}`)
+    }
     const now = new Date().toISOString()
     const { activeReconcile: _activeReconcile, ...currentWithoutReconcile } = current
-    const base: FleetProjectTask = {
+    const detail = requiredText(reason, 'task cancellation reason')
+    const entry: FleetTaskEntry = {
+      id: `entry_${randomUUID()}`, kind: 'progress', author: actor,
+      text: `Task cancelled: ${detail}`, resources: [], createdAt: now,
+    }
+    const updated: FleetProjectTask = {
       ...currentWithoutReconcile,
-      stableState: this.defaultRunningState(now, current.assignees[0] ?? actor),
+      stableState: { kind: 'cancelled', cancelledAt: now, reason: detail },
       stateVersion: current.stateVersion + 1,
+      entries: [...current.entries, entry],
       updatedAt: now,
     }
-    const updated = this.materialize(base, new Map(this.tasks).set(id, base))
     this.replace(updated)
-    this.emit({ action: 'reopened', task: updated, actor })
-    if (updated.activeReconcile !== undefined) this.emit({ action: 'reconcile_ready', task: updated })
+    this.emit({ action: 'cancelled', task: updated, actor })
+    this.evaluateDependents([updated.id])
     return snapshot(updated)
   }
 
@@ -1036,12 +1024,12 @@ export class FleetTaskBoard {
       }
       return { kind: 'child_count', states: [...new Set(input.states)], op: input.op, value: input.value }
     }
-    if (input.kind === 'owner_count') {
-      if (!['eq', 'gte', 'lte'].includes(input.op)) throw new Error('task owner_count op must be eq, gte, or lte')
+    if (input.kind === 'owner_intent_count') {
+      if (!['eq', 'gte', 'lte'].includes(input.op)) throw new Error('task owner_intent_count op must be eq, gte, or lte')
       if (input.value !== 'owners' && (!Number.isSafeInteger(input.value) || input.value < 0)) {
-        throw new Error('task owner_count value must be a non-negative integer or owners')
+        throw new Error('task owner_intent_count value must be a non-negative integer or owners')
       }
-      return { kind: 'owner_count', states: [...new Set(input.states)], op: input.op, value: input.value }
+      return { kind: 'owner_intent_count', intents: [...new Set(input.intents)], op: input.op, value: input.value }
     }
     if (input.items.length === 0) throw new Error(`task ${input.kind} trigger requires at least one item`)
     return { kind: input.kind, items: input.items.map(item => this.normalizeTrigger(item)) }
@@ -1091,13 +1079,13 @@ export class FleetTaskBoard {
     if (trigger.kind === 'at') return new Date(trigger.at).getTime() <= Date.now()
     if (trigger.kind === 'all') return trigger.items.every(item => this.triggerMatches(task, item, source))
     if (trigger.kind === 'any') return trigger.items.some(item => this.triggerMatches(task, item, source))
-    if (trigger.kind !== 'child_count' && trigger.kind !== 'owner_count') return false
+    if (trigger.kind !== 'child_count' && trigger.kind !== 'owner_intent_count') return false
     if (task.stableState.kind !== 'running') return false
     const count = trigger.kind === 'child_count'
       ? task.stableState.cohort
           .map(id => source.get(id))
           .filter((child): child is FleetProjectTask => child !== undefined && trigger.states.includes(child.stableState.kind)).length
-      : task.owners.filter(owner => trigger.states.includes(owner.state)).length
+      : task.owners.filter(owner => owner.intent !== undefined && trigger.intents.includes(owner.intent.kind)).length
     const expected = trigger.value === 'cohort'
       ? task.stableState.cohort.length
       : trigger.value === 'owners' ? task.owners.length : trigger.value
@@ -1114,9 +1102,9 @@ export class FleetTaskBoard {
         : 0
       return `Child predicate matched ${count} Tasks in states ${trigger.states.join(', ')}.`
     }
-    if (trigger.kind === 'owner_count') {
-      const count = task.owners.filter(owner => trigger.states.includes(owner.state)).length
-      return `Owner predicate matched ${count} owners in states ${trigger.states.join(', ')}.`
+    if (trigger.kind === 'owner_intent_count') {
+      const count = task.owners.filter(owner => owner.intent !== undefined && trigger.intents.includes(owner.intent.kind)).length
+      return `Owner intent predicate matched ${count} owners with intents ${trigger.intents.join(', ')}.`
     }
     const reasons = trigger.items
       .filter(item => this.triggerMatches(task, item, source))
@@ -1253,7 +1241,7 @@ export class FleetTaskBoard {
     const duePendingFor = unique([
       ...current.assignees,
       ...current.reviewers,
-      ...current.owners.filter(owner => owner.state === 'running').map(owner => owner.member),
+      ...current.owners.filter(owner => owner.intent === undefined).map(owner => owner.member),
     ])
     const updated = { ...current, dueNotifiedAt: now, duePendingFor, updatedAt: now }
     this.tasks.set(id, updated)
@@ -1366,14 +1354,14 @@ export class FleetTaskBoard {
   private resolveMany(values: readonly string[]): string[] { return unique(values.map(value => this.resolve(value))) }
   private mergeOwners(current: readonly FleetTaskOwner[], values: readonly string[], now: string): FleetTaskOwner[] {
     const byMember = new Map(current.map(owner => [owner.member, owner]))
-    return this.resolveMany(values).map(member => byMember.get(member) ?? { member, state: 'running', since: now })
+    return this.resolveMany(values).map(member => byMember.get(member) ?? { member, since: now })
   }
   private replaceOwnerMember(owners: readonly FleetTaskOwner[], member: string, successor: string): FleetTaskOwner[] {
     const result = new Map<string, FleetTaskOwner>()
     for (const owner of owners) {
       const updated = owner.member === member ? { ...owner, member: successor } : owner
       const existing = result.get(updated.member)
-      if (existing === undefined || updated.state === 'running') result.set(updated.member, updated)
+      if (existing === undefined || updated.intent === undefined) result.set(updated.member, updated)
     }
     return [...result.values()]
   }
@@ -1428,7 +1416,7 @@ export class FleetTaskBoard {
 const FLEX_OBJECT_SCHEMA = { type: 'object', additionalProperties: true } as const
 const STABLE_STATE_SCHEMA = {
   ...FLEX_OBJECT_SCHEMA,
-  description: 'Explicit next stable state. Terminal: {kind:"completed",result} or {kind:"blocked"|"paused"|"cancelled",reason}. Live: {kind:"running",cohort?:taskIds,reconcilers:[...]} or {kind:"dormant",reason,reconcilers:[...]}. Each reconciler is {id,when,target,priority,retryAfterSeconds,maxWakeups,timeoutAt?,onTimeout:{kind:"blocked"|"paused"|"cancelled",reason}}. Triggers are {kind:"on_enter"}, {kind:"event",eventKey}, {kind:"at",at}, {kind:"child_count",states,op:"eq"|"gte"|"lte",value:number|"cohort"}, {kind:"owner_count",states:["running"|"completed"|"blocked"],op,value:number|"owners"}, or recursive {kind:"all"|"any",items:[...]}.',
+  description: 'Explicit next stable state, accepted only by settle for the current ReconcileAttempt. Terminal: {kind:"completed",result} or {kind:"blocked"|"paused"|"cancelled",reason}. Live: {kind:"running",cohort?:taskIds,reconcilers:[...]} or {kind:"dormant",reason,reconcilers:[...]}. Each reconciler is {id,when,target,priority,retryAfterSeconds,maxWakeups,timeoutAt?,onTimeout:{kind:"blocked"|"paused"|"cancelled",reason}}. Triggers are {kind:"on_enter"}, {kind:"event",eventKey}, {kind:"at",at}, {kind:"child_count",states,op:"eq"|"gte"|"lte",value:number|"cohort"}, {kind:"owner_intent_count",intents:["complete"|"block"],op,value:number|"owners"}, or recursive {kind:"all"|"any",items:[...]}.',
 } as const
 const CHILD_OPERATION_SCHEMA = {
   ...FLEX_OBJECT_SCHEMA,
@@ -1439,7 +1427,7 @@ const TASK_SCHEMA = FLEX_OBJECT_SCHEMA
 
 const RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
-    action: { type: 'string', required: true, enum: ['list', 'owner_list', 'get', 'create', 'update', 'comment', 'progress', 'claim', 'settle', 'complete', 'owner_complete', 'owner_block', 'reopen', 'signal'] },
+    action: { type: 'string', required: true, enum: ['list', 'owner_list', 'get', 'create', 'update', 'cancel', 'comment', 'progress', 'claim', 'settle', 'complete', 'block', 'signal'] },
     task: TASK_SCHEMA, tasks: { type: 'array', items: TASK_SCHEMA },
   },
 } as const
@@ -1464,9 +1452,9 @@ export function installTaskTools(
 ): () => void {
   return ctx.tools.register(defineTool({
     name: 'fleet_task',
-    description: 'Manage recursive durable Tasks. Agent work advances through a ReconcileAttempt reserved for one exact Agent. Owners are independent implicit child Tasks: owner_list returns the caller\'s running work, and owner_complete or owner_block settles that ownership. A non-empty owner list keeps waking its member.',
+    description: 'Manage recursive durable Tasks. State changes come only from settle on the current ReconcileAttempt, except manager-only cancel. For an owned running Task, complete and block mark owner intent; they do not change Task state. owner_list returns the caller\'s pending owner work.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['list', 'owner_list', 'get', 'create', 'update', 'comment', 'progress', 'claim', 'settle', 'complete', 'owner_complete', 'owner_block', 'reopen', 'signal'] },
+      action: { type: 'string', required: true, enum: ['list', 'owner_list', 'get', 'create', 'update', 'cancel', 'comment', 'progress', 'claim', 'settle', 'complete', 'block', 'signal'] },
       id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' },
       stable_kind: { type: 'string', enum: ['running', 'dormant', 'blocked', 'paused', 'completed', 'cancelled'] },
       priority: { type: 'string', enum: ['low', 'normal', 'high'] }, decision: { type: 'string', enum: ['direct', 'vote'] },
@@ -1477,8 +1465,8 @@ export function installTaskTools(
       initial_state: STABLE_STATE_SCHEMA,
       state: STABLE_STATE_SCHEMA,
       child_ops: { type: 'array', items: CHILD_OPERATION_SCHEMA },
-      text: { type: 'string' }, attempt_id: { type: 'string' }, event_key: { type: 'string' }, result: { type: 'string' },
-      final_reply: { type: 'string', description: 'Required when completing a message-created Task.' },
+      text: { type: 'string', description: 'Progress, owner intent evidence, or cancellation reason depending on action.' },
+      attempt_id: { type: 'string' }, event_key: { type: 'string' }, result: { type: 'string' },
     },
     output: jsonOutput(RESULT_SCHEMA),
     execute(args, exec) {
@@ -1486,14 +1474,16 @@ export function installTaskTools(
       const callerId = String(agent.id)
       const permission = args.action === 'list' || args.action === 'owner_list' || args.action === 'get' ? 'task.read'
         : args.action === 'create' ? 'task.create'
+          : args.action === 'cancel' ? 'task.manage'
           : args.action === 'comment' ? 'task.comment'
-            : args.action === 'progress' || args.action === 'claim' ? 'task.progress' : 'task.update'
-      const canCompleteOwnRequirement = (args.action === 'complete' || args.action === 'settle')
-        && args.id !== undefined && tasks.canCompleteRequirement(callerId, args.id)
+            : args.action === 'progress' || args.action === 'claim' || args.action === 'complete' || args.action === 'block'
+              ? 'task.progress' : 'task.update'
+      const canSettleCurrentAttempt = args.action === 'settle'
+        && args.id !== undefined && tasks.canSettleAttempt(callerId, args.id)
       const canUseOwnOwnerTask = args.action === 'owner_list'
-        || ((args.action === 'owner_complete' || args.action === 'owner_block')
-          && args.id !== undefined && tasks.canSettleOwner(callerId, args.id))
-      if (!canCompleteOwnRequirement && !canUseOwnOwnerTask
+        || ((args.action === 'complete' || args.action === 'block')
+          && args.id !== undefined && tasks.canMarkOwnerIntent(callerId, args.id))
+      if (!canSettleCurrentAttempt && !canUseOwnOwnerTask
         && !authorize(callerId, permission) && !authorize(callerId, 'task.manage')) {
         throw new Error(`Agent ${callerId} is not authorized for ${permission}`)
       }
@@ -1547,12 +1537,16 @@ export function installTaskTools(
         if (args.event_key === undefined) throw new Error('fleet_task signal requires event_key')
         return Promise.resolve({ action: 'signal' as const, task: jsonTask(tasks.signalEvent(args.id, args.event_key, args.result)) })
       }
-      if (args.action === 'owner_complete' || args.action === 'owner_block') {
+      if (args.action === 'complete' || args.action === 'block') {
         if (args.text === undefined) throw new Error(`fleet_task ${args.action} requires text`)
         return Promise.resolve({
           action: args.action,
-          task: jsonTask(tasks.settleOwner(callerId, args.id, args.action === 'owner_complete' ? 'completed' : 'blocked', args.text)),
+          task: jsonTask(tasks.markOwnerIntent(callerId, args.id, args.action, args.text)),
         })
+      }
+      if (args.action === 'cancel') {
+        if (args.text === undefined) throw new Error('fleet_task cancel requires text')
+        return Promise.resolve({ action: 'cancel' as const, task: jsonTask(tasks.cancel(callerId, args.id, args.text)) })
       }
       if (args.action === 'settle') {
         if (args.attempt_id === undefined || args.text === undefined || args.state === undefined) {
@@ -1569,16 +1563,7 @@ export function installTaskTools(
           })),
         })
       }
-      return Promise.resolve({
-        action: args.action,
-        task: jsonTask(args.action === 'complete'
-          ? tasks.complete(callerId, args.id, {
-              ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
-              ...(args.result === undefined ? {} : { result: args.result }),
-              ...(args.final_reply === undefined ? {} : { finalReply: args.final_reply }),
-            })
-          : tasks.reopen(callerId, args.id)),
-      })
+      throw new Error(`unsupported fleet_task action ${args.action}`)
     },
   }))
 }

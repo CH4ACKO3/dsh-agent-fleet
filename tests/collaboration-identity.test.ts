@@ -107,9 +107,14 @@ describe('Fleet collaboration identities', () => {
     const required = first.tasks.pendingRequirement('reviewer')
     if (required === undefined) throw new Error('expected required task')
     const claimed = first.tasks.claim('agent-reviewer', required.id)
-    const completed = first.tasks.complete('agent-reviewer', required.id, {
-      attemptId: claimed.activeReconcile?.attemptId,
-      finalReply: 'Release inspection complete.',
+    const attempt = claimed.activeReconcile?.attemptId
+    if (attempt === undefined) throw new Error('expected required ReconcileAttempt')
+    const completed = first.tasks.settle('agent-reviewer', required.id, {
+      attemptId: attempt,
+      progress: 'Release inspection complete.',
+      next: {
+        kind: 'completed', result: 'Release inspection complete.', finalReply: 'Release inspection complete.',
+      },
     })
     expect(completed.requirement?.completionMessageId).toBeDefined()
     const taskState = first.tasks.state()

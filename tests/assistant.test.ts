@@ -94,7 +94,7 @@ describe('FleetAssistantRuntime', () => {
       'A valid `@Name` or `@member-id` in message text is parsed as a mention',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      '`action: "complete"`, the task id, and `final_reply`',
+      'settle its current ReconcileAttempt to state `{kind:"completed",result,finalReply}`',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'A delivery notice alone does not',

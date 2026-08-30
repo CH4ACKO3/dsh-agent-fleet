@@ -2,13 +2,28 @@
 
 Fleet models long-running work as a recursive Task tree. A Task keeps one
 durable stable state. Agent work can change that state only by settling its
-current ReconcileAttempt; administrative reopen and deterministic engine
-fallbacks use the same atomic state replacement path.
+current ReconcileAttempt. The only operational exception is an explicit
+manager cancellation; deterministic engine fallbacks also use atomic state
+replacement.
 
 This is a breaking replacement for the old `ready`, `waiting_time`,
 `waiting_event`, and `waiting_vote` execution-state model. Persisted Task state
-uses schema version 4 only. Version 4 adds persisted owner records and does not
-migrate older Task state.
+uses schema version 5 only. Version 5 separates persisted owner intent from
+Task state and does not migrate older Task state.
+
+## Operations, intentions, and state
+
+Task management operations create a Task, update its metadata, or cancel it.
+Cancellation requires `task.manage` and is an explicit lifecycle operation.
+Required-message Tasks cannot be cancelled while their external reply
+obligation remains. There is no manual reopen or general-purpose stable-state
+setter.
+
+The `complete` and `block` Task actions are owner intentions. They record what
+one owner believes should happen and never write the Task stable state. The
+`settle` action is different: it requires the current ReconcileAttempt fence
+and exact target identity, and is the normal path that atomically installs a
+next stable state. Task management permission cannot bypass that target fence.
 
 ## Stable states
 
@@ -32,7 +47,7 @@ Supported leaves are:
 - a durable named event;
 - an absolute time;
 - a count of cohort children in selected stable states;
-- a count of implicit owner Tasks in `running`, `completed`, or `blocked`.
+- a count of owners that marked `complete` or `block` intent.
 
 `all` and `any` compose these leaves recursively. For example, a time-boxed
 iteration can reconcile when all children have returned a result or when the
@@ -62,18 +77,18 @@ settlement instead of being lost.
 A Task has zero or more owners. Every owner is one concrete Fleet member,
 including a formal Agent or an attached user-facing assistant. Owners are
 independent from assignees: an assignee receives an exact ReconcileAttempt,
-while an owner performs one implicit child Task alongside the other owners.
+while an owner independently contributes a completion intent.
 
-An owner record starts in `running` and is settled by that same member as
-`completed` with a result or `blocked` with a reason. The parent Task does not
-change stable state when an owner settles. Instead, an `owner_count` trigger
-can start the parent's next ReconcileAttempt when, for example, every owner has
-returned either outcome:
+An owner starts without an intent. That same member may call Task `complete`
+with evidence or Task `block` with a reason. The resulting intent is durable,
+but the Task remains in its current stable state. An `owner_intent_count`
+trigger can start the next ReconcileAttempt when, for example, every owner has
+submitted either intent:
 
 ```json
 {
-  "kind": "owner_count",
-  "states": ["completed", "blocked"],
+  "kind": "owner_intent_count",
+  "intents": ["complete", "block"],
   "op": "eq",
   "value": "owners"
 }
@@ -81,15 +96,15 @@ returned either outcome:
 
 A member's owner task list is derived rather than persisted separately. It
 contains exactly the Tasks that are currently in stable state `running` and
-have that member's owner record still `running`. A non-empty list generates a
+have no intent from that member. A non-empty list generates a
 targeted continuation for that member whenever they become idle; no unrelated
-member is woken. The continuation stops as soon as the ownership is completed
-or blocked, or the parent Task leaves `running`.
+member is woken. The continuation stops as soon as the owner marks either
+intent or the Task leaves `running`.
 
 Owners may be declared when a Task is created. If a ReconcileAttempt is active,
 changing the owner set is part of that attempt's atomic settlement; otherwise
 an administrative Task update may change it directly. Retained owners keep
-their existing outcome, while newly added owners start in `running`.
+their existing intent, while newly added owners start without one.
 
 ## ReconcileAttempt lifecycle
 
@@ -133,8 +148,8 @@ atomically applies the configured `blocked`, `paused`, or `cancelled` fallback.
 The liveness invariant is therefore:
 
 > Every automatically live Task has either an active ReconcileAttempt or an
-> armed durable reconciler, while every running owner has a derived member task
-> list that targets only that owner. A model process does not need to remain
+> armed durable reconciler, while every owner without an intent has a derived
+> member task list that targets only that owner. A model process does not need to remain
 > online between continuations.
 
 ## Recursive children and Votes

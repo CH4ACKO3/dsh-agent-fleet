@@ -162,7 +162,7 @@ These may be separate packages or one initial productivity package, but none is 
 
 Deliver the behavior currently embedded in base Core/Run:
 
-- Project task board, assignment, comments, progress, completion/reopen, due notifications.
+- Project task board, assignment, comments, progress, owner completion intents, reconciliation, cancellation, and due notifications.
 - Calendar events, RSVP, start/close/cancel, and meeting linking.
 - Scheduled task creation, trigger, delivery, completion, and deferred-delivery recovery.
 - Plugin-owned persistence, archive participation, tools, projection, and UI contributions.

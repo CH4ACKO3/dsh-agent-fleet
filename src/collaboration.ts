@@ -375,7 +375,7 @@ export class FleetCollaborationService {
     let events: FleetTeamEventDispatch
     let teamScope: Scope
     let requiredActionInstruction = (_message: FleetMessage, _participantId: string): string =>
-      'Fleet promotes this obligation to a persistent high-priority task. Call fleet_task with action="list" to find it. An acknowledgement or progress reply does not complete it. Perform the requested work, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends final_reply to the source conversation before marking the task completed; ordinary native output is internal and does not count.'
+      'Fleet promotes this obligation to a persistent high-priority task. Call fleet_task with action="list" to find it. An acknowledgement or progress reply does not complete it. Perform the requested work, then settle its current ReconcileAttempt to state {kind:"completed",result,finalReply}. Fleet sends finalReply to the source conversation before committing the completed state; ordinary native output is internal and does not count.'
     const messages = new MessageHub(agentDirectory, {
       beforeSend: (sender, message) => events.waterfall(
         'fleet/message/pre-send',
@@ -474,7 +474,7 @@ export class FleetCollaborationService {
       const taskReference = task === undefined
         ? 'Call fleet_task with action="list" to find the required task for this message.'
         : `The required task for this exact message is ${task.id}. Use this exact id; do not reuse a task id from an earlier turn.`
-      return `Fleet promotes this obligation to a persistent high-priority task. ${taskReference} An acknowledgement or progress reply does not complete it. Perform the requested work, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends final_reply to the source conversation before marking the task completed; ordinary native output is internal and does not count.`
+      return `Fleet promotes this obligation to a persistent high-priority task. ${taskReference} An acknowledgement or progress reply does not complete it. Perform the requested work, then settle its current ReconcileAttempt to state {kind:"completed",result,finalReply}. Fleet sends finalReply to the source conversation before committing the completed state; ordinary native output is internal and does not count.`
     }
     const hasPendingRequirement = (member: string): boolean => {
       const task = tasks.pendingRequirement(member)
@@ -572,7 +572,7 @@ export class FleetCollaborationService {
             .filter(member => member !== event.actor)
           const requiredTaskNotice = event.action === 'completed'
             ? `[Fleet required task completed] ${event.task.title} (${event.task.id}). No further completion action is required.`
-            : `[Fleet required task ${event.action}] ${event.task.title} (${event.task.id}). An acknowledgement or progress reply does not complete this obligation. After the work is done, use fleet_task action="complete" with final_reply.`
+            : `[Fleet required task ${event.action}] ${event.task.title} (${event.task.id}). An acknowledgement or progress reply does not complete this obligation. After the work is done, settle its current ReconcileAttempt to {kind:"completed",result,finalReply}.`
           notifyMembers(
             recipients,
             event.task.requirement === undefined
