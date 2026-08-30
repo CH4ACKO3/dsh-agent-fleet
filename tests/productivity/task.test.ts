@@ -45,6 +45,17 @@ describe('FleetTaskBoard', () => {
     expect(restored.reopen('agent-reviewer', task.id).status).toBe('open')
   })
 
+  it('migrates version 1 Tasks into covered version 2 execution states', () => {
+    const board = new FleetTaskBoard(directory)
+    const current = board.create('agent-lead', { title: 'Legacy runnable task', assignees: ['reviewer'] })
+    const { decision: _decision, timeouts: _timeouts, execution: _execution, ...legacy } = current
+    const migrated = parseFleetTaskState({ version: 1, tasks: [legacy] } as never)
+    expect(migrated).toMatchObject({
+      version: 2,
+      tasks: [{ id: current.id, decision: 'direct', timeouts: {}, execution: { kind: 'ready' } }],
+    })
+  })
+
   it('transfers active responsibilities when a member retires', () => {
     const board = new FleetTaskBoard(directory)
     const task = board.create('agent-reviewer', {
@@ -166,5 +177,163 @@ describe('FleetTaskBoard', () => {
     expect(deliveries).toEqual([['reviewer'], ['reviewer']])
     expect(board.get('agent-lead', task.id).duePendingFor).toEqual([])
     board.close()
+  })
+
+  it('settles each claimed attempt into a durable successor before invalidating it', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))
+    const board = new FleetTaskBoard(directory)
+    const task = board.create('agent-lead', {
+      title: 'Implement release', assignees: ['reviewer'],
+      timeouts: { readySeconds: 60, runningSeconds: 120, eventSeconds: 180 },
+    })
+    expect(task.execution).toMatchObject({
+      kind: 'ready', timeoutAt: '2026-08-21T00:01:00.000Z',
+    })
+
+    const claimed = board.claim('agent-reviewer', task.id)
+    expect(claimed.execution).toMatchObject({
+      kind: 'running', actor: 'reviewer', timeoutAt: '2026-08-21T00:02:00.000Z',
+    })
+    if (claimed.execution.kind !== 'running') throw new Error('expected running attempt')
+    const settled = board.settle('agent-reviewer', task.id, {
+      attemptId: claimed.execution.attemptId,
+      progress: 'Implementation checkpoint saved.',
+      next: { kind: 'ready', reason: 'Run the focused verification.' },
+    })
+    expect(settled).toMatchObject({
+      status: 'in_progress',
+      execution: { kind: 'ready', reason: 'Run the focused verification.', timeoutAt: '2026-08-21T00:01:00.000Z' },
+      entries: [expect.objectContaining({ kind: 'progress', text: 'Implementation checkpoint saved.' })],
+    })
+    expect(() => board.settle('agent-reviewer', task.id, {
+      attemptId: claimed.execution.attemptId,
+      progress: 'Late duplicate.',
+      next: { kind: 'completed', result: 'Should not win.' },
+    })).toThrow('is no longer current')
+  })
+
+  it('resumes time and event waits without keeping an Agent turn active', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))
+    const board = new FleetTaskBoard(directory)
+    board.activate()
+    const timed = board.create('agent-lead', { title: 'Check later', assignees: ['reviewer'] })
+    const first = board.claim('agent-reviewer', timed.id)
+    if (first.execution.kind !== 'running') throw new Error('expected running attempt')
+    board.settle('agent-reviewer', timed.id, {
+      attemptId: first.execution.attemptId,
+      progress: 'Remote job started.',
+      next: { kind: 'waiting_time', wakeAt: '2026-08-21T00:01:00.000Z' },
+    })
+    expect(board.get('agent-reviewer', timed.id).execution.kind).toBe('waiting_time')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(board.get('agent-reviewer', timed.id).execution).toMatchObject({
+      kind: 'ready', reason: expect.stringContaining('Scheduled continuation'),
+    })
+
+    const eventTask = board.create('agent-lead', {
+      title: 'Wait for deployment', assignees: ['reviewer'], timeouts: { eventSeconds: 120 },
+    })
+    const second = board.claim('agent-reviewer', eventTask.id)
+    if (second.execution.kind !== 'running') throw new Error('expected running attempt')
+    expect(board.signalEvent(eventTask.id, 'deployment:42:completed', 'Deployment 42 completed.')).toMatchObject({
+      execution: { kind: 'running' },
+      signals: [{ eventKey: 'deployment:42:completed', result: 'Deployment 42 completed.' }],
+    })
+    const eventSettled = board.settle('agent-reviewer', eventTask.id, {
+      attemptId: second.execution.attemptId,
+      progress: 'Deployment operation recorded.',
+      next: { kind: 'waiting_event', eventKey: 'deployment:42:completed' },
+    })
+    expect(eventSettled.execution).toMatchObject({
+      kind: 'ready', reason: 'Deployment 42 completed.',
+    })
+    board.close()
+  })
+
+  it('turns ready, running, and event timeouts into reconciliation attempts', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-21T00:00:00.000Z'))
+    const board = new FleetTaskBoard(directory)
+    board.activate()
+    const task = board.create('agent-lead', {
+      title: 'Recover every stalled phase', assignees: ['reviewer'],
+      timeouts: { readySeconds: 10, runningSeconds: 20, eventSeconds: 30 },
+    })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(board.get('agent-reviewer', task.id).execution).toMatchObject({
+      kind: 'ready', reason: expect.stringContaining('ready timed out'),
+    })
+
+    const running = board.claim('agent-reviewer', task.id)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(board.get('agent-reviewer', task.id).execution).toMatchObject({
+      kind: 'ready', reason: expect.stringContaining('running timed out'),
+    })
+    if (running.execution.kind !== 'running') throw new Error('expected running attempt')
+    expect(() => board.settle('agent-reviewer', task.id, {
+      attemptId: running.execution.attemptId,
+      progress: 'Late result.', next: { kind: 'completed', result: 'Late.' },
+    })).toThrow('is no longer current')
+
+    const waiting = board.claim('agent-qa', task.id)
+    if (waiting.execution.kind !== 'running') throw new Error('expected running attempt')
+    expect(waiting.execution.actor).toBe('qa')
+    board.settle('agent-qa', task.id, {
+      attemptId: waiting.execution.attemptId,
+      progress: 'Waiting for build event.', next: { kind: 'waiting_event', eventKey: 'build:9' },
+    })
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(board.get('agent-reviewer', task.id).execution).toMatchObject({
+      kind: 'ready', reason: expect.stringContaining('waiting_event timed out'),
+    })
+    board.close()
+  })
+
+  it('uses a Vote as the continuation event for collaborative completion', () => {
+    const requests: Array<{ id: string; voters?: readonly string[] }> = []
+    const board = new FleetTaskBoard(
+      directory,
+      () => false,
+      () => {},
+      () => {},
+      (_callerId, _task, request) => {
+        requests.push({ id: request.id, ...(request.voters === undefined ? {} : { voters: request.voters }) })
+        return { id: request.id, status: 'open' }
+      },
+    )
+    const task = board.create('agent-lead', {
+      title: 'Approve release result', assignees: ['reviewer'], reviewers: ['qa'], decision: 'vote',
+    })
+    expect(() => board.complete('agent-reviewer', task.id)).toThrow('requires an approved completion Vote')
+    const claimed = board.claim('agent-reviewer', task.id)
+    if (claimed.execution.kind !== 'running') throw new Error('expected running attempt')
+    const waiting = board.settle('agent-reviewer', task.id, {
+      attemptId: claimed.execution.attemptId,
+      progress: 'Release evidence assembled.',
+      next: { kind: 'vote', decision: 'complete', channel: '#general', statement: 'Release evidence is sufficient.' },
+    })
+    expect(waiting.execution).toMatchObject({ kind: 'waiting_vote', decision: 'complete' })
+    expect(requests).toEqual([{ id: expect.stringContaining(`task_vote_${task.id}_`), voters: ['qa'] }])
+    if (waiting.execution.kind !== 'waiting_vote') throw new Error('expected Vote wait')
+    expect(board.resolveVote({ id: waiting.execution.voteId, status: 'approved' })).toMatchObject({
+      status: 'completed', execution: { kind: 'completed', result: expect.stringContaining('Approved by Vote') },
+    })
+  })
+
+  it('releases an un-settled turn back to one durable ready continuation', () => {
+    const board = new FleetTaskBoard(directory)
+    const task = board.create('agent-lead', { title: 'Do not lose this turn', assignees: ['reviewer'] })
+    const claimed = board.claim('agent-reviewer', task.id)
+    if (claimed.execution.kind !== 'running') throw new Error('expected running attempt')
+    expect(board.releaseRunning('reviewer', 'model turn ended')).toHaveLength(1)
+    expect(board.get('agent-reviewer', task.id).execution).toMatchObject({
+      kind: 'ready', reason: expect.stringContaining(claimed.execution.attemptId),
+    })
+    expect(() => board.settle('agent-reviewer', task.id, {
+      attemptId: claimed.execution.attemptId,
+      progress: 'Late settlement.', next: { kind: 'completed', result: 'Late.' },
+    })).toThrow('is no longer current')
   })
 })

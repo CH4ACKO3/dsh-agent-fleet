@@ -1366,6 +1366,23 @@ describe('MessageHub', () => {
     expect(lead.followedUp.at(-1)).toContain('approved')
   })
 
+  it('reuses a deterministic host Vote id without opening a duplicate', () => {
+    const { hub, lead, reviewer } = setup()
+    const input = {
+      id: 'task_vote_task_1_attempt_1',
+      channel: '#general' as const,
+      kind: 'finish' as const,
+      statement: '[Task task_1] Evidence is complete.',
+      voters: ['@reviewer'],
+    }
+    const opened = hub.createVote(lead, input)
+    const messages = reviewer.followedUp.length
+    expect(hub.createVote(lead, input)).toEqual(opened)
+    expect(reviewer.followedUp).toHaveLength(messages)
+    expect(() => hub.createVote(lead, { ...input, statement: 'Different result.' }))
+      .toThrow('already exists with different input')
+  })
+
   it('uses short monotonic message and Vote ids and continues them after restore', () => {
     const first = setup()
     const events: Parameters<MessageHub['restore']>[0][number][] = []

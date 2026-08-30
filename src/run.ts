@@ -5339,6 +5339,9 @@ export class FleetRunService {
       if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
       return
     }
+    runtime.tasks.releaseRunning(member, reason.kind === 'error'
+      ? `turn failed with ${reason.error.code}`
+      : `turn ended with ${reason.kind} before fleet_task settle`)
     const route = agent === undefined ? undefined : this.networkRoute(agent)
     this.clearNetworkRecovery(sessionId)
     if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
@@ -5389,8 +5392,14 @@ export class FleetRunService {
     if (participant === undefined
       || this.autoContinuationPaused(record, participant.name)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
-    const task = runtime.tasks.pendingRequirement(participant.name)
-    if (task === undefined) return false
+    const pending = runtime.tasks.pendingRequirement(participant.name)
+    if (pending === undefined) return false
+    const task = pending.execution.kind === 'ready'
+      ? runtime.tasks.claim(participant.sessionId, pending.id)
+      : pending.execution.kind === 'running' && pending.execution.actor === participant.name
+        ? pending
+        : undefined
+    if (task?.execution.kind !== 'running') return false
     const replyAlreadySent = task.requirement !== undefined
       && runtime.messages.pendingRequiredReply(participant.sessionId) === undefined
     const source = task.requirement === undefined
@@ -5399,17 +5408,18 @@ export class FleetRunService {
     const replyPhase = task.requirement === undefined
       ? undefined
       : replyAlreadySent
-        ? 'A Fleet reply to the source message has already been sent. Do not repeat the work, rerun checks, or send another separate reply. Review the preceding result only to confirm it satisfies the request, then close this exact task with fleet_task action="complete" and final_reply.'
-        : 'No Fleet reply to the source message has been recorded yet. Review the preceding turn before acting; if its work already satisfies the request, do not rerun checks and close this exact task now with fleet_task action="complete" and final_reply.'
+        ? 'A Fleet reply to the source message has already been sent. Do not repeat the work, rerun checks, or send another separate reply. Review the preceding result only to confirm it satisfies the request, then close this exact task with fleet_task action="complete", the current attempt_id, and final_reply.'
+        : 'No Fleet reply to the source message has been recorded yet. Review the preceding turn before acting; if its work already satisfies the request, do not rerun checks and close this exact task now with fleet_task action="complete", the current attempt_id, and final_reply.'
     runtime.messages.sendSystemNotification(participant.name, {
       kind: 'task_notice',
       text: [
         `[Fleet required task] A complete response is still required (${task.id}).`,
+        `Current attempt: ${task.execution.attemptId}${task.execution.timeoutAt === undefined ? '' : ` (timeout ${task.execution.timeoutAt})`}.`,
         source,
         replyPhase,
-        'The original input is not repeated here. Review the immediately preceding turns and tool results before acting. If the requirement is already satisfied, do not repeat checks or expand the work; call fleet_task with action="complete", this task id, and final_reply now. Use fleet_messages to read the source conversation only when the original input is actually needed.',
+        'The original input is not repeated here. Review the immediately preceding turns and tool results before acting. If the requirement is already satisfied, do not repeat checks or expand the work; call fleet_task with action="complete", this task id, the current attempt_id, and final_reply now. Use fleet_messages to read the source conversation only when the original input is actually needed.',
         'Fleet currently reports your runtime as active. Do not wait on an earlier pause instruction.',
-        'Otherwise continue the unfinished work, record useful progress if needed, then call fleet_task with action="complete", this task id, and final_reply. Fleet sends that final result to the source conversation before marking the task completed.',
+        'Otherwise continue the unfinished work. Before this turn ends, either complete this exact task with final_reply, or call fleet_task action="settle" with this attempt_id, progress text, and a durable next state. Fleet persists the successor before retiring this attempt.',
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `required-task:${task.id}`,
@@ -5436,28 +5446,23 @@ export class FleetRunService {
     if (participant === undefined
       || this.autoContinuationPaused(record, participant.name)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
-    const tasks = runtime.tasks.state().tasks
-    const terminal = new Set(tasks
-      .filter(task => task.status === 'completed' || task.status === 'cancelled')
-      .map(task => task.id))
-    const task = tasks
-      .filter(candidate => candidate.requirement === undefined
-        && candidate.assignees.includes(participant.name)
-        && (candidate.status === 'open' || candidate.status === 'in_progress')
-        && candidate.dependencies.every(dependency => terminal.has(dependency)))
-      .sort((left, right) => {
-        if (left.status !== right.status) return left.status === 'in_progress' ? -1 : 1
-        const priority = { high: 0, normal: 1, low: 2 } as const
-        return priority[left.priority] - priority[right.priority]
-          || left.createdAt.localeCompare(right.createdAt)
-      })[0]
-    if (task === undefined) return false
+    if (runtime.tasks.runningFor(participant.name).length > 0) return false
+    const pending = runtime.tasks.readyTasks(participant.name)
+      .find(task => task.requirement === undefined)
+    if (pending === undefined) return false
+    const readyReason = pending.execution.kind === 'ready'
+      ? pending.execution.reason
+      : 'Task is ready for its next attempt.'
+    const task = runtime.tasks.claim(participant.sessionId, pending.id)
+    if (task.execution.kind !== 'running') return false
     runtime.messages.sendSystemNotification(participant.sessionId, {
       kind: 'task_notice',
       text: [
-        `[Fleet assigned task remains active] ${task.title} (${task.id})`,
+        `[Fleet task attempt] ${task.title} (${task.id})`,
+        `Current attempt: ${task.execution.attemptId}${task.execution.timeoutAt === undefined ? '' : ` (timeout ${task.execution.timeoutAt})`}.`,
         task.description,
-        'This task belongs to the current active Fleet work and is still actionable. Continue it now, or explicitly update it to blocked/completed with evidence before going idle. Inspect existing messages, artifacts, and peer results first; do not repeat work that is already complete.',
+        readyReason,
+        'Work only this attempt. Before the turn ends, call fleet_task action="settle" with this attempt_id, progress text, and exactly one next state: ready, waiting_time, waiting_event, vote, blocked, completed, or cancelled. The next state is persisted before this attempt is retired. Inspect existing evidence first and do not repeat completed work.',
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `assigned-task:${task.id}`,
@@ -5466,8 +5471,31 @@ export class FleetRunService {
       member: participant.name,
       reason: 'assigned_task',
       tasks: [task.id],
+      attempt: task.execution.attemptId,
     })
     return true
+  }
+
+  private reconcileReadyTasks(runId: string): void {
+    const record = this.records.get(runId)
+    if (record === undefined || record.status !== 'running' || record.work?.status !== 'running'
+      || this.dormantRunIds.has(runId)) return
+    const runtime = this.collaboration.get(runId)
+    if (runtime === undefined) return
+    for (const participant of this.participants(record)) {
+      if (this.autoContinuationPaused(record, participant.name)
+        || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined
+        || this.networkRecoveries.has(participant.sessionId)
+        || runtime.tasks.runningFor(participant.name).length > 0
+        || runtime.tasks.readyTasks(participant.name).length === 0) continue
+      const agent = this.ctx.agents.get(SessionId(participant.sessionId))
+      if (agent?.status !== 'idle') continue
+      if (runtime.tasks.readyRequirement(participant.name) !== undefined) {
+        this.continueRequiredTask(runId, runtime, record, agent)
+      } else {
+        this.continueAssignedTask(runId, runtime, record, agent)
+      }
+    }
   }
 
   private continueUnread(
@@ -5555,6 +5583,8 @@ export class FleetRunService {
     }
     if (wokeUnread) return
     if (this.manualWakeRequiredRunIds.has(runId)) return
+    this.reconcileReadyTasks(runId)
+    if (runtime.tasks.activeWorkIsCovered()) return
 
     const online = record.members.flatMap(member => {
       const live = this.liveMember(member)
@@ -7242,6 +7272,15 @@ export class FleetRunService {
       onTask: (event, state) => {
         this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
         if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
+        if (event.task.execution.kind === 'ready'
+          && (event.action === 'created'
+            || event.action === 'settled'
+            || event.action === 'timed_out'
+            || event.action === 'signaled'
+            || event.action === 'reopened'
+            || event.action === 'updated')) {
+          queueMicrotask(() => { this.reconcileReadyTasks(record.id) })
+        }
       },
       onSchedule: (event, state) => {
         this.writeExtensionState(record.id, FLEET_SCHEDULE_STATE_NAMESPACE, state as unknown as JsonValue)

@@ -1354,9 +1354,24 @@ export class MessageHub {
       if (input.voters !== undefined) this.requireContact(sender.id, voter)
       if (!this.canRead(channel, voter)) throw new Error(`Agent ${voter} cannot access #${channel.id}`)
     }
+    const requestedId = input.id?.trim()
+    if (input.id !== undefined && requestedId?.length === 0) throw new Error('vote id cannot be empty')
+    const existing = requestedId === undefined ? undefined : this.votes.get(requestedId)
+    if (existing !== undefined) {
+      const sameVoters = input.voters === undefined
+        || (existing.voters.length === voters.length && existing.voters.every(voter => voters.includes(voter)))
+      if (existing.initiator !== sender.id
+        || existing.channel !== `#${channel.id}`
+        || existing.kind !== input.kind
+        || existing.statement !== statement
+        || !sameVoters) {
+        throw new Error(`vote id ${requestedId} already exists with different input`)
+      }
+      return snapshot(existing)
+    }
     this.clearPendingWakeups(sender.id, input.channel)
     const vote: FleetVote = {
-      id: `vote_${String(++this.voteSequence)}`,
+      id: requestedId ?? `vote_${String(++this.voteSequence)}`,
       channel: `#${channel.id}`,
       kind: input.kind,
       statement,

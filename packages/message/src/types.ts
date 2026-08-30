@@ -321,6 +321,8 @@ export interface FleetVote {
 }
 
 export interface CreateVoteInput {
+  /** Optional deterministic id for an idempotent host-coordinated Vote. */
+  readonly id?: string
   readonly channel: `#${string}`
   readonly kind: FleetVoteKind
   readonly statement: string

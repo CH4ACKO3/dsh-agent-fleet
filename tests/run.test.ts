@@ -3812,7 +3812,7 @@ describe('FleetRunService', () => {
     second.disconnect()
   })
 
-  it('keeps active work moving when a wake-up is unanswered or the whole Team becomes idle', async () => {
+  it('dispatches one durable Task attempt without waking the whole Team', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -3835,13 +3835,13 @@ describe('FleetRunService', () => {
     expect(lead.messages).toHaveLength(leadMessages)
     expect(reviewer.messages).toHaveLength(reviewerMessagesBeforeQuiescence + 1)
     expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('every member is idle') }),
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet task attempt]') }),
     ])
     expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('single member selected') }),
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('Current attempt:') }),
     ])
     expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('call fleet_vote now') }),
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('fleet_task action="settle"') }),
     ])
 
     const messages = service.messageHub(run.id)
@@ -3865,7 +3865,7 @@ describe('FleetRunService', () => {
     expect(messages.pendingWakeups(lead.id)).toEqual([])
     expect(messages.pendingWakeups(reviewer.id)).toEqual([])
     expect(service.readTrace(run.id, 0, 100).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('team_quiescent') }),
+      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('assigned_task') }),
       expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('pending_wakeup') }),
     ]))
 
@@ -3910,7 +3910,7 @@ describe('FleetRunService', () => {
     expect(reviewer.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining(`[Fleet assigned task remains active] ${task.title}`),
+        text: expect.stringContaining(`[Fleet task attempt] ${task.title}`),
       }),
     ])
     expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
@@ -3918,10 +3918,101 @@ describe('FleetRunService', () => {
       data: expect.stringContaining('assigned_task'),
     }))
 
-    service.taskBoard(run.id).complete(reviewer.id, task.id)
+    const currentTask = service.taskBoard(run.id).get(reviewer.id, task.id)
+    if (currentTask.execution.kind !== 'running') throw new Error('expected running task attempt')
+    service.taskBoard(run.id).complete(reviewer.id, task.id, { attemptId: currentTask.execution.attemptId })
     service.finish(launcher as unknown as Agent, 'cancelled', 'Assigned-task continuation verified.', run.id)
     await service.wait(run.id, 1_000)
     service.end(launcher as unknown as Agent, 'Assigned-task Team closed.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('dispatches independent ready Tasks concurrently without a Team-wide limit', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    lead.status = 'idle'
+    reviewer.status = 'idle'
+    const leadMessages = lead.messages.length
+    const reviewerMessages = reviewer.messages.length
+
+    const implementation = service.taskBoard(run.id).create(lead.id, {
+      title: 'Implement independent change', assignees: ['lead'],
+    })
+    const review = service.taskBoard(run.id).create(lead.id, {
+      title: 'Review independent evidence', assignees: ['reviewer'],
+    })
+
+    await vi.waitFor(() => {
+      expect(lead.messages).toHaveLength(leadMessages + 1)
+      expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
+    })
+    expect(service.taskBoard(run.id).get(lead.id, implementation.id).execution)
+      .toMatchObject({ kind: 'running', actor: 'lead' })
+    expect(service.taskBoard(run.id).get(reviewer.id, review.id).execution)
+      .toMatchObject({ kind: 'running', actor: 'reviewer' })
+
+    service.finish(launcher as unknown as Agent, 'cancelled', 'Concurrent dispatch verified.', run.id)
+    await service.wait(run.id, 1_000)
+    service.end(launcher as unknown as Agent, 'Concurrent dispatch Team closed.', run.id)
+    await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('uses an approved Fleet Vote to settle collaborative Task completion', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    lead.status = 'idle'
+    reviewer.status = 'idle'
+
+    const task = service.taskBoard(run.id).create(lead.id, {
+      title: 'Publish jointly approved result', assignees: ['lead'], reviewers: ['reviewer'], decision: 'vote',
+    })
+    await vi.waitFor(() => expect(service.taskBoard(run.id).get(lead.id, task.id).execution.kind).toBe('running'))
+    const claimed = service.taskBoard(run.id).get(lead.id, task.id)
+    if (claimed.execution.kind !== 'running') throw new Error('expected running Task attempt')
+    const waiting = service.taskBoard(run.id).settle(lead.id, task.id, {
+      attemptId: claimed.execution.attemptId,
+      progress: 'Implementation and evidence are ready for independent approval.',
+      next: {
+        kind: 'vote', decision: 'complete', channel: '#main',
+        statement: 'The implementation and evidence are sufficient for completion.',
+      },
+    })
+    if (waiting.execution.kind !== 'waiting_vote') throw new Error('expected waiting Vote')
+    expect(service.messageHub(run.id).getVote(reviewer, waiting.execution.voteId)).toMatchObject({
+      status: 'open', initiator: 'lead', voters: ['reviewer'],
+    })
+
+    service.messageHub(run.id).castVote(reviewer, {
+      id: waiting.execution.voteId,
+      response: 'approve',
+    })
+    expect(service.taskBoard(run.id).get(lead.id, task.id)).toMatchObject({
+      status: 'completed', execution: { kind: 'completed', result: expect.stringContaining('Approved by Vote') },
+    })
+
+    service.finish(launcher as unknown as Agent, 'cancelled', 'Collaborative completion verified.', run.id)
+    await service.wait(run.id, 1_000)
+    service.end(launcher as unknown as Agent, 'Collaborative completion Team closed.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })
@@ -4016,7 +4107,10 @@ describe('FleetRunService', () => {
       expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
     ]))
     if (requiredTask === undefined) throw new Error('expected required task')
+    const currentRequiredTask = service.taskBoard(run.id).get(reviewer.id, requiredTask.id)
+    if (currentRequiredTask.execution.kind !== 'running') throw new Error('expected running required task attempt')
     service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
+      attemptId: currentRequiredTask.execution.attemptId,
       finalReply: 'Latest result inspection complete.',
     })
     expect(service.messageHub(run.id).pendingRequiredReply(reviewer.id)).toBeUndefined()
@@ -4119,7 +4213,11 @@ describe('FleetRunService', () => {
       }),
     ])
     if (requiredTask === undefined) throw new Error('expected required task')
-    expect(() => service.taskBoard(run.id).complete(reviewer.id, requiredTask.id))
+    const currentRequiredTask = service.taskBoard(run.id).get(reviewer.id, requiredTask.id)
+    if (currentRequiredTask.execution.kind !== 'running') throw new Error('expected running required task attempt')
+    expect(() => service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
+      attemptId: currentRequiredTask.execution.attemptId,
+    }))
       .toThrow('required task final reply cannot be empty')
     const existingReply = messages.search(reviewer, {
       conversation: '@User',
@@ -4130,6 +4228,7 @@ describe('FleetRunService', () => {
       limit: 100,
     }).length
     const completed = service.taskBoard(run.id).complete(reviewer.id, requiredTask.id, {
+      attemptId: currentRequiredTask.execution.attemptId,
       finalReply: 'Final confirmation: the result is confirmed.',
     })
     expect(completed.requirement?.completionMessageId).toBe(existingReply?.id)
@@ -4238,7 +4337,10 @@ describe('FleetRunService', () => {
       }),
     ])
     if (requiredTask === undefined) throw new Error('expected required task')
+    const currentRequiredTask = service.taskBoard(run.id).get(launcher.id, requiredTask.id)
+    if (currentRequiredTask.execution.kind !== 'running') throw new Error('expected running required task attempt')
     service.taskBoard(run.id).complete(launcher.id, requiredTask.id, {
+      attemptId: currentRequiredTask.execution.attemptId,
       finalReply: 'Final result: the required reply is complete.',
     })
     const afterComplete = launcher.messages.length
@@ -4335,7 +4437,10 @@ describe('FleetRunService', () => {
     service.agentIdle(launcher as unknown as Agent)
     expect(launcher.messages).toHaveLength(afterReply)
     if (requiredTask === undefined) throw new Error('expected required task')
+    const currentRequiredTask = service.taskBoard(run.id).get(launcher.id, requiredTask.id)
+    if (currentRequiredTask.execution.kind !== 'running') throw new Error('expected running required task attempt')
     service.taskBoard(run.id).complete(launcher.id, requiredTask.id, {
+      attemptId: currentRequiredTask.execution.attemptId,
       finalReply: 'Final result: analysis received and reviewed.',
     })
     const afterComplete = launcher.messages.length

@@ -448,6 +448,22 @@ export class FleetCollaborationService {
         })
         return { messageId: result.messageId }
       },
+      (callerId, _task, request) => {
+        const sender = agentDirectory.get(callerId)
+        if (sender === undefined) throw new Error(`Fleet task Vote initiator ${callerId} is not active`)
+        const vote = messages.createVote(sender, {
+          id: request.id,
+          channel: request.channel,
+          kind: request.kind,
+          statement: request.statement,
+          ...(request.voters === undefined ? {} : { voters: request.voters }),
+        })
+        return {
+          id: vote.id,
+          status: vote.status,
+          ...(vote.rejection === undefined ? {} : { rejection: vote.rejection }),
+        }
+      },
     )
     requiredActionInstruction = (message, participantId) => {
       const assignee = participantName(participantId)
@@ -527,6 +543,13 @@ export class FleetCollaborationService {
       messages.onEvent(event => {
         input.onCoordination(event)
         if (event.type === 'message') ensureMessageTasks(event.message)
+        if (event.type === 'vote' && event.action === 'closed') {
+          tasks.resolveVote({
+            id: event.vote.id,
+            status: event.vote.status,
+            ...(event.vote.rejection === undefined ? {} : { rejection: event.vote.rejection }),
+          })
+        }
         if (event.type === 'meeting' && event.action === 'closed') {
           calendar.closeLinkedMeeting(event.meeting.id, event.meeting.closedAt)
         }
@@ -541,7 +564,11 @@ export class FleetCollaborationService {
         }
         const initialRequiredTask = event.action === 'created' && event.task.requirement?.kind === 'message'
         if (event.action !== 'due' && event.action !== 'notification' && !initialRequiredTask) {
-          const recipients = [...event.task.assignees, ...event.task.reviewers, ...event.task.followers]
+          const recipients = [
+            ...(event.action === 'created' ? [] : event.task.assignees),
+            ...event.task.reviewers,
+            ...event.task.followers,
+          ]
             .filter(member => member !== event.actor)
           const requiredTaskNotice = event.action === 'completed'
             ? `[Fleet required task completed] ${event.task.title} (${event.task.id}). No further completion action is required.`
@@ -553,9 +580,7 @@ export class FleetCollaborationService {
               : requiredTaskNotice,
             'task_notice',
             `task:${event.task.id}`,
-            event.task.requirement === undefined && (event.action === 'created' || event.action === 'completed')
-              ? 'wakeup'
-              : 'quiet',
+            'quiet',
           )
         }
       }),
