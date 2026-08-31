@@ -73,7 +73,7 @@ describe('FleetAssistantRuntime', () => {
       text: FLEET_ASSISTANT_SYSTEM_PROMPT,
     })
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'first inspect current activity and read the relevant conversation with `fleet_messages`',
+      'read the Inbox Task instead of inferring reply state',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Reply to foreground native user messages directly with ordinary native assistant output',
@@ -82,22 +82,64 @@ describe('FleetAssistantRuntime', () => {
       'do not duplicate it through `fleet_send`',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'Every granted Fleet capability with at least one authorized action is resident and directly callable',
+      'Every granted Fleet capability is resident and directly callable',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      '`action: "load"` is an idempotent compatibility operation and is never a prerequisite',
+      'compact thread-status view',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'one persistent Interaction Task',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'commits it only after that non-empty native assistant output is recorded',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'omit `recipients` only when every available member should act',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Before calling `fleet_run start` for a new Team work item',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'is still a request for the Team to execute',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'pass that file directly as the `fleet_run start` task source',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Use the actual roster\'s roles and responsibilities to prepare a concise provisional decomposition',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'post that decomposition once to the main Channel',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'a structured `stages` plan',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Fleet derives directive recipients from dependency-free stages',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'atomically creates a zero-owner composite root plus its first Goal/Vote cohort',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'A rejected Vote is a completed decision result, not a blocked Task',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'do not duplicate the kickoff through `fleet_send`',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'A valid `@Name` or `@member-id` in message text is parsed as a mention',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'settle its current ReconcileAttempt to state `{kind:"completed",result,finalReply}`',
+      'Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'A delivery notice alone does not',
+      'Fleet already claimed for this turn. Do not call `fleet_reconcile claim` again',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'its `id` is always the Task id, never an attempt or reconciler id',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'a delivery notice alone does not',
     )
     expect(fixture.restrict).not.toHaveBeenCalled()
 
@@ -174,7 +216,9 @@ describe('FleetAssistantRuntime', () => {
     expect(mode.tools).toEqual(expect.arrayContaining([
       'fleet_assistant',
       'fleet_send',
-      'fleet_meeting',
+      'fleet_inbox',
+      'fleet_reply',
+      'fleet_vote',
     ]))
     expect(fixture.restrict).not.toHaveBeenCalled()
     expect(fixture.section).toHaveBeenCalledWith(expect.objectContaining({

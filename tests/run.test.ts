@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 
 import { Context } from '@deepseek-ai/cordis'
-import type { Agent, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { Agent, PreStepDecision, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
@@ -18,7 +19,7 @@ import type {
 } from '@dsh-agent-fleet/core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { FleetRunService } from '../src/run.js'
+import { FleetRunService, installRunTools } from '../src/run.js'
 import type { FleetResourcePreview, FleetRunMember } from '../src/run.js'
 import type { FleetTaskBoard } from '../src/productivity/task.js'
 import { FleetArchiveRegistry } from '../src/archive.js'
@@ -40,12 +41,38 @@ function settleCompletedTask(
   taskId: string,
   attemptId: string,
   result: string,
-  finalReply?: string,
 ) {
   return board.settle(actorId, taskId, {
     attemptId,
     progress: result,
-    next: { kind: 'completed', result, ...(finalReply === undefined ? {} : { finalReply }) },
+    next: { kind: 'completed', reason: result, result },
+  })
+}
+
+function settleDefaultCompositeWork(
+  board: FleetTaskBoard,
+  actorId: string,
+  rootTaskId: string,
+  outcome: 'complete' | 'block',
+  result: string,
+) {
+  const delivery = board.state().tasks.find(task =>
+    task.parentId === rootTaskId
+      && task.domain.kind === 'goal',
+  )
+  if (delivery === undefined) throw new Error('expected default delivery Goal')
+  board.submitGoal(actorId, delivery.id, outcome === 'complete'
+    ? { kind: 'complete', reason: result, result }
+    : { kind: 'block', reason: result })
+  const claimed = board.claim(actorId, rootTaskId)
+  const attemptId = claimed.activeReconcile?.attemptId
+  if (attemptId === undefined) throw new Error('expected root ReconcileAttempt')
+  return board.settle(actorId, rootTaskId, {
+    attemptId,
+    progress: result,
+    next: outcome === 'complete'
+      ? { kind: 'completed', reason: result, result }
+      : { kind: 'blocked', reason: result },
   })
 }
 
@@ -78,6 +105,15 @@ class FakeAgentContext {
     for (const listener of [...(this.listeners.get('agent/request') ?? [])].reverse()) {
       const following = next
       next = () => Promise.resolve(listener({}, following) as Promise<RuntimeRequestConfig>)
+    }
+    return next()
+  }
+
+  async preStep(messages: UserMessage[]): Promise<PreStepDecision> {
+    let next = () => Promise.resolve({ kind: 'enter', messages } as PreStepDecision)
+    for (const listener of [...(this.listeners.get('agent/pre-step') ?? [])].reverse()) {
+      const following = next
+      next = () => Promise.resolve(listener({}, following) as Promise<PreStepDecision>)
     }
     return next()
   }
@@ -464,13 +500,17 @@ describe('FleetRunService', () => {
     writeFileSync(configPath, JSON.stringify(configuration))
     const { service, launcher, context, disconnect } = setup(root)
     const registered = new Map<string, unknown>()
+    const guards: Array<(execution: { readonly name: string; readonly arguments: unknown }) => string | undefined> = []
     context.provide('tools', {
       register: (tool: { readonly name: string }) => {
         registered.set(tool.name, tool)
         return () => { registered.delete(tool.name) }
       },
       restrict: () => () => {},
-      guard: () => () => {},
+      guard: (guard: (execution: { readonly name: string; readonly arguments: unknown }) => string | undefined) => {
+        guards.push(guard)
+        return () => { guards.splice(guards.indexOf(guard), 1) }
+      },
       get: (name: string) => registered.get(name),
     })
     await context.plugin((scope) => {
@@ -488,8 +528,44 @@ describe('FleetRunService', () => {
         view: expect.objectContaining({ toolGroups: expect.arrayContaining(['resources']) }),
       })],
     })
-    expect(registered.has('fleet_messages')).toBe(true)
-    expect(registered.has('fleet_tools')).toBe(true)
+    expect(registered.has('fleet_inbox')).toBe(true)
+    expect(registered.has('fleet_reply')).toBe(true)
+    expect(registered.has('fleet_messages')).toBe(false)
+    expect(registered.has('fleet_tools')).toBe(false)
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-route-1', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Build the requested project output.' }],
+      },
+    } as unknown as SessionEvent)
+    const guardReason = (name: string, argumentsValue: unknown = {}) => guards
+      .map(guard => guard({ name, arguments: argumentsValue }))
+      .find(reason => reason !== undefined)
+    expect(guardReason('read', { path: 'README.md' })).toBeUndefined()
+    expect(guardReason('bash', { command: 'git status --short' })).toBeUndefined()
+    expect(guardReason('write', { path: 'result.txt', content: 'done' })).toContain('not routed')
+    expect(guardReason('bash', { command: 'python etl.py' })).toContain('not routed')
+
+    service.takeOverAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'The user explicitly requested direct execution.',
+    })
+    expect(guardReason('write', { path: 'result.txt', content: 'done' })).toBeUndefined()
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-route-2', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'A separate request.' }],
+      },
+    } as unknown as SessionEvent)
+    expect(guardReason('write', { path: 'result.txt', content: 'again' })).toContain('not routed')
     disconnect()
   })
 
@@ -570,7 +646,7 @@ describe('FleetRunService', () => {
     second.disconnect()
   })
 
-  it('loads a persisted Team with an unfinished assistant must-reply task', async () => {
+  it('loads a persisted Team with an unfinished assistant Reply Task', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
     const run = await first.service.create(first.launcher as unknown as Agent, {
@@ -585,7 +661,6 @@ describe('FleetRunService', () => {
       to: `@${assistantId}`,
       text: 'Persist this required assistant task.',
       delivery: 'quiet',
-      mustReply: true,
     })
     first.disconnect()
     await first.core.close()
@@ -638,6 +713,306 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('records and wraps direct assistant input as a Fleet Task Request before model entry', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const scoped = new FakeAgentContext()
+    launcher.ctx = scoped as unknown as Context
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected assistant')
+    const incoming = createUserMessage({
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'Build and review the requested change.' }],
+    })
+
+    const decision = await scoped.preStep([incoming])
+    if (decision.kind !== 'enter') throw new Error('expected step entry')
+    const interaction = service.taskBoard(run.id).interactionTask(assistantId)
+    expect(interaction).toMatchObject({
+      stableState: { kind: 'running' },
+      domain: {
+        kind: 'interaction', inputRevision: 1, settledRevision: 0,
+        latestMessageId: String(incoming.id),
+      },
+      entries: [expect.objectContaining({ text: 'Build and review the requested change.' })],
+    })
+    expect(decision.messages[0]).toMatchObject({ id: incoming.id, source: { kind: 'user' } })
+    const wrappedText = decision.messages[0]?.content
+      .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') ?? ''
+    expect(wrappedText).toContain('[Fleet Task Request]')
+    expect(wrappedText).toContain(`Interaction Task: ${interaction?.id ?? ''}`)
+    expect(wrappedText).toContain('Required first action: call fleet_user_task')
+    expect(wrappedText).toContain('is still Team work, not permission to take over personally')
+    expect(wrappedText).toContain('pass that path directly to fleet_run start')
+    expect(wrappedText).toContain('Build and review the requested change.')
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: decision.messages[0],
+    } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      domain: { inputRevision: 1, latestMessageId: String(incoming.id) },
+      entries: [expect.objectContaining({ text: 'Build and review the requested change.' })],
+    })
+    disconnect()
+  })
+
+  it('keeps one foreground Interaction alive across Team work, quiescence, and native reporting', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (assistantId === undefined || lead === undefined) throw new Error('expected assistant and lead')
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-1', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Run the Team task and report its result.' }],
+      },
+    } as unknown as SessionEvent)
+    const interaction = service.taskBoard(run.id).interactionTask(assistantId)
+    expect(interaction).toMatchObject({
+      stableState: { kind: 'running' },
+      domain: { kind: 'interaction', inputRevision: 1, settledRevision: 0 },
+    })
+
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const rootGoalId = service.status(run.id).work?.rootTaskId
+    if (rootGoalId === undefined || interaction === undefined) throw new Error('expected composite root Task and Interaction')
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      id: interaction.id,
+      stableState: { kind: 'dormant' },
+      domain: { kind: 'interaction', waitingTaskIds: [rootGoalId] },
+    })
+    expect(service.taskBoard(run.id).ownerTasks(assistantId)).toEqual([])
+
+    settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, rootGoalId, 'complete', 'Verified result.')
+    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
+      status: 'idle', work: { status: 'finished', summary: 'Verified result.' },
+    })
+    await vi.waitFor(() => {
+      expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState).toMatchObject({ kind: 'running' })
+      expect(launcher.messages).toContainEqual(expect.objectContaining({
+        content: [expect.objectContaining({ text: expect.stringContaining('fleet_user_task action="status"') })],
+      }))
+    })
+
+    service.reportAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      outcome: 'complete',
+      reason: 'The Team result is ready for the user.',
+      report: 'Verified result.',
+    })
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'running' },
+      domain: { kind: 'interaction', reportIntent: { revision: 1, outcome: 'complete' } },
+    })
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: {
+          id: 'foreground-assistant-1', role: 'assistant',
+          content: [{ type: 'text', text: 'Verified result.' }],
+        },
+      },
+    } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      id: interaction.id,
+      stableState: { kind: 'completed', result: 'Verified result.' },
+      domain: { kind: 'interaction', inputRevision: 1, settledRevision: 1 },
+    })
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 3,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-2', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Check one more detail.' }],
+      },
+    } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      id: interaction.id,
+      stableState: { kind: 'running' },
+      domain: { kind: 'interaction', inputRevision: 2, settledRevision: 1 },
+    })
+    disconnect()
+  })
+
+  it('reinstalls an existing live Interaction wait without creating another Goal', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-progress', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Keep watching the delegated check.' }],
+      },
+    } as unknown as SessionEvent)
+    const deferred = service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'Waiting for the delegated check.',
+      goal: { title: 'Delegated check', description: 'Produce evidence.', owners: ['lead'] },
+      checkAfterSeconds: 300,
+    })
+    const linked = deferred.goals[0]
+    if (linked === undefined) throw new Error('expected linked Goal')
+    service.taskBoard(run.id).signalInteractionDelivery(assistantId, 'Progress check became due.')
+
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: { readonly agent: Agent }): Promise<unknown>
+    }> = []
+    installRunTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} } },
+    } as unknown as Context, service, {} as never)
+    const userTask = registered.find(tool => tool.name === 'fleet_user_task')
+    if (userTask === undefined) throw new Error('expected fleet_user_task')
+    const result = await userTask.execute({
+      action: 'continue',
+      run_id: run.id,
+      reason: 'The already-linked Team work is still running.',
+      check_after_seconds: 300,
+    }, { agent: launcher as unknown as Agent })
+
+    expect(result).toMatchObject({ action: 'continue', goals: [] })
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'dormant' },
+      domain: { waitingTaskIds: [linked.id] },
+    })
+    expect(service.taskBoard(run.id).state().tasks
+      .filter(task => task.parentId === deferred.task.id && task.domain.kind === 'goal'))
+      .toHaveLength(1)
+    disconnect()
+  })
+
+  it('accepts a foreground report when linked Tasks are terminal before work status catches up', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (assistantId === undefined || lead === undefined) throw new Error('expected assistant and lead')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-report-lag', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Run the Team task and report it.' }],
+      },
+    } as unknown as SessionEvent)
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const rootTaskId = service.status(run.id).work?.rootTaskId
+    if (rootTaskId === undefined) throw new Error('expected work root')
+    lead.status = 'running'
+    settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, rootTaskId, 'complete', 'Verified result.')
+    await vi.waitFor(() => {
+      expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('running')
+    })
+    expect(service.status(run.id)).toMatchObject({ status: 'running', work: { status: 'running' } })
+
+    expect(() => service.reportAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      outcome: 'complete',
+      reason: 'The authoritative linked Task is terminal.',
+      report: 'Verified result.',
+    })).not.toThrow()
+    expect(service.taskBoard(run.id).commitInteractionOutput(assistantId, 'Verified result.'))
+      .toMatchObject({ stableState: { kind: 'completed' } })
+
+    lead.completeTurn()
+    service.agentStatusChanged(lead as unknown as Agent)
+    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
+      status: 'idle', work: { status: 'finished', summary: 'Verified result.' },
+    })
+    disconnect()
+  })
+
+  it('delivers linked Task completion to the assistant without waiting for unrelated Team work', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (assistantId === undefined || lead === undefined) throw new Error('expected assistant and lead')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-delivery', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Complete the linked check and report it.' }],
+      },
+    } as unknown as SessionEvent)
+    const deferred = service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'Waiting for the linked check.',
+      goal: { title: 'Linked check', description: 'Produce evidence.', owners: ['lead'] },
+      checkAfterSeconds: 300,
+    })
+    const linked = deferred.goals[0]
+    if (linked === undefined) throw new Error('expected linked Goal')
+    service.taskBoard(run.id).createGoal(lead.id, {
+      title: 'Unrelated long work', description: 'Remain live.', owners: ['reviewer'],
+    })
+
+    service.taskBoard(run.id).submitGoal(lead.id, linked.id, {
+      kind: 'complete', reason: 'Linked check complete.', result: 'Verified linked evidence.',
+    })
+    await vi.waitFor(() => {
+      expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+        stableState: { kind: 'running' },
+        domain: {
+          pendingDelivery: expect.objectContaining({
+            cause: 'linked_tasks_settled',
+            tasks: [expect.objectContaining({ id: linked.id, result: 'Verified linked evidence.' })],
+          }),
+        },
+      })
+    })
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')
+      .some(task => task.title === 'Unrelated long work')).toBe(true)
+    expect(launcher.messages.flatMap(message => message.content)
+      .some(block => block.type === 'text' && block.text.includes('Persistent completion Delivery'))).toBe(true)
+    disconnect()
+  })
+
   it('uses member display names in messages and accepts them as message targets', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
@@ -670,10 +1045,10 @@ describe('FleetRunService', () => {
       .toContainEqual(expect.objectContaining({ fromName: leadMember.displayName }))
     const leadPersona = runtime.creates.find(input => input.label === leadMember.displayName)?.persona
     expect(leadPersona).toContain(`You are @${leadMember.displayName}`)
-    expect(leadPersona).toContain('fleet_tools cover Fleet capabilities only')
+    expect(leadPersona).toContain('Configured groups cover Fleet capabilities only')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
     expect(leadPersona).toContain('A valid `@Name` or `@member-id` in message text is parsed as a mention')
-    expect(leadPersona).toContain('settle its current ReconcileAttempt to state `{kind:"completed",result,finalReply}`')
+    expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state')
 
     service.end(launcher as unknown as Agent, 'Display name messaging test complete.', run.id)
     await service.wait(run.id, 1_000)
@@ -1591,7 +1966,16 @@ describe('FleetRunService', () => {
       },
     } as unknown as Context)
     expect(restrict).toHaveBeenCalledWith({
-      deny: ['fleet_agent', 'fleet_archive', 'fleet_setup', 'fleet_progress', 'fleet_assistant', 'fleet_run', 'fleet_trace', 'fleet_activity', 'fleet_member'],
+      deny: expect.arrayContaining([
+        'fleet_agent', 'fleet_archive', 'fleet_setup', 'fleet_trace', 'fleet_activity',
+      ]),
+    })
+    expect(restrict).not.toHaveBeenCalledWith({
+      deny: expect.arrayContaining([
+        'fleet_followup', 'fleet_messages', 'fleet_wait', 'fleet_member_status',
+        'fleet_meeting', 'fleet_work', 'fleet_schedule', 'fleet_calendar',
+        'fleet_document', 'fleet_tools',
+      ]),
     })
     expect(restrict).toHaveBeenCalledWith({
       deny: ['joyride_catalog', 'joyride_act', 'joyride_control', 'live_stream', 'live_stage'],
@@ -1600,24 +1984,14 @@ describe('FleetRunService', () => {
     expect(specialToolGuard({ name: 'joyride_act' })).toContain('not permitted')
     expect(specialToolGuard({ name: 'fleet_send' })).toBeUndefined()
     const residentTools = register.mock.calls.map(call => (call[0] as { name: string }).name)
-    expect(residentTools).toEqual([
-      'fleet_send',
-      'fleet_messages',
-      'fleet_followup',
-      'fleet_wait',
-      'fleet_channel',
-      'fleet_vote',
-      'fleet_meeting',
-      'fleet_task',
-      'fleet_schedule',
-      'fleet_calendar',
-      'fleet_tools',
-    ])
-    const discovery = register.mock.calls.find(call => (call[0] as { name: string }).name === 'fleet_tools')?.[0] as {
-      execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown>
-    }
-    await discovery.execute({ action: 'load', name: 'fleet_vote' })
-    expect(register.mock.calls.map(call => (call[0] as { name: string }).name)).toEqual(residentTools)
+    expect(residentTools).toEqual(expect.arrayContaining([
+      'fleet_inbox', 'fleet_reply', 'fleet_send', 'fleet_channel',
+      'fleet_task', 'fleet_goal', 'fleet_vote', 'fleet_reconcile',
+    ]))
+    expect(residentTools).not.toEqual(expect.arrayContaining([
+      'fleet_messages', 'fleet_followup', 'fleet_wait', 'fleet_meeting',
+      'fleet_schedule', 'fleet_calendar', 'fleet_tools',
+    ]))
     expect(memberSetup).toHaveBeenCalledWith(expect.objectContaining({
       team: expect.objectContaining({ id: run.id }),
       member: 'product-lead',
@@ -1629,7 +2003,8 @@ describe('FleetRunService', () => {
       } | undefined)?.parameters?.properties?.action?.enum
     expect(actionEnum('fleet_channel')).toEqual(['list'])
     expect(actionEnum('fleet_vote')).toEqual(['list', 'get', 'create', 'cast'])
-    expect(actionEnum('fleet_meeting')).toEqual(['list', 'join', 'leave'])
+    expect(actionEnum('fleet_task')).toEqual(['list', 'owner_list', 'get'])
+    expect(actionEnum('fleet_meeting')).toBeUndefined()
     const productLead = runtime.get(run.members[0]?.sessionId ?? '')
     if (productLead === undefined) throw new Error('expected product lead')
     expect(messages.listChannels(productLead).find(channel => channel.id === 'delivery')).toMatchObject({
@@ -2030,7 +2405,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('gives multiple user-facing assistants normal member messaging and meeting capabilities', async () => {
+  it('gives multiple user-facing assistants Task-based messaging and observation capabilities', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, core, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -2054,6 +2429,7 @@ describe('FleetRunService', () => {
       kind: 'collaboration',
       recipients: ['lead', 'reviewer'],
       assistantSessionId: launcher.id,
+      messageId: expect.any(String),
     })
     expect(core.nameForAgent(launcher.id)).toBeUndefined()
     expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages)
@@ -2122,10 +2498,9 @@ describe('FleetRunService', () => {
       .toContainEqual(expect.objectContaining({
         id: userDirectMessage.messageId,
         origin: 'user',
-        mustReply: true,
       }))
     expect(service.taskBoard(run.id).state().tasks.some(task =>
-      task.requirement?.kind === 'message' && task.requirement.messageId === userDirectMessage.messageId,
+      task.domain.kind === 'reply' && task.domain.messageId === userDirectMessage.messageId,
     )).toBe(true)
     expect(service.messageHub(run.id).send(lead, {
       to: '@User',
@@ -2175,12 +2550,18 @@ describe('FleetRunService', () => {
       runId: run.id,
       kind: 'directive',
       text: 'Pause feature expansion and finish the requested file only.',
-      mustReply: true,
       projectRoot: root,
     })
-    expect(directive).toMatchObject({ mustReply: true })
-    expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages.at(-1))
-      .toMatchObject({ mustReply: true })
+    expect(directive.recipients).toEqual(['lead', 'reviewer'])
+    const directiveMessage = service.messageHub(run.id).read(lead, { conversation: '#main' }).messages.at(-1)
+    expect(directiveMessage).toMatchObject({ mentions: ['lead', 'reviewer'] })
+    expect(service.taskBoard(run.id).state().tasks.filter(task =>
+      task.domain.kind === 'reply'
+      && task.domain.messageId === directiveMessage?.id,
+    )).toEqual(expect.arrayContaining([
+      expect.objectContaining({ domain: expect.objectContaining({ assignee: 'lead' }) }),
+      expect.objectContaining({ domain: expect.objectContaining({ assignee: 'reviewer' }) }),
+    ]))
     expect(lead.messages.at(-1)?.content).toEqual([
       expect.objectContaining({ type: 'text', text: expect.stringContaining('Pause feature expansion') }),
     ])
@@ -2362,17 +2743,21 @@ describe('FleetRunService', () => {
       view: { id: residentAttached.assistant.view.id, name: 'Resident' },
     })
 
-    const finishVote = hub.createVote(replacementAssistant, {
-      channel: '#main',
-      kind: 'finish',
-      statement: 'Assistant bridge test complete.',
-    })
-    hub.castVote(lead, { id: finishVote.id, response: 'approve' })
-    hub.castVote(reviewer, { id: finishVote.id, response: 'approve' })
+    const rootGoalId = service.status(run.id).work?.rootTaskId
+    if (rootGoalId === undefined) throw new Error('expected composite root Task')
+    settleDefaultCompositeWork(
+      service.taskBoard(run.id), lead.id, rootGoalId, 'complete', 'Assistant bridge test complete.',
+    )
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
       status: 'idle',
       work: { status: 'finished', summary: 'Assistant bridge test complete.' },
     })
+    expect(service.taskBoard(run.id).interactionTasks()).toEqual([])
+    for (const assistant of [launcher, replacementAssistant, residentReplacement, vtuberAssistant]) {
+      expect(assistant.messages).not.toContainEqual(expect.objectContaining({
+        content: [expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet work result') })],
+      }))
+    }
     service.end(launcher as unknown as Agent, 'Assistant bridge Team closed.')
     expect(() => service.uploadResource(launcher as unknown as Agent, {
       runId: run.id,
@@ -2428,31 +2813,28 @@ describe('FleetRunService', () => {
       targetKey: 'result.txt',
       displayPath: join(root, 'result.txt'),
     } as FsTarget])
-    const vote = messages.createVote(lead, {
-      channel: '#main',
-      kind: 'finish',
-      statement: 'result.txt was independently reviewed.',
-    })
-    messages.castVote(reviewer, { id: vote.id, response: 'approve' })
+    const rootGoalId = work.work?.rootTaskId
+    if (rootGoalId === undefined) throw new Error('expected composite root Task')
+    settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, rootGoalId, 'complete', 'result.txt accepted.')
 
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
       status: 'idle',
       settled: false,
-      work: { status: 'finished', summary: 'result.txt was independently reviewed.' },
+      work: { status: 'finished', summary: 'result.txt accepted.' },
     })
     expect(persisted.size).toBe(0)
     expect(core.list()).toHaveLength(2)
     expect(resources.list()).toEqual([])
-    expect(lead.inbox.nextTurn).toContainEqual(expect.objectContaining({
-      content: [expect.objectContaining({ text: expect.stringContaining('Call fleet_messages') })],
-    }))
-    expect(reviewer.inbox.nextStep).toEqual([])
     const secondWork = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     expect(secondWork.work?.id).not.toBe(work.work?.id)
-    expect(service.readTrace(run.id, 0, 100).events.map(event => event.type)).toContain('coordination.vote')
-    const memberTrace = await service.readMemberTrace(run.id, 'reviewer', -1, 100)
+    const memberTrace = await service.readMemberTrace(run.id, 'lead', -1, 100)
     expect(memberTrace.events).toContainEqual(expect.objectContaining({ type: 'session.user/message' }))
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Second work cancelled.')
+    const secondRootGoalId = secondWork.work?.rootTaskId
+    if (secondRootGoalId === undefined) throw new Error('expected second composite root Task')
+    settleDefaultCompositeWork(
+      service.taskBoard(run.id), lead.id, secondRootGoalId, 'block', 'Second work cancelled for this test.',
+    )
+    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle', work: { status: 'blocked' } })
     service.end(launcher as unknown as Agent, 'Team retired after test.')
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'closed', settled: true })
     expect(persisted.size).toBe(2)
@@ -2509,10 +2891,10 @@ describe('FleetRunService', () => {
     expect(workStart)
       .toEqual([expect.objectContaining({ text: expect.stringContaining('Hook-added acceptance criteria.') })])
     expect(workStart).toEqual([expect.objectContaining({
-      text: expect.stringContaining('Do not independently repeat another member\'s active task or remote job'),
+      text: expect.stringContaining('composite root Task'),
     })])
     expect(workStart).toEqual([expect.objectContaining({
-      text: expect.stringContaining('Never infer that bash is unavailable merely because it is absent from Fleet tool groups'),
+      text: expect.stringContaining('first formal cohort atomically'),
     })])
 
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
@@ -2675,7 +3057,6 @@ describe('FleetRunService', () => {
       member: 'reviewer',
       displayName: 'Reviewer',
       runtimeStatus: 'running',
-      declaredStatus: { text: 'Reproducing the latest result', updatedAt: expect.any(String) },
       cursor: 6,
       hasMore: false,
       items: [
@@ -2796,7 +3177,7 @@ describe('FleetRunService', () => {
       type: 'tool/call',
       seq: 1,
       time: Date.now(),
-      data: { turn: 1, step: 1, callId: 'wait-1', name: 'fleet_wait', arguments: '{"timeout_ms":30000}' },
+      data: { turn: 1, step: 1, callId: 'wait-1', name: 'wait_threads', arguments: '{"timeoutMs":30000}' },
     }))
     expect(leadStatus()).toBe('running')
     vi.advanceTimersByTime(2_000)
@@ -3188,153 +3569,6 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('keeps old work Votes from finishing new work and waits for the finishing caller to become idle', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    const messages = service.messageHub(run.id)
-    const firstWork = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    const oldVote = messages.createVote(lead, {
-      channel: '#main',
-      kind: 'finish',
-      statement: 'Finish the first work item.',
-    })
-    service.finish(launcher as unknown as Agent, 'cancelled', 'First work was superseded.')
-    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle' })
-
-    const secondWork = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    expect(secondWork.work?.id).not.toBe(firstWork.work?.id)
-    messages.castVote(reviewer, { id: oldVote.id, response: 'approve' })
-    expect(service.status(run.id)).toMatchObject({ status: 'running', work: { id: secondWork.work?.id } })
-
-    lead.status = 'running'
-    const finishing = service.finish(lead as unknown as Agent, 'finished', 'Second work complete.')
-    expect(finishing.status).toBe('finishing')
-    expect(() => service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root }))
-      .toThrow(/cannot start work while finishing/)
-    lead.completeTurn()
-    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle' })
-    service.end(launcher as unknown as Agent, 'Team test complete.')
-    await service.wait(run.id, 1_000)
-    disconnect()
-  })
-
-  it('finishes work on resume when an approved bound Vote was persisted before its completion callback', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const first = setup(root)
-    const run = await first.service.create(first.launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    first.service.start(first.launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    const lead = first.runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const reviewer = first.runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    const vote = first.service.messageHub(run.id).createVote(lead, {
-      channel: '#main',
-      kind: 'finish',
-      statement: 'Persisted approval should finish this work.',
-    })
-    const eventsPath = join(root, '.fleet-registry', run.id, 'events.jsonl')
-    const storedEvents = readFileSync(eventsPath, 'utf8').trim().split('\n')
-      .map(line => JSON.parse(line) as { readonly sequence: number })
-    const sequence = (storedEvents.at(-1)?.sequence ?? 0) + 1
-    const closedVote = {
-      ...vote,
-      approvals: [reviewer.id],
-      status: 'approved',
-      closedAt: new Date().toISOString(),
-    }
-    writeFileSync(eventsPath, `${readFileSync(eventsPath, 'utf8').trim()}\n${JSON.stringify({
-      sequence,
-      createdAt: new Date().toISOString(),
-      type: 'coordination.vote',
-      data: { type: 'vote', action: 'closed', vote: closedVote },
-    })}\n`)
-    for (const member of run.members) {
-      const agent = first.runtime.get(member.sessionId)
-      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
-    }
-    first.disconnect()
-    await first.core.close()
-
-    const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
-    const resumed = await second.service.resume(second.launcher as unknown as Agent, {
-      runId: run.id,
-      projectRoot: root,
-    })
-    expect(resumed).toMatchObject({ status: 'finishing', work: { status: 'finished' } })
-    await expect(second.service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle' })
-    second.service.end(second.launcher as unknown as Agent, 'Recovered Vote Team closed.')
-    await second.service.wait(run.id, 1_000)
-    second.disconnect()
-  })
-
-  it('records a failed Team without creating Agents when preflight paths are missing', async () => {
-    const { root, configPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const required = join(root, 'missing-corpus')
-
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [required],
-    })
-
-    expect(run).toMatchObject({ status: 'failed', settled: true, members: [] })
-    expect(run.summary).toContain(required)
-    expect(runtime.creates).toEqual([])
-    expect(service.readTrace(run.id, 0, 20).events.map(event => event.type)).toEqual([
-      'team_created',
-      'team_status',
-    ])
-    disconnect()
-  })
-
-  it('persists member-maintained status across restart', async () => {
-    const { root, configPath } = fixture()
-    const first = setup(root)
-    const run = await first.service.create(first.launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    const leadId = run.members.find(member => member.name === 'lead')?.sessionId ?? ''
-    first.service.memberStatusBoard(run.id).set(leadId, 'Waiting for the architecture review')
-    expect(first.service.readTrace(run.id, 0, 100).events.map(event => event.type)).toContain('member_status.updated')
-    for (const member of run.members) {
-      const agent = first.runtime.get(member.sessionId)
-      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
-    }
-    first.disconnect()
-    await first.core.close()
-
-    const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
-    await second.service.resume(second.launcher as unknown as Agent, {
-      runId: run.id,
-      projectRoot: root,
-    })
-
-    const resumedReviewerId = second.service.status(run.id).members.find(member => member.name === 'reviewer')?.sessionId ?? ''
-    expect(second.service.memberStatusBoard(run.id).get(resumedReviewerId, '@lead')).toMatchObject({
-      message: 'Waiting for the architecture review',
-    })
-    expect(second.service.readTrace(run.id, 0, 100).events
-      .filter(event => event.type === 'member_status.updated')).toHaveLength(1)
-
-    second.service.end(second.launcher as unknown as Agent, 'Collaboration components restored successfully.')
-    await second.service.wait(run.id, 1_000)
-    second.disconnect()
-  })
-
   it('loads dormant Team state at DSH startup and resumes it repeatedly', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
@@ -3439,6 +3673,274 @@ describe('FleetRunService', () => {
     await second.core.close()
   })
 
+  it('loads only an offline formal owner when its persistent Task list becomes non-empty', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const goal = first.service.taskBoard(run.id).createGoal(first.launcher.id, {
+      title: 'Targeted dormant owner check',
+      owners: ['lead'],
+    })
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, {
+      launcherId: 'replacement-launcher',
+      persisted: first.persisted,
+      persistedHeaders: first.persistedHeaders,
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected persisted assistant')
+    await second.service.attachAssistant(second.launcher as unknown as Agent, {
+      runId: run.id,
+      assistantId,
+    })
+    second.service.agentSessionStarted(second.launcher as unknown as Agent)
+
+    await vi.waitFor(() => { expect(second.runtime.resumes).toHaveLength(1) })
+    expect(second.runtime.resumes[0]?.id).toBe(run.members.find(member => member.name === 'lead')?.sessionId)
+    const loaded = second.service.status(run.id)
+    expect(loaded).toMatchObject({
+      runtimeState: 'active',
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'idle' }),
+        expect.objectContaining({ name: 'reviewer', status: 'unknown' }),
+      ],
+    })
+    expect(second.runtime.get(loaded.members.find(member => member.name === 'lead')?.sessionId ?? '')?.messages)
+      .toContainEqual(expect.objectContaining({
+        content: [expect.objectContaining({ text: expect.stringContaining(goal.id) })],
+      }))
+    expect(second.runtime.get(loaded.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
+
+    second.disconnect()
+    await second.core.close()
+  })
+
+  it('stages work for unloaded members and wakes only the first ready Task owner', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, {
+      launcherId: 'replacement-launcher',
+      persisted: first.persisted,
+      persistedHeaders: first.persistedHeaders,
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected persisted assistant')
+    await second.service.attachAssistant(second.launcher as unknown as Agent, {
+      runId: run.id,
+      assistantId,
+    })
+    second.service.agentSessionStarted(second.launcher as unknown as Agent)
+    expect(second.service.status(run.id)).toMatchObject({
+      runtimeState: 'dormant',
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'unknown' }),
+        expect.objectContaining({ name: 'reviewer', status: 'unknown' }),
+      ],
+    })
+
+    const kickoff = second.service.sendAssistantMessage(second.launcher as unknown as Agent, {
+      runId: run.id,
+      kind: 'directive',
+      text: 'Lead implements the requested work; reviewer stays dormant until a later dependent stage.',
+      stages: [{
+        key: 'implementation',
+        title: 'Implement the requested work',
+        description: 'Produce the requested deliverable and evidence.',
+        owners: ['lead'],
+      }],
+    })
+    expect(kickoff.recipients).toEqual(['lead'])
+    expect(second.service.taskBoard(run.id).state().tasks.some(task =>
+      task.domain.kind === 'reply' && task.domain.messageId === kickoff.messageId,
+    )).toBe(false)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(second.runtime.resumes).toEqual([])
+
+    const running = second.service.start(second.launcher as unknown as Agent, {
+      runId: run.id,
+      taskPath,
+      projectRoot: root,
+    })
+    const rootTaskId = running.work?.rootTaskId
+    if (rootTaskId === undefined) throw new Error('expected composite root Task')
+    await vi.waitFor(() => { expect(second.runtime.resumes).toHaveLength(1) })
+    expect(second.runtime.resumes[0]?.id).toBe(run.members.find(member => member.name === 'lead')?.sessionId)
+    expect(second.runtime.get(
+      second.service.status(run.id).members.find(member => member.name === 'reviewer')?.sessionId ?? '',
+    )).toBeUndefined()
+    expect(second.service.taskBoard(run.id).ownerTasks('lead')).toContainEqual(expect.objectContaining({
+      parentId: rootTaskId,
+      title: 'Implement the requested work',
+    }))
+    const lead = second.runtime.get(
+      second.service.status(run.id).members.find(member => member.name === 'lead')?.sessionId ?? '',
+    )
+    if (lead === undefined) throw new Error('expected resumed lead')
+    const published = second.service.messageHub(run.id)
+      .read(lead, { conversation: '#main' })
+      .messages.find(message => message.text === kickoff.text)
+    expect(published).toMatchObject({ kind: 'work_directive', delivery: 'quiet', mentions: ['lead'] })
+    expect(second.service.taskBoard(run.id).state().tasks.some(task =>
+      task.domain.kind === 'reply' && task.domain.messageId === published?.id,
+    )).toBe(false)
+
+    settleDefaultCompositeWork(second.service.taskBoard(run.id), lead.id, rootTaskId, 'complete', 'Accepted result.')
+    await expect(second.service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle' })
+    second.service.end(second.launcher as unknown as Agent, 'Staged dormant-owner test complete.', run.id)
+    await second.service.wait(run.id, 1_000)
+    second.disconnect()
+    await second.core.close()
+  })
+
+  it('loads only the owner of a user message Inbox Task', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, {
+      launcherId: 'replacement-launcher',
+      persisted: first.persisted,
+      persistedHeaders: first.persistedHeaders,
+    })
+    expect(second.service.status(run.id).runtimeState).toBe('dormant')
+
+    const sent = second.service.sendUserConversationMessage({
+      runId: run.id,
+      to: '@lead',
+      text: 'Please inspect this user request.',
+      delivery: 'quiet',
+    }, second.launcher as unknown as Agent)
+    expect(sent).toMatchObject({ recipients: 1, woken: 0 })
+
+    await vi.waitFor(() => { expect(second.runtime.resumes).toHaveLength(1) })
+    const loaded = second.service.status(run.id)
+    expect(loaded).toMatchObject({
+      runtimeState: 'active',
+      members: [
+        expect.objectContaining({ name: 'lead', status: 'idle' }),
+        expect.objectContaining({ name: 'reviewer', status: 'unknown' }),
+      ],
+    })
+    expect(second.runtime.resumes.map(input => input.id)).toEqual([
+      run.members.find(member => member.name === 'lead')?.sessionId,
+    ])
+    const lead = second.runtime.get(loaded.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = second.runtime.get(loaded.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    await vi.waitFor(() => {
+      expect(lead?.messages.flatMap(message => message.content)
+        .some(block => block.type === 'text' && block.text.includes('Please inspect this user request.'))).toBe(true)
+    })
+    expect(reviewer).toBeUndefined()
+    expect(lead?.status).toBe('idle')
+    expect(second.service.readTrace(run.id, 0, 300).events)
+      .not.toContainEqual(expect.objectContaining({ type: 'team_restored_for_user_input' }))
+
+    second.disconnect()
+    await second.core.close()
+  })
+
+  it('does not reload a dormant Team when attaching an assistant replays settled user input', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+    const userEvent = {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'already-settled-user-input', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'This request will be settled before restart.' }],
+      },
+    } as unknown as SessionEvent
+    first.launcher.session.events.push(userEvent as unknown as FakeEvent)
+    first.service.recordMemberSessionEvent(first.launcher.id, userEvent)
+    first.service.reportAssistantInteraction(first.launcher as unknown as Agent, {
+      runId: run.id,
+      outcome: 'complete',
+      reason: 'The request is settled.',
+      report: 'Settled.',
+    })
+    first.service.recordMemberSessionEvent(first.launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: {
+          id: 'settled-assistant-output', role: 'assistant',
+          content: [{ type: 'text', text: 'Settled.' }],
+        },
+      },
+    } as unknown as SessionEvent)
+    expect(first.service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('completed')
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, {
+      launcherId: 'replacement-launcher',
+      persisted: first.persisted,
+      persistedHeaders: first.persistedHeaders,
+    })
+    second.launcher.session.events.push(userEvent as unknown as FakeEvent)
+    await second.service.attachAssistant(second.launcher as unknown as Agent, {
+      runId: run.id,
+      assistantId,
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(second.runtime.resumes).toEqual([])
+    expect(second.service.status(run.id).runtimeState).toBe('dormant')
+    expect(second.service.readTrace(run.id, 0, 300).events)
+      .not.toContainEqual(expect.objectContaining({ type: 'team_restored_for_user_input' }))
+
+    second.disconnect()
+    await second.core.close()
+  })
+
   it('pauses only loaded members and wakes the partially loaded Team', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
@@ -3499,156 +4001,6 @@ describe('FleetRunService', () => {
 
     second.disconnect()
     await second.core.close()
-  })
-
-  it('resumes the same member Sessions and restores collaboration state after a process restart', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const first = setup(root)
-    const run = await first.service.create(first.launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-      provider: 'test-provider',
-      model: 'test-model',
-    })
-    first.service.start(first.launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    const leadId = run.members.find(member => member.name === 'lead')?.sessionId ?? ''
-    const reviewerId = run.members.find(member => member.name === 'reviewer')?.sessionId ?? ''
-    const assistantBeforeRestart = run.assistants[0]
-    if (assistantBeforeRestart === undefined) throw new Error('expected the default assistant')
-    const lead = first.runtime.get(leadId)
-    const reviewer = first.runtime.get(reviewerId)
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live members')
-    const pendingLeadWork = lead.messages[0]
-    const pendingReviewerWork = reviewer.messages[0]
-    if (pendingLeadWork === undefined || pendingReviewerWork === undefined) throw new Error('expected pending member work')
-    first.service.messageHub(run.id).send(lead, {
-      to: '#main',
-      text: 'Implementation is half complete.',
-      delivery: 'quiet',
-    })
-    const resource = first.service.resourceStore(run.id).addResource(leadId, {
-      path: join(root, 'result.bin'),
-      label: 'partial output',
-      mediaType: 'application/octet-stream',
-    })
-    for (const member of run.members) {
-      const agent = first.runtime.get(member.sessionId)
-      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
-    }
-    const coordinationMessagesBefore = first.service.readTrace(run.id, 0, 100).events
-      .filter(event => event.type === 'coordination.message').length
-    first.disconnect()
-    await first.core.close()
-
-    const changedTemplate = JSON.parse(readFileSync(configPath, 'utf8')) as {
-      core: { members: Array<{ name: string; color?: string }> }
-    }
-    if (changedTemplate.core.members[0] !== undefined) {
-      changedTemplate.core.members[0].name = 'Changed after creation'
-      changedTemplate.core.members[0].color = '#bd6578'
-    }
-    writeFileSync(configPath, JSON.stringify(changedTemplate))
-
-    const second = setup(root, {
-      launcherId: 'replacement-launcher',
-      persisted: first.persisted,
-      resumeInboxes: new Map([
-        [leadId, { nextStep: [pendingLeadWork] }],
-        [reviewerId, { nextStep: [pendingReviewerWork] }],
-      ]),
-    })
-    const resumed = await second.service.resume(second.launcher as unknown as Agent, {
-      runId: run.id,
-      projectRoot: root,
-    })
-
-    expect(resumed).toMatchObject({
-      id: run.id,
-      status: 'running',
-      settled: false,
-      launcherSessionId: 'replacement-launcher',
-      members: [
-        { name: 'lead', displayName: 'Lead', color: '#527fca' },
-        { name: 'reviewer', displayName: 'Reviewer', color: '#7c68bd' },
-      ],
-      assistants: [{
-        sessionId: 'replacement-launcher',
-        view: {
-          id: assistantBeforeRestart.view.id,
-          name: assistantBeforeRestart.view.name,
-          color: assistantBeforeRestart.view.color,
-          role: assistantBeforeRestart.view.role,
-        },
-      }],
-      assistantSessionAliases: expect.arrayContaining([
-        { sessionId: assistantBeforeRestart.sessionId, currentSessionId: 'replacement-launcher' },
-        { sessionId: 'replacement-launcher', currentSessionId: 'replacement-launcher' },
-      ]),
-    })
-    expect(second.runtime.resumes).toEqual([
-      expect.objectContaining({ id: leadId, provider: 'test-provider', model: 'test-model' }),
-      expect.objectContaining({ id: reviewerId, provider: 'test-provider', model: 'test-model' }),
-    ])
-    expect(second.core.list()).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: expect.stringMatching(/-lead$/),
-        displayName: 'Lead',
-        color: '#527fca',
-        id: leadId,
-        managed: true,
-      }),
-      expect.objectContaining({
-        name: expect.stringMatching(/-reviewer$/),
-        displayName: 'Reviewer',
-        color: '#7c68bd',
-        id: reviewerId,
-        managed: true,
-      }),
-    ]))
-    const resumedLead = second.runtime.get(leadId)
-    const resumedReviewer = second.runtime.get(reviewerId)
-    if (resumedLead === undefined || resumedReviewer === undefined) {
-      throw new Error('expected resumed members')
-    }
-    expect(second.service.messageHub(run.id).read(resumedReviewer, { conversation: '#main' }).messages)
-      .toContainEqual(expect.objectContaining({ text: 'Implementation is half complete.' }))
-    expect(second.service.resourceStore(run.id).getResource(resource.id)).toEqual(resource)
-    expect(resumedLead.messages).toHaveLength(0)
-    expect(resumedLead.inbox.nextTurn).toHaveLength(0)
-    expect(resumedLead.inbox.nextStep).toEqual([pendingLeadWork])
-    expect(resumedReviewer.messages).toHaveLength(0)
-    expect(resumedReviewer.inbox.nextTurn).toHaveLength(0)
-    expect(resumedReviewer.inbox.nextStep).toEqual([pendingReviewerWork])
-    second.service.recordMemberSessionEvent(second.launcher.id, {
-      type: 'turn/start', seq: 1, time: Date.now(), data: { turn: 1 },
-    })
-    second.service.agentIdle(resumedLead as unknown as Agent)
-    expect(resumedLead.messages).toHaveLength(0)
-    expect(resumedReviewer.messages).toHaveLength(0)
-    const afterLoadMessage = second.service.messageHub(run.id).send(resumedLead, {
-      to: '@reviewer',
-      text: 'A new message should still wake you while the loaded Team awaits a manual wake.',
-      delivery: 'quiet',
-    })
-    second.service.agentIdle(resumedReviewer as unknown as Agent)
-    expect(resumedReviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('Fleet inbox @lead') }),
-    ])
-    const reviewerMessagesAfterUnreadWake = resumedReviewer.messages.length
-    await second.service.wakeTeam(second.launcher as unknown as Agent, run.id)
-    expect(resumedLead.messages).toHaveLength(1)
-    expect(resumedReviewer.messages).toHaveLength(reviewerMessagesAfterUnreadWake + 1)
-    expect(second.service.readTrace(run.id, 0, 100).events
-      .filter(event => event.type === 'coordination.message')).toHaveLength(coordinationMessagesBefore + 1)
-    expect(second.service.readTrace(run.id, 0, 100).events)
-      .toContainEqual(expect.objectContaining({ type: 'team_loaded' }))
-
-    second.service.finish(second.launcher as unknown as Agent, 'cancelled', 'Resume test complete.')
-    await expect(second.service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle', settled: false })
-    second.service.end(second.launcher as unknown as Agent, 'Resume test Team closed.')
-    await expect(second.service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'closed', settled: true })
-    second.disconnect()
   })
 
   it('rebinds Fleet members when a Session Archive resumes a newer hot segment', async () => {
@@ -3828,78 +4180,6 @@ describe('FleetRunService', () => {
     second.disconnect()
   })
 
-  it('dispatches one durable Task attempt without waking the whole Team', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-
-    service.taskBoard(run.id).create(lead.id, {
-      title: 'Finish the independent review',
-      assignees: ['reviewer'],
-    })
-    const leadMessages = lead.messages.length
-    const reviewerMessagesBeforeQuiescence = reviewer.messages.length
-    service.agentIdle(lead as unknown as Agent)
-    expect(lead.messages).toHaveLength(leadMessages)
-    expect(reviewer.messages).toHaveLength(reviewerMessagesBeforeQuiescence + 1)
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet task attempt]') }),
-    ])
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('Current ReconcileAttempt:') }),
-    ])
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('fleet_task action="settle"') }),
-    ])
-
-    const messages = service.messageHub(run.id)
-    const sent = messages.send(lead, {
-      to: '@reviewer',
-      text: 'Please finish the independent review.',
-      delivery: 'wakeup',
-    })
-    const reviewerMessages = reviewer.messages.length
-    service.agentIdle(reviewer as unknown as Agent)
-    expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('Fleet inbox @lead') }),
-    ])
-    const reply = messages.send(reviewer, {
-      to: '@lead',
-      text: 'Independent review complete.',
-      delivery: 'quiet',
-    })
-    expect(reply.woken).toBe(0)
-    expect(messages.pendingWakeups(lead.id)).toEqual([])
-    expect(messages.pendingWakeups(reviewer.id)).toEqual([])
-    expect(service.readTrace(run.id, 0, 100).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('assigned_task') }),
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('pending_wakeup') }),
-    ]))
-
-    await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
-    const messagesBeforePausedContinuation = lead.messages.length
-    service.agentIdle(lead as unknown as Agent)
-    expect(lead.messages).toHaveLength(messagesBeforePausedContinuation)
-    expect(lead.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('Fleet inbox @reviewer') }),
-    ])
-
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Continuation behavior verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Continuation Team closed.', run.id)
-    await service.wait(run.id, 1_000)
-    disconnect()
-  })
-
   it('keeps an actionable assigned task active until its assignee settles the state', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
@@ -3929,6 +4209,12 @@ describe('FleetRunService', () => {
         text: expect.stringContaining(`[Fleet task attempt] ${task.title}`),
       }),
     ])
+    const attemptNotice = reviewer.messages.at(-1)?.content[0]
+    if (attemptNotice?.type !== 'text') throw new Error('expected task-attempt notice')
+    expect(attemptNotice.text).toContain('Fleet already claimed this ReconcileAttempt')
+    expect(attemptNotice.text).toContain('Do not call fleet_reconcile claim')
+    expect(attemptNotice.text).toContain(`action="resolve", id="${task.id}", attempt_id="attempt_`)
+    expect(attemptNotice.text).toContain('The id is the Task id, not the attempt or reconciler id.')
     expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
       type: 'member_continued',
       data: expect.stringContaining('assigned_task'),
@@ -3984,832 +4270,260 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('continuously wakes every member with a non-empty owner task list', async () => {
+  it('starts work through a zero-owner composite root without waking every member', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
+      configPath, projectRoot: root, requiredPaths: [],
     })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
     if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    lead.status = 'idle'
-    reviewer.status = 'idle'
-    const leadMessages = lead.messages.length
-    const reviewerMessages = reviewer.messages.length
-
-    const task = service.taskBoard(run.id).create(lead.id, {
-      title: 'Complete the parallel owner work',
-      assignees: ['lead'],
-      owners: ['lead', 'reviewer'],
-      initialState: {
-        kind: 'running',
-        reconcilers: [{
-          id: 'collect-owner-results',
-          when: { kind: 'owner_intent_count', intents: ['complete', 'block'], op: 'eq', value: 'owners' },
-          target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
-          onTimeout: { kind: 'blocked', reason: 'Owner result reconciliation exhausted.' },
-        }],
-      },
-    })
-
-    await vi.waitFor(() => {
-      expect(lead.messages).toHaveLength(leadMessages + 1)
-      expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
-    })
+    const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const rootTaskId = running.work?.rootTaskId
+    if (rootTaskId === undefined) throw new Error('expected composite root Task')
     expect(lead.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet owner task list]') }),
+      expect.objectContaining({ type: 'text', text: expect.stringContaining(`[Fleet composite root Task ${rootTaskId}`) }),
     ])
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining(`- ${task.title} (${task.id})`) }),
-    ])
+    expect(reviewer.messages).toHaveLength(0)
+    expect(service.taskBoard(run.id).get(lead.id, rootTaskId).domain).toMatchObject({
+      kind: 'composite', managedChildren: true, rootWorkId: running.work?.id,
+    })
+    expect(service.taskBoard(run.id).get(lead.id, rootTaskId).owners).toEqual([])
+    expect(service.taskBoard(run.id).ownerTasks('lead').map(task => task.parentId)).toContain(rootTaskId)
 
-    lead.inbox.clear()
-    reviewer.inbox.clear()
-    const reviewerBeforePeerIdle = reviewer.messages.length
-    service.taskBoard(run.id).markOwnerIntent(lead.id, task.id, 'complete', 'Implementation complete.')
-    const afterLeadSettlement = lead.messages.length
-    service.agentIdle(lead as unknown as Agent)
-    expect(lead.messages).toHaveLength(afterLeadSettlement)
-    expect(reviewer.messages).toHaveLength(reviewerBeforePeerIdle + 1)
-
-    reviewer.inbox.clear()
-    const reviewerBeforeRetry = reviewer.messages.length
-    service.agentIdle(reviewer as unknown as Agent)
-    expect(reviewer.messages).toHaveLength(reviewerBeforeRetry + 1)
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('action="block"') }),
-    ])
-
-    reviewer.inbox.clear()
-    service.taskBoard(run.id).markOwnerIntent(reviewer.id, task.id, 'block', 'External validation is unavailable.')
-    await vi.waitFor(() => expect(service.taskBoard(run.id).get(lead.id, task.id).activeReconcile)
-      .toMatchObject({ status: 'running', target: 'lead' }))
-    expect(lead.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet task attempt]') }),
-    ])
-    expect(service.taskBoard(run.id).ownerTasks('lead')).toEqual([])
-    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
-    expect(service.readTrace(run.id, 0, 300).events.filter(event =>
-      event.type === 'member_continued' && event.data.includes('owner_task_list'))).toHaveLength(4)
-
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Owner task list continuation verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Owner task list Team closed.', run.id)
+    settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, rootTaskId, 'complete', 'Accepted result.')
+    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
+      status: 'idle', work: { status: 'finished', summary: 'Accepted result.' },
+    })
+    service.end(launcher as unknown as Agent, 'Composite root test complete.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })
 
-  it('uses an approved Fleet Vote to settle collaborative Task completion', async () => {
+  it('keeps work and foreground reporting open until formal-member Tasks quiesce', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
+      configPath, projectRoot: root, requiredPaths: [],
     })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const assistantId = run.assistants[0]?.view.id
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    lead.status = 'idle'
-    reviewer.status = 'idle'
-
-    const task = service.taskBoard(run.id).create(lead.id, {
-      title: 'Publish jointly approved result', assignees: ['lead'], reviewers: ['reviewer'], decision: 'vote',
-    })
-    await vi.waitFor(() => expect(service.taskBoard(run.id).get(lead.id, task.id).activeReconcile?.status).toBe('running'))
-    const claimed = service.taskBoard(run.id).get(lead.id, task.id)
-    if (claimed.activeReconcile?.status !== 'running' || claimed.activeReconcile.attemptId === undefined) {
-      throw new Error('expected running ReconcileAttempt')
+    if (assistantId === undefined || lead === undefined || reviewer === undefined) {
+      throw new Error('expected assistant and live Fleet members')
     }
-    const waiting = service.taskBoard(run.id).settle(lead.id, task.id, {
-      attemptId: claimed.activeReconcile.attemptId,
-      progress: 'Implementation and evidence are ready for independent approval.',
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-barrier', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Run the gated Team task.' }],
+      },
+    } as unknown as SessionEvent)
+    const kickoff = service.sendAssistantMessage(launcher as unknown as Agent, {
+      runId: run.id,
+      kind: 'directive',
+      text: 'Plan: lead implements the change, then reviewer independently verifies the evidence.',
+      recipients: ['reviewer'],
+      stages: [
+        {
+          key: 'implementation',
+          title: 'Implement the delegated change',
+          description: 'Produce the requested change and implementation evidence.',
+          owners: ['lead'],
+        },
+        {
+          key: 'review',
+          kind: 'vote',
+          title: 'Independently review the change',
+          description: 'Approve the implementation only when independent evidence passes.',
+          owners: ['reviewer'],
+          dependencies: ['implementation'],
+        },
+      ],
+    })
+    expect(kickoff.recipients).toEqual(['lead'])
+    expect(kickoff.stages.map(stage => stage.key)).toEqual(['implementation', 'review'])
+    const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const rootTaskId = running.work?.rootTaskId
+    if (rootTaskId === undefined) throw new Error('expected composite root Task')
+    expect(service.taskBoard(run.id).state().tasks.some(task =>
+      task.domain.kind === 'reply' && task.domain.messageId === kickoff.messageId,
+    )).toBe(false)
+    const implementation = service.taskBoard(run.id).state().tasks.find(task =>
+      task.parentId === rootTaskId && task.title === 'Implement the delegated change')
+    const review = service.taskBoard(run.id).state().tasks.find(task =>
+      task.parentId === rootTaskId && task.title === 'Independently review the change')
+    if (implementation === undefined || review === undefined) throw new Error('expected assistant-created cohort')
+    expect(implementation).toMatchObject({
+      owners: [{ member: 'lead' }], dependencies: [], domain: { kind: 'goal', rootWorkId: running.work?.id },
+    })
+    expect(review).toMatchObject({
+      owners: [{ member: 'reviewer' }], dependencies: [implementation.id], domain: { kind: 'vote' },
+    })
+    expect(service.taskBoard(run.id).get(lead.id, rootTaskId)).toMatchObject({
+      owners: [], decision: 'vote', domain: { kind: 'composite', managedChildren: true },
+    })
+    expect(() => service.taskBoard(run.id).createGoal(lead.id, {
+      title: 'Duplicate planned stage', owners: ['reviewer'], parentId: rootTaskId,
+    })).toThrow('accepts children only through its ReconcileAttempt')
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.id)).not.toContain(review.id)
+
+    expect(() => service.taskBoard(run.id).claim(lead.id, rootTaskId)).toThrow('has no ready ReconcileAttempt')
+    expect(service.status(run.id)).toMatchObject({ status: 'running', work: { status: 'running' } })
+
+    service.taskBoard(run.id).signalInteractionDelivery(assistantId, 'Simulated progress deadline.')
+    expect(() => service.reportAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      outcome: 'complete',
+      reason: 'Too early.',
+      report: 'This must not be reported.',
+    })).toThrow('still waits for live Tasks')
+
+    service.taskBoard(run.id).submitGoal(lead.id, implementation.id, {
+      kind: 'complete', reason: 'Implementation complete.', result: 'Implementation evidence.',
+    })
+    expect(service.taskBoard(run.id).ownerTasks('lead').map(task => task.id)).not.toContain(rootTaskId)
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.id)).toContain(review.id)
+    service.taskBoard(run.id).castVote(reviewer.id, review.id, 'reject', 'Independent evidence found a defect.')
+    expect(service.taskBoard(run.id).readyTasks('lead').map(task => task.id)).toContain(rootTaskId)
+    const rejectedAttempt = service.taskBoard(run.id).claim(lead.id, rootTaskId).activeReconcile?.attemptId
+    if (rejectedAttempt === undefined) throw new Error('expected rejected root ReconcileAttempt')
+    expect(() => service.taskBoard(run.id).settle(lead.id, rootTaskId, {
+      attemptId: rejectedAttempt,
+      progress: 'Tried to accept rejected evidence.',
+      next: { kind: 'completed', reason: 'Must not complete.', result: 'Premature result.' },
+    })).toThrow('requires an approved Vote child')
+    const remediationRound = service.taskBoard(run.id).settle(lead.id, rootTaskId, {
+      attemptId: rejectedAttempt,
+      progress: 'Opened remediation for the rejected review.',
       childOps: [{
-        kind: 'vote', decision: 'complete', channel: '#main',
-        statement: 'The implementation and evidence are sufficient for completion.',
+        kind: 'goal', title: 'Repair the rejected implementation', owners: ['lead'],
+        description: 'Fix the defect and produce fresh evidence.',
       }],
       next: {
-        kind: 'running',
+        kind: 'running', reason: 'Waiting for remediation.',
         reconcilers: [{
-          id: 'finish-after-vote',
-          when: { kind: 'child_count', states: ['completed', 'blocked'], op: 'gte', value: 1 },
+          id: 'after-remediation',
+          when: { kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort' },
           target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
-          onTimeout: { kind: 'blocked', reason: 'Vote reconciliation exhausted.' },
+          onTimeout: { kind: 'blocked', reason: 'Remediation reconciliation exhausted.' },
         }],
       },
     })
-    if (waiting.stableState.kind !== 'running') throw new Error('expected running parent Task')
-    const voteTask = service.taskBoard(run.id).get(lead.id, waiting.stableState.cohort[0] ?? '')
-    if (voteTask.vote === undefined) throw new Error('expected Vote child Task')
-    expect(service.messageHub(run.id).getVote(reviewer, voteTask.vote.id)).toMatchObject({
-      status: 'open', initiator: 'lead', voters: ['reviewer'],
+    if (remediationRound.stableState.kind !== 'running') throw new Error('expected remediation round')
+    expect(service.status(run.id)).toMatchObject({ status: 'running', work: { status: 'running' } })
+    const remediationId = remediationRound.stableState.cohort[0]!
+    service.taskBoard(run.id).submitGoal(lead.id, remediationId, {
+      kind: 'complete', reason: 'Defect repaired.', result: 'Fresh implementation evidence.',
     })
-
-    service.messageHub(run.id).castVote(reviewer, {
-      id: voteTask.vote.id,
-      response: 'approve',
+    const repairedAttempt = service.taskBoard(run.id).claim(lead.id, rootTaskId).activeReconcile?.attemptId
+    if (repairedAttempt === undefined) throw new Error('expected repaired root ReconcileAttempt')
+    const acceptanceRound = service.taskBoard(run.id).settle(lead.id, rootTaskId, {
+      attemptId: repairedAttempt,
+      progress: 'Opened a fresh independent review.',
+      childOps: [{
+        kind: 'vote', title: 'Independent review #2', channel: '#main',
+        statement: 'Approve the repaired implementation.', voters: ['reviewer'],
+      }],
+      next: {
+        kind: 'running', reason: 'Waiting for fresh independent acceptance.',
+        reconcilers: [{
+          id: 'after-review',
+          when: { kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort' },
+          target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
+          onTimeout: { kind: 'blocked', reason: 'Review reconciliation exhausted.' },
+        }],
+      },
     })
-    const readyParent = service.taskBoard(run.id).get(lead.id, task.id)
-    expect(readyParent.activeReconcile?.status).toBe('ready')
-    const finalClaim = service.taskBoard(run.id).claim(lead.id, task.id)
-    const finalAttempt = finalClaim.activeReconcile?.attemptId
-    if (finalAttempt === undefined) throw new Error('expected final ReconcileAttempt')
-    settleCompletedTask(service.taskBoard(run.id), lead.id, task.id, finalAttempt, 'Approved by Vote.')
-    expect(service.taskBoard(run.id).get(lead.id, task.id).stableState)
-      .toMatchObject({ kind: 'completed', result: expect.stringContaining('Approved by Vote') })
+    if (acceptanceRound.stableState.kind !== 'running') throw new Error('expected fresh acceptance round')
+    service.taskBoard(run.id).castVote(
+      reviewer.id, acceptanceRound.stableState.cohort[0]!, 'approve', 'Fresh evidence passes.',
+    )
+    const acceptedAttempt = service.taskBoard(run.id).claim(lead.id, rootTaskId).activeReconcile?.attemptId
+    if (acceptedAttempt === undefined) throw new Error('expected accepted root ReconcileAttempt')
+    service.taskBoard(run.id).settle(lead.id, rootTaskId, {
+      attemptId: acceptedAttempt,
+      progress: 'Remediation passed the fresh independent review.',
+      next: { kind: 'completed', reason: 'Current acceptance Vote approved.', result: 'Accepted result.' },
+    })
+    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
+      status: 'idle', work: { status: 'finished', summary: 'Accepted result.' },
+    })
+    expect(() => service.reportAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      outcome: 'complete',
+      reason: 'All formal-member work is quiescent.',
+      report: 'Final result.',
+    })).not.toThrow()
 
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Collaborative completion verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Collaborative completion Team closed.', run.id)
+    service.end(launcher as unknown as Agent, 'Work barrier test complete.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })
 
-  it('selects an outstanding terminal voter instead of repeatedly waking the Vote initiator', async () => {
-    const { root, configPath, taskPath } = fixture()
+  it('wakes every explicit Goal owner concurrently and stops after their submissions', async () => {
+    const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
+      configPath, projectRoot: root, requiredPaths: [],
     })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
     if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    service.messageHub(run.id).createVote(lead, {
-      channel: '#main',
-      kind: 'finish',
-      statement: 'The result and independent review are complete.',
-      voters: ['@reviewer'],
+    lead.status = 'idle'
+    reviewer.status = 'idle'
+    const leadBefore = lead.messages.length
+    const reviewerBefore = reviewer.messages.length
+    const goal = service.taskBoard(run.id).createGoal(lead.id, {
+      title: 'Parallel sprint', owners: ['lead', 'reviewer'],
     })
-    service.messageHub(run.id).read(reviewer, { conversation: '#main' })
-    const leadMessages = lead.messages.length
-    const reviewerMessages = reviewer.messages.length
-
-    service.agentIdle(lead as unknown as Agent)
-
-    expect(lead.messages).toHaveLength(leadMessages)
-    expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
+    await vi.waitFor(() => {
+      expect(lead.messages.length).toBeGreaterThan(leadBefore)
+      expect(reviewer.messages.length).toBeGreaterThan(reviewerBefore)
+    })
     expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('terminal Vote is already open') }),
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('including a reject recommendation') }),
     ])
-    expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
-      type: 'member_continued',
-      data: expect.stringContaining('"member":"reviewer"'),
-    }))
-
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Terminal voter selection verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Terminal voter Team closed.', run.id)
+    service.taskBoard(run.id).submitGoal(lead.id, goal.id, { kind: 'complete', reason: 'Implementation done.' })
+    expect(service.taskBoard(run.id).ownerTasks('lead')).toEqual([])
+    service.taskBoard(run.id).submitGoal(reviewer.id, goal.id, { kind: 'complete', reason: 'Review done.' })
+    expect(service.taskBoard(run.id).get(lead.id, goal.id).stableState.kind).toBe('completed')
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
+    service.end(launcher as unknown as Agent, 'Parallel Goal test complete.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })
 
-  it('starts another member turn with a required-task notice for a quiet mentioned message', async () => {
-    const { root, configPath, taskPath } = fixture()
+  it('drives Inbox and Reply Tasks even while the outer Team has no work item', async () => {
+    const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
+      configPath, projectRoot: root, requiredPaths: [],
     })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
     if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    lead.status = 'running'
-    reviewer.status = 'running'
-
+    reviewer.status = 'idle'
+    const before = reviewer.messages.length
     const sent = service.messageHub(run.id).send(lead, {
-      to: '#main',
-      text: '@reviewer Please inspect the latest result after this turn.',
-      delivery: 'quiet',
+      to: '#main', text: '@reviewer please inspect this.', mentions: ['@reviewer'], delivery: 'quiet',
     })
-    const requiredTask = service.taskBoard(run.id).pendingRequirement('reviewer')
-    expect(requiredTask).toMatchObject({
-      stableState: { kind: 'running' }, priority: 'high', assignees: ['reviewer'],
-      requirement: { kind: 'message', messageId: sent.messageId, assignee: 'reviewer' },
+    await vi.waitFor(() => expect(reviewer.messages.length).toBeGreaterThan(before))
+    const reply = service.taskBoard(run.id).pendingReply('reviewer')
+    if (reply === undefined) throw new Error('expected Reply Task')
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind))
+      .toEqual(expect.arrayContaining(['inbox', 'reply']))
+    service.messageHub(run.id).readInbox(reviewer)
+    service.taskBoard(run.id).syncInbox('reviewer', 0, 0)
+    const delivered = service.messageHub(run.id).send(reviewer, {
+      to: '#main', text: 'Inspection complete.', replyTo: sent.messageId, delivery: 'quiet',
     })
-    expect(service.messageHub(run.id).pendingWakeups(reviewer.id)).toEqual([])
-    const messagesAfterInjection = reviewer.messages.length
-
-    service.recordMemberSessionEvent(reviewer.id, {
-      type: 'turn/end',
-      seq: 1,
-      time: Date.now(),
-      data: { turn: 1, reason: { kind: 'completed' } },
-    })
-    reviewer.completeTurn()
-    service.agentStatusChanged(reviewer as unknown as Agent)
-
-    expect(reviewer.messages).toHaveLength(messagesAfterInjection + 1)
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
-      }),
-    ])
-    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'task.created', data: expect.stringContaining(sent.messageId) }),
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
-    ]))
-    if (requiredTask === undefined) throw new Error('expected required task')
-    const currentRequiredTask = service.taskBoard(run.id).get(reviewer.id, requiredTask.id)
-    if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    settleCompletedTask(
-      service.taskBoard(run.id), reviewer.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
-      'Latest result inspection complete.', 'Latest result inspection complete.',
-    )
-    expect(service.messageHub(run.id).pendingRequiredReply(reviewer.id)).toBeUndefined()
-    const completionNotice = lead.messages.flatMap(message => message.content)
-      .flatMap(block => block.type === 'text' ? [block.text] : [])
-      .find(text => text.includes(`[Fleet required task completed]`) && text.includes(requiredTask.id))
-    expect(completionNotice).toContain('No further completion action is required')
-    expect(completionNotice).not.toContain('use fleet_task action="complete"')
-
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Unread continuation verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Unread continuation Team closed.', run.id)
-    await service.wait(run.id, 1_000)
-    disconnect()
-  })
-
-  it('keeps a member active after replying to a required message until its task is completed', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    lead.status = 'running'
-    reviewer.status = 'running'
-
-    const messages = service.messageHub(run.id)
-    const messagesBeforeInitialUserInput = reviewer.messages.length
-    const sent = service.sendUserConversationMessage({
-      runId: run.id,
-      to: `@${reviewer.id}`,
-      text: 'Confirm the result before going idle.',
-      delivery: 'quiet',
-    })
-    expect(reviewer.messages.length).toBeGreaterThanOrEqual(messagesBeforeInitialUserInput + 1)
-    expect(reviewer.messages.flatMap(message => message.content)).toContainEqual(expect.objectContaining({
-      type: 'text', text: expect.stringContaining('Confirm the result before going idle.'),
-    }))
-    expect(messages.read(reviewer, { conversation: `@fleet-user:${run.id}` }).messages)
-      .toContainEqual(expect.objectContaining({ id: sent.messageId, mustReply: true }))
-    expect(messages.inbox(reviewer, { unreadOnly: true })).toEqual([])
-    expect(messages.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
-    const requiredTask = service.taskBoard(run.id).pendingRequirement('reviewer')
-    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: 'reviewer' })
-    expect(requiredTask).toMatchObject({ title: '对用户输入进行完整回复' })
-    expect(requiredTask?.description).not.toContain('Confirm the result before going idle.')
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining(`The required task for this exact message is ${requiredTask?.id}`),
-      }),
-    ])
-
-    const messagesBeforeRequiredReplyWake = reviewer.messages.length
-    reviewer.completeTurn()
-    service.agentStatusChanged(reviewer as unknown as Agent)
-    expect(reviewer.messages).toHaveLength(messagesBeforeRequiredReplyWake + 1)
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
-      }),
-    ])
-    const continuationText = reviewer.messages.at(-1)?.content
-      .flatMap(block => block.type === 'text' ? [block.text] : [])
-      .join('\n') ?? ''
-    expect(continuationText).toContain(`Source Fleet message: ${sent.messageId}`)
-    expect(continuationText).toContain('No Fleet reply to the source message has been recorded yet')
-    expect(continuationText).toContain('The original input is not repeated here')
-    expect(continuationText).not.toContain('Confirm the result before going idle.')
-
-    messages.send(reviewer, {
-      to: '@User',
-      text: 'The result is confirmed.',
-      delivery: 'quiet',
-    })
-    expect(messages.pendingRequiredReply(reviewer.id)).toBeUndefined()
-    expect(service.taskBoard(run.id).pendingRequirement('reviewer')?.id).toBe(requiredTask?.id)
-    const messagesAfterReply = reviewer.messages.length
-    service.agentIdle(reviewer as unknown as Agent)
-    expect(reviewer.messages).toHaveLength(messagesAfterReply)
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining('A Fleet reply to the source message has already been sent'),
-      }),
-    ])
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining('Do not repeat the work, rerun checks, or send another separate reply'),
-      }),
-    ])
-    if (requiredTask === undefined) throw new Error('expected required task')
-    const currentRequiredTask = service.taskBoard(run.id).get(reviewer.id, requiredTask.id)
-    if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    expect(() => settleCompletedTask(
-      service.taskBoard(run.id), reviewer.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
-      'Completion without final reply.',
-    ))
-      .toThrow('required task final reply cannot be empty')
-    const existingReply = messages.search(reviewer, {
-      conversation: '@User',
-      limit: 100,
-    }).find(message => message.text === 'The result is confirmed.')
-    const sourceMessagesBeforeCompletion = messages.search(reviewer, {
-      conversation: '@User',
-      limit: 100,
-    }).length
-    const completed = settleCompletedTask(
-      service.taskBoard(run.id), reviewer.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
-      'Final confirmation: the result is confirmed.', 'Final confirmation: the result is confirmed.',
-    )
-    expect(completed.requirement?.completionMessageId).toBe(existingReply?.id)
-    expect(messages.search(reviewer, { conversation: '@User', limit: 100 }))
-      .toHaveLength(sourceMessagesBeforeCompletion)
-    expect(messages.getMessage(reviewer, completed.requirement?.completionMessageId ?? '')).toMatchObject({
-      text: 'The result is confirmed.',
-    })
-    expect(service.taskBoard(run.id).pendingRequirement('reviewer')).toBeUndefined()
-    const messagesAfterCompletion = reviewer.messages.length
-    service.agentIdle(reviewer as unknown as Agent)
-    expect(reviewer.messages).toHaveLength(messagesAfterCompletion)
-    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
-      expect.objectContaining({ type: 'task.completed', data: expect.stringContaining(requiredTask.id) }),
-    ]))
-
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Required reply behavior verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Required reply Team closed.', run.id)
-    await service.wait(run.id, 1_000)
-    disconnect()
-  })
-
-  it('keeps a user-facing assistant active for required tasks while the Team has no running work', async () => {
-    const { root, configPath } = fixture()
-    const first = setup(root)
-    const run = await first.service.create(first.launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    const assistantId = run.assistants[0]?.view.id
-    if (assistantId === undefined) throw new Error('expected attached Fleet assistant')
-    first.disconnect()
-    await first.core.close()
-
-    const second = setup(root, { launcherId: first.launcher.id })
-    const { service, launcher } = second
-    const registeredTools: string[] = []
-    const scoped = new FakeAgentContext() as FakeAgentContext & {
-      tools: {
-        register(tool: { readonly name: string }): () => void
-        restrict(): () => void
-        guard(): () => void
-        get(name: string): unknown
-      }
-    }
-    launcher.ctx = scoped as unknown as Context
-    await service.attachAssistant(launcher as unknown as Agent, { runId: run.id })
-    expect(service.status(run.id)).toMatchObject({ runtimeState: 'dormant' })
-    scoped.tools = {
-      register: tool => { registeredTools.push(tool.name); return () => {} },
-      restrict: () => () => {},
-      guard: () => () => {},
-      get: name => [...registeredTools, 'fleet_send', 'fleet_followup', 'fleet_progress'].includes(name) ? { name } : undefined,
-    }
-    service.agentSessionStarted(launcher as unknown as Agent)
-    expect(registeredTools).toContain('fleet_send')
-    expect(registeredTools).toContain('fleet_messages')
-    expect(registeredTools).toContain('fleet_task')
-    const messages = service.messageHub(run.id)
-    const sent = service.sendUserConversationMessage({
-      runId: run.id,
-      to: `@${assistantId}`,
-      text: 'Reply before becoming idle.',
-      delivery: 'wakeup',
-    })
-    expect(service.status(run.id)).toMatchObject({ status: 'idle' })
-    expect(messages.pendingRequiredReply(assistantId)).toMatchObject({ id: sent.messageId })
-    expect(registeredTools).toContain('fleet_task')
-    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
-    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: assistantId })
-
-    const beforeRequiredReplyWake = launcher.messages.length
-    service.recordMemberSessionEvent(launcher.id, {
-      seq: 1,
-      time: Date.now(),
-      type: 'turn/end',
-      data: { turn: 1, reason: { kind: 'completed' } },
-    })
-    expect(launcher.messages).toHaveLength(beforeRequiredReplyWake + 1)
-    expect(launcher.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
-      }),
-    ])
-    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('required_task') }),
-    ]))
-
-    messages.send(launcher as unknown as Agent, {
-      to: '@User',
-      text: 'The required reply is complete.',
-      delivery: 'quiet',
-    })
-    expect(messages.pendingRequiredReply(assistantId)).toBeUndefined()
-    const afterReply = launcher.messages.length
-    service.agentStatusChanged(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterReply)
-    expect(launcher.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
-      }),
-    ])
-    if (requiredTask === undefined) throw new Error('expected required task')
-    const currentRequiredTask = service.taskBoard(run.id).get(launcher.id, requiredTask.id)
-    if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    settleCompletedTask(
-      service.taskBoard(run.id), launcher.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
-      'Final result: the required reply is complete.', 'Final result: the required reply is complete.',
-    )
-    const afterComplete = launcher.messages.length
-    service.agentStatusChanged(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterComplete)
-    service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterComplete)
-    second.disconnect()
-  })
-
-  it('wakes an idle member until an ordinary Channel message is read', async () => {
-    const { root, configPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-
-    const sent = service.messageHub(run.id).send(lead, {
-      to: '#main',
-      text: 'Ordinary Channel update without a mention.',
-      delivery: 'quiet',
-    })
-    const afterNotice = reviewer.messages.length
-    await vi.waitFor(() => expect(reviewer.messages).toHaveLength(afterNotice + 1))
-    expect(reviewer.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('Fleet inbox #main') }),
-    ])
-    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining('unread_message') }),
-    ]))
-
-    service.messageHub(run.id).read(reviewer, { conversation: '#main' })
-    const afterRead = reviewer.messages.length
-    service.agentIdle(reviewer as unknown as Agent)
-    expect(reviewer.messages).toHaveLength(afterRead)
-    disconnect()
-  })
-
-  it('keeps a user-facing assistant active for unread member replies while the Team has no running work', async () => {
-    const { root, configPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    const assistantId = run.assistants[0]?.view.id
-    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    if (assistantId === undefined || lead === undefined) throw new Error('expected assistant and lead')
-    expect(service.status(run.id)).toMatchObject({ status: 'idle' })
-
-    const sent = service.messageHub(run.id).send(lead, {
-      to: '#main',
-      text: '@team-assistant The requested analysis is ready.',
-      mentions: [`@${assistantId}`],
-      delivery: 'quiet',
-    })
-    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
-    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: assistantId })
-    const afterArrival = launcher.messages.length
-    service.agentSessionStarted(launcher as unknown as Agent)
-
-    await vi.waitFor(() => expect(launcher.messages).toHaveLength(afterArrival + 1))
-    expect(launcher.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
-      }),
-    ])
-    expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'member_continued', data: expect.stringContaining(sent.messageId) }),
-    ]))
-
-    expect(service.conversationMessages(launcher as unknown as Agent, {
-      action: 'read',
-      conversation: '#main',
-    })).toMatchObject({
-      messages: [expect.objectContaining({ id: sent.messageId })],
-    })
-    const afterRead = launcher.messages.length
-    service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterRead)
-    service.messageHub(run.id).send(launcher as unknown as Agent, {
-      to: '#main',
-      text: 'Analysis received; thank you.',
-      delivery: 'quiet',
-    })
-    const afterReply = launcher.messages.length
-    service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterReply)
-    if (requiredTask === undefined) throw new Error('expected required task')
-    const currentRequiredTask = service.taskBoard(run.id).get(launcher.id, requiredTask.id)
-    if (currentRequiredTask.activeReconcile?.status !== 'running') throw new Error('expected running required ReconcileAttempt')
-    settleCompletedTask(
-      service.taskBoard(run.id), launcher.id, requiredTask.id, currentRequiredTask.activeReconcile.attemptId,
-      'Final result: analysis received and reviewed.', 'Final result: analysis received and reviewed.',
-    )
-    const afterComplete = launcher.messages.length
-    service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterComplete)
-    disconnect()
-  })
-
-  it('restarts a required assistant task after its Session is reattached', async () => {
-    const { root, configPath } = fixture()
-    const { service, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    const assistantId = run.assistants[0]?.view.id
-    if (assistantId === undefined) throw new Error('expected attached Fleet assistant')
-    service.sendUserConversationMessage({
-      runId: run.id,
-      to: `@${assistantId}`,
-      text: 'Resume this required task after reconnecting.',
-      delivery: 'quiet',
-      mustReply: true,
-    })
-    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
-    if (requiredTask === undefined) throw new Error('expected required task')
-    const scoped = new FakeAgentContext() as FakeAgentContext & {
-      tools: {
-        register(tool: { readonly name: string }): () => void
-        restrict(): () => void
-        guard(): () => void
-        get(name: string): unknown
-      }
-    }
-    scoped.tools = {
-      register: () => () => {},
-      restrict: () => () => {},
-      guard: () => () => {},
-      get: name => ['fleet_send', 'fleet_followup', 'fleet_progress', 'fleet_messages'].includes(name) ? { name } : undefined,
-    }
-    launcher.ctx = scoped as unknown as Context
-    launcher.status = 'idle'
-    const beforeReconnect = launcher.messages.length
-    const beforeNextTurn = launcher.inbox.nextTurn.length
-    const beforeNextStep = launcher.inbox.nextStep.length
-
-    service.agentSessionStarted(launcher as unknown as Agent, true)
-
-    await vi.waitFor(() => expect(launcher.messages).toHaveLength(beforeReconnect + 1))
-    expect(launcher.inbox.nextTurn).toHaveLength(beforeNextTurn + 1)
-    expect(launcher.inbox.nextStep).toHaveLength(beforeNextStep)
-    expect(launcher.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining(requiredTask.id) }),
-    ])
-    disconnect()
-  })
-
-  it('freezes required-task continuation while the Team is paused and resumes it later', async () => {
-    const { root, configPath } = fixture()
-    const { service, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    const assistantId = run.assistants[0]?.view.id
-    if (assistantId === undefined) throw new Error('expected attached Fleet assistant')
-    const sent = service.sendUserConversationMessage({
-      runId: run.id,
-      to: `@${assistantId}`,
-      text: `@${assistantId} Complete this after the Team resumes.`,
-      mentions: [`@${assistantId}`],
-      delivery: 'quiet',
-    })
-    const requiredTask = service.taskBoard(run.id).pendingRequirement(assistantId)
-    expect(requiredTask?.requirement).toMatchObject({ messageId: sent.messageId, assignee: assistantId })
-
-    await service.pauseTeam(launcher as unknown as Agent, run.id)
-    expect(service.status(run.id)).toMatchObject({ status: 'paused' })
-    launcher.status = 'idle'
-    const afterPause = launcher.messages.length
-    service.recordMemberSessionEvent(launcher.id, {
-      seq: 1,
-      time: Date.now(),
-      type: 'turn/end',
-      data: { turn: 1, reason: { kind: 'completed' } },
-    })
-    service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterPause)
-    expect(service.taskBoard(run.id).pendingRequirement(assistantId)?.id).toBe(requiredTask?.id)
-
-    await service.resumeTeam(launcher as unknown as Agent, run.id)
-    const afterResume = launcher.messages.length
-    service.agentIdle(launcher as unknown as Agent)
-    expect(launcher.messages).toHaveLength(afterResume + 1)
-    expect(launcher.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining(requiredTask?.id ?? 'missing required task'),
-      }),
-    ])
-    expect(service.taskBoard(run.id).pendingRequirement(assistantId)?.id).toBe(requiredTask?.id)
-    disconnect()
-  })
-
-  it('pauses and resumes a Team without resuming members that were already paused individually', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-
-    await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
-    const runningLead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    if (runningLead === undefined) throw new Error('expected live lead')
-    runningLead.status = 'running'
-    launcher.status = 'running'
-    const [paused, duplicatePause] = await Promise.all([
-      service.pauseTeam(launcher as unknown as Agent, run.id),
-      service.pauseTeam(launcher as unknown as Agent, run.id),
-    ])
-
-    expect(paused).toMatchObject({
-      status: 'paused',
-      teamPausedMembers: ['lead'],
-      members: [
-        expect.objectContaining({ name: 'lead', status: 'paused' }),
-        expect.objectContaining({ name: 'reviewer', status: 'paused' }),
-      ],
-    })
-    expect(runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')).toBeUndefined()
-    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
-    expect(runningLead.cancelCount).toBe(1)
-    expect(launcher.cancelCount).toBe(1)
-    expect(paused.assistants[0]).toMatchObject({ status: 'idle' })
-    expect(duplicatePause).toEqual(paused)
-
-    const pausedRequest = service.sendUserConversationMessage({
-      runId: run.id,
-      to: '#main',
-      text: '@lead Continue this after the Team resumes.',
-      mentions: ['@lead'],
-      delivery: 'wakeup',
-    })
-    expect(service.taskBoard(run.id).pendingRequirement('lead')?.requirement).toMatchObject({
-      messageId: pausedRequest.messageId,
-      assignee: 'lead',
-    })
-
-    const resumed = await service.resumeTeamAsExternal(launcher as unknown as Agent, run.id)
-    expect(resumed).toMatchObject({
-      status: 'running',
-      teamPausedMembers: [],
-      members: [
-        expect.objectContaining({ name: 'lead', status: 'idle' }),
-        expect.objectContaining({ name: 'reviewer', status: 'paused' }),
-      ],
-    })
-    const resumedLead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const resumedLeadTexts = resumedLead?.messages.map(message => message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
-      .join('\n')) ?? []
-    const resumeSignalIndex = resumedLeadTexts.findIndex(text => text.includes('[Fleet pause lifted]'))
-    const queuedMessageIndex = resumedLeadTexts.findIndex(text => text.includes('Continue this after the Team resumes.'))
-    expect(resumeSignalIndex).toBeGreaterThanOrEqual(0)
-    expect(queuedMessageIndex).toBeGreaterThan(resumeSignalIndex)
-    expect(resumedLead?.messages).toContainEqual(expect.objectContaining({
-      content: [expect.objectContaining({ text: expect.stringContaining('Continue this after the Team resumes.') })],
-    }))
-    expect(service.taskBoard(run.id).pendingRequirement('lead')?.requirement).toMatchObject({
-      messageId: pausedRequest.messageId,
-      assignee: 'lead',
-    })
-    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')).toBeUndefined()
-    const resumedLeadMessages = resumedLead?.messages.length ?? 0
-    await service.wakeTeam(launcher as unknown as Agent, run.id)
-    expect(resumedLead?.messages).toHaveLength(resumedLeadMessages + 1)
-    expect(service.status(run.id).members).toContainEqual(expect.objectContaining({ name: 'reviewer', status: 'idle' }))
-    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')?.messages)
-      .toContainEqual(expect.objectContaining({
-        content: [expect.objectContaining({ text: expect.stringContaining('explicitly woken') })],
-      }))
-
-    service.end(launcher as unknown as Agent, 'Team pause controls verified.', run.id)
-    await service.wait(run.id, 1_000)
-    disconnect()
-  })
-
-  it('explicitly wakes every online member without interrupting the active work', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    const leadMessages = lead.messages.length
-    const reviewerMessages = reviewer.messages.length
-    const assistantMessages = launcher.messages.length
-
-    expect(await service.wakeTeam(launcher as unknown as Agent, run.id)).toMatchObject({ status: 'running' })
-    expect(lead.messages).toHaveLength(leadMessages + 1)
-    expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
-    expect(launcher.messages).toHaveLength(assistantMessages + 1)
-    expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
-      type: 'team_woken',
-      data: expect.stringContaining('"reason":"manual"'),
-    }))
-
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Team wake verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Wake test Team closed.', run.id)
-    await service.wait(run.id, 1_000)
-    disconnect()
-  })
-
-  it('wakes one unpaused member without interrupting another member', async () => {
-    const { root, configPath, taskPath } = fixture()
-    const { service, runtime, launcher, disconnect } = setup(root)
-    const run = await service.create(launcher as unknown as Agent, {
-      configPath,
-      projectRoot: root,
-      requiredPaths: [],
-    })
-    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
-    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
-    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
-    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
-    const leadMessages = lead.messages.length
-    const reviewerMessages = reviewer.messages.length
-
-    expect(await service.wakeMember(launcher as unknown as Agent, run.id, 'lead'))
-      .toMatchObject({ name: 'lead' })
-    expect(lead.messages).toHaveLength(leadMessages + 1)
-    expect(reviewer.messages).toHaveLength(reviewerMessages)
-    expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
-      type: 'member_woken',
-      data: expect.stringContaining('"member":"lead"'),
-    }))
-
-    await service.pauseMember(launcher as unknown as Agent, run.id, 'reviewer')
-    expect(await service.wakeMember(launcher as unknown as Agent, run.id, 'reviewer'))
-      .toMatchObject({ name: 'reviewer', status: 'idle' })
-    expect(runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')?.messages.at(-1)?.content)
-      .toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('explicitly woken') })])
-
-    service.finish(launcher as unknown as Agent, 'cancelled', 'Member wake verified.', run.id)
-    await service.wait(run.id, 1_000)
-    service.end(launcher as unknown as Agent, 'Member wake Team closed.', run.id)
+    service.taskBoard(run.id).recordReply(reviewer.id, reply.id, delivered.messageId)
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
+    service.end(launcher as unknown as Agent, 'Inbox and Reply test complete.', run.id)
     await service.wait(run.id, 1_000)
     disconnect()
   })
@@ -4923,7 +4637,7 @@ describe('FleetRunService', () => {
     expect(reviewer.messages).toHaveLength(reviewerMessages)
 
     service.recordMemberSessionEvent(lead.id, completedTurn(11))
-    expect(lead.messages).toHaveLength(leadMessages)
+    expect(lead.messages).toHaveLength(leadMessages + 1)
     expect(reviewer.messages).toHaveLength(reviewerMessages + 1)
     expect(reviewer.messages.at(-1)?.content).toEqual([
       expect.objectContaining({ type: 'text', text: expect.stringContaining('network recovery') }),
@@ -4934,14 +4648,14 @@ describe('FleetRunService', () => {
 
     service.recordMemberSessionEvent(lead.id, failedTurn(12))
     vi.advanceTimersByTime(29_999)
-    expect(lead.messages).toHaveLength(leadMessages)
-    vi.advanceTimersByTime(1)
     expect(lead.messages).toHaveLength(leadMessages + 1)
+    vi.advanceTimersByTime(1)
+    expect(lead.messages).toHaveLength(leadMessages + 2)
     service.recordMemberSessionEvent(lead.id, failedTurn(13))
     vi.advanceTimersByTime(59_999)
-    expect(lead.messages).toHaveLength(leadMessages + 1)
+    expect(lead.messages).toHaveLength(leadMessages + 2)
     vi.advanceTimersByTime(1)
-    expect(lead.messages).toHaveLength(leadMessages + 1)
+    expect(lead.messages).toHaveLength(leadMessages + 2)
 
     expect(service.readTrace(run.id, 0, 200).events).toEqual(expect.arrayContaining([
       expect.objectContaining({

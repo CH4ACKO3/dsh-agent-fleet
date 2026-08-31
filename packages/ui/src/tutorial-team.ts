@@ -59,7 +59,7 @@ const TUTORIAL_TRACES: Readonly<Record<string, readonly FleetPanelMemberTraceEve
       message: { content: [{ type: 'reasoning', text: 'There is a message from Nova in #main. I should read the agreed checklist before saving the shared artifact.' }] },
     }),
     recordedEvent(TUTORIAL_SESSIONS.mina, 6330, '2026-08-22T21:37:59.300Z', 'session.tool/call', {
-      name: 'fleet_messages', arguments: '{"action":"read","conversation":"#main"}',
+      name: 'fleet_inbox', arguments: '{"action":"read"}',
     }),
     recordedEvent(TUTORIAL_SESSIONS.mina, 6331, '2026-08-22T21:37:59.316Z', 'session.tool/result', {
       message: { content: [{ type: 'text', text: 'msg_2 · Nova proposed the agreed one-paragraph onboarding checklist and assigned Mina to save it.' }] },
@@ -92,7 +92,7 @@ const TUTORIAL_TRACES: Readonly<Record<string, readonly FleetPanelMemberTraceEve
       message: { content: [{ type: 'reasoning', text: 'Nova posted the proposed checklist. I should read the Channel, wait for Mina to save the file, then independently inspect it.' }] },
     }),
     recordedEvent(TUTORIAL_SESSIONS.rowan, 7454, '2026-08-22T21:37:54.778Z', 'session.tool/call', {
-      name: 'fleet_messages', arguments: '{"action":"read","conversation":"#main"}',
+      name: 'fleet_inbox', arguments: '{"action":"read"}',
     }),
     recordedEvent(TUTORIAL_SESSIONS.rowan, 8256, '2026-08-22T21:38:25.853Z', 'session.tool/call', {
       name: 'read', arguments: '{"file_path":"…/project-brief.md"}',

@@ -1,57 +1,142 @@
-# Recursive Task reconciliation
+# Recursive Task runtime
 
-Fleet models long-running work as a recursive Task tree. A Task keeps one
-durable stable state. Agent work can change that state only by settling its
-current ReconcileAttempt. The only operational exception is an explicit
-manager cancellation; deterministic engine fallbacks also use atomic state
-replacement.
+Fleet models collaboration as a recursive Task tree. Task persistence uses
+schema version 6 and intentionally rejects older Task state; this is a breaking
+replacement, not a migration layer.
 
-This is a breaking replacement for the old `ready`, `waiting_time`,
-`waiting_event`, and `waiting_vote` execution-state model. Persisted Task state
-uses schema version 5 only. Version 5 separates persisted owner intent from
-Task state and does not migrate older Task state.
+Each Task has a durable stable state and a required reason:
 
-## Operations, intentions, and state
+- `running`: domain work, owners, children, or reconcilers are active;
+- `dormant`: no member should run now, but a future reconciler or domain event
+  can reactivate the Task;
+- `blocked`: progress needs intervention;
+- `paused`: automatic progression is suppressed;
+- `completed`: the domain result is final;
+- `cancelled`: the Task was explicitly retired.
 
-Task management operations create a Task, update its metadata, or cancel it.
-Cancellation requires `task.manage` and is an explicit lifecycle operation.
-Required-message Tasks cannot be cancelled while their external reply
-obligation remains. There is no manual reopen or general-purpose stable-state
-setter.
+Only domain handlers, deterministic timeout fallbacks, and fenced
+ReconcileAttempts write stable state. `fleet_task` is read-only; an Agent cannot
+manually set a generic Task to completed or blocked.
 
-The `complete` and `block` Task actions are owner intentions. They record what
-one owner believes should happen and never write the Task stable state. The
-`settle` action is different: it requires the current ReconcileAttempt fence
-and exact target identity, and is the normal path that atomically installs a
-next stable state. Task management permission cannot bypass that target fence.
+## Domain Tasks
 
-## Stable states
+The public write surface is intentionally higher-level:
 
-- `running`: the Task owns an immutable cohort of child Task ids for this state
-  version and has one or more armed reconcilers;
-- `dormant`: no work should run now, but one or more deterministic triggers can
-  reopen reconciliation later;
-- `blocked`: progress requires intervention that is not currently predictable;
-- `paused`: automatic progression is intentionally suppressed;
-- `completed` and `cancelled`: terminal states.
+- Inbox: every member has one persistent Inbox Task. Unread messages move it
+  from `dormant` to `running`; `fleet_inbox read` consumes an aggregate bounded
+  batch across visible conversations and the domain reconciles it automatically.
+- Reply: every resolved `@mention` creates one Reply Task per target.
+  `fleet_reply` sends the response, records the delivery message id, and
+  atomically completes the Task.
+- Goal: one or more owners submit `complete` or `block` with a reason through
+  `fleet_goal`. `complete` means the owned assignment produced its result; that
+  result may still recommend rejecting a parent outcome. `block` is reserved
+  for an external condition that prevents the assignment from continuing.
+- Vote: each voter casts `approve` or `reject` with a reason through
+  `fleet_vote`. A rejection determines the result immediately; unanimous
+  approval completes the Vote.
+- Interaction: each attached assistant has at most one persistent foreground
+  Interaction Task. Direct native user inputs increment its revision instead
+  of creating more Tasks. `fleet_user_task continue` links formal-member Tasks
+  and makes the Interaction dormant. A system reconciler later stores one
+  revision-fenced completion Delivery with the linked outcomes. `report` or
+  `block` records a result intent that consumes that Delivery only after a
+  non-empty native assistant response is recorded.
+- Composite: orchestration Tasks are advanced only by `fleet_reconcile` and can
+  recursively own or link child Tasks.
 
-`running` describes an active orchestration scope, not a live model call. All
-Agents may sleep while a running parent waits for its children.
+Optional Goal, Vote, and Reply deadlines install a deterministic `$system`
+reconciler whose fallback blocks the Task. No model call is needed at timeout.
 
-## Triggers
+## Owners and targeted liveness
 
-A reconciler is addressed to one exact member and has a trigger expression.
-Supported leaves are:
+A Task has zero or more concrete owners. A member's Task list is derived rather
+than persisted separately. It contains exactly the `running` Tasks for which
+that member still owes its domain operation:
 
-- state entry (`on_enter`);
-- a durable named event;
-- an absolute time;
-- a count of cohort children in selected stable states;
-- a count of owners that marked `complete` or `block` intent.
+- unread Inbox content;
+- an undelivered Reply;
+- a missing Goal submission;
+- a missing Vote ballot;
+- an unsettled foreground Interaction revision owned by an assistant.
 
-`all` and `any` compose these leaves recursively. For example, a time-boxed
-iteration can reconcile when all children have returned a result or when the
-review deadline arrives:
+A non-empty list wakes only that owner. It never wakes unrelated Team members.
+The item disappears as soon as the domain operation is recorded or the Task
+leaves `running`. A Task may have no owner when progression is entirely event,
+child, time, or reconciler driven.
+
+Any real user message addressed to a Team member updates that recipient's
+persistent Inbox and Reply Tasks. If its Session is not loaded, Fleet restores
+only that concrete owner; unrelated members with empty Task lists remain
+offline. The same targeted loader handles Tasks created by internal Team
+activity. There is no input-level "restore the whole Team" path.
+
+This makes an iteration or sprint a normal parent Task: open one child Goal per
+member, let every owner work independently, and arm the parent reconciler for a
+barrier such as all children settled, at least one child completed, or the
+review deadline.
+
+## Foreground Interaction liveness
+
+The foreground user conversation is a durable scheduling source, not an
+ordinary Fleet message. A direct user input creates or reopens the assistant's
+single Interaction Task. Multiple inputs are merged by monotonically
+increasing `inputRevision`; a later revision removes any stale continuation or
+report intent.
+
+While the assistant is actively deciding what to do, the Interaction is
+`running` and therefore appears in only that assistant's owner list. If formal
+Team work must continue, the assistant calls `fleet_user_task continue` with
+live formal-member Tasks or creates one concrete formal-member Goal. After a
+progress Delivery it may omit both to retain the already-linked live Tasks. Fleet
+atomically records those links and changes the Interaction to `dormant` with
+two deterministic `$system` reconcilers:
+
+- a latched delivery event, fired as soon as all linked Tasks settle or the
+  Team becomes quiescent;
+- an absolute progress-check time, five minutes by default.
+
+Team quiescence means every formal member is idle and none has a running
+attempt, ready attempt, or pending owner Task. It excludes assistants, so the
+Interaction itself cannot prevent the condition. Linked completion,
+quiescence, or the deadline atomically creates a persistent `pendingDelivery`
+containing a delivery id, the input revision, trigger cause, and snapshots of
+every linked Task outcome, then returns the Interaction to `running`. The
+normal owner-list path injects that structured Delivery and wakes only its
+assistant. Unrelated Team work may remain active. The assistant can inspect the
+result, atomically consume the Delivery by installing another bounded
+continuation, or prepare the user-facing answer.
+
+The linked Task ids remain fenced across that wake-up and across later
+`continue` calls. A continuation drops only links that have already settled,
+then appends its newly supplied live Tasks or Goal. It cannot replace a live
+composite root with one interesting child. If any retained or newly linked
+Task is still live, `fleet_user_task report` and `block` are rejected; the
+assistant must repair or repeat the bounded continuation. This prevents a
+stall deadline or progress check from bypassing an unfinished root outcome.
+
+`fleet_user_task report` and `block` record intent but do not directly write a
+terminal state. Fleet commits `completed` or `blocked` only when the same input
+revision subsequently records a non-empty native `assistant/message`. This
+also consumes the pending Delivery. It keeps the scheduler state, Delivery,
+and visible report on the same side of the durability boundary: an interrupted
+turn cannot mark the user request handled without actually reporting it. If a
+turn ends without reporting or installing a continuation, the Interaction
+remains `running`; its non-empty owner list injects the same Delivery again.
+
+## ReconcileAttempt and the no-gap invariant
+
+A reconciler contains:
+
+- a trigger expression;
+- one exact target member or `$system`;
+- priority and retry delay;
+- a maximum wake count;
+- an optional absolute timeout;
+- a deterministic `blocked`, `paused`, or `cancelled` fallback.
+
+Supported trigger leaves are `on_enter`, a latched named event, an absolute
+time, and a child-state count. `all` and `any` compose them. For example:
 
 ```json
 {
@@ -68,104 +153,93 @@ review deadline arrives:
 }
 ```
 
-Event receipts are latched on their Task. An event that arrives before the
-Task enters a matching dormant state is therefore observed immediately after
-settlement instead of being lost.
+When a trigger matches, Fleet atomically materializes one ready
+ReconcileAttempt for the current Task state version. The scheduler claims it
+before sending a `[Fleet task attempt]` notice, which creates a fresh per-turn
+`attemptId` fence. The recipient therefore calls `resolve` directly with the
+Task id and that exact attempt id; `claim` is only for a ready Task discovered
+manually through `list`. Resolution validates the Task version, reconciler id,
+target member, and attempt id, then stages children and the next stable state
+in one transaction.
 
-## Owners and member task lists
+The crucial invariant is enforced at commit time:
 
-A Task has zero or more owners. Every owner is one concrete Fleet member,
-including a formal Agent or an attached user-facing assistant. Owners are
-independent from assignees: an assignee receives an exact ReconcileAttempt,
-while an owner independently contributes a completion intent.
+> A ReconcileAttempt cannot resolve to `running` or `dormant` unless the next
+> stable state installs at least one reconciler.
 
-An owner starts without an intent. That same member may call Task `complete`
-with evidence or Task `block` with a reason. The resulting intent is durable,
-but the Task remains in its current stable state. An `owner_intent_count`
-trigger can start the next ReconcileAttempt when, for example, every owner has
-submitted either intent:
+The new state is evaluated for already-true triggers before the old attempt is
+retired. Therefore the next ready attempt can be visible in the same atomic
+commit. Child creation, linking, cancellation, Vote creation, owner changes,
+progress, and the next state are committed together; a stale duplicate attempt
+cannot win afterward.
 
-```json
-{
-  "kind": "owner_intent_count",
-  "intents": ["complete", "block"],
-  "op": "eq",
-  "value": "owners"
-}
+If a member turn ends without resolution, Fleet removes only that turn's fence
+and retries the same target after `retryAfterSeconds`. Exhausting `maxWakeups`
+or reaching `timeoutAt` atomically applies the configured fallback. This keeps
+long work durable without keeping a model process alive or waking the whole
+Team.
+
+## Child cohorts
+
+`parentId` defines the recursive lifecycle tree. A running state's `cohort` is
+the child membership snapshot observed by its triggers. Children created or
+linked during resolution enter the next cohort before it becomes visible, so
+an all-children barrier cannot race with late child creation.
+
+Tasks with `decision: "vote"` require an approved Vote child in their current
+cohort before a ReconcileAttempt may commit `completed`. A rejected Vote is
+itself a successfully completed decision Task; its parent must start a
+remediation/acceptance round or choose a real terminal impediment.
+
+## Work and observation
+
+For a decomposed work item, the assistant first attaches an ordered `stages`
+plan to its kickoff directive. A stage is either owned Goal work or an explicit
+approve/reject Vote, and may depend only on earlier stage keys. `fleet_run
+start` atomically creates a zero-owner composite root plus this first cohort and
+its concrete dependencies. Only dependency-free Goal owners or Vote voters
+enter runnable owner lists.
+
+The root carries no owner, so it consumes no turns while the cohort runs. When
+the complete/blocked/cancelled count reaches the cohort size, one designated
+coordinator receives a fenced ReconcileAttempt. That attempt must either choose
+a terminal state or atomically install another cohort and its trigger. Direct
+Goal/Vote creation under a managed work root is rejected; later rounds are
+created only through `child_ops`, so a late child cannot open a liveness gap.
+
+If the plan contains an acceptance Vote, the root uses `decision: "vote"`.
+A rejection therefore cannot complete the root. The coordinator creates a
+remediation Goal, waits for it, creates a fresh Vote, and completes only from a
+cohort containing approval. Old attempts remain terminal children instead of
+being reopened, which preserves an auditable sequence:
+
+```text
+implementation #1 -> review #1 (reject) -> remediation #1
+                  -> review #2 (approve) -> root completed
 ```
 
-A member's owner task list is derived rather than persisted separately. It
-contains exactly the Tasks that are currently in stable state `running` and
-have no intent from that member. A non-empty list generates a
-targeted continuation for that member whenever they become idle; no unrelated
-member is woken. The continuation stops as soon as the owner marks either
-intent or the Task leaves `running`.
+Without a staged kickoff, Fleet creates the same composite root with one
+default delivery Goal as its first cohort. In both forms, the root's terminal
+state deterministically finishes or blocks the outer work record. Ordinary
+messages never start work Tasks.
 
-Owners may be declared when a Task is created. If a ReconcileAttempt is active,
-changing the owner set is part of that attempt's atomic settlement; otherwise
-an administrative Task update may change it directly. Retained owners keep
-their existing intent, while newly added owners start without one.
+The same continuation round handles ordinary collaboration without a separate
+workflow engine:
 
-## ReconcileAttempt lifecycle
+- sequential handoff: the reconciler replaces A's completed Goal with B's Goal;
+- parallel work and merge: one cohort contains A/B/C, then an all/any/count
+  trigger opens the aggregation round;
+- required response: a Reply Task is linked into the cohort;
+- joint judgment: a Vote child records approve/reject while the parent decides
+  what that result means;
+- external wait: the parent becomes dormant with an event trigger and timeout;
+- retry or repair: a new attempt child replaces the old cohort instead of
+  reopening terminal history.
 
-When a trigger becomes true, Fleet atomically attaches one ready
-ReconcileAttempt to the source Task state version. A Task version can have at
-most one active ReconcileAttempt. If several reconcilers match, Fleet selects
-the highest priority and then the lexically smallest id.
+Only the current leaf owners, Vote voters, Reply assignees, or one ready
+reconciler target are woken. A zero-owner parent waiting on children consumes
+no model turns.
 
-Claiming an attempt:
-
-1. verifies the exact target member and completed dependencies;
-2. reserves that member for this reconciliation;
-3. creates a fresh per-turn `attemptId` fence;
-4. increments the configured wake count.
-
-Settlement validates the Task version, reconcile id, target member, and current
-turn fence. It then commits all of the following as one state update:
-
-- the progress entry;
-- child Task creation, linking, cancellation, or Vote creation;
-- the next explicit stable state;
-- the next cohort and reconciler definitions;
-- retirement of the old ReconcileAttempt.
-
-The new stable state is evaluated for already-true triggers before the caller
-is released. A non-terminal settlement is invalid unless `running` or
-`dormant` includes at least one reconciler.
-
-## Retry and timeout
-
-A ReconcileAttempt configures one target member, a retry delay, a maximum wake
-count, an optional absolute timeout, and a deterministic fallback stable state.
-If an Agent turn ends without settlement, Fleet keeps the same ReconcileAttempt,
-removes the old turn fence, and wakes only that target again. Other members are
-not woken.
-
-The member is logically reserved while the attempt is waiting or running, but
-no model call is kept alive between retries. Reaching the wake limit or timeout
-atomically applies the configured `blocked`, `paused`, or `cancelled` fallback.
-
-The liveness invariant is therefore:
-
-> Every automatically live Task has either an active ReconcileAttempt or an
-> armed durable reconciler, while every owner without an intent has a derived
-> member task list that targets only that owner. A model process does not need to remain
-> online between continuations.
-
-## Recursive children and Votes
-
-`parentId` defines lifecycle ownership as a strict tree. A running state's
-`cohort` is the immutable child membership snapshot observed by its triggers.
-Adding children requires a new parent state version, so an `all children`
-barrier cannot race with late child creation.
-
-Links may include existing Tasks without changing their lifecycle parent.
-Creating a child inside settlement assigns the current Task as its parent and
-adds it to the new cohort before the settlement is visible.
-
-A collaborative decision is represented as a Vote child Task. The child stays
-`dormant` while ballots are open, then a deterministic system reconciler marks
-it completed or blocked. That child transition can trigger the parent's next
-ReconcileAttempt. A parent whose decision mode is `vote` cannot enter
-`completed` or `blocked` until its current cohort contains the corresponding
-approved Vote child.
+`fleet_progress` is deliberately outside Task state. It is a read-only compact
+thread-style view of one reachable member's current runtime status and bounded
+recent output. Reading it never wakes, interrupts, or changes that member.

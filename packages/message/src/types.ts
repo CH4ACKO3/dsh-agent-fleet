@@ -51,6 +51,7 @@ export type FleetSystemNotificationKind =
   | 'calendar_notice'
 export type FleetMessageKind =
   | 'text'
+  | 'work_directive'
   | 'meeting_opened'
   | 'meeting_closed'
   | 'vote_opened'
@@ -75,8 +76,6 @@ export interface FleetMessage {
   readonly recipientIds?: string[]
   readonly text: string
   readonly replyTo?: string
-  /** The host must keep the recipient active until its required action is satisfied. */
-  readonly mustReply?: boolean
   readonly resources: string[]
   readonly mentions: string[]
   readonly delivery: FleetDelivery
@@ -87,7 +86,6 @@ export interface SendMessageInput {
   readonly to: FleetTarget
   readonly text: string
   readonly replyTo?: string
-  readonly mustReply?: boolean
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
   readonly delivery: FleetDelivery
@@ -386,7 +384,7 @@ export type FleetCoordinationEvent =
       readonly action: 'read'
       readonly agentId: string
       readonly messageId: string
-      /** Cumulative contiguous character offset returned by fleet_messages read/text. */
+      /** Cumulative contiguous character offset returned by Inbox reads. */
       readonly through: number
     }
   /** Legacy persisted terminal receipt. New writes use the cumulative read action. */

@@ -1,6 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
-
 import { MessageHub } from '../src/hub.js'
 import { installMessageTools } from '../src/index.js'
 import type { AgentDirectory, MessageAgent } from '../src/types.js'
@@ -92,6 +90,41 @@ function setup(): {
 }
 
 describe('MessageHub', () => {
+  it('aggregates unread messages across conversations into one bounded inbox read', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    hub.send(lead, { to: '@reviewer', text: 'Direct request.', delivery: 'quiet' })
+    hub.send(qa, { to: '#general', text: 'Channel update.', delivery: 'quiet' })
+    expect(hub.unreadSummary(reviewer.id)).toEqual({
+      unreadMessages: 2,
+      unreadChars: 'Direct request.'.length + 'Channel update.'.length,
+    })
+    const read = hub.readInbox(reviewer)
+    expect(read.messages.map(message => [message.conversation, message.text])).toEqual([
+      ['@reviewer', 'Direct request.'],
+      ['#general', 'Channel update.'],
+    ])
+    expect(read).toMatchObject({ hasMore: false, remainingUnread: 0, remainingUnreadChars: 0 })
+    expect(hub.unreadSummary(reviewer.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+  })
+
+  it('keeps targeted Channel messages visible without waking non-mentioned inbox owners', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: '@reviewer Start the first phase. QA follows later.',
+      mentions: ['@reviewer'],
+      delivery: 'wakeup',
+    })
+
+    expect(hub.unreadSummary(reviewer.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: '@reviewer Start the first phase. QA follows later.'.length,
+    })
+    expect(hub.unreadSummary(qa.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+    expect(hub.readInbox(qa)).toMatchObject({ messages: [], remainingUnread: 0 })
+    expect(hub.getMessage(qa, sent.messageId)).toMatchObject({ id: sent.messageId })
+  })
+
   it('keeps ordinary quiet direct Agent messages non-blocking', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {
@@ -105,8 +138,8 @@ describe('MessageHub', () => {
     expect(reviewer.injected).toHaveLength(1)
     expect(reviewer.followedUp).toHaveLength(0)
     expect(reviewer.injected[0]).toContain('Please inspect the parser.')
-    expect(reviewer.injected[0]).toContain('do not call fleet_messages merely to read it again')
-    expect(reviewer.injected[0]).not.toContain('must-reply')
+    expect(reviewer.injected[0]).toContain('do not call fleet_inbox merely to read it again')
+    expect(reviewer.injected[0]).not.toContain('reply-task')
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
       from: 'lead',
@@ -124,11 +157,10 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(reviewer.injectedContext[0]?.source).toEqual({ kind: 'user' })
-    expect(reviewer.injected[0]).toContain('must-reply')
+    expect(reviewer.injected[0]).toContain('reply-task')
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: human.messageId,
       origin: 'user',
-      mustReply: true,
     })
     expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: human.messageId })
 
@@ -142,11 +174,10 @@ describe('MessageHub', () => {
       plugin: 'dsh-agent-fleet',
       form: 'relay',
     })
-    expect(hub.read(reviewer, { conversation: '@lead' }).messages.at(-1))
-      .not.toMatchObject({ mustReply: true })
+    expect(hub.read(reviewer, { conversation: '@lead' }).messages.at(-1)?.mentions).toEqual([])
   })
 
-  it('keeps required replies pending until each recipient posts in the same conversation', () => {
+  it('keeps Reply sources pending until an explicit domain receipt completes them', () => {
     const { hub, lead, reviewer, qa } = setup()
 
     const direct = hub.sendHuman(lead, {
@@ -158,14 +189,13 @@ describe('MessageHub', () => {
     hub.read(reviewer, { conversation: '@lead' })
     expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({
       id: direct.messageId,
-      mustReply: true,
     })
     expect(hub.followupRequiredReply(reviewer)).toMatchObject({ id: direct.messageId })
     expect(reviewer.followedUp.at(-1)).toContain(
-      `Call fleet_send or fleet_followup with to="@lead" to send the reply.`,
+      `Use fleet_reply with the Reply Task for message ${direct.messageId}.`,
     )
     expect(reviewer.followedUp.at(-1)).toContain(
-      'Ordinary model output is not sent to Fleet and does not satisfy must-reply.',
+      'Ordinary model output does not deliver the reply or complete its receipt.',
     )
 
     hub.send(reviewer, {
@@ -180,23 +210,24 @@ describe('MessageHub', () => {
       text: 'Direct request confirmed.',
       delivery: 'quiet',
     })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: direct.messageId })
+    hub.completeRequiredReply(reviewer.id, direct.messageId)
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
     expect(hub.pendingRequiredReply(lead.id)).toBeUndefined()
 
     const userChannel = hub.sendHuman(lead, {
       to: '#general',
       text: 'User Channel updates do not require replies.',
-      mustReply: true,
       delivery: 'quiet',
     })
     hub.read(reviewer, { conversation: '#general' })
-    expect(hub.getMessage(reviewer, userChannel.messageId).mustReply).toBeUndefined()
+    expect(hub.getMessage(reviewer, userChannel.messageId).mentions).toEqual([])
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
 
     const channel = hub.send(lead, {
       to: '#general',
-      text: 'Everyone must acknowledge this Channel update.',
-      mustReply: true,
+      text: '@reviewer @qa Please acknowledge this Channel update.',
+      mentions: ['@reviewer', '@qa'],
       delivery: 'quiet',
     })
     hub.read(reviewer, { conversation: '#general' })
@@ -204,7 +235,7 @@ describe('MessageHub', () => {
     expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: channel.messageId })
     expect(hub.pendingRequiredReply(qa.id)).toMatchObject({ id: channel.messageId })
     expect(reviewer.injected.at(-1)).toContain(
-      `Call fleet_send or fleet_followup with to="#general" to send the reply.`,
+      `Use fleet_reply with the Reply Task for message ${channel.messageId}.`,
     )
 
     hub.send(reviewer, {
@@ -219,6 +250,8 @@ describe('MessageHub', () => {
       text: 'Channel update acknowledged.',
       delivery: 'quiet',
     })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: channel.messageId })
+    hub.completeRequiredReply(reviewer.id, channel.messageId)
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
     expect(hub.pendingRequiredReply(qa.id)).toMatchObject({ id: channel.messageId })
   })
@@ -233,14 +266,16 @@ describe('MessageHub', () => {
 
     expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
     expect(hub.pendingRequiredReply(qa.id)).toBeUndefined()
-    expect(reviewer.injected.at(-1)).toContain('does not satisfy must-reply')
-    expect(qa.injected.at(-1)).not.toContain('does not satisfy must-reply')
+    expect(reviewer.injected.at(-1)).toContain('does not deliver the reply')
+    expect(qa.injected.at(-1)).not.toContain('does not deliver the reply')
 
     hub.send(reviewer, {
       to: '#general',
       text: 'The inspection is complete.',
       delivery: 'quiet',
     })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
+    hub.completeRequiredReply(reviewer.id, sent.messageId)
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
   })
 
@@ -250,8 +285,8 @@ describe('MessageHub', () => {
     first.hub.onEvent(event => { events.push(event) })
     const sent = first.hub.send(first.lead, {
       to: '@reviewer',
-      text: 'Reply after restart.',
-      mustReply: true,
+      text: '@reviewer Reply after restart.',
+      mentions: ['@reviewer'],
       delivery: 'quiet',
     })
     first.hub.read(first.reviewer, { conversation: '@lead' })
@@ -260,13 +295,14 @@ describe('MessageHub', () => {
     second.hub.restore(events)
     expect(second.hub.pendingRequiredReply(second.reviewer.id)).toMatchObject({
       id: sent.messageId,
-      mustReply: true,
     })
     second.hub.send(second.reviewer, {
       to: '@lead',
       text: 'Reply restored and completed.',
       delivery: 'quiet',
     })
+    expect(second.hub.pendingRequiredReply(second.reviewer.id)).toMatchObject({ id: sent.messageId })
+    second.hub.completeRequiredReply(second.reviewer.id, sent.messageId)
     expect(second.hub.pendingRequiredReply(second.reviewer.id)).toBeUndefined()
   })
 
@@ -309,22 +345,6 @@ describe('MessageHub', () => {
       ? { ...event, message: { ...event.message, mentions: [] } }
       : event))
     expect(alreadyRead.hub.pendingRequiredReply(alreadyRead.reviewer.id)).toBeUndefined()
-  })
-
-  it('rejects mustReply on Meeting messages', () => {
-    const { hub, lead, reviewer } = setup()
-    hub.openMeeting(lead, {
-      id: 'review',
-      title: 'Review',
-      agenda: 'Inspect the change.',
-      participants: ['@reviewer'],
-    })
-    expect(() => hub.send(lead, {
-      to: 'meeting:review',
-      text: 'This marker is conversation-only.',
-      mustReply: true,
-      delivery: 'quiet',
-    })).toThrow('mustReply is supported only for direct messages and Channels')
   })
 
   it('applies the send admission hook before validation and persistence', () => {
@@ -534,7 +554,7 @@ describe('MessageHub', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {
       to: '#general',
-      text: 'The body is available only through fleet_messages.',
+      text: 'The body is available only through fleet_inbox.',
       delivery: 'quiet',
     })
     const notice = reviewer.inbox.nextStep[0]
@@ -643,7 +663,7 @@ describe('MessageHub', () => {
     })
     expect(reviewer.inbox.nextTurn).toHaveLength(1)
     expect(reviewer.followedUp.at(-1)).toContain(
-      `Call fleet_messages with action="read" and conversation="@lead" to load this inbox`,
+      'Call fleet_inbox with action="read" to consume unread messages from all visible sources',
     )
     expect(reviewer.followedUp.at(-1)).toContain(
       'This notification and ordinary model output do not mark the inbox as read.',
@@ -820,7 +840,6 @@ describe('MessageHub', () => {
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
       mentions: ['reviewer'],
-      mustReply: true,
     })
     expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
 
@@ -830,6 +849,8 @@ describe('MessageHub', () => {
       mentions: ['@lead'],
       delivery: 'quiet',
     })
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
+    hub.completeRequiredReply(reviewer.id, sent.messageId)
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
     expect(hub.pendingRequiredReply(lead.id)).toMatchObject({ id: reply.messageId })
 
@@ -838,6 +859,8 @@ describe('MessageHub', () => {
       text: 'Receipt confirmed.',
       delivery: 'quiet',
     })
+    expect(hub.pendingRequiredReply(lead.id)).toMatchObject({ id: reply.messageId })
+    hub.completeRequiredReply(lead.id, reply.messageId)
     expect(hub.pendingRequiredReply(lead.id)).toBeUndefined()
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
 
@@ -1457,92 +1480,6 @@ describe('MessageHub', () => {
     })
   })
 
-  it('renders common Vote results without repeating statements or member ids', () => {
-    const { hub, lead, reviewer } = setup()
-    const registered: Array<{
-      readonly name: string
-      readonly output: { render(args: unknown, value: unknown): readonly { readonly type: string; readonly text?: string }[] }
-    }> = []
-    installMessageTools({
-      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
-    } as never, hub, { messages: false })
-    const tool = registered.find(candidate => candidate.name === 'fleet_vote')
-    const vote = hub.createVote(lead, {
-      channel: '#general',
-      kind: 'message',
-      statement: 'A proposal that is already present in the tool call and should not be echoed.',
-      voters: ['@reviewer'],
-    })
-
-    const text = tool?.output.render({}, { action: 'create', vote })[0]?.text ?? ''
-    expect(text).toBe('{"id":"vote_1","channel":"#general","kind":"message","status":"open","approvals":"0/1"}')
-    expect(text).not.toContain(vote.statement)
-    expect(text).not.toContain(lead.id)
-    expect(text).not.toContain(reviewer.id)
-  })
-
-  it('renders exactly the bounded text marked read and continues from persistent progress', () => {
-    const { hub, lead, reviewer } = setup()
-    const longText = 'a'.repeat(5_000)
-    const sent = hub.send(lead, { to: '@reviewer', text: longText, delivery: 'quiet' })
-    const page = hub.read(reviewer, { conversation: '@lead', maxChars: 2_000 })
-    const registered: Array<{
-      readonly name: string
-      readonly output: { render(args: unknown, value: unknown): readonly { readonly type: string; readonly text?: string }[] }
-    }> = []
-    installMessageTools({
-      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
-    } as never, hub, { coordination: false })
-    const rendered = registered.find(candidate => candidate.name === 'fleet_messages')
-      ?.output.render({ action: 'read' }, page)[0]?.text ?? ''
-
-    expect(rendered).toContain('"read_range":{"start":0,"end":2000,"total":5000}')
-    expect(rendered).toContain('"text_more":{"action":"text","message_id":"msg_1","offset":2000,"total_length":5000}')
-    expect(rendered.length).toBeLessThan(3_000)
-    expect(hub.readMessageText(reviewer, sent.messageId, undefined, 2_000)).toEqual({
-      messageId: sent.messageId,
-      offset: 2_000,
-      text: 'a'.repeat(2_000),
-      totalLength: 5_000,
-      hasMore: true,
-      nextOffset: 4_000,
-      readThrough: 4_000,
-    })
-    expect(hub.readMessageText(reviewer, sent.messageId, undefined, 2_000)).toEqual({
-      messageId: sent.messageId,
-      offset: 4_000,
-      text: 'a'.repeat(1_000),
-      totalLength: 5_000,
-      hasMore: false,
-      readThrough: 5_000,
-    })
-  })
-
-  it('declares internal routing metadata returned by every fleet_messages action', async () => {
-    const { hub, lead, reviewer } = setup()
-    hub.sendHuman(lead, { to: '@reviewer', text: 'One private user input.', delivery: 'quiet' })
-    const registered: Array<{
-      readonly name: string
-      readonly output: { readonly schema: unknown }
-      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
-    }> = []
-    installMessageTools({
-      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
-    } as never, hub, { coordination: false })
-    const tool = registered.find(candidate => candidate.name === 'fleet_messages')
-    if (tool === undefined) throw new Error('expected fleet_messages')
-
-    const read = await tool.execute(
-      { action: 'read', conversation: '@lead', unread_only: false },
-      { agent: reviewer },
-    )
-    expect(read).toMatchObject({ messages: [expect.objectContaining({ origin: 'user', recipientIds: [reviewer.id] })] })
-    expect(validateJsonSchemaValue(tool.output.schema as never, read)).toEqual([])
-
-    const inbox = await tool.execute({ action: 'inbox', unread_only: false }, { agent: reviewer })
-    expect(validateJsonSchemaValue(tool.output.schema as never, inbox)).toEqual([])
-  })
-
   it('checks current action authorization when a previously visible tool executes', async () => {
     const { hub, lead } = setup()
     const registered: Array<{
@@ -1788,7 +1725,7 @@ describe('MessageHub', () => {
 
     expect(lead.injected[0]).toContain('The transaction boundary needs one owner.')
     expect(qa.injected[0]).toContain('The transaction boundary needs one owner.')
-    expect(qa.injected[0]).not.toContain('Call fleet_messages')
+    expect(qa.injected[0]).not.toContain('Call fleet_inbox')
     expect(observer.injected).toHaveLength(0)
     expect(() => hub.read(observer, { conversation: 'meeting:design-review' })).toThrow('cannot access')
   })

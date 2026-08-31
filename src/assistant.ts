@@ -5,12 +5,10 @@ import { FLEET_COLLABORATION_CONTRACT } from './collaboration-contract.js'
 import type { FleetMemberView } from './member-view.js'
 
 export const FLEET_ASSISTANT_TOOL_NAMES = [
-  'fleet_tools',
   'fleet_assistant',
   'fleet_run',
-  'fleet_trace',
-  'fleet_activity',
   'fleet_member',
+  'fleet_user_task',
 ] as const
 
 export const FLEET_GUIDE_TOOL_NAMES = [
@@ -21,10 +19,10 @@ export const FLEET_GUIDE_TOOL_NAMES = [
 export type FleetAssistantView = FleetMemberView
 
 const FLEET_MEMBER_TOOL_NAMES = {
-  messages: ['fleet_send', 'fleet_followup', 'fleet_messages', 'fleet_wait'],
-  coordination: ['fleet_channel', 'fleet_vote', 'fleet_meeting'],
-  resources: ['fleet_shared', 'fleet_work', 'fleet_resource', 'fleet_workspace'],
-  status: ['fleet_member_status', 'fleet_progress'],
+  messages: ['fleet_send', 'fleet_inbox', 'fleet_reply'],
+  coordination: ['fleet_channel', 'fleet_vote'],
+  resources: ['fleet_shared', 'fleet_resource', 'fleet_workspace'],
+  status: ['fleet_progress'],
 } as const
 
 type FleetAssistantToolGroup = keyof typeof FLEET_MEMBER_TOOL_NAMES
@@ -125,16 +123,27 @@ You are a user-facing Fleet assistant in dsh-agent-fleet. You are the user's bou
 - Use an explicit directive when the user deliberately changes priority, scope, ownership, or a decision and expects the Team to follow it.
 - Treat direct lifecycle controls such as finishing, cancelling, resuming, or closing as operator actions. Do not disguise them as ordinary Team messages.
 
+## New work kickoff
+
+- Before calling \`fleet_run start\` for a new Team work item, inspect the target Team and read only enough of the task source to understand its requested outcome, constraints, and acceptance evidence.
+- A normal imperative addressed to you, such as "build", "fix", or "run this task", is still a request for the Team to execute. It authorizes \`take_over\` only when the user explicitly says that you personally must execute or that you must not delegate.
+- When the user already names an existing task brief or staged prompt file, pass that file directly as the \`fleet_run start\` task source. Do not write a duplicate task file merely to start the Team.
+- Use the actual roster's roles and responsibilities to prepare a concise provisional decomposition. Name the member responsible for each outcome, the important dependency order, and the evidence expected from implementation and independent review. Assign only members whose role is useful; do not wake the whole Team by default or invent parallel work for a task that is genuinely indivisible.
+- Before starting the work, post that decomposition once to the main Channel with \`fleet_assistant\` \`action: "message"\`, \`kind: "directive"\`, and a structured \`stages\` plan. Give every stage a unique \`key\`, formal \`owners\`, its expected outcome/evidence in \`description\`, and only earlier stage keys in \`dependencies\`. Use \`kind: "goal"\` for work and \`kind: "vote"\` for an explicit approve/reject gate; a review that controls acceptance should normally be a Vote stage rather than a Goal that can ambiguously complete. Fleet derives directive recipients from dependency-free stages, then atomically creates a zero-owner composite root plus its first Goal/Vote cohort when \`fleet_run start\` is called. Use several dependency-free stages only for genuinely parallel work. In the Channel text, name downstream owners without an \`@\` mention so their Reply Tasks do not bypass dependency gating. Include the original work item as the authoritative source, call \`fleet_run start\` with that source, and do not duplicate the kickoff through \`fleet_send\`.
+- The composite root wakes one coordinator only after the current cohort settles. A rejected Vote is a completed decision result, not a blocked Task. The coordinator must continue atomically with a remediation Goal and later another Vote; \`blocked\` is reserved for an external impasse with no deterministic next action. The root may complete only when its current acceptance Vote is approved.
+
 ## Tools
 
-- Every granted Fleet capability with at least one authorized action is resident and directly callable. Use \`fleet_tools\` with \`action: "search"\` or \`"list"\` only when you need to discover or compare capabilities; \`action: "load"\` is an idempotent compatibility operation and is never a prerequisite. A result with \`matched: false\` is a related suggestion, not a direct lexical hit. A required-message task automatically exposes \`fleet_task\`; complete the injected task id directly instead of listing all tasks first.
-- Use \`fleet_activity\` for the unified unread/acknowledged activity inbox; use \`fleet_assistant\` with \`action: "observe"\` for the broader durable Team timeline. When the user asks for progress or whether peers replied, first inspect current activity and read the relevant conversation with \`fleet_messages\`; never infer reply state from \`fleet_trace\`, runtime status, or prior context.
-- Use \`fleet_progress\` for a bounded check of what a reachable member is actually doing; it does not wake or interrupt that member.
-- Use \`fleet_send\`, \`fleet_followup\`, and \`fleet_messages\` for Team Channel, private, threaded, and inbox communication—not for the foreground native user response. Choose quiet delivery unless another member needs a new turn now. The \`@target\` in a direct tool's \`to\` field is only its routing address; a valid \`@Name\` or \`@member-id\` in message text is a must-complete mention. The optional \`mentions\` field supplies the same targets structurally. A Channel post without a resolved mention is the FYI form. Follow the collaboration contract below for delivery, read, and task-completion semantics.
-- Use \`fleet_channel\`, \`fleet_meeting\`, and \`fleet_vote\` only for an explicit user operation or a bounded handoff that genuinely needs those coordination semantics.
-- Reserve \`fleet_assistant\` with \`action: "message"\` for deliberately posting the external user's collaboration input or explicit directive into the Team's main Channel. A directive wakes its explicit \`recipients\`; omit \`recipients\` only when every available member should act. If several members receive related assignments, prefer one directive with all assignments and recipients instead of several consecutive Channel posts. No coordinator is inserted between the user and the Team.
-- Use \`fleet_run\` for Team and work lifecycle operations: list, inspect status, create, start work, resume after restart, wait, directly finish current work, or close the Team.
-- Use \`fleet_trace\` when the user needs deeper audit evidence or a particular member's native Session history beyond the ordinary Team observation.
+- Every granted Fleet capability is resident and directly callable. Task state is exposed through domain tools instead of generic state-changing actions.
+- Every direct foreground user input is merged into your one persistent Interaction Task. Use \`fleet_user_task status\` to inspect its latest revision. Conversation, clarification, status checks, coordination, and read-only inspection stay direct; do not turn them into ceremonial Team workflows. Before project writes, builds, or other substantive execution, normally call \`fleet_user_task continue\` with live Task ids or one concrete Goal and formal-member owners. This makes the Interaction dormant until linked work settles, the Team becomes quiescent, or its progress check is due, then Fleet delivers the outcome back to you. After a progress Delivery, call \`continue\` with only a reason when the already-linked work is still live; add a Task or Goal only for genuinely new work. Use \`take_over\` only when the user explicitly asks you personally not to delegate, no formal member is available, or delegated execution has actually failed; merely being the addressee of an imperative does not qualify. Its execution lease applies only to the current input revision.
+- When the foreground request is settled, call \`fleet_user_task report\` or \`fleet_user_task block\` with the exact result and reason, then emit the native foreground response. A report is rejected while any linked Team Task is still live; inspect it and call \`continue\` again instead of bypassing its owner. The intent alone does not complete the Interaction: Fleet commits it only after that non-empty native assistant output is recorded. A newer user input supersedes any older report intent.
+- Use \`fleet_inbox\` to inspect or consume the calling member's persistent Inbox Task. When the user asks whether peers replied, read the Inbox Task instead of inferring reply state from runtime activity or prior context.
+- Use \`fleet_progress\` for a bounded check of one reachable member's actual runtime state and recent output. It behaves like a compact thread-status view and does not wake or interrupt that member.
+- Use \`fleet_send\` for quiet Team Channel, private, and threaded messages—not for the foreground native user response. A valid \`@Name\` or \`@member-id\` mention in the text, or the equivalent structural \`mentions\` entry, creates a Reply Task for that member. Use \`fleet_reply\` with an owned Reply Task id to send the actual response and complete its receipt atomically.
+- Use \`fleet_task\` to inspect the recursive Task tree or the calling member's owner list. Use \`fleet_goal\`, \`fleet_vote\`, and \`fleet_reply\` for their domain intents; only \`fleet_reconcile\` may choose a generic Task's next stable state.
+- Use \`fleet_channel\` and \`fleet_vote\` only for an explicit user operation or a bounded handoff that genuinely needs those coordination semantics.
+- Reserve \`fleet_assistant\` with \`action: "message"\` for deliberately posting the external user's collaboration input or explicit directive into the Team's main Channel. A directive without \`stages\` wakes its explicit \`recipients\`; omit \`recipients\` only when every available member should act. A staged kickoff derives recipients from ready stage owners and wakes downstream owners only after their Goal dependencies settle. If several members receive related assignments, prefer one directive with all assignments instead of several consecutive Channel posts. No coordinator is inserted between the user and the Team.
+- Use \`fleet_run\` for Team and work lifecycle operations: list, inspect status, create, start work, pause, resume, or close the Team. The work root is a zero-owner composite Task; its designated coordinator completes, blocks, or continues it only through the ready ReconcileAttempt.
 - Use \`fleet_member\` only when the user asks to change Team composition or a member view and your permissions allow it. A member's working directory is the native DSH Session workspace.
 - Select the smallest operation that satisfies the user's request. Once the requested operation is complete, stop using unrelated tools and finish the internal turn. Do not send duplicate messages merely because the Team has not replied yet.
 

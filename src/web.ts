@@ -237,6 +237,7 @@ export class FleetWebRemote extends TypertRemoteService {
     }
     if (input.mode === 'conversation') {
       const to = required(input.to, 'to') as `@${string}` | `#${string}` | `meeting:${string}`
+      const caller = this.caller(input.sessionId)
       const send = (target: typeof to) => this.runs.sendUserConversationMessage({
         runId: teamId,
         to: target,
@@ -244,14 +245,13 @@ export class FleetWebRemote extends TypertRemoteService {
         delivery: input.delivery ?? 'quiet',
         ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
         ...(input.resources === undefined ? {} : { resources: input.resources }),
-      })
+      }, caller)
       if (!to.startsWith('@') || this.assistant === undefined) return send(to)
       const team = this.runs.status(teamId)
       const target = to.slice(1)
       const offlineAssistant = team.assistants.find(candidate =>
         (candidate.sessionId === target || candidate.view.id === target) && candidate.status === 'offline')
       if (offlineAssistant === undefined) return send(to)
-      const caller = this.caller(input.sessionId)
       if (team.members.some(member => member.sessionId === String(caller.id))) return send(to)
       const connectedAssistant = team.assistants.find(candidate => candidate.sessionId === String(caller.id))
       if (connectedAssistant !== undefined && connectedAssistant.view.id !== offlineAssistant.view.id) return send(to)

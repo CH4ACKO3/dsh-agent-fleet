@@ -1,163 +1,59 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { FLEET_TOOL_CATALOG, installFleetToolDiscovery, searchFleetTools } from '../src/tool-discovery.js'
+import { FLEET_TOOL_CATALOG, searchFleetTools } from '../src/tool-discovery.js'
 
-describe('Fleet tool discovery', () => {
-  const allowed = new Set([
-    'fleet_send', 'fleet_messages', 'fleet_followup', 'fleet_wait',
-    'fleet_channel', 'fleet_vote', 'fleet_meeting',
-    'fleet_shared', 'fleet_work', 'fleet_resource', 'fleet_workspace',
-    'fleet_member_status', 'fleet_progress',
-  ])
+describe('Fleet member tool catalog', () => {
+  const all = new Set(FLEET_TOOL_CATALOG.map(entry => entry.name))
+  const permissions = new Set(FLEET_TOOL_CATALOG.flatMap(entry =>
+    Object.values(entry.privilegedActions ?? {}).flatMap(value => typeof value === 'string' ? [value] : value)))
 
-  it('finds optional tools by English or Chinese intent without an LLM', () => {
-    expect(searchFleetTools('consensus vote', allowed, new Set())[0]).toMatchObject({
-      name: 'fleet_vote', group: 'coordination', loaded: false,
-    })
-    expect(searchFleetTools('共享文件', allowed, new Set()).map(match => match.name)).toContain('fleet_shared')
-  })
-
-  it('does not reveal groups unavailable to the member', () => {
-    expect(searchFleetTools('external deployment', new Set(['fleet_send']), new Set())).toEqual([])
-  })
-
-  it('reports only actions granted by member permissions', () => {
-    expect(searchFleetTools('resource', allowed, new Set()).find(match => match.name === 'fleet_resource'))
-      .toMatchObject({
-        actions: ['list', 'get'],
-        restrictedActions: [{ action: 'add', permissions: ['resource.write'] }],
-      })
-    expect(searchFleetTools('resource', allowed, new Set(), new Set(['resource.write']))
-      .find(match => match.name === 'fleet_resource')?.actions).toEqual(['list', 'get', 'add'])
-    expect(searchFleetTools('shared file', allowed, new Set())
-      .find(match => match.name === 'fleet_shared')).toMatchObject({
-        actions: ['list', 'read'],
-        restrictedActions: [
-          { action: 'write', permissions: ['resource.write'] },
-          { action: 'delete', permissions: ['resource.write'] },
-        ],
-      })
-    expect(searchFleetTools('shared file', allowed, new Set(), new Set(['resource.write']))
-      .find(match => match.name === 'fleet_shared')?.actions).toEqual(['list', 'read', 'write', 'delete'])
-  })
-
-  it('segments natural Chinese queries and applies domain aliases without dependencies', () => {
-    const allAllowed = new Set(FLEET_TOOL_CATALOG.map(entry => entry.name))
-    const permissions = new Set(FLEET_TOOL_CATALOG.flatMap(entry =>
-      Object.values(entry.privilegedActions ?? {}).flatMap(value => typeof value === 'string' ? [value] : value)))
-    const cases = [
-      ['查看团队目前运行状态', 'fleet_run'],
-      ['谁正在做什么', 'fleet_progress'],
-      ['给成员发一条私聊', 'fleet_send'],
-      ['紧急叫醒审阅员', 'fleet_followup'],
-      ['投票决定是否发布', 'fleet_vote'],
-      ['开会讨论这个方案', 'fleet_meeting'],
-      ['声明我正在编辑 src 目录', 'fleet_work'],
-      ['修改成员权限组', 'fleet_permission'],
-      ['看看最近发生了什么', 'fleet_activity'],
-      ['启动一个用户助理会话', 'fleet_assistant'],
-      ['唤醒整个团队', 'fleet_run'],
-      ['恢复单个成员', 'fleet_member'],
-    ] as const
-    for (const [query, expected] of cases) {
-      expect(searchFleetTools(query, allAllowed, new Set(), permissions)[0]?.name, query).toBe(expected)
-    }
-  })
-
-  it('expands a directly matched small family while keeping related results distinguishable', () => {
-    const matches = searchFleetTools(
-      '投票决定是否发布',
-      new Set(['fleet_channel', 'fleet_vote', 'fleet_meeting']),
-      new Set(),
-      new Set(['vote.create', 'channel.manage', 'meeting.manage']),
-    )
-    expect(matches.map(match => match.name)).toEqual(['fleet_vote', 'fleet_channel', 'fleet_meeting'])
-    expect(matches[0]).toMatchObject({ family: 'coordination', matched: true })
-    expect(matches.slice(1)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ family: 'coordination', matched: false }),
-      expect.objectContaining({ family: 'coordination', matched: false }),
+  it('contains the Task-based collaboration surface and excludes superseded tools', () => {
+    expect([...all]).toEqual(expect.arrayContaining([
+      'fleet_inbox', 'fleet_send', 'fleet_reply', 'fleet_goal', 'fleet_vote',
+      'fleet_task', 'fleet_reconcile', 'fleet_channel', 'fleet_resource', 'fleet_progress',
+      'fleet_user_task',
+    ]))
+    expect([...all]).not.toEqual(expect.arrayContaining([
+      'fleet_messages', 'fleet_followup', 'fleet_wait', 'fleet_member_status',
+      'fleet_meeting', 'fleet_schedule', 'fleet_calendar', 'fleet_work', 'fleet_document', 'fleet_tools',
     ]))
   })
 
-  it('never expands unavailable or actionless family members', () => {
-    const matches = searchFleetTools(
-      '发一条私聊',
-      new Set(['fleet_send', 'fleet_messages', 'fleet_followup', 'fleet_wait']),
-      new Set(),
-    )
-    expect(matches.map(match => match.name)).toEqual(['fleet_send', 'fleet_messages', 'fleet_wait'])
-    expect(matches.some(match => match.name === 'fleet_followup')).toBe(false)
+  it('finds the new domain tools by Chinese or English intent', () => {
+    const cases = [
+      ['查看未读收件箱', 'fleet_inbox'],
+      ['完成必回消息', 'fleet_reply'],
+      ['mark my goal blocked', 'fleet_goal'],
+      ['投票决定是否发布', 'fleet_vote'],
+      ['处理任务状态决议', 'fleet_reconcile'],
+      ['谁正在做什么', 'fleet_progress'],
+      ['汇报用户任务结果', 'fleet_user_task'],
+      ['助理接管执行', 'fleet_user_task'],
+    ] as const
+    for (const [query, expected] of cases) {
+      expect(searchFleetTools(query, all, new Set(), permissions)[0]?.name, query).toBe(expected)
+    }
   })
 
-  it('does not expand an unrelated family from a generic Chinese noun', () => {
-    const names = searchFleetTools(
-      '挂载另一个工作区',
-      new Set(['fleet_workspace', 'fleet_work', 'fleet_git', 'fleet_member_status', 'fleet_progress']),
-      new Set(),
-      new Set(['workspace.read', 'workspace.manage', 'git.inspect', 'git.scope-check', 'git.worktree-create', 'member-status.read']),
-    ).map(match => match.name)
-    expect(names).toEqual(['fleet_workspace', 'fleet_work', 'fleet_git'])
+  it('keeps generic Task actions read-only', () => {
+    expect(searchFleetTools('task state', all, new Set(), permissions)
+      .find(match => match.name === 'fleet_task')?.actions).toEqual(['list', 'owner_list', 'get'])
   })
 
-  it('includes permission-filtered core tools and tracks exact loaded tools', () => {
-    const visible = new Set(['fleet_run', 'fleet_member', 'fleet_trace'])
-    expect(searchFleetTools('team run', visible, new Set(['fleet_run']))[0]).toMatchObject({
-      name: 'fleet_run', loaded: true,
-    })
-    expect(searchFleetTools('唤醒整个团队', visible, new Set(), new Set(['team.manage']))[0])
-      .toMatchObject({ name: 'fleet_run', actions: expect.arrayContaining(['wake', 'resume']) })
-    expect(searchFleetTools('拉起未加载的团队成员', visible, new Set(), new Set(['team.manage']))[0])
-      .toMatchObject({ name: 'fleet_member', actions: expect.arrayContaining(['resume']) })
-    expect(searchFleetTools('manage members', visible, new Set(), new Set())
-      .find(match => match.name === 'fleet_member')).toMatchObject({ actions: ['list'] })
-    expect(searchFleetTools('manage members', visible, new Set(), new Set(['team.manage']))
-      .find(match => match.name === 'fleet_member')?.actions)
-      .toEqual(['list', 'add', 'update', 'configure', 'configure_all', 'pause', 'resume', 'remove'])
+  it('reports create permissions on Goal and Vote without restricting owner intent', () => {
+    expect(searchFleetTools('goal', all, new Set())
+      .find(match => match.name === 'fleet_goal')).toMatchObject({
+        actions: ['list', 'get', 'complete', 'block'],
+        restrictedActions: [{ action: 'create', permissions: ['task.create'] }],
+      })
+    expect(searchFleetTools('goal', all, new Set(), new Set(['task.create']))
+      .find(match => match.name === 'fleet_goal')?.actions)
+      .toEqual(['list', 'get', 'create', 'complete', 'block'])
   })
 
-  it('rejects an exact load when none of that tool actions are authorized', async () => {
-    let discovery: { readonly description: string; execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown> } | undefined
-    installFleetToolDiscovery({
-      tools: {
-        register: tool => {
-          discovery = tool as typeof discovery
-          return () => {}
-        },
-      },
-    } as never, {
-      allowedTools: new Set(['fleet_followup']),
-      residentTools: new Set(),
-      permissions: new Set(),
-      load: () => { throw new Error('must not load') },
+  it('tracks fleet_progress as a resident observation tool without a status-write permission', () => {
+    expect(searchFleetTools('成员最近输出', all, new Set(['fleet_progress']))[0]).toMatchObject({
+      name: 'fleet_progress', loaded: true, actions: ['read'], restrictedActions: [],
     })
-    if (discovery === undefined) throw new Error('expected fleet_tools discovery')
-    expect(discovery.description).toContain('does not list host tools such as bash')
-    expect(discovery.description).toContain('already resident')
-    await expect(discovery.execute({ action: 'load', name: 'fleet_followup' }))
-      .rejects.toThrow('no actions available')
-  })
-
-  it('keeps compatibility load idempotent for a resident tool', async () => {
-    let discovery: { execute(args: { readonly action: 'load'; readonly name: string }): Promise<unknown> } | undefined
-    const load = vi.fn()
-    installFleetToolDiscovery({
-      tools: {
-        register: tool => {
-          discovery = tool as typeof discovery
-          return () => {}
-        },
-      },
-    } as never, {
-      allowedTools: new Set(['fleet_vote']),
-      residentTools: new Set(['fleet_vote']),
-      permissions: new Set(['vote.create']),
-      load,
-    })
-    if (discovery === undefined) throw new Error('expected fleet_tools discovery')
-    await expect(discovery.execute({ action: 'load', name: 'fleet_vote' })).resolves.toMatchObject({
-      loadedTools: ['fleet_vote'],
-      matches: [expect.objectContaining({ name: 'fleet_vote', loaded: true })],
-    })
-    expect(load).not.toHaveBeenCalled()
   })
 })

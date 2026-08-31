@@ -207,7 +207,9 @@ describe('FleetWebRemote', () => {
   })
 
   it('sends direct UI conversations as the external user without attaching the current Session', () => {
+    const caller = { id: 'ui-session' } as Agent
     const ctx = new Context()
+    Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
     const runs = {
       status: vi.fn(() => ({ assistants: [] })),
       sendUserConversationMessage: vi.fn(() => ({ messageId: 'message-one', recipients: 1, woken: 0 })),
@@ -229,7 +231,7 @@ describe('FleetWebRemote', () => {
       to: '@member-session',
       text: 'A direct message from the user.',
       delivery: 'quiet',
-    })
+    }, caller)
     expect(runs.requireAssistantConnection).not.toHaveBeenCalled()
 
     remote.send({
@@ -247,7 +249,7 @@ describe('FleetWebRemote', () => {
       text: '@reviewer stop using the stale branch.',
       mentions: ['@reviewer'],
       delivery: 'interrupt',
-    })
+    }, caller)
   })
 
   it('rebinds an offline Team assistant to the foreground Session before delivering its first message', async () => {
@@ -283,7 +285,7 @@ describe('FleetWebRemote', () => {
     expect(assistant.activate).toHaveBeenCalledWith(caller, 'team-one', view)
     expect(runs.sendUserConversationMessage).toHaveBeenCalledWith({
       runId: 'team-one', to: '@ui-session', text: 'Are you there?', delivery: 'wakeup',
-    })
+    }, caller)
   })
 
   it('routes lightweight member request configuration without a structural update', async () => {

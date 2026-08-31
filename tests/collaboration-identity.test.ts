@@ -75,7 +75,7 @@ describe('Fleet collaboration identities', () => {
     collaboration.close()
   })
 
-  it('reconciles completed required tasks with restored message obligations', () => {
+  it('restores completed Reply Tasks and the persistent Inbox Task independently', () => {
     const lead = view('lead')
     const reviewer = view('reviewer')
     const views = new Map([lead, reviewer].map(member => [member.id, member]))
@@ -104,21 +104,15 @@ describe('Fleet collaboration identities', () => {
     const sent = first.messages.send(agents.get('agent-lead') as never, {
       to: '#general', text: '@reviewer inspect the release.', mentions: ['@reviewer'], delivery: 'quiet',
     })
-    const required = first.tasks.pendingRequirement('reviewer')
+    const required = first.tasks.pendingReply('reviewer')
     if (required === undefined) throw new Error('expected required task')
-    const claimed = first.tasks.claim('agent-reviewer', required.id)
-    const attempt = claimed.activeReconcile?.attemptId
-    if (attempt === undefined) throw new Error('expected required ReconcileAttempt')
-    const completed = first.tasks.settle('agent-reviewer', required.id, {
-      attemptId: attempt,
-      progress: 'Release inspection complete.',
-      next: {
-        kind: 'completed', result: 'Release inspection complete.', finalReply: 'Release inspection complete.',
-      },
+    const delivered = first.messages.send(agents.get('agent-reviewer') as never, {
+      to: '#general', text: 'Release inspection complete.', replyTo: sent.messageId, delivery: 'quiet',
     })
-    expect(completed.requirement?.completionMessageId).toBeDefined()
+    const completed = first.tasks.recordReply('agent-reviewer', required.id, delivered.messageId)
+    expect(completed.domain).toMatchObject({ kind: 'reply', completionMessageId: delivered.messageId })
     const taskState = first.tasks.state()
-    expect(first.messages.pendingRequiredReply('reviewer')).toBeUndefined()
+    expect(first.tasks.pendingReply('reviewer')).toBeUndefined()
 
     collaboration.closeTeam('team-required')
     const restored = open(() => {})
@@ -130,11 +124,14 @@ describe('Fleet collaboration identities', () => {
     restored.attachMember('agent-lead', lead)
     restored.attachMember('agent-reviewer', reviewer)
     restored.restore({ coordination, resources: [], memberStatuses: [] })
-    expect(restored.tasks.pendingRequirement('reviewer')).toBeUndefined()
-    expect(restored.messages.pendingRequiredReply('reviewer')).toBeUndefined()
+    expect(restored.tasks.pendingReply('reviewer')).toBeUndefined()
     expect(restored.tasks.state().tasks).toContainEqual(expect.objectContaining({
       id: required.id, stableState: expect.objectContaining({ kind: 'completed' }),
-      requirement: expect.objectContaining({ messageId: sent.messageId }),
+      domain: expect.objectContaining({ kind: 'reply', messageId: sent.messageId, completionMessageId: delivered.messageId }),
+    }))
+    expect(restored.tasks.state().tasks).toContainEqual(expect.objectContaining({
+      domain: expect.objectContaining({ kind: 'inbox', owner: 'reviewer', unreadMessages: 0 }),
+      stableState: expect.objectContaining({ kind: 'dormant' }),
     }))
     collaboration.close()
   })

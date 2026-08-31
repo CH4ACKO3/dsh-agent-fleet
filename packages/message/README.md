@@ -1,60 +1,42 @@
 # Message
 
-DSH Agent Fleet 的进程内通信组件。
+DSH Agent Fleet 的底层进程内消息与投递组件。
 
-当前实现提供七个模型工具：
+该包负责消息日志、频道、按成员划分的已读进度、原生 Session 投递、重绑定补投、搜索与
+分页。完整 Fleet 主机在它之上提供持久 Inbox Task、Reply Task 和 Vote Task；消息包自身
+不决定 Task 稳定状态。
 
-- `fleet_send`：静默私信或频道发言；
-- `fleet_followup`：唤醒指定 Agent；
-- `fleet_messages`：渐进读取私信或频道历史，并按消息持久记录实际读到的正文范围；
-- `fleet_wait`：等待下一次消息或频道变化；
-- `fleet_channel`：列出、创建、更新和归档频道；
-- `fleet_meeting`：列出、发起和结束会议。
-- `fleet_vote`：在频道中创建、读取和参与一致同意 Vote。
+## Agent 工具
 
-Message 单独安装时，消息历史、频道、会议和 Vote 只保存在当前进程；由根插件启动
-Team run 时，它们同时进入该 run 的持久协作轨迹。实际投递直接使用 DSH Agent 的 `inject` 和
-`followup`。每条新消息会固化发送时的接收成员；回执分别记录待送达、已送达和已读，满足
-`已读 ⊆ 已送达 ⊆ 接收成员`。待送达会记录当前卡点：没有活动 Session、原生 inbox 注入失败，
-或成员已退休；成员重新绑定 Session 时会自动补投。完整正文被原生上下文消费，或者由
-`fleet_messages read` / `fleet_messages text` 返回时，都会推进持久 `readThrough`；正文全部
-进入上下文后才算已读。频道的折叠通知只表示已送达，不会把正文标成已读。读取同时受消息数
-和字符数限制，长消息可从已记录的位置继续。私聊和频道消息可以设置 `must_reply`；目标读完后
-仍需在同一私聊或频道发送任意消息才算完成，否则进入空闲时会再次被唤醒。该状态直接由持久
-消息历史推导，不与已读状态混用。当前来自外部用户的私聊会自动设置 `must_reply`，用户频道
-消息不会设置；Agent 仍可在频道或私聊中显式使用该标志。消息可以携带资源 ID，
-但不负责保存文件内容。安装 Resources 后，可以先用 `fleet_resource add` 注册普通文件或
-二进制文件，再由接收方用 `fleet_resource get` 解析资源 ID。
+消息包只注册两个直接模型工具：
 
-运行时指令、恢复提醒、生产力变更和消息提示统一走 `FleetSystemNotification`。它们只管理
-原生 Agent 上下文的静默注入、唤醒、打断与折叠，不进入 Fleet 消息历史，也没有独立已读
-状态；关联真实消息时只记录投递关系，真实消息仍必须通过 `fleet_messages read/text` 读取。
-所有原生 `inject`、`followup` 和 `steer` 分发都收敛在 MessageHub 内部。
+- `fleet_send`：静默发送私信或频道消息；
+- `fleet_channel`：列出、创建、更新或归档频道。
 
-Agent 目标可以使用 Core 注册的 Fleet 名称（例如 `@reviewer`）或原生 DSH Agent ID。
-频道使用 `#channel`。与 Core 一起安装时，只有已注册 Fleet 成员能够参与通信，消息中
-同时保留原生 ID 并展示 Fleet 名称；Message 单独安装时仍按原生 Agent ID 工作。
+`fleet_followup`、`fleet_messages`、`fleet_wait`、旧 `fleet_vote` 和
+`fleet_meeting` 已从模型工具面删除。成员通过完整 Fleet 主机中的：
 
-频道是持久的异步协作空间，不形成 Agent 上下级关系。Agent 可以在频道中发布工作，
-其他 Agent 使用 `reply_to` 认领、补充或返回结果。私聊 `to` 中的 `@target` 只是路由地址，普通私聊
-和回复不会创建义务；私聊或频道消息中所有成功解析的 `mentions` 会在完整 Fleet 主机中提升成分配给
-目标的高优先级持久 Task。普通回复或确认不会完成它，目标完成实际工作后必须显式调用
-`fleet_task complete`；不带 mention 的私聊和回复不会创建任务。
-不需要回复的 FYI 应使用不带 mention 的普通频道消息。使用 `fleet_followup` 时，消息对所有频道成员可见，
-但只有明确 `mentions` 的 Agent
-会被唤醒。频道的 `createdBy` 只控制归档，
-不代表频道负责人。`fleet_wait` 只响应当前 Agent 可见的消息、频道或会议变化。
-频道的 `summary` 和 `body` 是可替换的当前共享状态，`revision` 随更新递增；消息仍是
-独立的时间顺序记录。
+- `fleet_inbox` 聚合读取所有可见来源的未读消息；
+- `fleet_reply` 发送 Reply Task 的最终内容并记录回执；
+- `fleet_vote` 创建或提交持久 Vote Task。
 
-会议使用 `meeting:meeting-id`。发起和结束会议会唤醒所有其他参会者；会中普通消息
-会通过 `inject` 将完整正文直接加入所有其他参会者的上下文，而不是像频道广播一样
-只发送历史提示。使用 `fleet_followup` 向会议发言时，会唤醒所有其他参会者。只有
-发起人可以结束会议，结束后不再接受新消息。
+## 消息与 Task 的边界
 
-Vote 属于频道。创建者以外、当前可读取该频道的所有在线 Fleet 成员各投一次；任一
-拒绝立即结束 Vote，所有 voter 同意才通过。`finish` 和 `blocked` Vote 在根插件的 Team
-run 中会驱动对应终态。
+`to` 中的 `@target` 只负责路由。正文中成功解析的 `@Name`、`@member-id`，以及
+结构化 `mentions`，由完整 Fleet 主机提升为目标成员的 Reply Task。普通消息只更新目标
+成员的 Inbox Task，不创建工作 Task，也不会直接唤醒整个 Team。
+
+外部用户发送给具体成员的私信同样创建 Reply Task。Reply 是否完成由
+`fleet_reply` 的实际投递回执决定，不再由“后来是否发过任意消息”推断。
+
+每条消息固化发送时的接收成员，并分别记录待送达、已送达和累计已读正文范围，满足：
+
+```
+已读 ⊆ 已送达 ⊆ 接收成员
+```
+
+成员没有活动 Session、原生 inbox 注入失败或成员正在重绑定时，消息保持待送达；新
+Session 接入后自动补投。频道通知只表示已送达，不会把正文标记为已读。
 
 ## 使用
 

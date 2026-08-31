@@ -98,9 +98,9 @@ Use raw pnpm so installation and Loader activation remain separate:
 $RuntimePackages = @(
   "dsh-harmony@0.8.8"
   "the-binding-of-dsh@0.1.7"
-  "dsh-agent-fleet@0.1.1"
+  "dsh-agent-fleet@0.2.0"
   "@ch4acko3/dsh-agent-fleet-git@0.1.0"
-  "dsh-agent-fleet-patchouli@0.1.0"
+  "dsh-agent-fleet-patchouli@0.1.3"
   "dsh-patchouli@0.1.6"
   "dsh-patchouli-native-context-service@0.1.6"
   "dsh-patchouli-memory-ui@0.1.0"
@@ -290,7 +290,7 @@ The receiving agent should not call the migration complete until all of these pa
 
 1. `dsh web --help` builds the Loader tree without duplicate IDs.
 2. `dsh web --port 3080` serves the UI and survives a cold restart.
-3. A team can be created, all assistants load, and a parsed mention or legacy `must_reply` message creates a persistent required Task that remains active until `fleet_task complete`.
+3. A team can be created, all assistants load, and a parsed mention creates a persistent Reply Task that remains active until `fleet_reply` delivers its content and receipt.
 4. The deployment's configured public model provider completes a normal request.
 5. Patchouli records the interaction, and a later request retrieves it through the configured retrieval model.
 6. Markdown rendering, source/comparison views, Git integration, and the budget panel load without browser errors.

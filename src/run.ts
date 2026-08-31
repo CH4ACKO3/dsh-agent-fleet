@@ -29,13 +29,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelectionRef, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-compaction'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { FleetCore, RuntimeRequestConfig } from '@dsh-agent-fleet/core'
@@ -53,7 +53,6 @@ import type {
   FleetMessage,
   FleetTarget,
   MessageHub,
-  ReadMessagesResult,
   SendMessageResult,
 } from '@dsh-agent-fleet/message'
 import type { FleetResources } from '@dsh-agent-fleet/resources'
@@ -85,6 +84,7 @@ import {
 import {
   FLEET_TASK_STATE_NAMESPACE,
   parseFleetTaskState,
+  type FleetProjectTask,
   type FleetTaskBoard,
 } from './productivity/task.js'
 import {
@@ -107,6 +107,7 @@ export type FleetWorkStatus = 'running' | 'finished' | 'blocked' | 'failed' | 'c
 
 export interface FleetWorkRecord {
   readonly id: string
+  readonly rootTaskId?: string
   readonly taskPath: string
   /** Immutable accepted work text used for restart, without changing the caller's source file. */
   readonly acceptedTaskPath?: string
@@ -280,10 +281,6 @@ export interface FleetMemberProgress {
   readonly member: string
   readonly displayName?: string
   readonly runtimeStatus: NonNullable<FleetRunMember['status']>
-  readonly declaredStatus?: {
-    readonly text: string
-    readonly updatedAt?: string
-  }
   readonly items: FleetProgressItem[]
   readonly cursor: number
   readonly hasMore: boolean
@@ -437,13 +434,24 @@ export interface FleetActivityInbox {
 
 export type FleetAssistantMessageKind = 'collaboration' | 'directive'
 
+export interface FleetAssistantStage {
+  readonly key: string
+  readonly kind: 'goal' | 'vote'
+  readonly title: string
+  readonly description: string
+  readonly owners: string[]
+  readonly dependencies: string[]
+  readonly timeoutAt?: string
+}
+
 export interface FleetAssistantMessage {
   readonly id: string
+  readonly messageId: string
   readonly runId: string
   readonly kind: FleetAssistantMessageKind
   readonly text: string
-  readonly mustReply?: boolean
   readonly recipients: string[]
+  readonly stages: FleetAssistantStage[]
   readonly assistantSessionId: string
   readonly assistantId: string
   readonly assistantName: string
@@ -989,8 +997,49 @@ export interface SendAssistantMessageInput {
   readonly kind: FleetAssistantMessageKind
   readonly text: string
   readonly recipients?: readonly string[]
-  readonly mustReply?: boolean
+  readonly stages?: readonly {
+    readonly key: string
+    readonly kind?: 'goal' | 'vote'
+    readonly title: string
+    readonly description?: string
+    readonly owners: readonly string[]
+    readonly dependencies?: readonly string[]
+    readonly timeoutAt?: string
+  }[]
   readonly projectRoot?: string
+}
+
+interface PendingAssistantKickoff {
+  readonly messageId: string
+  readonly text: string
+  readonly channelId: string
+  readonly staged: boolean
+  readonly recipients: string[]
+  readonly stages: FleetAssistantStage[]
+}
+
+export interface ContinueFleetInteractionInput {
+  readonly runId?: string
+  readonly reason: string
+  readonly taskIds?: readonly string[]
+  readonly goal?: {
+    readonly title: string
+    readonly description: string
+    readonly owners: readonly string[]
+  }
+  readonly checkAfterSeconds?: number
+}
+
+export interface ReportFleetInteractionInput {
+  readonly runId?: string
+  readonly outcome: 'complete' | 'block'
+  readonly reason: string
+  readonly report: string
+}
+
+export interface TakeOverFleetInteractionInput {
+  readonly runId?: string
+  readonly reason: string
 }
 
 export interface SendFleetConversationMessageInput {
@@ -998,26 +1047,9 @@ export interface SendFleetConversationMessageInput {
   readonly to: FleetTarget
   readonly text: string
   readonly replyTo?: string
-  readonly mustReply?: boolean
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
   readonly delivery: 'quiet' | 'wakeup' | 'interrupt'
-}
-
-export interface FleetConversationMessagesInput {
-  readonly action?: 'read' | 'search' | 'inbox' | 'react' | 'reactions' | 'pin' | 'unpin' | 'pins' | 'text'
-  readonly conversation?: FleetTarget
-  readonly after?: string
-  readonly limit?: number
-  readonly maxChars?: number
-  readonly query?: string
-  readonly from?: string
-  readonly resource?: string
-  readonly unreadOnly?: boolean
-  readonly messageId?: string
-  readonly offset?: number
-  readonly reaction?: string
-  readonly remove?: boolean
 }
 
 export interface UploadFleetResourceInput {
@@ -1932,11 +1964,10 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     'No member is your parent. Use Fleet Channels, direct messages, Meetings, Votes, shared files, and resource references to coordinate.',
     'No Fleet member is a default coordinator. Claim work, negotiate ownership, and ask the relevant peers for review directly.',
     'When another member is clearly doing work that belongs to your responsibility and is clearly outside theirs, send that member one private reminder about the responsibility boundary. Do not police ambiguous overlap.',
-    'Keep your short Fleet member status text current when the work you are doing meaningfully changes. Clear it when the note is no longer useful. This self-declared text is separate from automatic runtime state.',
     '## Member view',
     `Configured Fleet tool groups: ${member.toolGroups.join(', ') || 'none'}. Optional groups are available only when their sub-plugin is installed.`,
-    'These groups and fleet_tools cover Fleet capabilities only; host tools such as bash, read, and edit come from the Agent preset and are not listed here.',
-    'Every granted Fleet capability with at least one authorized action stays directly available. Use fleet_tools only to search or list capabilities; its load action is an idempotent compatibility operation, not a prerequisite.',
+    'Configured groups cover Fleet capabilities only; host tools such as bash, read, and edit come from the Agent preset.',
+    'Every granted Fleet capability with at least one authorized action stays directly available.',
     `Granted Fleet permissions: ${member.permissions.join(', ') || 'none'}.`,
     `Reachable members: ${members || 'none'}.`,
     `Reachable Channels: ${channels || 'none'}.`,
@@ -1994,7 +2025,45 @@ function errorMessage(error: unknown): string {
 
 const EXPLICIT_WAIT_DELAY_MS = 2_000
 const QUIET_TOOL_WAIT_DELAY_MS = 90_000
-const EXPLICIT_WAIT_TOOLS = new Set(['fleet_wait', 'sleep', 'wait', 'wait_agent', 'wait_threads'])
+const DEFAULT_INTERACTION_CHECK_SECONDS = 300
+const FLEET_TASK_REQUEST_MARKER = '[Fleet Task Request]'
+const ASSISTANT_PROJECT_WRITE_TOOLS = new Set(['write', 'edit'])
+const ASSISTANT_READ_ONLY_SHELL_TOOLS = new Set([
+  'pwd', 'ls', 'rg', 'grep', 'cat', 'head', 'tail', 'wc', 'stat', 'file', 'du', 'df',
+  'sort', 'uniq', 'cut', 'tr', 'jq', 'realpath', 'readlink', 'which', 'type', 'date', 'uname',
+])
+const ASSISTANT_READ_ONLY_GIT_COMMANDS = new Set([
+  'status', 'diff', 'log', 'show', 'rev-parse', 'ls-files', 'ls-tree',
+])
+
+function assistantShellIsReadOnly(argumentsValue: unknown): boolean {
+  if (argumentsValue === null || typeof argumentsValue !== 'object') return false
+  const command = (argumentsValue as { readonly command?: unknown }).command
+  if (typeof command !== 'string' || command.trim().length === 0) return false
+  const scrubbed = command.replaceAll(/\b\d*>\s*\/dev\/null\b/g, '').trim()
+  if (/(?:^|[^<])>{1,2}|<{1,2}/.test(scrubbed)) return false
+  const segments = scrubbed.split(/\s*(?:&&|\|\||[;\n|])\s*/).filter(Boolean)
+  return segments.length > 0 && segments.every(segment => {
+    const words = segment.trim().split(/\s+/)
+    const executable = words[0]
+    if (executable === undefined) return false
+    if (executable === 'sed') return !words.some(word => /^-.*i/.test(word))
+    if (executable === 'find') return !words.some(word => word === '-delete' || word === '-exec' || word === '-execdir')
+    if (executable === 'git') {
+      const subcommand = words[1]
+      return subcommand === 'branch'
+        ? words.includes('--show-current')
+        : subcommand !== undefined && ASSISTANT_READ_ONLY_GIT_COMMANDS.has(subcommand)
+    }
+    return ASSISTANT_READ_ONLY_SHELL_TOOLS.has(executable)
+  })
+}
+
+function assistantToolCrossesExecutionBoundary(name: string, argumentsValue: unknown): boolean {
+  return ASSISTANT_PROJECT_WRITE_TOOLS.has(name)
+    || (name === 'bash' && !assistantShellIsReadOnly(argumentsValue))
+}
+const EXPLICIT_WAIT_TOOLS = new Set(['sleep', 'wait', 'wait_agent', 'wait_threads'])
 const COMMAND_ARGUMENT_KEYS = new Set(['cmd', 'command', 'script', 'shell'])
 
 function commandStrings(value: unknown, key?: string): string[] {
@@ -2075,7 +2144,6 @@ interface NetworkRecovery {
 
 export class FleetRunService {
   private readonly records = new Map<string, FleetRunRecord>()
-  private readonly voteWorkIds = new Map<string, Map<string, string>>()
   private readonly dormantRunIds = new Set<string>()
   private readonly manualWakeRequiredRunIds = new Set<string>()
   private readonly eventSequences = new Map<string, number>()
@@ -2095,11 +2163,14 @@ export class FleetRunService {
   private readonly sharedFileWatchers = new Map<string, FSWatcher>()
   private readonly sharedFileSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly assistantRequestConfigs = new WeakMap<Agent, AssistantRequestConfigRef>()
+  private readonly assistantInputWrapperAgents = new WeakSet<Agent>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
   private readonly pausingTeams = new Map<string, Promise<FleetRunRecord>>()
   private readonly pausingMembers = new Map<string, Promise<FleetRunMember>>()
+  private readonly ownerMemberResumes = new Map<string, Promise<void>>()
+  private readonly pendingAssistantKickoffs = new Map<string, PendingAssistantKickoff>()
   private residentAssistants: FleetResidentAssistantController | undefined
   private readonly changeListeners = new Set<() => void>()
   private readonly traceChangeListeners = new Set<(teamId: string, memberId: string) => void>()
@@ -2156,6 +2227,7 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const assistantId = runtime.memberNamesById.get(sessionId)
     if (assistantId === undefined) return
+    this.bindAssistantInputWrapper(agent)
     void this.installAssistantTools(agent, runtime, assistantId)
       .then(() => {
         const record = this.records.get(runId)
@@ -2163,7 +2235,8 @@ export class FleetRunService {
           recoverRequiredTask
           && agent.status !== 'running'
           && record !== undefined
-          && this.continueRequiredTask(runId, runtime, record, agent)
+          && (this.continueAssignedTask(runId, runtime, record, agent)
+            || this.continueOwnedTasks(runId, runtime, record, agent))
         ) return
         if (agent.status === 'idle') this.agentIdle(agent)
       })
@@ -2294,7 +2367,6 @@ export class FleetRunService {
       throw error
     }
     const runtime = this.openCollaboration(record, template.members)
-    this.voteWorkIds.set(record.id, new Map())
     this.appendEvent(record.id, 'team_created', {
       team: template.team,
       configPath,
@@ -2323,7 +2395,6 @@ export class FleetRunService {
       this.appendEvent(record.id, 'team_status', { status: 'failed', summary })
       this.notify(failed)
       this.collaboration.closeTeam(record.id)
-      this.voteWorkIds.delete(record.id)
       this.teamProjectionEvents.delete(record.id)
       this.teamProjectionIdentities.delete(record.id)
       this.eventSequences.delete(record.id)
@@ -2343,7 +2414,6 @@ export class FleetRunService {
       this.appendEvent(record.id, 'team_status', { status: 'failed', summary })
       this.notify(failed)
       this.collaboration.closeTeam(record.id)
-      this.voteWorkIds.delete(record.id)
       this.teamProjectionEvents.delete(record.id)
       this.teamProjectionIdentities.delete(record.id)
       this.eventSequences.delete(record.id)
@@ -2439,7 +2509,6 @@ export class FleetRunService {
         } catch {}
       }
       this.collaboration.closeTeam(record.id)
-      this.voteWorkIds.delete(record.id)
       this.forgetTeam(record.id)
       const failed = this.replaceRecord(record.id, {
         assistants: [],
@@ -2469,7 +2538,11 @@ export class FleetRunService {
     const taskPath = isAbsolute(input.taskPath) ? input.taskPath : resolve(input.projectRoot, input.taskPath)
     const task = readFileSync(taskPath, 'utf8').trim()
     if (task.length === 0) throw new Error('Fleet work cannot be empty')
-    const available = record.members.filter(member => this.memberCanReply(member))
+    // Starting work must be possible while every formal member is unloaded.
+    // The first ready owner Task is the deterministic propulsion source that
+    // resumes exactly the required member. Explicitly paused members remain
+    // unavailable for assignment.
+    const available = record.members.filter(member => member.status !== 'paused')
     if (available.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
     const decision = this.requireRuntime(record.id).events.waterfall(
       'fleet/work/pre-start',
@@ -2486,8 +2559,54 @@ export class FleetRunService {
     const temporaryTaskPath = join(workDirectory, `.${workId}.${process.pid}.tmp`)
     writeFileSync(temporaryTaskPath, `${acceptedTask}\n`, 'utf8')
     renameSync(temporaryTaskPath, acceptedTaskPath)
+    const runtime = this.requireRuntime(record.id)
+    const kickoffKey = `${record.id}:${String(launcher.id)}`
+    const kickoff = this.pendingAssistantKickoffs.get(kickoffKey)
+    this.pendingAssistantKickoffs.delete(kickoffKey)
+    const kickoffReplyTaskIds = kickoff === undefined || kickoff.staged
+      ? []
+      : runtime.tasks.state().tasks
+          .filter(candidate => candidate.domain.kind === 'reply'
+            && candidate.domain.messageId === kickoff.messageId)
+          .map(candidate => candidate.id)
+    const plannedRootOwner = kickoff?.recipients[0]
+    const rootOwner = available.find(member => member.name === plannedRootOwner) ?? available[0]!
+    const plannedStages: FleetAssistantStage[] = kickoff?.stages.length
+      ? kickoff.stages
+      : [{
+          key: 'delivery', kind: 'goal', title: 'Deliver the Fleet work item',
+          description: acceptedTask, owners: [rootOwner.name], dependencies: [],
+        }]
+    const plan = runtime.tasks.createCompositePlan(rootOwner.sessionId, {
+      title: `Fleet work ${workId}`,
+      description: acceptedTask,
+      coordinator: rootOwner.name,
+      stages: plannedStages.map(stage => ({
+        key: stage.key,
+        kind: stage.kind,
+        title: stage.title,
+        ...(stage.description.length === 0 ? {} : { description: stage.description }),
+        owners: stage.owners,
+        dependencies: stage.dependencies,
+        ...(stage.timeoutAt === undefined ? {} : { timeoutAt: stage.timeoutAt }),
+      })),
+      dependencies: kickoffReplyTaskIds,
+      rootWorkId: workId,
+    })
+    const rootTask = plan.task
+    const stageTasks = plan.stages
+    if (kickoff?.staged) {
+      runtime.messages.send(launcher, {
+        to: `#${kickoff.channelId}`,
+        text: kickoff.text,
+        delivery: 'quiet',
+        mentions: kickoff.recipients,
+        kind: 'work_directive',
+      })
+    }
     const work: FleetWorkRecord = {
       id: workId,
+      rootTaskId: rootTask.id,
       taskPath,
       acceptedTaskPath,
       status: 'running',
@@ -2495,22 +2614,39 @@ export class FleetRunService {
     }
     const running = this.replaceRecord(record.id, { status: 'running', work })
     this.manualWakeRequiredRunIds.delete(record.id)
-    this.appendEvent(record.id, 'work_started', { workId: work.id, taskPath, acceptedTaskPath })
+    this.appendEvent(record.id, 'work_started', {
+      workId: work.id,
+      rootTaskId: rootTask.id,
+      childTaskIds: [...stageTasks.values()].map(task => task.id),
+      taskPath,
+      acceptedTaskPath,
+    })
+    const launchingAssistant = running.assistants.find(assistant => assistant.sessionId === String(launcher.id))
+    if (launchingAssistant !== undefined && runtime.tasks.interactionTask(launchingAssistant.view.id)?.stableState.kind === 'running') {
+      runtime.tasks.deferInteraction(String(launcher.id), {
+        reason: `Waiting for Fleet work ${work.id} to settle, reach a Team quiescence point, or reach its progress deadline.`,
+        taskIds: [rootTask.id],
+        checkAfterSeconds: DEFAULT_INTERACTION_CHECK_SECONDS,
+      })
+    }
 
     const roster = record.members
       .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
       .join('\n')
-    const messages = this.requireRuntime(record.id).messages
-    for (const member of available) {
-      messages.sendSystemNotification(member.sessionId, {
+    const stagePlan = [...stageTasks.entries()].map(([key, task]) => {
+      const dependencies = task.dependencies.length === 0 ? 'none' : task.dependencies.join(', ')
+      return `- ${key}: ${task.title} (${task.id}); ${task.domain.kind === 'vote' ? 'voters' : 'owners'} ${task.owners.map(owner => `@${owner.member}`).join(', ')}; dependencies ${dependencies}`
+    }).join('\n')
+    if (this.memberCanReply(rootOwner)) {
+      runtime.messages.sendSystemNotification(rootOwner.sessionId, {
         kind: 'work_start',
         text: [
-          `[Fleet work ${work.id}]`,
+          `[Fleet composite root Task ${rootTask.id} for work ${work.id}]`,
           `Team: ${record.name}`,
-          `Your Fleet identity: @${member.displayName ?? member.name}`,
+          `Your Fleet identity: @${rootOwner.displayName ?? rootOwner.name}`,
           `Members:\n${roster}`,
-          'Before substantive work, inspect the current Fleet tasks, messages, member status, and work claims. Claim one bounded responsibility and coordinate with the relevant peers. Do not independently repeat another member\'s active task or remote job; review or take an unowned dependency instead.',
-          'Fleet tool groups and fleet_tools describe Fleet capabilities only. Host tools such as bash, read, and edit come from the Agent preset. Determine host-tool availability from the tool schemas visible in this turn; if bash is visible, call it directly. Never infer that bash is unavailable merely because it is absent from Fleet tool groups or the fleet_tools catalog.',
+          `The assistant created the first formal cohort atomically; do not recreate it:\n${stagePlan}`,
+          'The root has no owner and will wake you through one ReconcileAttempt only when its current cohort settles. Inspect every Goal result and Vote outcome. A rejected review is a completed decision, not a blocked Task: atomically create a remediation Goal and install the next cohort before resolving. Complete the root only after required evidence is accepted; use blocked only when no deterministic continuation is available.',
           `Work:\n${acceptedTask}`,
         ].join('\n\n'),
         delivery: 'wakeup',
@@ -2551,12 +2687,6 @@ export class FleetRunService {
     const effectiveViews = this.effectiveMemberViews(record, events)
     const effectiveTemplate: TeamTemplate = { ...template, members: effectiveViews }
     const templates = new Map(effectiveViews.map(member => [member.id, member]))
-    const voteWorkIds = new Map<string, string>()
-    for (const event of events) {
-      if (event.type !== 'work_vote_bound') continue
-      const binding = event.data as { readonly voteId: string; readonly workId: string }
-      voteWorkIds.set(binding.voteId, binding.workId)
-    }
     const attached = new Map(record.members.map(member => [member.name, member]))
     for (const event of events) {
       if (event.type !== 'member_attached') continue
@@ -2584,14 +2714,6 @@ export class FleetRunService {
     }
 
     const collaborationState = this.collaborationState(record, events)
-    const coordination = collaborationState.coordination
-    const approvedWorkVote = record.status === 'running' && record.work !== undefined
-      ? coordination.findLast(event => event.type === 'vote'
-        && event.action === 'closed'
-        && event.vote.status === 'approved'
-        && (event.vote.kind === 'finish' || event.vote.kind === 'blocked')
-        && voteWorkIds.get(event.vote.id) === record.work?.id)
-      : undefined
     const provider = record.agentOptions?.provider ?? launcher.options.provider
     const model = record.agentOptions?.model ?? launcher.options.model
     const maxTokens = record.agentOptions?.maxTokens ?? launcher.options.maxTokens
@@ -2602,11 +2724,9 @@ export class FleetRunService {
     }
     if (wasDormant) {
       this.collaboration.closeTeam(input.runId)
-      this.voteWorkIds.delete(input.runId)
       this.dormantRunIds.delete(input.runId)
     }
     const runtime = this.openCollaboration(record, effectiveViews)
-    this.voteWorkIds.set(record.id, voteWorkIds)
     const managed: string[] = []
     const memberRebinds: Array<{
       readonly previousSessionId: string
@@ -2750,20 +2870,6 @@ export class FleetRunService {
       else runtime.activateProductivity()
       if (restored.work?.status === 'running') this.manualWakeRequiredRunIds.add(record.id)
       runtime.events.emit('fleet/team/session-start', { source: 'resume' })
-      if (approvedWorkVote !== undefined && approvedWorkVote.type === 'vote') {
-        const initiatorSessionId = this.restoredSessionId(events, approvedWorkVote.vote.initiator)
-        const participants = this.participants(record)
-        const initiator = participants.find(member =>
-          member.name === approvedWorkVote.vote.initiator || member.sessionId === initiatorSessionId)
-        const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
-          ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
-        if (caller !== undefined) return this.finishWork(
-          record,
-          approvedWorkVote.vote.kind === 'finish' ? 'finished' : 'blocked',
-          approvedWorkVote.vote.statement,
-          String(caller.id),
-        )
-      }
       return this.describeRecord(restored)
     } catch (error) {
       runtime.detachMember(String(launcher.id))
@@ -2773,7 +2879,6 @@ export class FleetRunService {
         } catch {}
       }
       this.collaboration.closeTeam(record.id)
-      this.voteWorkIds.delete(record.id)
       const current = this.requireRecord(record.id)
       if (!isTerminal(current.status)) {
         try {
@@ -2813,6 +2918,82 @@ export class FleetRunService {
 
   taskBoard(runId: string): FleetTaskBoard {
     return this.requireRuntime(runId).tasks
+  }
+
+  assistantInteraction(caller: Agent, runId?: string) {
+    const record = this.requireCallerRecord(caller, runId)
+    const assistant = this.requireAssistantConnection(caller, record.id)
+    const task = this.requireRuntime(record.id).tasks.interactionTask(assistant.view.id)
+    if (task === undefined) throw new Error(`Fleet assistant ${assistant.view.id} has no foreground Interaction Task`)
+    return task
+  }
+
+  continueAssistantInteraction(caller: Agent, input: ContinueFleetInteractionInput) {
+    const record = this.requireCallerRecord(caller, input.runId)
+    const assistant = this.requireAssistantConnection(caller, record.id)
+    const formalMembers = new Set(record.members.map(member => member.name))
+    if (input.goal !== undefined) {
+      for (const owner of input.goal.owners) {
+        const resolved = this.memberViews(record.id).find(member =>
+          member.id === owner || member.name === owner)?.id
+        if (resolved === undefined || !formalMembers.has(resolved)) {
+          throw new Error(`Interaction continuation owner ${owner} must be a formal Team member`)
+        }
+      }
+    }
+    if (input.taskIds !== undefined) {
+      for (const taskId of input.taskIds) {
+        const task = this.requireRuntime(record.id).tasks.get(String(caller.id), taskId)
+        if (task.domain.kind === 'interaction'
+          || !task.owners.some(owner => formalMembers.has(owner.member))) {
+          throw new Error(`Interaction continuation Task ${taskId} must be owned by a formal Team member`)
+        }
+      }
+    }
+    return this.requireRuntime(record.id).tasks.deferInteraction(String(caller.id), {
+      reason: input.reason,
+      ...(input.taskIds === undefined ? {} : { taskIds: input.taskIds }),
+      ...(input.goal === undefined ? {} : { goal: input.goal }),
+      checkAfterSeconds: input.checkAfterSeconds ?? DEFAULT_INTERACTION_CHECK_SECONDS,
+    })
+  }
+
+  takeOverAssistantInteraction(caller: Agent, input: TakeOverFleetInteractionInput) {
+    const record = this.requireCallerRecord(caller, input.runId)
+    const assistant = this.requireAssistantConnection(caller, record.id)
+    return this.requireRuntime(record.id).tasks.takeOverInteraction(String(caller.id), input.reason)
+  }
+
+  reportAssistantInteraction(caller: Agent, input: ReportFleetInteractionInput) {
+    const record = this.requireCallerRecord(caller, input.runId)
+    this.requireAssistantConnection(caller, record.id)
+    return this.requireRuntime(record.id).tasks.submitInteractionReport(String(caller.id), {
+      outcome: input.outcome,
+      reason: input.reason,
+      report: input.report,
+    })
+  }
+
+  private assistantExecutionBoundaryReason(
+    caller: Agent,
+    execution: { readonly name: string; readonly arguments: unknown },
+  ): string | undefined {
+    if (!assistantToolCrossesExecutionBoundary(execution.name, execution.arguments)) return undefined
+    const record = this.assistantTeamForSession(String(caller.id))
+    if (record === undefined) return undefined
+    const assistant = record.assistants.find(candidate => candidate.sessionId === String(caller.id))
+    const interaction = assistant === undefined
+      ? undefined
+      : this.collaboration.get(record.id)?.tasks.interactionTask(assistant.view.id)
+    if (interaction?.domain.kind !== 'interaction') return undefined
+    const lease = interaction.domain.executionLease
+    if (lease?.revision === interaction.domain.inputRevision) return undefined
+    return [
+      `Fleet assistant project execution is not routed for Interaction Task ${interaction.id}.`,
+      'Normal conversation, status checks, coordination, and read-only inspection remain available.',
+      'For Team work, create/link formal-member Tasks and call fleet_user_task action="continue".',
+      'Only when the user explicitly asked the assistant to execute personally, no formal member is available, or Team execution has failed, call fleet_user_task action="take_over" with a concrete reason, then retry.',
+    ].join(' ')
   }
 
   requireAssistantConnection(caller: Agent, runId: string, allowDormant = false): FleetRunAssistant {
@@ -4603,6 +4784,9 @@ export class FleetRunService {
       await this.installAssistantTools(caller, runtime, current.view.id)
       runtime.messages.connectAgent(callerId, autoJoinChannels)
       this.bindAssistantRequestConfig(caller, this.assistantRequestConfig(current, caller))
+      this.bindAssistantInputWrapper(caller)
+      this.captureLatestAssistantUserInput(record, current, caller)
+      queueMicrotask(() => { this.signalAssistantInteractionDeliveries(record.id) })
       return { run: this.describeRecord(record), assistant: structuredClone(current) }
     }
     if (current !== undefined) {
@@ -4610,6 +4794,9 @@ export class FleetRunService {
       await this.installAssistantTools(caller, runtime, current.view.id)
       runtime.messages.connectAgent(callerId, autoJoinChannels)
       this.bindAssistantRequestConfig(caller, this.assistantRequestConfig(current, caller))
+      this.bindAssistantInputWrapper(caller)
+      this.captureLatestAssistantUserInput(record, current, caller)
+      queueMicrotask(() => { this.signalAssistantInteractionDeliveries(record.id) })
       return { run: this.describeRecord(record), assistant: structuredClone(current) }
     }
     const rebound = input.assistantId === undefined
@@ -4690,7 +4877,81 @@ export class FleetRunService {
       sessionId: callerId,
       view,
     })
+    this.bindAssistantInputWrapper(caller)
+    this.captureLatestAssistantUserInput(updated, assistant, caller)
+    queueMicrotask(() => { this.signalAssistantInteractionDeliveries(updated.id) })
     return { run: this.describeRecord(updated), assistant: structuredClone(assistant) }
+  }
+
+  private captureLatestAssistantUserInput(
+    record: FleetRunRecord,
+    assistant: FleetRunAssistant,
+    agent: Agent,
+  ): void {
+    const input = agent.session.events.findLast(event =>
+      event.type === 'user/message' && event.data.source?.kind === 'user')
+    if (input?.type !== 'user/message') return
+    const tasks = this.collaboration.get(record.id)?.tasks
+    if (tasks === undefined) return
+    tasks.recordInteractionInput(assistant.view.id, {
+      messageId: String(input.data.id),
+      text: progressMessageText(input.data),
+    })
+  }
+
+  private bindAssistantInputWrapper(agent: Agent): void {
+    if (this.assistantInputWrapperAgents.has(agent)) return
+    const context = (agent as Agent & { readonly ctx?: Context }).ctx
+    if (context === undefined) return
+    this.assistantInputWrapperAgents.add(agent)
+    context.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
+      const decision = await next()
+      if (decision.kind === 'reject') return decision
+      const record = this.assistantTeamForSession(String(agent.id))
+      if (record === undefined) return decision
+      const assistant = record.assistants.find(candidate => candidate.sessionId === String(agent.id))
+      const tasks = this.collaboration.get(record.id)?.tasks
+      if (assistant === undefined || tasks === undefined) return decision
+
+      let wrapped = false
+      const messages = decision.messages.map(message => {
+        if (message.source.kind !== 'user') return message
+        const originalText = progressMessageText(message)
+        if (originalText.startsWith(FLEET_TASK_REQUEST_MARKER)) return message
+        const task = tasks.recordInteractionInput(assistant.view.id, {
+          messageId: String(message.id),
+          text: originalText,
+        })
+        if (task.domain.kind !== 'interaction') return message
+        const request = [
+          FLEET_TASK_REQUEST_MARKER,
+          `Interaction Task: ${task.id}`,
+          `Input revision: ${String(task.domain.inputRevision)}`,
+          '',
+          'This user input is already tracked as your persistent foreground task.',
+          'Required first action: call fleet_user_task with action="status" before responding or doing project work.',
+          'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
+          'A normal project imperative addressed to you is still Team work, not permission to take over personally. If the request names an existing task brief or staged prompt file, pass that path directly to fleet_run start instead of writing a duplicate brief.',
+          'Before crossing into project execution, normally inspect the roster, publish one staged directive, start the Fleet run, and link formal-member Tasks with fleet_user_task action="continue". Formal members own implementation and independent review.',
+          'Use fleet_user_task action="take_over" only when the user explicitly asks you to execute personally, no formal member is available, or Team execution has failed. Before the native response that settles this request, call action="report" or action="block".',
+          'A turn ending is not task completion. Nobody is watching this turn: only a recorded report/block followed by non-empty native output settles the Interaction Task.',
+          '',
+          'Original user request:',
+          originalText.trim() || '(The user submitted a non-text foreground input; inspect the attached content.)',
+        ].join('\n')
+        const firstText = message.content.findIndex(block => block.type === 'text')
+        const content: UserMessage['content'] = []
+        if (firstText < 0) content.push({ type: 'text', text: request })
+        for (const [index, block] of message.content.entries()) {
+          if (block.type !== 'text') content.push(block)
+          else if (index === firstText) content.push({ type: 'text', text: request })
+        }
+        wrapped = true
+        return freezeMessage<UserMessage>({ ...message, content })
+      })
+      if (!wrapped) return decision
+      return { kind: 'enter', messages }
+    })
   }
 
   private async installAssistantTools(
@@ -4709,6 +4970,7 @@ export class FleetRunService {
       readonly tools?: {
         readonly register?: unknown
         get?(name: string, agent?: Agent): unknown
+        guard?(guard: (execution: { readonly name: string; readonly arguments: unknown }) => string | undefined): () => void
       }
       readonly inject?: unknown
     }
@@ -4722,6 +4984,8 @@ export class FleetRunService {
     const directTools = Object.hasOwn(ready, 'tools') ? ready.tools : undefined
     const directFs = Object.hasOwn(ready, 'fs')
     if (typeof directTools?.register === 'function') {
+      const stopBoundary = directTools.guard?.(execution =>
+        this.assistantExecutionBoundaryReason(caller, execution))
       const hostHasProgress = typeof directTools.get === 'function'
         && directTools.get('fleet_progress') !== undefined
       const stop = runtime.installTools(callerCtx, assistantId, {
@@ -4732,9 +4996,11 @@ export class FleetRunService {
         ),
       })
       if (typeof directTools.get === 'function'
-        && directTools.get('fleet_messages', caller) === undefined) {
+        && (directTools.get('fleet_inbox', caller) === undefined
+          || directTools.get('fleet_reply', caller) === undefined)) {
         stop()
-        throw new Error('Fleet assistant message tools were not visible in the Agent scope after installation')
+        stopBoundary?.()
+        throw new Error('Fleet assistant Inbox/Reply tools were not visible in the Agent scope after installation')
       }
       this.assistantToolAgents.add(caller)
       return
@@ -4746,6 +5012,8 @@ export class FleetRunService {
     // "cannot get property ... without inject". Always create the durable tool
     // binding from a scope that explicitly injects both services.
     await callerCtx.inject(['fs', 'tools'], (scope) => {
+      const stopBoundary = scope.tools.guard(execution =>
+        this.assistantExecutionBoundaryReason(caller, execution))
       const hostHasProgress = scope.tools.get('fleet_progress') !== undefined
       const stop = runtime.installTools(scope, assistantId, {
         exposeHostFleetTools: true,
@@ -4753,12 +5021,14 @@ export class FleetRunService {
           !hostHasProgress || group !== 'status',
         ),
       })
-      if (scope.tools.get('fleet_messages', caller) === undefined) {
+      if (scope.tools.get('fleet_inbox', caller) === undefined
+          || scope.tools.get('fleet_reply', caller) === undefined) {
         stop()
-        throw new Error('Fleet assistant message tools were not visible in the Agent scope after installation')
+        stopBoundary()
+        throw new Error('Fleet assistant Inbox/Reply tools were not visible in the Agent scope after installation')
       }
       this.assistantToolAgents.add(caller)
-      return stop
+      return () => { stopBoundary(); stop() }
     })
   }
 
@@ -4788,19 +5058,55 @@ export class FleetRunService {
     if (content.length > MAX_ASSISTANT_MESSAGE_LENGTH) {
       throw new Error(`Fleet assistant message cannot exceed ${MAX_ASSISTANT_MESSAGE_LENGTH} characters`)
     }
-    const available = record.members.filter(member => this.memberCanReply(member))
+    // Assignment is a durable Team decision, not a snapshot of which Agent is
+    // currently loaded. Once an unloaded member owns a ready Task, the owner
+    // reconciler resumes only that member. Explicit pauses still opt out.
+    const available = record.members.filter(member => member.status !== 'paused')
     const views = new Map(this.effectiveMemberViews(record).map(view => [view.id, view]))
-    const recipients = input.recipients === undefined
+    const resolveMember = (reference: string): string => {
+      const normalized = reference.startsWith('@') ? reference.slice(1) : reference
+      const matches = available.filter(member =>
+        member.name === normalized || views.get(member.name)?.name === normalized,
+      )
+      if (matches.length === 0) throw new Error(`unknown or unavailable Fleet member ${reference}`)
+      if (matches.length > 1) throw new Error(`ambiguous Fleet member ${reference}`)
+      return matches[0]?.name as string
+    }
+    if (input.kind !== 'directive' && input.stages !== undefined && input.stages.length > 0) {
+      throw new Error('Fleet assistant stages require a directive message')
+    }
+    const stages: FleetAssistantStage[] = []
+    const stageKeys = new Set<string>()
+    for (const candidate of input.stages ?? []) {
+      const key = candidate.key.trim()
+      const title = candidate.title.trim()
+      const kind = candidate.kind ?? 'goal'
+      if (key.length === 0) throw new Error('Fleet assistant stage key cannot be empty')
+      if (title.length === 0) throw new Error(`Fleet assistant stage ${key} title cannot be empty`)
+      if (stageKeys.has(key)) throw new Error(`duplicate Fleet assistant stage key ${key}`)
+      const dependencies = [...new Set((candidate.dependencies ?? []).map(dependency => dependency.trim()))]
+      for (const dependency of dependencies) {
+        if (!stageKeys.has(dependency)) {
+          throw new Error(`Fleet assistant stage ${key} dependency ${dependency} must reference an earlier stage`)
+        }
+      }
+      const owners = [...new Set(candidate.owners.map(resolveMember))]
+      if (owners.length === 0) throw new Error(`Fleet assistant stage ${key} requires at least one owner`)
+      if (kind === 'vote' && (candidate.description?.trim().length ?? 0) === 0) {
+        throw new Error(`Fleet assistant Vote stage ${key} requires a decision statement in description`)
+      }
+      stageKeys.add(key)
+      stages.push({
+        key, kind, title, description: candidate.description?.trim() ?? '', owners, dependencies,
+        ...(candidate.timeoutAt === undefined ? {} : { timeoutAt: candidate.timeoutAt }),
+      })
+    }
+    const readyOwners = stages.flatMap(stage => stage.dependencies.length === 0 ? stage.owners : [])
+    const recipients = stages.length > 0
+      ? [...new Set(readyOwners)]
+      : input.recipients === undefined
       ? available.map(member => member.name)
-      : [...new Set(input.recipients.map(reference => {
-          const normalized = reference.startsWith('@') ? reference.slice(1) : reference
-          const matches = available.filter(member =>
-            member.name === normalized || views.get(member.name)?.name === normalized,
-          )
-          if (matches.length === 0) throw new Error(`unknown or unavailable Fleet member ${reference}`)
-          if (matches.length > 1) throw new Error(`ambiguous Fleet member ${reference}`)
-          return matches[0]?.name as string
-        }))]
+      : [...new Set(input.recipients.map(resolveMember))]
     if (recipients.length === 0) throw new Error(`Fleet team ${record.id} has no available members`)
     const channel = parseTeamTemplate(
       JSON.parse(readFileSync(record.configPath, 'utf8')) as unknown,
@@ -4820,22 +5126,38 @@ export class FleetRunService {
       resource: { kind: 'conversation', id: `#${channel.id}` },
     })
     const messages = this.requireRuntime(record.id).messages
-    const sent = messages.send(caller, {
-      to: `#${channel.id}`,
+    // Hold staged directives until fleet_run start can atomically create the
+    // composite root and first ready cohort. Publishing here would make Inbox
+    // Tasks non-empty and resume members before their formal work exists.
+    const stagedDirective = input.kind === 'directive' && stages.length > 0
+    const sent = stagedDirective
+      ? { messageId: `staged_assistant_${randomUUID()}` }
+      : messages.send(caller, {
+          to: `#${channel.id}`,
+          text: content,
+          delivery: input.kind === 'directive' ? 'wakeup' : 'quiet',
+          ...(input.kind === 'directive' || input.recipients !== undefined
+            ? { mentions: recipients.map(member => `@${member}`) }
+            : {}),
+        })
+    const kickoffKey = `${record.id}:${String(caller.id)}`
+    if (input.kind === 'directive') this.pendingAssistantKickoffs.set(kickoffKey, {
+      messageId: sent.messageId,
       text: content,
-      delivery: input.kind === 'directive' ? 'wakeup' : 'quiet',
-      ...(input.mustReply === true ? { mustReply: true } : {}),
-      ...(input.kind === 'directive' || input.recipients !== undefined
-        ? { mentions: recipients.map(member => `@${member}`) }
-        : {}),
+      channelId: channel.id,
+      staged: stagedDirective,
+      recipients,
+      stages,
     })
+    else this.pendingAssistantKickoffs.delete(kickoffKey)
     const message: FleetAssistantMessage = {
       id: `assistant_message_${randomUUID()}`,
+      messageId: sent.messageId,
       runId: record.id,
       kind: input.kind,
-      text: messages.getMessage(caller, sent.messageId).text,
-      ...(input.mustReply === true ? { mustReply: true } : {}),
+      text: stagedDirective ? content : messages.getMessage(caller, sent.messageId).text,
       recipients,
+      stages,
       assistantSessionId: String(caller.id),
       assistantId: assistant.view.id,
       assistantName: assistant.view.name,
@@ -4867,81 +5189,19 @@ export class FleetRunService {
       action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
-    return this.requireRuntime(record.id).messages.send(caller, {
+    const result = this.requireRuntime(record.id).messages.send(caller, {
       to: input.to,
       text: input.text,
       delivery: input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
-      ...(input.mustReply === undefined ? {} : { mustReply: input.mustReply }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
     })
+    this.pendingAssistantKickoffs.delete(`${record.id}:${String(caller.id)}`)
+    return result
   }
 
-  conversationMessages(
-    caller: Agent,
-    input: FleetConversationMessagesInput,
-  ): ReadMessagesResult | Record<string, unknown> {
-    const record = this.requireCallerRecord(caller)
-    const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
-    if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
-    if (record.assistants.some(assistant => assistant.sessionId === String(caller.id))) {
-      this.requireAssistantConnection(caller, record.id)
-    }
-    const action = input.action ?? 'read'
-    const subject = {
-      kind: record.assistants.some(assistant => assistant.sessionId === String(caller.id)) ? 'assistant' as const : 'member' as const,
-      id: participant.name,
-    }
-    this.authorization?.require({
-      teamId: record.id,
-      subject,
-      action: action === 'react' || action === 'pin' || action === 'unpin' ? 'message.post' : 'message.read',
-      ...(input.conversation === undefined
-        ? {}
-        : { resource: { kind: 'conversation' as const, id: input.conversation } }),
-    })
-    const messages = this.requireRuntime(record.id).messages
-    if (action === 'read') {
-      if (input.conversation === undefined) throw new Error('fleet_messages read requires conversation')
-      return messages.read(caller, {
-        conversation: input.conversation,
-        ...(input.after === undefined ? {} : { after: input.after }),
-        ...(input.limit === undefined ? {} : { limit: input.limit }),
-        ...(input.maxChars === undefined ? {} : { maxChars: input.maxChars }),
-        ...(input.unreadOnly === undefined ? {} : { unreadOnly: input.unreadOnly }),
-      })
-    }
-    if (action === 'search') return { action, messages: messages.search(caller, {
-      ...(input.query === undefined ? {} : { query: input.query }),
-      ...(input.conversation === undefined ? {} : { conversation: input.conversation }),
-      ...(input.from === undefined ? {} : { from: input.from }),
-      ...(input.resource === undefined ? {} : { resource: input.resource }),
-      ...(input.limit === undefined ? {} : { limit: input.limit }),
-    }) }
-    if (action === 'inbox') return { action, inbox: messages.inbox(caller, {
-      ...(input.unreadOnly === undefined ? {} : { unreadOnly: input.unreadOnly }),
-      ...(input.limit === undefined ? {} : { limit: input.limit }),
-    }) }
-    if (action === 'pins') return { action, pins: messages.listPins(caller, input.conversation) }
-    if (input.messageId === undefined) throw new Error(`fleet_messages ${action} requires message_id`)
-    if (action === 'text') return {
-      action,
-      chunk: messages.readMessageText(caller, input.messageId, input.offset, input.limit ?? 12_000),
-    }
-    if (action === 'reactions') return { action, reactions: messages.listReactions(caller, input.messageId) }
-    if (action === 'react') {
-      if (input.reaction === undefined) throw new Error('fleet_messages react requires reaction')
-      return { action, reaction: messages.react(caller, {
-        messageId: input.messageId,
-        reaction: input.reaction,
-        ...(input.remove === undefined ? {} : { remove: input.remove }),
-      }) }
-    }
-    return { action, pin: messages.pin(caller, input.messageId, action === 'unpin') }
-  }
-
-  sendUserConversationMessage(input: SendFleetConversationMessageInput): SendMessageResult {
+  sendUserConversationMessage(input: SendFleetConversationMessageInput, caller?: Agent): SendMessageResult {
     const record = this.requireMutableRecord(input.runId)
     const subject = { kind: 'external' as const, id: `fleet-user:${record.id}` }
     this.authorization?.require({
@@ -4956,15 +5216,16 @@ export class FleetRunService {
       action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
-    return this.requireRuntime(record.id).sendUserMessage({
+    const result = this.collaboration.require(record.id).sendUserMessage({
       to: input.to,
       text: input.text,
       delivery: input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
-      ...(input.mustReply === undefined ? {} : { mustReply: input.mustReply }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
     })
+    this.reconcileOwnerTasks(record.id, caller)
+    return result
   }
 
   uploadResource(caller: Agent, input: UploadFleetResourceInput): FleetResource {
@@ -5113,8 +5374,7 @@ export class FleetRunService {
   recordCoordination(runId: string, event: FleetCoordinationEvent): void {
     const record = this.records.get(runId)
     const runtime = this.collaboration.get(runId)
-    const voteBindings = this.voteWorkIds.get(runId)
-    if (record === undefined || runtime === undefined || voteBindings === undefined) return
+    if (record === undefined || runtime === undefined) return
     this.appendEvent(record.id, `coordination.${event.type}`, event)
     if (event.type === 'message') {
       const recipientIds = event.message.recipientIds ?? []
@@ -5127,39 +5387,6 @@ export class FleetRunService {
           if (agent?.status === 'idle') this.agentIdle(agent)
         }
       })
-    }
-    if (
-      event.type === 'vote'
-      && event.action === 'opened'
-      && (event.vote.kind === 'finish' || event.vote.kind === 'blocked')
-      && record.status === 'running'
-      && record.work?.status === 'running'
-    ) {
-      voteBindings.set(event.vote.id, record.work.id)
-      this.appendEvent(record.id, 'work_vote_bound', { voteId: event.vote.id, workId: record.work.id })
-    }
-    if (event.type === 'vote' && event.action === 'closed' && event.vote.status === 'approved') {
-      if (event.vote.kind === 'finish' || event.vote.kind === 'blocked') {
-        const vote = event.vote
-        queueMicrotask(() => {
-          const current = this.records.get(runId)
-          if (
-            current?.status !== 'running'
-            || current.work === undefined
-            || voteBindings.get(vote.id) !== current.work.id
-          ) return
-          const participants = this.participants(current)
-          const initiator = participants.find(member => member.sessionId === vote.initiator)
-          const caller = (initiator === undefined ? undefined : this.ctx.agents.get(SessionId(initiator.sessionId)))
-            ?? participants.map(member => this.ctx.agents.get(SessionId(member.sessionId))).find(agent => agent !== undefined)
-          if (caller !== undefined) this.finishWork(
-            current,
-            vote.kind === 'finish' ? 'finished' : 'blocked',
-            vote.statement,
-            String(caller.id),
-          )
-        })
-      }
     }
   }
 
@@ -5331,6 +5558,18 @@ export class FleetRunService {
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     this.recordBudgetUsage(record, member, event)
+    const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
+    if (event.type === 'user/message' && event.data.source?.kind === 'user') {
+      if (foregroundAssistant) {
+        runtime.tasks.recordInteractionInput(member, {
+          messageId: String(event.data.id),
+          text: progressMessageText(event.data),
+        })
+      }
+    }
+    if (foregroundAssistant && event.type === 'assistant/message' && event.data.interrupted !== true) {
+      runtime.tasks.commitInteractionOutput(member, progressMessageText(event.data))
+    }
     if (event.type === 'assistant/chunk') return
     for (const listener of [...this.traceChangeListeners]) listener(runId, member)
     if (event.type !== 'turn/end') return
@@ -5341,15 +5580,17 @@ export class FleetRunService {
     }
     runtime.tasks.releaseRunning(member, reason.kind === 'error'
       ? `turn failed with ${reason.error.code}`
-      : `turn ended with ${reason.kind} before fleet_task settle`)
+      : `turn ended with ${reason.kind} before fleet_reconcile resolve`)
     const route = agent === undefined ? undefined : this.networkRoute(agent)
     this.clearNetworkRecovery(sessionId)
     if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
       this.wakeNetworkRecoveriesForRoute(runId, route, sessionId)
     }
-    if (agent !== undefined && !this.continueRequiredTask(runId, runtime, record, agent)) {
-      this.continueRequiredReply(runId, runtime, record, agent)
-    }
+    const continued = agent !== undefined && (
+      this.continueAssignedTask(runId, runtime, record, agent)
+      || this.continueOwnedTasks(runId, runtime, record, agent)
+    )
+    if (!continued) queueMicrotask(() => { this.signalAssistantInteractionDeliveries(runId) })
   }
 
   private autoContinuationPaused(record: FleetRunRecord, participant: string): boolean {
@@ -5360,97 +5601,21 @@ export class FleetRunService {
     return record.assistants.find(candidate => candidate.view.id === participant)?.status === 'paused'
   }
 
-  private continueRequiredReply(
-    runId: string,
-    runtime: FleetCollaborationTeam,
-    record: FleetRunRecord,
-    agent: Agent,
-  ): boolean {
-    const participant = this.participants(record)
-      .find(candidate => candidate.sessionId === String(agent.id))
-    if (participant === undefined
-      || this.autoContinuationPaused(record, participant.name)
-      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
-    const requiredReply = runtime.messages.followupRequiredReply(agent)
-    if (requiredReply === undefined) return false
-    this.appendEvent(runId, 'member_continued', {
-      member: participant.name,
-      reason: 'required_reply',
-      messages: [requiredReply.id],
-    })
-    return true
-  }
-
-  private continueRequiredTask(
-    runId: string,
-    runtime: FleetCollaborationTeam,
-    record: FleetRunRecord,
-    agent: Agent,
-  ): boolean {
-    const participant = this.participants(record)
-      .find(candidate => candidate.sessionId === String(agent.id))
-    if (participant === undefined
-      || this.autoContinuationPaused(record, participant.name)
-      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
-    const pending = runtime.tasks.pendingRequirement(participant.name)
-    if (pending === undefined) return false
-    const task = pending.activeReconcile?.status === 'ready'
-      ? runtime.tasks.claim(participant.sessionId, pending.id)
-      : pending.activeReconcile?.status === 'running' && pending.activeReconcile.target === participant.name
-        ? pending
-        : undefined
-    if (task === undefined) return false
-    const reconcile = task.activeReconcile
-    if (reconcile?.status !== 'running' || reconcile.attemptId === undefined) return false
-    const replyAlreadySent = task.requirement !== undefined
-      && runtime.messages.pendingRequiredReply(participant.sessionId) === undefined
-    const source = task.requirement === undefined
-      ? undefined
-      : `Source Fleet message: ${task.requirement.messageId} in ${task.requirement.conversation}.`
-    const replyPhase = task.requirement === undefined
-      ? undefined
-      : replyAlreadySent
-        ? 'A Fleet reply to the source message has already been sent. Do not repeat the work, rerun checks, or send another separate reply. Review the preceding result only to confirm it satisfies the request, then settle this exact ReconcileAttempt to {kind:"completed",result,finalReply}.'
-        : 'No Fleet reply to the source message has been recorded yet. Review the preceding turn before acting; if its work already satisfies the request, do not rerun checks and settle this exact ReconcileAttempt now to {kind:"completed",result,finalReply}.'
-    runtime.messages.sendSystemNotification(participant.name, {
-      kind: 'task_notice',
-      text: [
-        `[Fleet required task] A complete response is still required (${task.id}).`,
-        `Current ReconcileAttempt: ${reconcile.attemptId}${reconcile.timeoutAt === undefined ? '' : ` (timeout ${reconcile.timeoutAt})`}.`,
-        source,
-        replyPhase,
-        'The original input is not repeated here. Review the immediately preceding turns and tool results before acting. If the requirement is already satisfied, do not repeat checks or expand the work; call fleet_task action="settle" with this task id, the current attempt_id, progress text, and state {kind:"completed",result,finalReply}. Use fleet_messages to read the source conversation only when the original input is actually needed.',
-        'Fleet currently reports your runtime as active. Do not wait on an earlier pause instruction.',
-        'Otherwise continue the unfinished work. Before this turn ends, call fleet_task action="settle" with this attempt_id, progress text, and one explicit stable state. Completion uses {kind:"completed",result,finalReply}; a running or dormant state must include its next durable reconcilers.',
-      ].filter(Boolean).join('\n\n'),
-      delivery: 'wakeup',
-      coalesceKey: `required-task:${task.id}`,
-      ...(task.requirement === undefined ? {} : { relatedMessageId: task.requirement.messageId }),
-    })
-    this.appendEvent(runId, 'member_continued', {
-      member: participant.name,
-      reason: 'required_task',
-      tasks: [task.id],
-      ...(task.requirement === undefined ? {} : { messages: [task.requirement.messageId] }),
-    })
-    return true
-  }
-
   private continueAssignedTask(
     runId: string,
     runtime: FleetCollaborationTeam,
     record: FleetRunRecord,
     agent: Agent,
   ): boolean {
-    if (record.status !== 'running' || record.work?.status !== 'running') return false
+    if (record.status === 'paused' || record.status === 'starting' || record.status === 'finishing'
+      || record.status === 'closed' || record.status === 'failed') return false
     const participant = this.participants(record)
       .find(candidate => candidate.sessionId === String(agent.id))
     if (participant === undefined
       || this.autoContinuationPaused(record, participant.name)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     if (runtime.tasks.runningFor(participant.name).length > 0) return false
-    const pending = runtime.tasks.readyTasks(participant.name)
-      .find(task => task.requirement === undefined)
+    const pending = runtime.tasks.readyTasks(participant.name)[0]
     if (pending === undefined) return false
     const readyReason = pending.activeReconcile?.reason ?? 'Task is ready for reconciliation.'
     const task = runtime.tasks.claim(participant.sessionId, pending.id)
@@ -5461,9 +5626,10 @@ export class FleetRunService {
       text: [
         `[Fleet task attempt] ${task.title} (${task.id})`,
         `Current ReconcileAttempt: ${reconcile.attemptId}${reconcile.timeoutAt === undefined ? '' : ` (timeout ${reconcile.timeoutAt})`}.`,
+        'Fleet already claimed this ReconcileAttempt for the current turn. Do not call fleet_reconcile claim.',
         task.description,
         readyReason,
-        'Work only this ReconcileAttempt. Before the turn ends, call fleet_task action="settle" with this attempt_id, progress text, and one explicit stable state. A running or dormant state must include durable reconcilers; child_ops may atomically create, link, cancel, or open Vote child Tasks. Fleet commits the state, child operations, and next triggers before releasing you.',
+        `Work only this ReconcileAttempt. Inspect every current cohort result before deciding. A rejected Vote is a completed decision: continue with a remediation Goal and later a fresh Vote instead of completing or blocking the parent. Before the turn ends, call fleet_reconcile action="resolve", id="${task.id}", attempt_id="${reconcile.attemptId}", progress="...", and state={...}. The id is the Task id, not the attempt or reconciler id. A running or dormant state must include durable reconcilers; child_ops may atomically create Goal work, open a Vote, create/link a generic child, or cancel an obsolete child. Fleet commits the state, child operations, and next triggers before releasing you.`,
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `assigned-task:${task.id}`,
@@ -5483,7 +5649,8 @@ export class FleetRunService {
     record: FleetRunRecord,
     agent: Agent,
   ): boolean {
-    if (record.status !== 'running' || record.work?.status !== 'running') return false
+    if (record.status === 'paused' || record.status === 'starting' || record.status === 'finishing'
+      || record.status === 'closed' || record.status === 'failed') return false
     const participant = this.participants(record)
       .find(candidate => candidate.sessionId === String(agent.id))
     if (participant === undefined
@@ -5491,19 +5658,37 @@ export class FleetRunService {
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const tasks = runtime.tasks.ownerTasks(participant.name)
     if (tasks.length === 0) return false
-    runtime.messages.sendSystemNotification(participant.sessionId, {
-      kind: 'task_notice',
-      text: [
-        '[Fleet owner task list]',
-        'Your running owner Tasks:',
-        ...tasks.map(task => `- ${task.title} (${task.id})`),
-        'Each ownership behaves like an implicit child work item but records only intent, not Task state. Use fleet_task action="owner_list" to read the complete Task descriptions, states, and owner intents, then work your part independently.',
-        'For each finished item call fleet_task action="complete" with its task id and concrete evidence to mark complete intent; if your part cannot proceed, call action="block" with the blocking reason. These are intentions only: a ReconcileAttempt decides the Task state.',
-        'Until every ownership has an intent or its Task leaves running, this non-empty list will wake you again.',
-      ].join('\n'),
-      delivery: 'wakeup',
-      coalesceKey: `owner-task-list:${participant.name}`,
-    })
+    const taskInstruction = (task: (typeof tasks)[number]): string => {
+      if (task.domain.kind === 'inbox') return `- ${task.title} (${task.id}): call fleet_inbox action="read" to consume unread messages.`
+      if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): finish the requested work, then call fleet_reply with task_id="${task.id}" and content.`
+      if (task.domain.kind === 'goal') return `- ${task.title} (${task.id}): call fleet_goal action="complete" with the assignment result (including a reject recommendation), or "block" only for an external impediment.`
+      if (task.domain.kind === 'interaction') {
+        const delivery = task.domain.pendingDelivery
+        const deliveryText = delivery === undefined
+          ? ''
+          : ` Persistent completion Delivery ${delivery.id} (${delivery.cause}) for revision ${String(delivery.revision)}: ${delivery.summary} Linked results: ${delivery.tasks.map(item => `${item.title} (${item.id})=${item.state}: ${item.result ?? item.reason}`).join('; ') || 'none'}.`
+        return `- ${task.title} (${task.id}): inspect the latest user intent with fleet_user_task action="status".${deliveryText} If already-linked Team work remains live, call action="continue" with only a reason to reinstall that wait; add a live formal-member task id or concrete Goal handoff only for new work. If the foreground response settles the request, call action="report" or "block" before emitting that native response; the Delivery is consumed only after non-empty native output.`
+      }
+      if (task.domain.kind === 'vote') return `- ${task.title} (${task.id}): call fleet_vote action="cast" with this id, a decision, and a reason.`
+      return `- ${task.title} (${task.id}): inspect it with fleet_task action="get".`
+    }
+    try {
+      runtime.messages.sendSystemNotification(participant.sessionId, {
+        kind: 'task_notice',
+        text: [
+          '[Fleet owner task list]',
+          'Your running owner Tasks:',
+          ...tasks.map(taskInstruction),
+          'Use fleet_task action="owner_list" to inspect the complete Task records. Domain tools record your intent or receipt and atomically derive the next Task state.',
+          'Until every owned item is consumed or leaves running, this non-empty list will wake you again.',
+        ].join('\n'),
+        delivery: 'wakeup',
+        coalesceKey: `owner-task-list:${participant.name}`,
+      })
+    } catch (error) {
+      if (errorMessage(error).includes('is not available to Fleet')) return false
+      throw error
+    }
     this.appendEvent(runId, 'member_continued', {
       member: participant.name,
       reason: 'owner_task_list',
@@ -5514,7 +5699,8 @@ export class FleetRunService {
 
   private reconcileReadyTasks(runId: string): void {
     const record = this.records.get(runId)
-    if (record === undefined || record.status !== 'running' || record.work?.status !== 'running'
+    if (record === undefined || record.status === 'paused' || record.status === 'starting'
+      || record.status === 'finishing' || record.status === 'closed' || record.status === 'failed'
       || this.dormantRunIds.has(runId)) return
     const runtime = this.collaboration.get(runId)
     if (runtime === undefined) return
@@ -5526,18 +5712,14 @@ export class FleetRunService {
         || runtime.tasks.readyTasks(participant.name).length === 0) continue
       const agent = this.ctx.agents.get(SessionId(participant.sessionId))
       if (agent?.status !== 'idle') continue
-      if (runtime.tasks.readyRequirement(participant.name) !== undefined) {
-        this.continueRequiredTask(runId, runtime, record, agent)
-      } else {
-        this.continueAssignedTask(runId, runtime, record, agent)
-      }
+      this.continueAssignedTask(runId, runtime, record, agent)
     }
   }
 
-  private reconcileOwnerTasks(runId: string): void {
+  private reconcileOwnerTasks(runId: string, preferredCaller?: Agent): void {
     const record = this.records.get(runId)
-    if (record === undefined || record.status !== 'running' || record.work?.status !== 'running'
-      || this.dormantRunIds.has(runId)) return
+    if (record === undefined || record.status === 'paused' || record.status === 'starting'
+      || record.status === 'finishing' || record.status === 'closed' || record.status === 'failed') return
     const runtime = this.collaboration.get(runId)
     if (runtime === undefined) return
     for (const participant of this.participants(record)) {
@@ -5548,31 +5730,146 @@ export class FleetRunService {
         || runtime.tasks.readyTasks(participant.name).length > 0
         || runtime.tasks.ownerTasks(participant.name).length === 0) continue
       const agent = this.ctx.agents.get(SessionId(participant.sessionId))
-      if (agent?.status === 'idle') this.continueOwnedTasks(runId, runtime, record, agent)
+      if (agent?.status === 'idle') {
+        this.continueOwnedTasks(runId, runtime, record, agent)
+        continue
+      }
+      if (agent === undefined && record.members.some(member => member.name === participant.name)) {
+        this.resumeOwnerMember(record, runtime, participant.name, preferredCaller)
+      }
     }
   }
 
-  private continueUnread(
-    runId: string,
-    runtime: FleetCollaborationTeam,
+  private resumeOwnerMember(
     record: FleetRunRecord,
-    agent: Agent,
-  ): boolean {
-    const participant = this.participants(record)
-      .find(candidate => candidate.sessionId === String(agent.id))
-    if (participant === undefined
-      || this.autoContinuationPaused(record, participant.name)
-      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
-    const pending = runtime.messages.pendingWakeups(participant.sessionId)
-    const unread = runtime.messages.followupUnread(agent)
-    if (unread === undefined) return false
-    this.appendEvent(runId, 'member_continued', {
-      member: participant.name,
-      reason: pending.length > 0 ? 'pending_wakeup' : 'unread_message',
-      messages: [unread.latestMessageId],
-      inbox: unread.conversation,
+    runtime: FleetCollaborationTeam,
+    memberName: string,
+    preferredCaller?: Agent,
+  ): void {
+    const key = `${record.id}:${memberName}`
+    if (this.ownerMemberResumes.has(key)) return
+    const caller = preferredCaller ?? [
+      ...record.assistants.map(assistant => assistant.sessionId),
+      ...record.members.map(member => member.sessionId),
+    ].map(sessionId => this.ctx.agents.get(SessionId(sessionId))).find((agent): agent is Agent => agent !== undefined)
+    if (caller === undefined) return
+    const operation = this.resumeMemberNow(caller, record, memberName)
+      .then(member => {
+        const agent = this.ctx.agents.get(SessionId(member.sessionId))
+        const current = this.records.get(record.id)
+        if (agent?.status === 'idle' && current !== undefined) {
+          this.continueOwnedTasks(record.id, runtime, current, agent)
+        }
+      })
+      .catch((error: unknown) => {
+        this.ctx.logger('dsh-agent-fleet').warn(
+          `Could not resume Fleet owner ${memberName} in Team ${record.id}: ${errorMessage(error)}`,
+        )
+      })
+      .finally(() => { this.ownerMemberResumes.delete(key) })
+    this.ownerMemberResumes.set(key, operation)
+  }
+
+  private teamIsQuiescent(record: FleetRunRecord, runtime: FleetCollaborationTeam): boolean {
+    if (record.status !== 'idle' && record.status !== 'running') return false
+    return record.members.every(member => {
+      if (member.status === 'paused' || this.networkRecoveries.has(member.sessionId)) return false
+      const agent = this.ctx.agents.get(SessionId(member.sessionId))
+      if (agent?.status === 'running') return false
+      return runtime.tasks.runningFor(member.name).length === 0
+        && runtime.tasks.readyTasks(member.name).length === 0
+        && runtime.tasks.ownerTasks(member.name).length === 0
     })
-    return true
+  }
+
+  private workRelatedTasks(runtime: FleetCollaborationTeam, rootTaskId: string): FleetProjectTask[] {
+    const tasks = runtime.tasks.state().tasks
+    const related = new Set([rootTaskId])
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const task of tasks) {
+        if (task.parentId !== undefined && related.has(task.parentId) && !related.has(task.id)) {
+          related.add(task.id)
+          changed = true
+        }
+        if (!related.has(task.id)) continue
+        for (const dependency of task.dependencies) {
+          if (related.has(dependency)) continue
+          related.add(dependency)
+          changed = true
+        }
+      }
+    }
+    return tasks.filter(task => related.has(task.id))
+  }
+
+  private workTasksAreSettled(tasks: readonly FleetProjectTask[], rootTaskId: string): boolean {
+    return tasks.every(task => task.id === rootTaskId
+      || task.stableState.kind === 'completed'
+      || task.stableState.kind === 'blocked'
+      || task.stableState.kind === 'cancelled')
+  }
+
+  private workMembersAreIdle(record: FleetRunRecord, tasks: readonly FleetProjectTask[]): boolean {
+    const formalMembers = new Set(record.members.map(member => member.name))
+    const owners = new Set(tasks.flatMap(task => [
+      ...task.owners.map(owner => owner.member),
+      ...task.assignees,
+    ]).filter(member => formalMembers.has(member)))
+    return [...owners].every(owner => {
+      const member = record.members.find(candidate => candidate.name === owner)
+      return member !== undefined && this.ctx.agents.get(SessionId(member.sessionId))?.status !== 'running'
+    })
+  }
+
+  private finishReadyWork(runId: string): void {
+    const record = this.records.get(runId)
+    const runtime = this.collaboration.get(runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running' || runtime === undefined) return
+    const root = runtime.tasks.state().tasks.find(task => task.id === record.work?.rootTaskId)
+    if (root === undefined) return
+    const related = this.workRelatedTasks(runtime, root.id)
+    const rootWorkId = root.domain.kind === 'composite' || root.domain.kind === 'goal'
+      ? root.domain.rootWorkId
+      : undefined
+    if (rootWorkId !== record.work.id
+      || (root.stableState.kind !== 'completed' && root.stableState.kind !== 'blocked')
+      || !this.workTasksAreSettled(related, root.id)
+      || !this.workMembersAreIdle(record, related)) return
+    const coordinator = root.assignees[0] ?? root.owners[0]?.member
+    const callerId = record.members.find(member => member.name === coordinator)?.sessionId ?? record.launcherSessionId
+    this.finishWork(
+      record,
+      root.stableState.kind === 'completed' ? 'finished' : 'blocked',
+      root.stableState.kind === 'completed'
+        ? root.stableState.result ?? root.stableState.reason
+        : root.stableState.reason,
+      callerId,
+    )
+  }
+
+  private signalAssistantInteractionDeliveries(runId: string): void {
+    const record = this.records.get(runId)
+    const runtime = this.collaboration.get(runId)
+    if (record === undefined || runtime === undefined) return
+    const teamQuiescent = this.teamIsQuiescent(record, runtime)
+    const tasks = record.assistants.flatMap(assistant => {
+      const interaction = runtime.tasks.interactionTask(assistant.view.id)
+      if (interaction?.domain.kind !== 'interaction' || interaction.stableState.kind !== 'dormant') return []
+      const linked = interaction.domain.waitingTaskIds.map(id => runtime.tasks.get(assistant.sessionId, id))
+      const linkedSettled = linked.length > 0 && linked.every(task => task.stableState.kind === 'completed'
+        || task.stableState.kind === 'blocked' || task.stableState.kind === 'cancelled')
+      if (!linkedSettled && !teamQuiescent) return []
+      const task = runtime.tasks.signalInteractionDelivery(
+        assistant.view.id,
+        linkedSettled
+          ? `Every linked Team Task reached a terminal state for Fleet Interaction ${interaction.id}.`
+          : `Every formal member in Fleet Team ${record.name} is idle and has no actionable owner or Reconcile Task.`,
+      )
+      return task === undefined ? [] : [task.id]
+    })
+    if (tasks.length > 0) this.appendEvent(record.id, 'interaction_delivery_ready', { tasks })
   }
 
   agentIdle(agent: Agent): void {
@@ -5589,110 +5886,31 @@ export class FleetRunService {
     const record = this.records.get(runId)
     const participant = runtime.memberNamesById.get(agentId)
     if (record === undefined || participant === undefined
-      || this.autoContinuationPaused(record, participant)) return
+      || this.autoContinuationPaused(record, participant)
+      || this.networkRecoveries.has(agentId)) return
 
-    // Message obligations are promoted to durable required tasks. Keep both
-    // formal members and user-facing assistants active until the task is
-    // explicitly completed, even if they have already acknowledged the message.
-    if (this.continueRequiredTask(runId, runtime, record, agent)) return
-    // Preserve legacy required-reply recovery for journals that have not yet
-    // been migrated to a task.
-    if (this.continueRequiredReply(runId, runtime, record, agent)) return
-    // Unread conversation state also outlives a work item. In particular, the
-    // user-facing assistant must consume member replies before answering later
-    // progress questions from stale context.
-    if (this.continueUnread(runId, runtime, record, agent)) return
-    // During an active work item, an actionable assigned task is durable work,
-    // not a suggestion that may disappear when a model emits ordinary text.
     if (this.continueAssignedTask(runId, runtime, record, agent)) return
-    // An owner entry is an implicit child Task. Keep waking only that owner
-    // until they settle their entry or the parent Task leaves running.
     if (this.continueOwnedTasks(runId, runtime, record, agent)) return
-    if (record?.status !== 'running' || record.work?.status !== 'running') return
-
-    let wokeUnread = false
-    for (const member of record.members) {
-      if (this.budgetRemaining(record, member.name).exhaustedScope !== undefined) continue
-      if (this.networkRecoveries.has(member.sessionId)) continue
-      const live = this.liveMember(member)
-      if (live?.status !== 'idle') continue
-      const pending = runtime.messages.pendingWakeups(member.sessionId)
-      const unread = runtime.messages.followupUnread(live)
-      const requiredTask = unread === undefined ? runtime.tasks.pendingRequirement(member.name) : undefined
-      if (requiredTask !== undefined) {
-        if (this.continueRequiredTask(runId, runtime, record, live)) wokeUnread = true
-        continue
-      }
-      const requiredReply = unread === undefined ? runtime.messages.followupRequiredReply(live) : undefined
-      const waitingMessage = unread ?? requiredReply
-      if (waitingMessage === undefined) continue
-      const waitingMessageId = unread?.latestMessageId ?? requiredReply?.id
-      if (waitingMessageId === undefined) continue
-      this.appendEvent(runId, 'member_continued', {
-        member: member.name,
-        reason: pending.length > 0
-          ? 'pending_wakeup'
-          : unread === undefined ? 'required_reply' : 'unread_message',
-        messages: [waitingMessageId],
-        ...(unread === undefined ? {} : { inbox: unread.conversation }),
-      })
-      wokeUnread = true
-    }
-    if (wokeUnread) return
-    if (this.manualWakeRequiredRunIds.has(runId)) return
     this.reconcileReadyTasks(runId)
     this.reconcileOwnerTasks(runId)
-    if (runtime.tasks.activeWorkIsCovered()) return
-
-    const online = record.members.flatMap(member => {
-      const live = this.liveMember(member)
-      return live === undefined ? [] : [live]
-    })
-    const allIdle = online.length > 0 && online.every(member => member.status === 'idle')
-    if (!allIdle) return
-    const idleCandidates = record.members.filter(candidate =>
-      this.memberCanReply(candidate)
-      && !this.networkRecoveries.has(candidate.sessionId)
-      && this.budgetRemaining(record, candidate.name).exhaustedScope === undefined,
-    ).filter(candidate => this.ctx.agents.get(SessionId(candidate.sessionId))?.status === 'idle')
-    const activeTaskAssignees = new Set(runtime.tasks.state().tasks
-      .filter(task => task.stableState.kind !== 'completed' && task.stableState.kind !== 'cancelled')
-      .flatMap(task => task.assignees))
-    const voteReader = idleCandidates
-      .map(candidate => this.liveMember(candidate))
-      .find(candidate => candidate !== undefined)
-    const pendingTerminalVoters = new Set(voteReader === undefined ? [] : runtime.messages
-      .listVotes(voteReader)
-      .filter(vote => vote.status === 'open' && (vote.kind === 'finish' || vote.kind === 'blocked'))
-      .flatMap(vote => vote.voters.filter(voter => !vote.approvals.includes(voter))))
-    const member = idleCandidates.find(candidate => pendingTerminalVoters.has(candidate.name))
-      ?? idleCandidates.find(candidate => activeTaskAssignees.has(candidate.name))
-      ?? idleCandidates.find(candidate => runtime.memberViews.get(candidate.name)?.permissions.includes('vote.create') === true)
-      ?? idleCandidates[0]
-    if (member === undefined) return
-    runtime.messages.sendSystemNotification(member.sessionId, {
-      kind: 'team_quiescent',
-      text: [
-        `[Fleet work ${record.work.id} continuation]`,
-        'The Team still has active work, but every member is idle and no explicit wake-up reply is pending.',
-        'You are the single member selected for this continuation so the whole Team does not duplicate the same work. Inspect the current Tasks, Channels, Meetings, Votes, shared files, work claims, and member status. Continue an assigned open task or claim one unowned next step; wake only the relevant peers for review.',
-        'Ordinary model output and member status text do not finish Fleet work. If the evidence shows the work is complete or blocked, call fleet_vote now with action="create", channel="#main", kind="finish" or "blocked", and an evidence-backed statement. If a terminal Vote is already open, cast approve or reject instead of merely saying that you agree.',
-      ].join('\n\n'),
-      delivery: 'wakeup',
-      coalesceKey: `team-quiescent:${record.work.id}`,
-    })
-    this.appendEvent(runId, 'member_continued', {
-      member: member.name,
-      reason: 'team_quiescent',
-    })
   }
 
   agentStatusChanged(agent: Agent): void {
     const agentId = String(agent.id)
-    if ([...this.records.values()].some(record => this.participants(record).some(member => member.sessionId === agentId))) {
+    const records = [...this.records.values()].filter(record =>
+      this.participants(record).some(member => member.sessionId === agentId))
+    if (records.length > 0) {
       this.emitChange()
     }
-    if (agent.status === 'idle') this.agentIdle(agent)
+    if (agent.status === 'idle') {
+      this.agentIdle(agent)
+      for (const record of records) {
+        queueMicrotask(() => {
+          this.finishReadyWork(record.id)
+          this.signalAssistantInteractionDeliveries(record.id)
+        })
+      }
+    }
   }
 
   agentDisconnected(agentId: string): void {
@@ -6420,10 +6638,6 @@ export class FleetRunService {
     if (callerParticipant === undefined || callerView === undefined) {
       throw new Error(`Agent ${callerId} is not a Fleet participant`)
     }
-    const canRead = this.authorization?.has(record.id, callerView, 'member-status.read')
-      ?? callerView.toolGroups.includes('status')
-    if (!canRead) throw new Error(`Agent ${callerId} is not authorized for member-status.read`)
-
     const reference = memberReference.startsWith('@') ? memberReference.slice(1) : memberReference
     const views = this.memberViews(record.id)
     const matches = this.participants(record).flatMap(candidate => {
@@ -6469,18 +6683,11 @@ export class FleetRunService {
     const runtimeStatus = current.members.find(candidate => candidate.name === member.name)?.status
       ?? current.assistants.find(candidate => candidate.view.id === member.name)?.status
       ?? 'unknown'
-    const declared = this.requireRuntime(record.id).memberStatuses.get(callerId, member.name)
     return {
       runId: record.id,
       member: member.name,
       ...(memberView === undefined ? {} : { displayName: memberView.name }),
       runtimeStatus,
-      ...(declared.message === '' ? {} : {
-        declaredStatus: {
-          text: declared.message,
-          ...(declared.updatedAt === undefined ? {} : { updatedAt: declared.updatedAt }),
-        },
-      }),
       items,
       cursor,
       hasMore,
@@ -6777,7 +6984,7 @@ export class FleetRunService {
       const coordination = event.data as Extract<FleetCoordinationEvent, { type: 'vote' }>
       return coordination.action === 'opened' || coordination.action === 'closed' ? 'vote' : undefined
     }
-    if (/^task\.(created|updated|commented|progressed|owner_intent_marked|completed|cancelled|due)$/.test(event.type)) return 'task'
+    if (/^task\.(created|updated|commented|progressed|domain_updated|reconcile_ready|reconcile_started|reconciled|retrying|timed_out|signaled|completed|cancelled|due)$/.test(event.type)) return 'task'
     if (/^calendar\.(created|updated|rsvp|started|closed|cancelled)$/.test(event.type)) return 'calendar'
     if (event.type === 'resource.document_commented' || event.type === 'resource.document_resolved') return 'document'
     if (event.type === 'schedule.triggered') return 'schedule'
@@ -6916,7 +7123,6 @@ export class FleetRunService {
     this.waitingSessionIds.clear()
     this.abnormalSessionIds.clear()
     this.collaboration.close()
-    this.voteWorkIds.clear()
     this.dormantRunIds.clear()
     this.manualWakeRequiredRunIds.clear()
     this.teamProjectionEvents.clear()
@@ -7058,6 +7264,14 @@ export class FleetRunService {
       workId: record.work?.id,
       ...(error === undefined ? {} : { error }),
     })
+    this.signalAssistantInteractionDeliveries(idle.id)
+    const runtime = this.collaboration.get(idle.id)
+    if (runtime !== undefined) {
+      for (const assistant of idle.assistants) {
+        const agent = this.ctx.agents.get(SessionId(assistant.sessionId))
+        if (agent?.status === 'idle') this.continueOwnedTasks(idle.id, runtime, idle, agent)
+      }
+    }
     this.notify(idle)
   }
 
@@ -7090,7 +7304,6 @@ export class FleetRunService {
     this.stopSharedFileWatcher(runId)
     this.forgetTeam(runId)
     if (record.members.length === 0) {
-      this.voteWorkIds.delete(record.id)
       this.teamProjectionEvents.delete(record.id)
       this.teamProjectionIdentities.delete(record.id)
       this.eventSequences.delete(record.id)
@@ -7119,7 +7332,6 @@ export class FleetRunService {
     this.forgetTeam(record.id)
     const settled = this.replaceRecord(record.id, { settled: true })
     this.appendEvent(record.id, 'team_settled', { recoveredAfterRestart: true })
-    this.voteWorkIds.delete(record.id)
     this.teamProjectionEvents.delete(record.id)
     this.teamProjectionIdentities.delete(record.id)
     this.eventSequences.delete(record.id)
@@ -7165,7 +7377,6 @@ export class FleetRunService {
     })
     this.appendEvent(record.id, 'team_settled', error === undefined ? {} : { error })
     this.collaboration.closeTeam(record.id)
-    this.voteWorkIds.delete(record.id)
     this.teamProjectionEvents.delete(record.id)
     this.teamProjectionIdentities.delete(record.id)
     this.eventSequences.delete(record.id)
@@ -7331,14 +7542,19 @@ export class FleetRunService {
         this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
         if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
         if (event.action === 'created'
+          || event.action === 'domain_updated'
           || event.action === 'reconcile_ready'
           || event.action === 'reconciled'
           || event.action === 'retrying'
           || event.action === 'signaled'
-          || event.action === 'updated') {
+          || event.action === 'updated'
+          || event.action === 'completed'
+          || event.action === 'cancelled') {
           queueMicrotask(() => {
             this.reconcileReadyTasks(record.id)
             this.reconcileOwnerTasks(record.id)
+            this.finishReadyWork(record.id)
+            this.signalAssistantInteractionDeliveries(record.id)
           })
         }
       },
@@ -7989,7 +8205,6 @@ export class FleetRunService {
       } catch (error) {
         if (reference !== undefined) {
           this.collaboration.closeTeam(reference.id)
-          this.voteWorkIds.delete(reference.id)
           this.dormantRunIds.delete(reference.id)
           this.records.delete(reference.id)
         }
@@ -8005,20 +8220,13 @@ export class FleetRunService {
     const events = this.storedEvents(record)
     this.indexAssistantSessions(record, events)
     this.eventSequences.set(record.id, this.lastStoredSequence(record))
-    const bindings = new Map<string, string>()
-    for (const event of events) {
-      if (event.type !== 'work_vote_bound') continue
-      const binding = event.data as { readonly voteId: string; readonly workId: string }
-      bindings.set(binding.voteId, binding.workId)
-    }
-    this.voteWorkIds.set(record.id, bindings)
     this.dormantRunIds.add(record.id)
     const runtime = this.openCollaboration(record, this.effectiveMemberViews(record, events))
     for (const member of record.members) {
       runtime.memberIdsByName.set(member.name, member.sessionId)
       runtime.memberNamesById.set(member.sessionId, member.name)
     }
-    // Coordination replay can recreate durable must-reply tasks before a
+    // Coordination replay can recreate durable Reply Tasks before a
     // resident assistant Session is resumed. Seed its persisted identity now
     // so task assignees resolve during replay; live attachment follows later.
     for (const assistant of record.assistants) {
@@ -8281,6 +8489,7 @@ const RUN_WORK_SCHEMA = {
   additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
+    rootTaskId: { type: 'string' },
     taskPath: { type: 'string', required: true },
     acceptedTaskPath: { type: 'string' },
     status: { type: 'string', required: true, enum: ['running', 'finished', 'blocked', 'failed', 'cancelled'] },
@@ -8337,7 +8546,7 @@ const RUN_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'wake', 'list', 'status', 'wait', 'finish', 'close'] },
+    action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
     runs: { type: 'array', items: RUN_SCHEMA },
     run: RUN_SCHEMA,
   },
@@ -8416,14 +8625,6 @@ const PROGRESS_RESULT_SCHEMA = {
       type: 'string',
       required: true,
       enum: ['idle', 'running', 'waiting', 'error', 'offline', 'paused', 'unknown'],
-    },
-    declaredStatus: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        text: { type: 'string', required: true },
-        updatedAt: { type: 'string' },
-      },
     },
     items: { type: 'array', required: true, items: PROGRESS_ITEM_SCHEMA },
     cursor: { type: 'integer', required: true },
@@ -8522,11 +8723,24 @@ const ASSISTANT_MESSAGE_SCHEMA = {
   additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
+    messageId: { type: 'string', required: true },
     runId: { type: 'string', required: true },
     kind: { type: 'string', required: true, enum: ['collaboration', 'directive'] },
     text: { type: 'string', required: true },
-    mustReply: { type: 'boolean' },
     recipients: { type: 'array', required: true, items: { type: 'string' } },
+    stages: {
+      type: 'array', required: true, items: {
+        type: 'object', additionalProperties: false, properties: {
+          key: { type: 'string', required: true },
+          kind: { type: 'string', required: true, enum: ['goal', 'vote'] },
+          title: { type: 'string', required: true },
+          description: { type: 'string', required: true },
+          owners: { type: 'array', required: true, items: { type: 'string' } },
+          dependencies: { type: 'array', required: true, items: { type: 'string' } },
+          timeoutAt: { type: 'string' },
+        },
+      },
+    },
     assistantSessionId: { type: 'string', required: true },
     assistantId: { type: 'string', required: true },
     assistantName: { type: 'string', required: true },
@@ -8567,6 +8781,24 @@ const ASSISTANT_RESULT_SCHEMA = {
   },
 } as const
 
+const FLEXIBLE_OBJECT_SCHEMA = {
+  type: 'object', additionalProperties: true, properties: {},
+} as const
+
+function flexibleJson(value: unknown): InferValue<typeof FLEXIBLE_OBJECT_SCHEMA> {
+  return value as InferValue<typeof FLEXIBLE_OBJECT_SCHEMA>
+}
+
+const USER_TASK_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    action: { type: 'string', required: true, enum: ['status', 'continue', 'take_over', 'report', 'block'] },
+    task: { ...FLEXIBLE_OBJECT_SCHEMA, required: true },
+    goals: { type: 'array', items: FLEXIBLE_OBJECT_SCHEMA },
+  },
+} as const
+
 function jsonOutput<const S extends ValueSchemaSpec>(schema: S): {
   schema: S
   render: (args: unknown, value: InferValue<S>) => [{ type: 'text'; text: string }]
@@ -8589,13 +8821,12 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send a quiet message from the calling Fleet participant to a member, Channel, or the external user. The @ in a direct to target is routing only. A resolved message mention creates a persistent must-complete task for that target; an ordinary direct message or reply does not. User-facing Team assistants must use this tool to reply to @User.',
+    description: 'Send a quiet Fleet message. Ordinary messages enter recipients\' Inbox Tasks; every resolved @mention also creates a Reply Task. Use fleet_reply to complete an existing Reply Task.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
+      to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not create a Reply Task.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural targets merged with valid @Name or @member-id mentions parsed from the text. Every resolved target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets merged with valid @Name or @member-id mentions parsed from the text.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a persistent must-complete task for every recipient. Parsed message mentions already create target-level required tasks automatically.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
@@ -8607,88 +8838,82 @@ export function installRunTools(
         delivery: 'quiet',
         ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
-        ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }))
     },
   }))
 
   ctx.tools.register(defineTool({
-    name: 'fleet_followup',
-    description: 'Send a Fleet message and wake or urgently interrupt its recipients. The @ in a direct to target is routing only. Resolved message mentions create persistent must-complete tasks for those targets; in a Channel they also select who is woken or interrupted.',
+    name: 'fleet_user_task',
+    description: 'Operate the calling assistant persistent foreground Interaction Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Report/block commits only after native foreground output.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not imply must-reply.' },
-      message: { type: 'string', required: true, description: 'Self-contained follow-up text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural targets merged with valid @Name or @member-id mentions parsed from the text. Every resolved target receives a persistent high-priority task that only fleet_task complete can satisfy; a direct message may mention only its recipient. Channel mentions are woken or interrupted.' },
-      reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
-      must_reply: { type: 'boolean', description: 'Compatibility name for explicitly creating a persistent must-complete task for every recipient. Parsed message mentions already create target-level required tasks automatically.' },
-      resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
-      interrupt: { type: 'boolean', description: 'Interrupt in-flight work instead of an ordinary wake-up.' },
+      action: { type: 'string', required: true, enum: ['status', 'continue', 'take_over', 'report', 'block'] },
+      run_id: { type: 'string', description: 'Persistent Team id. Defaults to the Team containing the calling assistant.' },
+      reason: { type: 'string', description: 'Required for continue, take_over, report, and block.' },
+      report: { type: 'string', description: 'Exact foreground result to present. Required for report and block.' },
+      task_ids: { type: 'array', items: { type: 'string' }, description: 'For continue, optional additional live Tasks owned by formal Team members. Omit to retain existing live waits.' },
+      title: { type: 'string', description: 'For continue with instructions, title of the new Goal.' },
+      instructions: { type: 'string', description: 'For continue, concrete work for a new formal-member Goal.' },
+      owners: { type: 'array', items: { type: 'string' }, description: 'For continue with instructions, one or more formal Team members.' },
+      check_after_seconds: { type: 'integer', description: 'For continue, deterministic progress-check deadline. Defaults to 300 seconds.' },
     },
-    output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
+    output: jsonOutput(USER_TASK_RESULT_SCHEMA),
     execute(args, exec) {
-      const caller = callingAgent(exec.agent, 'fleet_followup')
-      return Promise.resolve(service.sendConversationMessage(caller, {
-        to: args.to as `@${string}` | `#${string}` | `meeting:${string}`,
-        text: args.message,
-        delivery: args.interrupt === true ? 'interrupt' : 'wakeup',
-        ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
-        ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
-        ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
-        ...(args.resources === undefined ? {} : { resources: args.resources }),
-      }))
-    },
-  }))
-
-  // Message reading is a process-wide routing capability, like sending. The
-  // caller Agent identifies its Team at execution time, so resident assistants
-  // can always consume unread state even when a scoped optional-tool binding is
-  // being restored after a host/plugin restart. Agent-scoped tools may still
-  // shadow this definition with the same semantics and richer discovery groups.
-  ctx.tools.register(defineTool({
-    name: 'fleet_messages',
-    description: 'Read a Fleet conversation inbox in one character-bounded batch. Unread reads return the newest messages that fit max_chars and report remainingUnread when older information is still waiting. Reading returned text advances the existing persistent per-message progress; notifications and ordinary model output do not.',
-    parameters: {
-      action: { type: 'string', enum: ['read', 'search', 'inbox', 'react', 'reactions', 'pin', 'unpin', 'pins', 'text'], description: 'Defaults to read.' },
-      conversation: { type: 'string', description: 'Conversation in @fleet-name, @agent-id, #channel, or meeting:id form.' },
-      after: { type: 'string', description: 'Return messages after this stable Fleet message id.' },
-      limit: { type: 'integer', description: 'Optional history ceiling when unread_only=false. Unread inbox reads always batch by max_chars, so retained limit values from older Sessions cannot split a short inbox across model steps.' },
-      max_chars: { type: 'integer', description: 'Maximum total text returned by read. When unread text is longer, the newest messages are returned and older messages remain unread.' },
-      query: { type: 'string', description: 'Case-insensitive text query for search.' },
-      from: { type: 'string', description: 'Optional sender filter for search.' },
-      resource: { type: 'string', description: 'Optional resource id filter for search.' },
-      unread_only: { type: 'boolean', description: 'For read, defaults true and batch-loads unread messages from the conversation inbox. For inbox, return only unread activity items.' },
-      message_id: { type: 'string', description: 'Message id for text, reaction, or pin actions.' },
-      offset: { type: 'integer', description: 'Character offset for text continuation.' },
-      reaction: { type: 'string', description: 'Reaction label for react.' },
-      remove: { type: 'boolean', description: 'Remove the calling participant reaction instead of adding it.' },
-    },
-    output: jsonOutput(MESSAGE_ACTION_RESULT_SCHEMA),
-    execute(args, exec) {
-      const caller = callingAgent(exec.agent, 'fleet_messages')
-      return Promise.resolve(service.conversationMessages(caller, {
-        ...(args.action === undefined ? {} : { action: args.action }),
-        ...(args.conversation === undefined ? {} : { conversation: args.conversation as FleetTarget }),
-        ...(args.after === undefined ? {} : { after: args.after }),
-        ...(args.limit === undefined ? {} : { limit: args.limit }),
-        ...(args.max_chars === undefined ? {} : { maxChars: args.max_chars }),
-        ...(args.query === undefined ? {} : { query: args.query }),
-        ...(args.from === undefined ? {} : { from: args.from }),
-        ...(args.resource === undefined ? {} : { resource: args.resource }),
-        ...(args.unread_only === undefined ? {} : { unreadOnly: args.unread_only }),
-        ...(args.message_id === undefined ? {} : { messageId: args.message_id }),
-        ...(args.offset === undefined ? {} : { offset: args.offset }),
-        ...(args.reaction === undefined ? {} : { reaction: args.reaction }),
-        ...(args.remove === undefined ? {} : { remove: args.remove }),
-      }) as unknown as Record<string, JsonValue>)
+      const caller = callingAgent(exec.agent, 'fleet_user_task')
+      if (args.action === 'status') {
+        return Promise.resolve({ action: 'status' as const, task: flexibleJson(service.assistantInteraction(caller, args.run_id)) })
+      }
+      if (args.reason === undefined) throw new Error(`fleet_user_task ${args.action} requires reason`)
+      if (args.action === 'continue') {
+        if (args.instructions !== undefined && (args.owners === undefined || args.owners.length === 0)) {
+          throw new Error('fleet_user_task continue with instructions requires owners')
+        }
+        const continued = service.continueAssistantInteraction(caller, {
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+          reason: args.reason,
+          ...(args.task_ids === undefined ? {} : { taskIds: args.task_ids }),
+          ...(args.instructions === undefined ? {} : {
+            goal: {
+              title: args.title ?? 'Continue foreground user request',
+              description: args.instructions,
+              owners: args.owners ?? [],
+            },
+          }),
+          ...(args.check_after_seconds === undefined ? {} : { checkAfterSeconds: args.check_after_seconds }),
+        })
+        return Promise.resolve({
+          action: 'continue' as const,
+          task: flexibleJson(continued.task),
+          goals: continued.goals.map(flexibleJson),
+        })
+      }
+      if (args.action === 'take_over') {
+        return Promise.resolve({
+          action: 'take_over' as const,
+          task: flexibleJson(service.takeOverAssistantInteraction(caller, {
+            ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+            reason: args.reason,
+          })),
+        })
+      }
+      if (args.report === undefined) throw new Error(`fleet_user_task ${args.action} requires report`)
+      return Promise.resolve({
+        action: args.action,
+        task: flexibleJson(service.reportAssistantInteraction(caller, {
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+          outcome: args.action === 'report' ? 'complete' : 'block',
+          reason: args.reason,
+          report: args.report,
+        })),
+      })
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'fleet_run',
-    description: 'Control a persistent Fleet Team lifecycle: create it, pause, resume or wake its member runtimes, submit work, poll a short wait slice, directly finish current work, or close the Team.',
+    description: 'Control the outer Fleet Team lifecycle. A started work item is owned by a zero-owner composite root Task whose ReconcileAttempts atomically continue or finish the work.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'wake', 'list', 'status', 'wait', 'finish', 'close'] },
+      action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team where supported.' },
       team_config: { type: 'string', description: 'Team JSON path required for create.' },
       task: { type: 'string', description: 'Work Markdown path required for start.' },
@@ -8697,9 +8922,7 @@ export function installRunTools(
       provider: { type: 'string', description: 'Optional default provider route for every member, used only by create.' },
       model: { type: 'string', description: 'Optional default model for every member, used only by create.' },
       max_tokens: { type: 'integer', description: 'Optional positive output-token limit per member request, used only by create.' },
-      status: { type: 'string', enum: ['finished', 'blocked', 'failed', 'cancelled'], description: 'Outcome required for finish; the Team returns to idle.' },
-      summary: { type: 'string', description: 'Work outcome summary for finish, or Team shutdown summary for close.' },
-      timeout_ms: { type: 'integer', description: 'Short wait slice from 1000 through 5000 milliseconds so queued steer messages promptly return to the native Agent loop.' },
+      summary: { type: 'string', description: 'Team shutdown summary required for close.' },
     },
     output: jsonOutput(RUN_RESULT_SCHEMA),
     async execute(args, exec) {
@@ -8709,31 +8932,12 @@ export function installRunTools(
       if (args.action === 'status') {
         return { action: 'status' as const, run: service.status(args.run_id, callerRoot) }
       }
-      if (args.action === 'wait') {
-        const timeout = args.timeout_ms ?? 5_000
-        if (!Number.isSafeInteger(timeout) || timeout < 1_000 || timeout > 5_000) {
-          throw new Error('timeout_ms must be an integer from 1000 through 5000')
-        }
-        return {
-          action: 'wait' as const,
-          run: await service.wait(args.run_id, timeout, exec.signal, callerRoot),
-        }
-      }
-      if (args.action === 'finish') {
-        if (args.status === undefined || args.summary === undefined) {
-          throw new Error('fleet_run finish requires status and summary')
-        }
-        return { action: 'finish' as const, run: service.finish(caller, args.status, args.summary, args.run_id) }
-      }
       if (args.action === 'close') {
         if (args.summary === undefined) throw new Error('fleet_run close requires summary')
         return { action: 'close' as const, run: service.end(caller, args.summary, args.run_id) }
       }
       if (args.action === 'pause') {
         return { action: 'pause' as const, run: await service.pauseTeam(caller, args.run_id) }
-      }
-      if (args.action === 'wake') {
-        return { action: 'wake' as const, run: await service.wakeTeam(caller, args.run_id) }
       }
       if (args.action === 'resume') {
         if (args.run_id === undefined) throw new Error('fleet_run resume requires run_id')
@@ -8838,8 +9042,22 @@ export function installRunTools(
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team.' },
       kind: { type: 'string', enum: ['collaboration', 'directive'], description: 'Message intent. Collaboration preserves normal flow; directive is an explicit controller direction.' },
       text: { type: 'string', description: 'Message to relay to the Team coordinator. Required for message.' },
-      recipients: { type: 'array', items: { type: 'string' }, description: 'For message, specific member ids or names to mention. Omit only when the message is for every available member.' },
-      must_reply: { type: 'boolean', description: 'Require every directive recipient to send a later message in the Team Channel before remaining idle.' },
+      recipients: { type: 'array', items: { type: 'string' }, description: 'For message, specific member ids or names to mention. When stages are supplied, Fleet derives recipients from owners of stages without dependencies.' },
+      stages: {
+        type: 'array',
+        description: 'For a new-work directive, the ordered first cohort of Goal work and Vote decisions. Dependencies reference earlier stage keys; Fleet creates the zero-owner composite root and this cohort atomically, then initially wakes only ready owners.',
+        items: {
+          type: 'object', additionalProperties: false, properties: {
+            key: { type: 'string', required: true, description: 'Unique stable key for this stage.' },
+            kind: { type: 'string', enum: ['goal', 'vote'], description: 'Goal work by default; Vote for an explicit approve/reject gate.' },
+            title: { type: 'string', required: true, description: 'Concise child Task title.' },
+            description: { type: 'string', description: 'Expected evidence, or the exact decision statement for a Vote stage.' },
+            owners: { type: 'array', required: true, items: { type: 'string' }, description: 'Goal owners or Vote voters.' },
+            dependencies: { type: 'array', items: { type: 'string' }, description: 'Earlier stage keys that must complete before these owners wake.' },
+            timeoutAt: { type: 'string', description: 'Optional ISO deadline with a deterministic blocked fallback.' },
+          },
+        },
+      },
       after_sequence: { type: 'integer', description: 'For observe, return durable Team events after this sequence. Defaults to 0.' },
       limit: { type: 'integer', description: 'For observe, return from 1 through 200 events. Defaults to 100.' },
       assistant_id: { type: 'string', description: 'Existing assistant id to rebind after a restart; omit to add a new assistant.' },
@@ -8899,7 +9117,7 @@ export function installRunTools(
           kind: args.kind ?? 'collaboration',
           text: args.text,
           ...(args.recipients === undefined ? {} : { recipients: args.recipients }),
-          ...(args.must_reply === undefined ? {} : { mustReply: args.must_reply }),
+          ...(args.stages === undefined ? {} : { stages: args.stages }),
           ...(projectRoot === undefined ? {} : { projectRoot }),
         })
         return Promise.resolve({
@@ -8968,7 +9186,7 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_progress',
-    description: 'Read one reachable Team member\'s current runtime state, self-declared status, and bounded recent Session progress without exposing their full private context.',
+    description: 'Read one reachable Team member\'s current runtime state and bounded recent output, like a compact thread progress view, without exposing full private context.',
     parameters: {
       run_id: { type: 'string', description: 'Team id; inferred when the caller belongs to exactly one active Team.' },
       member: { type: 'string', required: true, description: 'Member id, display name, or @member to inspect.' },

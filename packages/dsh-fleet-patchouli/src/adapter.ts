@@ -45,7 +45,6 @@ const SHARED_EVENT_TYPES = new Set([
   'team_woken',
   'work_started',
   'work_status',
-  'work_vote_bound',
   'member_attached',
   'member_continued',
   'member_detached',

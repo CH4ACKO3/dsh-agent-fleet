@@ -11,14 +11,47 @@ connector gateway are internal modules bundled with the main plugin rather than 
 
 ## Installation
 
-Fleet installs its compatible Harmony and The Binding of DSH (TBOD) packages. Harmony still needs to own the
-DSH launcher because its patches must run before the profile loads:
+### Ask an Agent to install it
+
+The whole installation can be delegated with one message. Give this to any Agent that can use a terminal and open a
+browser:
+
+> 帮我在这台机器上安装 DeepSeek Harness 和 `dsh-agent-fleet` 插件。请严格按照
+> https://github.com/CH4ACKO3/dsh-agent-fleet#installation 的当前说明执行，使用 npm 已发布版本，不要从源码安装，
+> 不要使用 headless 模式。缺少兼容的 Node.js 时也请一并安装。完成后启动 `web` profile，在浏览器中确认 WebUI
+> 可以打开，并检查 Fleet patches 和 `the-binding-of-dsh/bidirectional-connection` 均为 `bound`。请持续处理到安装
+> 成功或遇到需要我决定的明确阻塞，最后告诉我 WebUI 地址、安装的版本和验证结果。
+
+The Agent should perform the commands below rather than merely describe them. It may ask before using administrator
+privileges, but it does not need to ask about ordinary package installation, profile creation, startup, or verification.
+Model credentials are configured separately in the WebUI and should not be requested or printed during installation.
+
+### Install manually
+
+Use Node.js `^22.22.3` or `>=24.11.1`. Install DeepSeek Harness first and Harmony second so Harmony owns the final
+`dsh` launcher, then add Fleet to the Web profile:
 
 ```sh
-npm install --global dsh-harmony@^0.8.4
-dsh plugin --profile web add dsh-agent-fleet
+npm install --global @deepseek-ai/dsh@0.1.1-rc.2
+npm install --global dsh-harmony@^0.8.8
+dsh plugin --profile web add dsh-agent-fleet@latest --allow-build=dsh-harmony
 dsh web
 ```
+
+`dsh web` stays in the foreground and normally opens the browser automatically. Keep it running, and verify the
+installation from another terminal:
+
+```sh
+dsh --version
+dsh --profile web --dump-config
+dsh harmony status --json --profile web
+```
+
+The installation is complete when the WebUI opens, the resolved profile contains `dsh-agent-fleet`, and Harmony reports
+the Fleet patches plus `the-binding-of-dsh/bidirectional-connection` as `bound`.
+
+Fleet installs its compatible Harmony and The Binding of DSH (TBOD) packages into the profile. The separate global
+Harmony installation is still required because its patches must run before the profile loads.
 
 Install only the optional integrations that the profile uses:
 
@@ -28,23 +61,21 @@ dsh plugin --profile web add @ch4acko3/dsh-agent-fleet-lark
 dsh plugin --profile web add dsh-agent-fleet-patchouli
 ```
 
-Instead of the global command, Harmony can be installed into the profile first; on the next WebUI start, choose
-**Install and restart** in Harmony's first-run dialog. Installing a package with `dsh plugin` does not by itself
-enable its profile bundle, so enable `dsh-harmony` and `dsh-agent-fleet` in DSH's plugin settings when installing
-from the terminal. Fleet activates TBOD through Harmony automatically and reuses an already enabled TBOD bundle.
+Instead of the global Harmony command, Harmony can be installed into the profile first; on the next WebUI start, choose
+**Install and restart** in Harmony's first-run dialog. `dsh plugin ... add` installs Fleet and appends its bundle to the
+profile. If Fleet was installed with raw npm/pnpm instead, enable `dsh-agent-fleet` in DSH's plugin settings. Fleet
+activates TBOD through Harmony automatically and reuses an already enabled TBOD bundle.
 
-If pnpm reports `Ignored build scripts: dsh-harmony`, approve that one package in the affected profile and retry:
+The `--allow-build` option permits only Harmony's required installer in the profile. If an older pnpm still reports
+`Ignored build scripts: dsh-harmony`, approve it and rerun the Fleet add command so DSH can finish appending the bundle:
 
 ```sh
-cd "${DSH_HOME:-$HOME/.dsh}/profiles/web"
-pnpm approve-builds dsh-harmony
-pnpm install
+dsh plugin --profile web approve-builds dsh-harmony
+dsh plugin --profile web add dsh-agent-fleet@latest --allow-build=dsh-harmony
 ```
 
-After startup, `dsh harmony status --profile web` must report Fleet patches and
-`the-binding-of-dsh/bidirectional-connection` as `bound`. Harmony's first-run gate reports a missing launcher;
-Fleet's plugin compatibility metadata reports unavailable packages and version mismatches. Fleet does not switch
-to a fallback transport.
+Harmony's first-run gate reports a missing launcher; Fleet's plugin compatibility metadata reports unavailable packages
+and version mismatches. Fleet does not switch to a fallback transport.
 
 ## Components
 

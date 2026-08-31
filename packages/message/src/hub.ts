@@ -108,10 +108,8 @@ function escapeRegularExpression(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-function mustReplyInstruction(message: FleetMessage): string {
-  const sender = `@${message.fromName ?? message.from}`
-  const conversation = message.conversation.startsWith('@') ? sender : message.conversation
-  return `Call fleet_send or fleet_followup with to="${conversation}" to send the reply. Ordinary model output is not sent to Fleet and does not satisfy must-reply.`
+function replyInstruction(message: FleetMessage): string {
+  return `Use fleet_reply with the Reply Task for message ${message.id}. Ordinary model output does not deliver the reply or complete its receipt.`
 }
 
 export interface MessageHubOptions {
@@ -508,22 +506,10 @@ export class MessageHub {
     this.assertOpen()
     sender = this.requireParticipant(sender)
     const target = input.to
-    if (origin === 'user') {
-      if (input.to.startsWith('#')) {
-        const { mustReply: _mustReply, ...channelInput } = input
-        input = channelInput
-      }
-    }
     const decision = this.options.beforeSend?.(sender, snapshot(input)) ?? { kind: 'send', input }
     if (decision.kind === 'reject') throw new Error(decision.reason.trim() || 'Fleet message was rejected')
     if (decision.input.to !== target) throw new Error('Fleet message hooks cannot change the sender or target')
-    if (origin === 'user' && decision.input.to.startsWith('#')) {
-      const { mustReply: _mustReply, ...channelInput } = decision.input
-      input = channelInput
-    } else input = decision.input
-    if (input.mustReply === true && input.to.startsWith('meeting:')) {
-      throw new Error('mustReply is supported only for direct messages and Channels')
-    }
+    input = decision.input
     const text = input.text.trim()
     if (text.length === 0) throw new Error('message text cannot be empty')
     if (text.length > MAX_MESSAGE_LENGTH) {
@@ -562,6 +548,7 @@ export class MessageHub {
     const participantId = this.resolveAgent(reference)
     const message = this.history.findLast(candidate => candidate.from !== participantId
       && this.canSeeMessage(participantId, candidate)
+      && this.isInboxRelevant(participantId, candidate)
       && !this.isFullyRead(participantId, candidate))
     return message === undefined ? undefined : snapshot(message)
   }
@@ -571,11 +558,13 @@ export class MessageHub {
     const participantId = this.resolveAgent(reference)
     const latest = this.history.findLast(message => message.from !== participantId
       && this.canSeeMessage(participantId, message)
+      && this.isInboxRelevant(participantId, message)
       && !this.isFullyRead(participantId, message))
     if (latest === undefined) return undefined
     const conversation = this.inboxConversation(participantId, latest)
     const unread = this.history.filter(message => message.from !== participantId
       && this.canSeeMessage(participantId, message)
+      && this.isInboxRelevant(participantId, message)
       && this.sameConversation(participantId, message, conversation)
       && !this.isFullyRead(participantId, message))
     return {
@@ -584,6 +573,68 @@ export class MessageHub {
       unreadMessages: unread.length,
       unreadChars: unread.reduce((total, message) =>
         total + message.text.length - this.readThrough(participantId, message.id), 0),
+    }
+  }
+
+  unreadSummary(reference: string): { readonly unreadMessages: number; readonly unreadChars: number } {
+    this.assertOpen()
+    const participantId = this.resolveAgent(reference)
+    const unread = this.history.filter(message => message.from !== participantId
+      && this.canSeeMessage(participantId, message)
+      && this.isInboxRelevant(participantId, message)
+      && !this.isFullyRead(participantId, message))
+    return {
+      unreadMessages: unread.length,
+      unreadChars: unread.reduce((total, message) =>
+        total + message.text.length - this.readThrough(participantId, message.id), 0),
+    }
+  }
+
+  /** Consume the newest unread messages across every visible conversation in one bounded batch. */
+  readInbox(sender: MessageAgent, maxChars = 12_000): ReadMessagesResult {
+    this.assertOpen()
+    sender = this.requireParticipant(sender)
+    if (!Number.isSafeInteger(maxChars) || maxChars < 1 || maxChars > 12_000) {
+      throw new Error('maxChars must be an integer from 1 through 12000')
+    }
+    const unread = this.history.filter(message => message.from !== sender.id
+      && this.canSeeMessage(sender.id, message)
+      && this.isInboxRelevant(sender.id, message)
+      && !this.isFullyRead(sender.id, message))
+    const selected: FleetMessage[] = []
+    let selectedChars = 0
+    for (let index = unread.length - 1; index >= 0; index -= 1) {
+      const message = unread[index]
+      if (message === undefined) continue
+      const unreadChars = message.text.length - this.readThrough(sender.id, message.id)
+      if (selected.length > 0 && selectedChars + unreadChars > maxChars) break
+      selected.unshift(message)
+      selectedChars += Math.min(unreadChars, maxChars)
+      if (selectedChars >= maxChars) break
+    }
+    const page: ReadMessagesResult['messages'][number][] = []
+    let remaining = maxChars
+    let changed = false
+    for (const message of selected) {
+      if (remaining === 0) break
+      const total = message.text.length
+      const current = this.readThrough(sender.id, message.id)
+      const start = current > 0 && current < total ? current : 0
+      const end = Math.min(total, start + remaining)
+      const text = message.text.slice(start, end)
+      page.push({ ...message, text, readRange: { start, end, total } })
+      remaining -= text.length
+      if (end > current) changed = this.markReadThrough(sender.id, message, end) || changed
+      if (end < total) break
+    }
+    if (changed) this.changed([sender.id])
+    const summary = this.unreadSummary(sender.id)
+    return {
+      messages: snapshot(page),
+      hasMore: summary.unreadMessages > 0,
+      remainingUnread: summary.unreadMessages,
+      remainingUnreadChars: summary.unreadChars,
+      revision: this.agentRevision(sender.id),
     }
   }
 
@@ -649,7 +700,7 @@ export class MessageHub {
     const messageLabel = inbox.unreadMessages === 1 ? 'message' : 'messages'
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
-      text: `[Fleet inbox ${inbox.conversation}] ${String(inbox.unreadMessages)} unread ${messageLabel} (${String(inbox.unreadChars)} text characters) are waiting. Call fleet_messages with action="read" and conversation="${inbox.conversation}" to load this inbox in one bounded batch. The read returns the newest unread messages that fit its character budget; hasMore=true and remainingUnread > 0 mean older unread information is still waiting. Continue reading this same inbox before going idle when either is reported. This notification and ordinary model output do not mark the inbox as read.`,
+      text: `[Fleet inbox ${inbox.conversation}] ${String(inbox.unreadMessages)} unread ${messageLabel} (${String(inbox.unreadChars)} text characters) are waiting. Call fleet_inbox with action="read" to consume unread messages from all visible sources in one bounded batch. hasMore=true and remainingUnread > 0 mean unread information is still waiting. Continue before going idle when either is reported. This notification and ordinary model output do not mark the inbox as read.`,
       delivery: 'wakeup',
       coalesceKey: this.messageNoticeKey(this.requireVisibleMessage(participantId, inbox.latestMessageId)),
       relatedMessageId: inbox.latestMessageId,
@@ -1477,7 +1528,7 @@ export class MessageHub {
         return Promise.resolve({ timedOut: false, revision, reason: 'changed' })
       }
     }
-    if (signal?.aborted === true) return Promise.reject(signal.reason ?? new Error('fleet_wait aborted'))
+    if (signal?.aborted === true) return Promise.reject(signal.reason ?? new Error('MessageHub wait aborted'))
 
     return new Promise<WaitResult>((resolve, reject) => {
       let settled = false
@@ -1495,7 +1546,7 @@ export class MessageHub {
         fail: error => { settle(() => { reject(error) }) },
       }
       const onAbort = (): void => {
-        waiter.fail(signal?.reason ?? new Error('fleet_wait aborted'))
+        waiter.fail(signal?.reason ?? new Error('MessageHub wait aborted'))
       }
       const timer = setTimeout(() => {
         waiter.finish({ timedOut: true, revision: this.agentRevision(sender.id), reason: 'timeout' })
@@ -1526,16 +1577,11 @@ export class MessageHub {
     this.requireContact(sender.id, targetId)
     this.requireKnownParticipant(targetId)
     this.clearPendingWakeups(sender.id, input.to)
-    // The @ in a direct target is routing syntax, not a mention. Only an
-    // explicitly parsed mention (plus trusted user input or mustReply) creates
-    // a reply obligation. This lets an ordinary reply finish the conversation,
-    // while a reply that mentions its recipient asks for a final confirmation.
-    const mustReply = origin === 'user' || input.mustReply === true || mentions.includes(targetId)
-    const { mustReply: _mustReply, ...rest } = input
-    const normalizedInput: SendMessageInput = mustReply ? { ...rest, mustReply: true } : rest
+    // The @ in a direct target is routing syntax, not a mention. Only trusted
+    // user input or an explicitly parsed mention creates a Reply Task.
     const message = this.appendMessage(
       sender.id,
-      normalizedInput,
+      input,
       text,
       resources,
       mentions,
@@ -1648,7 +1694,6 @@ export class MessageHub {
       recipientIds: [...new Set(recipientIds)],
       text,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
-      ...(input.mustReply === true ? { mustReply: true } : {}),
       resources,
       mentions,
       delivery: input.delivery,
@@ -1661,12 +1706,8 @@ export class MessageHub {
 
   private rememberMessage(message: FleetMessage): void {
     const conversationId = message.conversationId ?? message.conversation
-    const senderReplies = this.requiredRepliesByParticipant.get(message.from)
-    senderReplies?.delete(conversationId)
-    if (senderReplies?.size === 0) this.requiredRepliesByParticipant.delete(message.from)
     if (message.kind === 'text' && !message.conversation.startsWith('meeting:')) {
-      const requiredParticipants = message.mustReply === true
-        || (message.origin === 'user' && message.conversation.startsWith('@'))
+      const requiredParticipants = message.origin === 'user' && message.conversation.startsWith('@')
         ? message.recipientIds ?? []
         : message.mentions
       for (const participantId of requiredParticipants) {
@@ -1756,13 +1797,13 @@ export class MessageHub {
       ? ''
       : `\nResources: ${message.resources.join(', ')}`
     const sender = `@${message.fromName ?? message.from}`
-    const mustReply = this.requiresReply(message, target.id)
-    const replyMarker = mustReply ? ' | must-reply' : ''
-    const replyInstruction = mustReply ? `\n${this.requiredActionInstruction(message, target.id)}` : ''
+    const replyRequired = this.requiresReply(message, target.id)
+    const replyMarker = replyRequired ? ' | reply-task' : ''
+    const requiredInstruction = replyRequired ? `\n${this.requiredActionInstruction(message, target.id)}` : ''
     const directInstruction = message.conversation.startsWith('@')
-      ? '\nThis direct message is complete in context; do not call fleet_messages merely to read it again.'
+      ? '\nThis direct message is complete in context; do not call fleet_inbox merely to read it again.'
       : ''
-    const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}${replyInstruction}${directInstruction}`
+    const text = `[Fleet ${message.conversation} | ${message.id} | from=${sender}${replyMarker}] ${message.text}${resourceText}${requiredInstruction}${directInstruction}`
     const input = createUserMessage({
       content: [{ type: 'text', text }],
       source: message.origin === 'user'
@@ -1927,7 +1968,7 @@ export class MessageHub {
   private deliverChannelNotice(target: MessageAgent, message: FleetMessage): void {
     const sender = message.fromName === undefined ? message.from : `@${message.fromName}`
     const replyInstruction = this.requiresReply(message, target.id) ? ` ${this.requiredActionInstruction(message, target.id)}` : ''
-    const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_messages when relevant.${replyInstruction}`
+    const text = `[Fleet ${message.conversation}] Unread channel activity is waiting. Latest message ${message.id} is from ${sender}. Read with fleet_inbox when relevant.${replyInstruction}`
     this.sendSystemNotification(target.id, {
       kind: 'message_notice',
       text,
@@ -1939,12 +1980,14 @@ export class MessageHub {
 
   private requiresReply(message: FleetMessage, participantId: string): boolean {
     if (message.kind !== 'text') return false
-    if (message.mustReply === true) return message.recipientIds?.includes(participantId) ?? false
-    return message.conversation.startsWith('#') && message.mentions.includes(participantId)
+    if (message.origin === 'user' && message.conversation.startsWith('@')) {
+      return message.recipientIds?.includes(participantId) ?? false
+    }
+    return message.mentions.includes(participantId)
   }
 
   private requiredActionInstruction(message: FleetMessage, participantId: string): string {
-    return this.options.requiredActionInstruction?.(snapshot(message), participantId) ?? mustReplyInstruction(message)
+    return this.options.requiredActionInstruction?.(snapshot(message), participantId) ?? replyInstruction(message)
   }
 
   private deliverMeeting(
@@ -2100,7 +2143,6 @@ export class MessageHub {
         || !this.sameConversation(agentId, message, conversation)) continue
       const addressed = conversation.startsWith('@')
         || message.mentions.includes(agentId)
-        || (message.mustReply === true && message.recipientIds?.includes(agentId) === true)
       if (addressed) this.markReadThrough(agentId, message, message.text.length)
     }
   }
@@ -2172,6 +2214,11 @@ export class MessageHub {
     const message = this.history.find(candidate => candidate.id === messageId)
     if (message === undefined || !message.conversation.startsWith('#')) return 'full'
     return message.delivery !== 'quiet' && message.mentions.includes(participantId) ? 'full' : 'notice'
+  }
+
+  private isInboxRelevant(participantId: string, message: FleetMessage): boolean {
+    if (!message.conversation.startsWith('#') || message.mentions.length === 0) return true
+    return message.mentions.includes(participantId)
   }
 
   private requirePermission(agentId: string, permission: FleetMessagePermission): void {
