@@ -10,6 +10,7 @@ import {
   fleetActivityViewPosition,
   fleetActivityWindow,
   fleetAssistantMailboxMentions,
+  fleetPanelMentionMembers,
   fleetPanelSelectedMemberId,
   fleetTimelineTicks,
   fleetPanelMemberRunControls,
@@ -18,6 +19,7 @@ import {
   fleetPermissionGroupCapabilities,
   fleetResourcePreviewKind,
   groupFleetActivity,
+  groupFleetMessageThreads,
   insertFleetMemberMention,
   nearestFleetActivityGroupIndex,
   releaseFleetNativeSessionWindow,
@@ -26,12 +28,14 @@ import {
   splitFleetMemberMentions,
   updateFleetPermissionAssignmentValues,
   type FleetPanelTeamSnapshot,
+  type FleetPanelMessage,
 } from '../packages/ui/src/team-panel.js'
 import {
   projectAgentFleetPrivateMessages,
-  reconcileAgentFleetMailboxReadState,
+  projectAgentFleetWorkStatuses,
 } from '../packages/ui/src/assistant-private-chat.js'
 import {
+  fleetConversationAudienceLabel,
   fleetMemberPresence,
   fleetMemberPresenceLabel,
 } from '../packages/ui/src/runtime-chat.js'
@@ -40,6 +44,13 @@ import {
   archiveFleetAssistantTeam,
   resolveFleetAssistantArchiveTarget,
 } from '../packages/ui/src/meta-assistant.js'
+
+describe('Fleet conversation audience labels', () => {
+  it('makes private and broadcast scope explicit', () => {
+    expect(fleetConversationAudienceLabel('direct')).toBe('私聊 · 仅会话双方')
+    expect(fleetConversationAudienceLabel('channel')).toBe('频道 · 全体成员可见')
+  })
+})
 
 describe('Fleet assistant Session archive choices', () => {
   it('offers Team archive only for a live assistant Session and includes every current assistant connection', () => {
@@ -179,6 +190,60 @@ describe('Fleet assistant mailbox mentions', () => {
       .toEqual(['@team-assistant'])
     expect(fleetAssistantMailboxMentions('Send this to Albany.', 'team-assistant', 'Albany')).toEqual([])
     expect(fleetAssistantMailboxMentions('@AlbanySuffix is different.', 'team-assistant', 'Albany')).toEqual([])
+  })
+})
+
+describe('Fleet message mention rendering', () => {
+  it('recognizes a Team assistant mention at the beginning of message text', () => {
+    const members = fleetPanelMentionMembers({
+      members: [{
+        id: 'alivia', name: 'Alivia', role: 'Engineer', responsibility: 'Implementation', color: '#406080',
+      }],
+      assistants: [{
+        id: 'assistant-alen', name: 'Alen', role: 'Team assistant', responsibility: 'Coordination', color: '#506fa0',
+      }],
+    })
+
+    const mentions = splitFleetMemberMentions(
+      '@Alen 收到，已阅读对齐事项。@Alivia 你好。',
+      members,
+    ).flatMap(segment => segment.member?.name ?? [])
+
+    expect(mentions).toEqual(['Alen', 'Alivia'])
+  })
+})
+
+describe('Fleet message reply threads', () => {
+  const message = (id: string, replyTo?: string): FleetPanelMessage => ({
+    id,
+    sequence: Number(id.replace(/\D/g, '')),
+    conversationId: '#general',
+    senderId: `sender-${id}`,
+    sentAt: '2026-09-01T10:00:00.000Z',
+    content: [{ type: 'text', text: id }],
+    ...(replyTo === undefined ? {} : { kind: 'reply', replyTo }),
+  })
+
+  it('nests replies and reply chains under the original message without losing order', () => {
+    const threads = groupFleetMessageThreads([
+      message('message-1'),
+      message('message-2', 'message-1'),
+      message('message-3', 'message-2'),
+      message('message-4'),
+    ])
+
+    expect(threads.map(thread => ({
+      message: thread.message.id,
+      comments: thread.comments.map(comment => comment.id),
+    }))).toEqual([
+      { message: 'message-1', comments: ['message-2', 'message-3'] },
+      { message: 'message-4', comments: [] },
+    ])
+  })
+
+  it('keeps a reply visible as a normal message when its source is outside the loaded page', () => {
+    expect(groupFleetMessageThreads([message('message-5', 'older-message')]))
+      .toEqual([{ message: message('message-5', 'older-message'), comments: [] }])
   })
 })
 
@@ -381,6 +446,28 @@ describe('Fleet member permission groups', () => {
 })
 
 describe('Agent Fleet private-chat projection', () => {
+  it('groups only populated Team runtime states for the work-status popover', () => {
+    const statuses = projectAgentFleetWorkStatuses([
+      { id: 'assistant', name: 'Alen', role: '团队助理', color: '#5577aa', runtimeStatus: 'running' },
+      { id: 'engineer', name: 'Faisal', role: '核心工程师', color: '#337755', runtimeStatus: 'running' },
+      { id: 'quality', name: 'Alivia', role: '集成与质量工程师', color: '#995577', runtimeStatus: 'waiting' },
+      { id: 'lead', name: 'Harlan', role: '产品负责人', color: '#775533', runtimeStatus: 'idle' },
+      { id: 'paused', name: 'Robin', role: '评审', color: '#777777', runtimeStatus: 'paused' },
+      { id: 'unloaded', name: 'Mira', role: '平台工程师', color: '#667788', runtimeStatus: 'unknown' },
+    ])
+
+    expect(statuses.map(group => ({
+      id: group.id,
+      members: group.members.map(member => member.name),
+    }))).toEqual([
+      { id: 'working', members: ['Alen', 'Faisal'] },
+      { id: 'waiting', members: ['Alivia'] },
+      { id: 'idle', members: ['Harlan'] },
+      { id: 'paused', members: ['Robin'] },
+      { id: 'unloaded', members: ['Mira'] },
+    ])
+  })
+
   it('keeps human-visible text and images while excluding reasoning, tools, and context', () => {
     const nodes = new Map<string, unknown>([
       ['user:1', {
@@ -479,46 +566,6 @@ describe('Agent Fleet private-chat projection', () => {
     })[0]).toMatchObject({ sender: 'operator', read: true })
   })
 
-  it('reconciles an assistant mailbox receipt with its consumed native context message', () => {
-    const assistant = { id: 'assistant', name: 'Hailey', role: 'Assistant' }
-    const operator = { id: 'operator', name: 'You', role: 'Operator', operator: true }
-    const unreadReceipt = {
-      readMembers: [],
-      unreadMembers: [assistant],
-      sources: [{ memberId: assistant.id, sessionId: 'assistant-session', contextMessageId: 'context-read' }],
-    }
-    const mailbox = {
-      assistant,
-      operator,
-      running: true,
-      state: 'open' as const,
-      messages: [
-        { id: 'fleet-read', sender: operator, sentAt: '', content: [], receipt: unreadReceipt },
-        {
-          id: 'fleet-queued', sender: operator, sentAt: '', content: [],
-          receipt: {
-            ...unreadReceipt,
-            sources: [{ memberId: assistant.id, sessionId: 'assistant-session', contextMessageId: 'context-queued' }],
-          },
-        },
-      ],
-    }
-
-    const reconciled = reconcileAgentFleetMailboxReadState(mailbox, [{
-      id: 'context-read', sender: 'operator', sentAt: '', content: [], imageAttachments: new Map(),
-      streaming: false, read: true,
-    }])
-
-    expect(reconciled[0]?.receipt).toMatchObject({
-      readMembers: [assistant],
-      unreadMembers: [],
-    })
-    expect(reconciled[1]?.receipt).toMatchObject({
-      readMembers: [],
-      unreadMembers: [assistant],
-    })
-  })
-
   it('preserves a streaming assistant row without requiring an iterable node store', () => {
     const node = {
       key: 'assistant:stream',
@@ -537,6 +584,67 @@ describe('Agent Fleet private-chat projection', () => {
       content: [{ type: 'text', text: '' }],
       streaming: true,
     }])
+  })
+
+  it('drops a settled assistant step whose only visible text block is empty', () => {
+    const node = {
+      key: 'assistant:empty',
+      kind: 'assistant-step',
+      visibility: 'visible',
+      data: { time: 300, status: 'settled', blocks: [{ kind: 'text', text: '' }] },
+    }
+
+    expect(projectAgentFleetPrivateMessages({
+      order: [node.key],
+      nodes: { get: key => key === node.key ? node : undefined },
+    })).toEqual([])
+  })
+
+  it('projects only durable direct interactions for a Team assistant', () => {
+    const nodes = new Map<string, unknown>([
+      ['user:direct', {
+        id: 'user-message-1',
+        kind: 'user',
+        visibility: 'visible',
+        data: { time: 100, content: [{ type: 'text', text: 'Inspect the Team.' }] },
+      }],
+      ['assistant:progress', {
+        kind: 'assistant-step',
+        visibility: 'visible',
+        data: { time: 200, status: 'settled', blocks: [{ kind: 'text', text: 'Background progress noise.' }] },
+      }],
+      ['assistant:final', {
+        kind: 'assistant-step',
+        visibility: 'visible',
+        data: { time: 300, status: 'settled', blocks: [{ kind: 'text', text: 'A duplicate native final.' }] },
+      }],
+    ])
+
+    const projected = projectAgentFleetPrivateMessages({
+      order: [...nodes.keys()],
+      nodes: { get: key => nodes.get(key) },
+      interactions: [{
+        revision: 1,
+        messageId: 'user-message-1',
+        input: 'Inspect the Team.',
+        inputAt: '2026-09-01T08:00:00.000Z',
+        updates: [{
+          id: 'update-1',
+          text: 'The Team check is underway.',
+          sentAt: '2026-09-01T08:00:30.000Z',
+        }],
+        output: 'The Team is healthy.',
+        outputAt: '2026-09-01T08:01:00.000Z',
+      }],
+    })
+
+    expect(projected).toMatchObject([
+      { id: 'interaction:1:user', sender: 'operator', content: [{ type: 'text', text: 'Inspect the Team.' }] },
+      { id: 'interaction:1:update:update-1', sender: 'assistant', content: [{ type: 'text', text: 'The Team check is underway.' }] },
+      { id: 'interaction:1:assistant', sender: 'assistant', content: [{ type: 'text', text: 'The Team is healthy.' }] },
+    ])
+    expect(JSON.stringify(projected)).not.toContain('Background progress noise')
+    expect(JSON.stringify(projected)).not.toContain('duplicate native final')
   })
 })
 

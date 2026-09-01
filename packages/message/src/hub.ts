@@ -29,6 +29,7 @@ import type {
   OpenMeetingInput,
   ReadMessagesInput,
   ReadMessagesResult,
+  ReplyMessageInput,
   SearchMessagesInput,
   SendMessageDecision,
   SendMessageInput,
@@ -110,6 +111,10 @@ function escapeRegularExpression(value: string): string {
 
 function replyInstruction(message: FleetMessage): string {
   return `Use fleet_reply with the Reply Task for message ${message.id}. Ordinary model output does not deliver the reply or complete its receipt.`
+}
+
+function wakes(delivery: FleetDelivery): boolean {
+  return delivery === 'wakeup' || delivery === 'interrupt'
 }
 
 export interface MessageHubOptions {
@@ -493,6 +498,28 @@ export class MessageHub {
     return this.sendWithOrigin(sender, input)
   }
 
+  /** Complete an addressed exchange without broadcasting a new work obligation. */
+  reply(sender: MessageAgent, input: ReplyMessageInput): SendMessageResult {
+    this.assertOpen()
+    sender = this.requireParticipant(sender)
+    const source = this.requireVisibleMessage(sender.id, input.messageId)
+    if (source.from === sender.id) throw new Error('an Agent cannot reply to its own message')
+    if (source.conversation.startsWith('meeting:')) {
+      throw new Error('Fleet Reply Tasks do not use Meeting conversations')
+    }
+    const target = source.conversation.startsWith('@')
+      ? `@${source.from}` as FleetTarget
+      : source.conversation
+    return this.sendWithOrigin(sender, {
+      to: target,
+      text: input.text,
+      replyTo: source.id,
+      delivery: 'quiet',
+      kind: 'reply',
+      ...(input.resources === undefined ? {} : { resources: input.resources }),
+    })
+  }
+
   /** Send host-attested human input while keeping Fleet as the durable message record. */
   sendHuman(sender: MessageAgent, input: SendMessageInput): SendMessageResult {
     return this.sendWithOrigin(sender, input, 'user')
@@ -506,10 +533,12 @@ export class MessageHub {
     this.assertOpen()
     sender = this.requireParticipant(sender)
     const target = input.to
+    const replyTo = input.kind === 'reply' ? input.replyTo : undefined
     const decision = this.options.beforeSend?.(sender, snapshot(input)) ?? { kind: 'send', input }
     if (decision.kind === 'reject') throw new Error(decision.reason.trim() || 'Fleet message was rejected')
     if (decision.input.to !== target) throw new Error('Fleet message hooks cannot change the sender or target')
     input = decision.input
+    if (replyTo !== undefined) input = { ...input, kind: 'reply', replyTo }
     const text = input.text.trim()
     if (text.length === 0) throw new Error('message text cannot be empty')
     if (text.length > MAX_MESSAGE_LENGTH) {
@@ -517,12 +546,16 @@ export class MessageHub {
     }
 
     const resources = uniqueStrings(input.resources ?? [], 'resource id')
-    const explicitMentions = uniqueStrings(input.mentions ?? [], 'mention')
-      .map(target => this.resolveAgent(target))
-    const mentions = [...new Set([
-      ...explicitMentions,
-      ...this.textMentions(text).filter(target => target !== sender.id),
-    ])]
+    const reply = input.kind === 'reply'
+    const explicitMentions = reply
+      ? []
+      : uniqueStrings(input.mentions ?? [], 'mention').map(target => this.resolveAgent(target))
+    const mentions = reply
+      ? []
+      : [...new Set([
+          ...explicitMentions,
+          ...this.textMentions(text).filter(target => target !== sender.id),
+        ])]
     if (input.to.startsWith('meeting:')) {
       if (mentions.length > 0) throw new Error('meeting messages do not accept mentions')
       return this.sendMeeting(sender, input, text, resources, origin)
@@ -934,7 +967,7 @@ export class MessageHub {
     for (const [messageId, content] of redeliver) {
       const message = this.history.find(candidate => candidate.id === messageId)
       if (message === undefined) continue
-      this.deliverOrBlock(participantId, message, content, content === 'full' && message.delivery !== 'quiet')
+      this.deliverOrBlock(participantId, message, content, content === 'full' && wakes(message.delivery))
     }
     const pending = this.history.filter(message =>
       message.recipientIds?.includes(participantId) === true
@@ -947,7 +980,7 @@ export class MessageHub {
         participantId,
         message,
         content,
-        content === 'full' && message.delivery !== 'quiet',
+        content === 'full' && wakes(message.delivery),
       )) delivered += 1
     }
     if (redeliver.size > 0 || pending.length > 0) this.changed([participantId])
@@ -1591,7 +1624,7 @@ export class MessageHub {
     )
     this.acknowledgeInputsByReply(sender.id, input.to)
     this.removePendingSystemNotification(sender, this.requiredReplyNoticeKey(message))
-    const wake = input.delivery !== 'quiet'
+    const wake = wakes(input.delivery)
     if (wake) this.addPendingWakeup(targetId, message)
     const delivered = this.deliverOrBlock(targetId, message, 'full', wake) ? 1 : 0
     this.changed([sender.id, targetId])
@@ -1608,7 +1641,7 @@ export class MessageHub {
   ): SendMessageResult {
     const channel = this.requireReadableChannel(sender.id, channelId(input.to))
     if (channel.archived) throw new Error(`channel #${channel.id} is archived`)
-    if (input.delivery !== 'quiet' && mentions.length === 0) {
+    if (wakes(input.delivery) && mentions.length === 0) {
       throw new Error('a Channel follow-up requires at least one explicit mention')
     }
     for (const mention of mentions) {
@@ -1620,8 +1653,24 @@ export class MessageHub {
       }
     }
 
+    const replyRecipient = input.kind === 'reply'
+      ? this.channelReplyRecipient(sender.id, input.to, input.replyTo)
+      : undefined
+    if (replyRecipient !== undefined) {
+      this.requireKnownParticipant(replyRecipient)
+      this.requireContact(sender.id, replyRecipient)
+      if (!this.canRead(channel, replyRecipient)) {
+        throw new Error(`Agent ${replyRecipient} cannot access #${channel.id}`)
+      }
+    }
+
     this.clearPendingWakeups(sender.id, input.to)
-    const recipientIds = this.visibleChannelParticipantIds(channel).filter(participantId => participantId !== sender.id)
+    const channelRecipientIds = this.visibleChannelParticipantIds(channel).filter(participantId => participantId !== sender.id)
+    const recipientIds = replyRecipient !== undefined
+      ? [replyRecipient]
+      : mentions.length > 0
+        ? mentions
+        : input.delivery === 'fyi' ? [] : channelRecipientIds
     const message = this.appendMessage(sender.id, input, text, resources, mentions, recipientIds, input.kind ?? 'text', origin)
     this.acknowledgeInputsByReply(sender.id, input.to)
     this.removePendingSystemNotification(sender, this.requiredReplyNoticeKey(message))
@@ -1629,7 +1678,7 @@ export class MessageHub {
     let delivered = 0
     let woken = 0
     for (const participantId of recipientIds) {
-      const wake = input.delivery !== 'quiet' && mentioned.has(participantId)
+      const wake = wakes(input.delivery) && mentioned.has(participantId)
       if (wake) this.addPendingWakeup(participantId, message)
       if (this.deliverOrBlock(participantId, message, wake ? 'full' : 'notice', wake)) {
         delivered += 1
@@ -1642,6 +1691,33 @@ export class MessageHub {
       recipients: recipientIds.length,
       delivered,
       woken,
+      ...(input.kind !== 'reply' && input.replyTo === undefined && mentions.length > 0 && mentions.length < channelRecipientIds.length
+        ? {
+            audienceHint: `This post notified ${String(mentions.length)}/${String(channelRecipientIds.length)} Channel peers and remains visible to the full Channel. Prefer a direct message or bounded Meeting for subset work.`,
+          }
+        : {}),
+    }
+  }
+
+  /** Unread work that still needs an Inbox tool call rather than native context consumption. */
+  taskUnreadSummary(reference: string): { readonly unreadMessages: number; readonly unreadChars: number } {
+    this.assertOpen()
+    const participantId = this.resolveAgent(reference)
+    const deliveredInFull = new Set([...this.contextDeliveries.values()].flatMap(delivery =>
+      delivery.participantId === participantId
+        && delivery.content === 'full'
+        && delivery.state === 'pending'
+        ? [delivery.messageId]
+        : []))
+    const unread = this.history.filter(message => message.from !== participantId
+      && this.canSeeMessage(participantId, message)
+      && this.isInboxRelevant(participantId, message)
+      && !this.isFullyRead(participantId, message)
+      && !deliveredInFull.has(message.id))
+    return {
+      unreadMessages: unread.length,
+      unreadChars: unread.reduce((total, message) =>
+        total + message.text.length - this.readThrough(participantId, message.id), 0),
     }
   }
 
@@ -1657,7 +1733,7 @@ export class MessageHub {
     this.clearPendingWakeups(sender.id, input.to)
     const recipientIds = meeting.participants.filter(participant => participant !== sender.id)
     const message = this.appendMessage(sender.id, input, text, resources, [], recipientIds, input.kind ?? 'text', origin)
-    const wake = input.delivery !== 'quiet'
+    const wake = wakes(input.delivery)
     for (const participant of recipientIds) if (wake) this.addPendingWakeup(participant, message)
     const delivered = this.deliverMeeting(meeting, sender.id, message, wake)
     this.changed(meeting.participants)
@@ -1707,10 +1783,7 @@ export class MessageHub {
   private rememberMessage(message: FleetMessage): void {
     const conversationId = message.conversationId ?? message.conversation
     if (message.kind === 'text' && !message.conversation.startsWith('meeting:')) {
-      const requiredParticipants = message.origin === 'user' && message.conversation.startsWith('@')
-        ? message.recipientIds ?? []
-        : message.mentions
-      for (const participantId of requiredParticipants) {
+      for (const participantId of message.mentions) {
         const required = this.requiredRepliesByParticipant.get(participantId) ?? new Map<string, FleetMessage>()
         required.set(conversationId, message)
         this.requiredRepliesByParticipant.set(participantId, required)
@@ -1790,6 +1863,15 @@ export class MessageHub {
     const expected = directConversation(sender, agentTarget(target))
     const actual = directConversation(reply.from, agentTarget(reply.conversation))
     if (expected !== actual) throw new Error(`reply target ${replyTo} is in another conversation`)
+  }
+
+  private channelReplyRecipient(sender: string, target: FleetTarget, replyTo: string | undefined): string {
+    if (replyTo === undefined) throw new Error('a Fleet reply requires a source message')
+    this.requireReply(sender, target, replyTo)
+    const source = this.history.find(message => message.id === replyTo)
+    if (source === undefined) throw new Error(`unknown reply target ${replyTo}`)
+    if (source.from === sender) throw new Error('an Agent cannot reply to its own message')
+    return source.from
   }
 
   private deliver(target: MessageAgent, message: FleetMessage, wake: boolean): void {
@@ -1980,9 +2062,6 @@ export class MessageHub {
 
   private requiresReply(message: FleetMessage, participantId: string): boolean {
     if (message.kind !== 'text') return false
-    if (message.origin === 'user' && message.conversation.startsWith('@')) {
-      return message.recipientIds?.includes(participantId) ?? false
-    }
     return message.mentions.includes(participantId)
   }
 
@@ -2042,15 +2121,15 @@ export class MessageHub {
         continue
       }
       if (message.conversation.startsWith('@')) {
-        if (message.delivery !== 'quiet') this.addPendingWakeup(agentTarget(message.conversation), message)
+        if (wakes(message.delivery)) this.addPendingWakeup(agentTarget(message.conversation), message)
       } else if (message.conversation.startsWith('#')) {
-        if (message.delivery !== 'quiet') {
+        if (wakes(message.delivery)) {
           for (const mention of message.mentions) this.addPendingWakeup(mention, message)
         }
       } else {
         const meeting = this.meetings.get(meetingId(message.conversation))
         if (meeting === undefined) continue
-        if (message.delivery !== 'quiet') {
+        if (wakes(message.delivery)) {
           for (const participant of meeting.participants) {
             if (participant !== message.from) this.addPendingWakeup(participant, message)
           }
@@ -2213,10 +2292,11 @@ export class MessageHub {
   private inferDeliveryContent(participantId: string, messageId: string): 'full' | 'notice' {
     const message = this.history.find(candidate => candidate.id === messageId)
     if (message === undefined || !message.conversation.startsWith('#')) return 'full'
-    return message.delivery !== 'quiet' && message.mentions.includes(participantId) ? 'full' : 'notice'
+    return wakes(message.delivery) && message.mentions.includes(participantId) ? 'full' : 'notice'
   }
 
   private isInboxRelevant(participantId: string, message: FleetMessage): boolean {
+    if (message.recipientIds !== undefined && !message.recipientIds.includes(participantId)) return false
     if (!message.conversation.startsWith('#') || message.mentions.length === 0) return true
     return message.mentions.includes(participantId)
   }

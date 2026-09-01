@@ -47,6 +47,8 @@ const SEND_SCHEMA = {
     recipients: { type: 'integer', required: true },
     delivered: { type: 'integer', required: true },
     woken: { type: 'integer', required: true },
+    replyTaskIds: { type: 'array', items: { type: 'string' } },
+    audienceHint: { type: 'string' },
   },
 } as const
 
@@ -122,6 +124,10 @@ export interface FleetMessageToolOptions {
   /** Register only these exact tool names. Omit to keep the legacy group behavior. */
   readonly tools?: ReadonlySet<string>
   readonly permissions?: ReadonlySet<import('./types.js').FleetMessagePermission>
+  /** Treat direct sends as response requests unless reply_mode is optional. */
+  readonly directReplyByDefault?: boolean
+  /** Idempotently reconcile durable Reply Tasks before returning the tool result. */
+  readonly reconcileMessageTasks?: (agent: Agent, messageId: string) => string[]
   readonly authorize?: (
     agentId: string,
     action: string,
@@ -151,11 +157,14 @@ export function installMessageTools(
   if (options.messages !== false) {
     register(defineTool({
       name: 'fleet_send',
-      description: 'Send a quiet Fleet message. Ordinary messages only enter recipients\' Inbox Tasks. Each resolved @mention additionally creates a Reply Task for that member. Use fleet_reply, not fleet_send, to finish an existing Reply Task.',
+      description: options.directReplyByDefault
+        ? 'Send one quiet Fleet message to the smallest necessary audience. A direct @target creates one Reply Task by default; use reply_mode="optional" only for context that needs no answer. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is FYI history and wakes nobody.'
+        : 'Send one quiet Fleet message to the smallest necessary audience. Use a direct @target for one-member work and send subset work privately to one accountable owner, who can coordinate with peers. Use a #channel only when its full audience needs the exact content. A Channel post with mentions notifies only those members but remains visible to the full Channel. Each mention creates a Reply Task; use fleet_reply to finish an existing Reply Task.',
       parameters: {
-        to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not create a Reply Task.' },
+        to: { type: 'string', required: true, description: options.directReplyByDefault ? 'Use @fleet-name or @agent-id for a private response request, #channel for Team-visible history, or meeting:id.' : 'Use @fleet-name or @agent-id for private one-member work, #channel for a Team-visible broadcast, or meeting:id. A direct @target delivers the full message but creates no Reply Task unless that recipient is also mentioned in the text or mentions parameter.' },
         message: { type: 'string', required: true, description: 'Self-contained message text.' },
         mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets, merged with valid @Name or @member-id mentions parsed from the text. A direct message may mention only its recipient.' },
+        reply_mode: { type: 'string', enum: ['required', 'optional'], description: 'For foreground assistants, direct messages default to required. Set optional only when no response is wanted.' },
         reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
         resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
       },
@@ -163,14 +172,25 @@ export function installMessageTools(
       execute(args, exec) {
         const caller = callingAgent(exec.agent, 'fleet_send')
         requireAction(caller, 'message.post', { kind: 'conversation', id: args.to })
-        return Promise.resolve(hub.send(caller, {
+        const directReply = options.directReplyByDefault === true
+          && String(args.to).startsWith('@')
+          && args.reply_mode !== 'optional'
+        const mentions = directReply
+          ? [...new Set([args.to, ...(args.mentions ?? [])])]
+          : args.mentions
+        const result = hub.send(caller, {
           to: args.to as FleetTarget,
           text: args.message,
-          delivery: 'quiet',
-          ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
+          delivery: String(args.to).startsWith('#') ? 'fyi' : 'quiet',
+          ...(mentions === undefined ? {} : { mentions }),
           ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
           ...(args.resources === undefined ? {} : { resources: args.resources }),
-        }))
+        })
+        const replyTaskIds = options.reconcileMessageTasks?.(caller, result.messageId) ?? []
+        return Promise.resolve({
+          ...result,
+          ...(replyTaskIds.length === 0 ? {} : { replyTaskIds }),
+        })
       },
     }))
   }

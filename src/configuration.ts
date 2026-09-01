@@ -29,6 +29,8 @@ export interface FleetMessageConfiguration {
   readonly defaultChannel: { readonly id: string; readonly name: string }
   readonly rules: string
   readonly collaborationMethod: string
+  /** First input-context growth interval for private visibility reminders. Later intervals double. */
+  readonly visibilityReminderContextGrowthTokens: number
 }
 
 export interface FleetResourcesConfiguration {
@@ -67,6 +69,12 @@ function optionalText(value: unknown, label: string): string {
   return value.trim()
 }
 
+function optionalNonNegativeInteger(value: unknown, label: string, fallback: number): number {
+  if (value === undefined) return fallback
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${label} must be a non-negative integer`)
+  return Number(value)
+}
+
 export function fleetConfigurationValue(value: unknown, label = 'configuration'): FleetConfigurationValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
   if (typeof value === 'number') {
@@ -91,6 +99,11 @@ export function parseFleetMessageConfiguration(value: unknown): FleetMessageConf
     },
     rules: optionalText(input.rules, `${FLEET_MESSAGE_MODULE}.rules`),
     collaborationMethod: optionalText(input.collaborationMethod, `${FLEET_MESSAGE_MODULE}.collaborationMethod`),
+    visibilityReminderContextGrowthTokens: optionalNonNegativeInteger(
+      input.visibilityReminderContextGrowthTokens,
+      `${FLEET_MESSAGE_MODULE}.visibilityReminderContextGrowthTokens`,
+      16_000,
+    ),
   }
 }
 
@@ -145,6 +158,7 @@ export class FleetConfigurationRegistry {
           defaultChannel: { id: 'main', name: 'Main' },
           rules: '',
           collaborationMethod: '',
+          visibilityReminderContextGrowthTokens: 16_000,
         },
       },
       parse: parseFleetMessageConfiguration,

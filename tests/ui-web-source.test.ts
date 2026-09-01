@@ -75,6 +75,7 @@ describe('Fleet Web panel source', () => {
         if (request.view === 'settings') {
           return ok({
             name: 'Runtime Team', positioning: 'Runtime operations', rules: '', collaborationMethod: '',
+            visibilityReminderContextGrowthTokens: 16_000,
             updateDensity: 'balanced', notificationPolicy: 'milestones', contentPreference: '',
             projectRoot: '/workspace/fleet',
             budget: {
@@ -196,7 +197,8 @@ describe('Fleet Web panel source', () => {
               type: 'message',
               message: {
                 id: 'message-reply', conversation: '@fleet-user:team-1', from: 'member-session',
-                text: 'Direct reply received.', mentions: [], resources: [], createdAt: '2026-08-21T10:05:00.000Z',
+                kind: 'reply', replyTo: 'message-user', text: 'Direct reply received.', mentions: [], resources: [],
+                createdAt: '2026-08-21T10:05:00.000Z',
               },
             },
           },
@@ -287,6 +289,41 @@ describe('Fleet Web panel source', () => {
               type: 'inbox', action: 'blocked', agentId: 'builder', messageId: 'message-blocked',
               reason: 'inbox_delivery_failed', detail: 'native inbox is closed',
               blockedAt: '2026-08-21T10:10:31.000Z',
+            },
+          },
+          {
+            sequence: 16,
+            createdAt: '2026-08-21T10:11:00.000Z',
+            type: 'task.completed',
+            data: {
+              action: 'completed',
+              task: {
+                id: 'interaction-1',
+                title: 'assistant user interaction',
+                domain: {
+                  kind: 'interaction', owner: 'assistant', inputRevision: 1, settledRevision: 1,
+                  latestMessageId: 'native-user-1', waitingTaskIds: [],
+                },
+                stableState: { kind: 'completed', reason: 'Direct response completed.', result: 'Team status is healthy.' },
+                entries: [
+                  {
+                    id: 'entry-user', kind: 'comment', author: 'User', text: 'Check Team status.', resources: [],
+                    createdAt: '2026-08-21T10:10:40.000Z', interactionRevision: 1,
+                    interactionMessageId: 'native-user-1',
+                  },
+                  {
+                    id: 'entry-update', kind: 'progress', author: 'assistant', text: 'Still checking.', resources: [],
+                    createdAt: '2026-08-21T10:10:50.000Z', interactionRevision: 1,
+                    interactionDelivery: 'update',
+                  },
+                  {
+                    id: 'entry-output', kind: 'comment', author: 'assistant', text: 'Team status is healthy.', resources: [],
+                    createdAt: '2026-08-21T10:11:00.000Z', interactionRevision: 1,
+                    interactionDelivery: 'final',
+                  },
+                ],
+                updatedAt: '2026-08-21T10:11:00.000Z',
+              },
             },
           },
         ],
@@ -381,6 +418,14 @@ describe('Fleet Web panel source', () => {
           id: 'assistant', name: 'You', role: '外部观察者', responsibility: '外部观察者',
           presence: 'active', runtimeStatus: 'idle', sessionId: 'observer-session',
         }],
+        assistantInteractions: [{
+          assistantId: 'assistant', pending: false, turns: [{
+            revision: 1, messageId: 'native-user-1', input: 'Check Team status.',
+            updates: [{ id: 'entry-update', text: 'Still checking.', sentAt: '2026-08-21T10:10:50.000Z' }],
+            inputAt: '2026-08-21T10:10:40.000Z', output: 'Team status is healthy.',
+            outputAt: '2026-08-21T10:11:00.000Z',
+          }],
+        }],
         resources: [{ id: 'plan', name: 'plan.md', kind: 'plan', path: '/workspace/fleet/.fleet/plan.md' }],
         workspaces: [{ id: 'workspace:/workspace/fleet/src', name: 'source', path: '/workspace/fleet/src' }],
         messages: expect.arrayContaining([
@@ -440,9 +485,13 @@ describe('Fleet Web panel source', () => {
           }],
         },
       }),
-      expect.objectContaining({ id: 'message-reply', conversationId: '@builder', senderId: 'builder' }),
+      expect.objectContaining({
+        id: 'message-reply', conversationId: '@builder', senderId: 'builder',
+        kind: 'reply', replyTo: 'message-user',
+      }),
     ]))
     expect(snapshot.team?.activity.filter(item => item.kind === 'decision')).toHaveLength(3)
+    expect(snapshot.team?.activity.some(item => item.text.includes('user interaction'))).toBe(false)
     expect(snapshot.team?.activity.some(item => item.kind === 'resource')).toBe(true)
     const updatesAfterInitialProjection = snapshotUpdates
     await source.refresh()
@@ -545,6 +594,7 @@ describe('Fleet Web panel source', () => {
     await expect(source.updateTeamSettings?.({
       sessionId: 'observer-session', teamId: 'team-1', settings: {
         name: 'Runtime Team', positioning: 'Runtime operations', rules: '', collaborationMethod: '',
+        visibilityReminderContextGrowthTokens: 16_000,
         updateDensity: 'detailed', notificationPolicy: 'decisions', contentPreference: 'Lead with outcomes.',
       },
     })).resolves.toMatchObject({ updateDensity: 'detailed', notificationPolicy: 'decisions' })

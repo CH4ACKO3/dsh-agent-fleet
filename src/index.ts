@@ -43,6 +43,7 @@ export * from './productivity/index.js'
 export * from './run.js'
 export * from './setup.js'
 export * from './team-events.js'
+export * from './turn-reminders.js'
 export * from './web.js'
 
 export const name = 'dsh-agent-fleet'

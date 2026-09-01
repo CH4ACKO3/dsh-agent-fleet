@@ -4,6 +4,8 @@ import type { FleetChatContentBlock, FleetChatMember, FleetChatReceiptSource } f
 import { encodeFleetFile } from './web-client.js'
 import {
   type FleetPanelActivity,
+  type FleetPanelAssistantInteraction,
+  type FleetPanelAssistantInteractionTurn,
   type FleetPanelArchiveFile,
   type FleetPanelBudgetAccount,
   type FleetPanelBudgetModelUsage,
@@ -290,6 +292,9 @@ function teamSettings(value: unknown): FleetPanelTeamSettings {
   const positioning = string(value.positioning)
   const rules = string(value.rules)
   const collaborationMethod = string(value.collaborationMethod)
+  const visibilityReminderContextGrowthTokens = typeof value.visibilityReminderContextGrowthTokens === 'number'
+    ? value.visibilityReminderContextGrowthTokens
+    : undefined
   const updateDensity = string(value.updateDensity)
   const notificationPolicy = string(value.notificationPolicy)
   const contentPreference = string(value.contentPreference)
@@ -298,6 +303,7 @@ function teamSettings(value: unknown): FleetPanelTeamSettings {
   const model = string(value.request.model)
   const reasoningEffort = string(value.request.reasoningEffort)
   if (name === undefined || positioning === undefined || rules === undefined || collaborationMethod === undefined
+    || visibilityReminderContextGrowthTokens === undefined
     || contentPreference === undefined || projectRoot === undefined
     || (updateDensity !== 'concise' && updateDensity !== 'balanced' && updateDensity !== 'detailed')
     || (notificationPolicy !== 'decisions' && notificationPolicy !== 'milestones' && notificationPolicy !== 'continuous')) {
@@ -308,6 +314,7 @@ function teamSettings(value: unknown): FleetPanelTeamSettings {
     positioning,
     rules,
     collaborationMethod,
+    visibilityReminderContextGrowthTokens,
     updateDensity,
     notificationPolicy,
     contentPreference,
@@ -512,6 +519,12 @@ function activityKind(type: string): FleetPanelActivity['kind'] | undefined {
 }
 
 function stateEventKey(event: WireEvent): string | undefined {
+  if (event.type.startsWith('task.')) {
+    const task = nestedRecord(event.data, 'task')
+    const domain = nestedRecord(task, 'domain')
+    const owner = domain?.kind === 'interaction' ? string(domain.owner) : undefined
+    if (owner !== undefined) return `interaction:${owner}`
+  }
   if (event.type === 'coordination.channel') {
     const id = string(nestedRecord(event.data, 'channel')?.id)
     return id === undefined ? undefined : `channel:${id}`
@@ -826,6 +839,82 @@ function activityText(event: WireEvent, membersBySession: ReadonlyMap<string, Fl
   if (event.type === 'member_detached') return `${member} 已离开团队`
   if (event.type === 'member_paused') return `${member} 已暂停`
   return event.type.replaceAll('_', ' ')
+}
+
+function assistantInteractions(events: readonly WireEvent[]): FleetPanelAssistantInteraction[] {
+  const latest = new Map<string, { readonly sequence: number; readonly task: Readonly<Record<string, unknown>> }>()
+  for (const event of events) {
+    if (!event.type.startsWith('task.')) continue
+    const task = nestedRecord(event.data, 'task')
+    const domain = nestedRecord(task, 'domain')
+    const owner = domain?.kind === 'interaction' ? string(domain.owner) : undefined
+    if (task === undefined || owner === undefined || event.sequence < (latest.get(owner)?.sequence ?? 0)) continue
+    latest.set(owner, { sequence: event.sequence, task })
+  }
+  return [...latest.entries()].map(([assistantId, current]) => {
+    const domain = nestedRecord(current.task, 'domain')
+    const stableState = nestedRecord(current.task, 'stableState')
+    const inputRevision = typeof domain?.inputRevision === 'number' ? domain.inputRevision : 0
+    const settledRevision = typeof domain?.settledRevision === 'number' ? domain.settledRevision : 0
+    const turns = new Map<number, FleetPanelAssistantInteractionTurn>()
+    let legacyRevision = 0
+    const entries = Array.isArray(current.task.entries) ? current.task.entries : []
+    for (const candidate of entries) {
+      const entry = asRecord(candidate)
+      const text = string(entry?.text)
+      const createdAt = string(entry?.createdAt)
+      if (entry === undefined || text === undefined || createdAt === undefined) continue
+      const explicitRevision = typeof entry.interactionRevision === 'number'
+        && Number.isSafeInteger(entry.interactionRevision) && entry.interactionRevision > 0
+        ? entry.interactionRevision
+        : undefined
+      const userEntry = string(entry.interactionMessageId) !== undefined || string(entry.author) === 'User'
+      if (userEntry) {
+        const revision = explicitRevision ?? ++legacyRevision
+        const messageId = string(entry.interactionMessageId)
+        legacyRevision = Math.max(legacyRevision, revision)
+        turns.set(revision, {
+          revision,
+          ...(messageId === undefined ? {} : { messageId }),
+          input: text,
+          inputAt: createdAt,
+        })
+        continue
+      }
+      if (explicitRevision === undefined) continue
+      const turn = turns.get(explicitRevision)
+      if (turn === undefined) continue
+      if (string(entry.interactionDelivery) === 'update') {
+        turns.set(explicitRevision, {
+          ...turn,
+          updates: [...(turn.updates ?? []), {
+            id: string(entry.id) ?? `${String(explicitRevision)}:${String(turn.updates?.length ?? 0)}`,
+            text,
+            sentAt: createdAt,
+          }],
+        })
+      } else {
+        turns.set(explicitRevision, { ...turn, output: text, outputAt: createdAt })
+      }
+    }
+    const legacyResult = stableState?.kind === 'completed' ? string(stableState.result) : undefined
+    if (legacyResult !== undefined && settledRevision > 0) {
+      const settled = turns.get(settledRevision)
+      if (settled !== undefined && settled.output === undefined) {
+        turns.set(settledRevision, {
+          ...settled,
+          output: legacyResult,
+          outputAt: string(current.task.updatedAt) ?? settled.inputAt,
+        })
+      }
+    }
+    const state = string(stableState?.kind)
+    return {
+      assistantId,
+      pending: settledRevision < inputRevision && (state === 'running' || state === 'dormant' || state === 'paused'),
+      turns: [...turns.values()].toSorted((left, right) => left.revision - right.revision),
+    }
+  })
 }
 
 function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
@@ -1285,6 +1374,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const source = contextSourcesByMessage.get(id)?.get(participantId)
       return source === undefined ? [] : [source]
     })
+    const kind = string(message.kind)
+    const replyTo = string(message.replyTo)
     return [{
       id,
       sequence: event.sequence,
@@ -1293,6 +1384,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       sender,
       sentAt: string(message.createdAt) ?? event.createdAt,
       content: blocks,
+      ...(kind === undefined ? {} : { kind }),
+      ...(replyTo === undefined ? {} : { replyTo }),
       ...(visibleMemberIds.length === 0 ? {} : {
         receipt: {
           visibleMemberIds,
@@ -1373,6 +1466,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
 
   const activity: FleetPanelActivity[] = cache.events.flatMap((event): FleetPanelActivity[] => {
     if (privateMessageSequences.has(event.sequence)) return []
+    if (nestedRecord(nestedRecord(event.data, 'task'), 'domain')?.kind === 'interaction') return []
     const kind = activityKind(event.type)
     return kind === undefined ? [] : [{
       id: `${cache.run.id}:${String(event.sequence)}`,
@@ -1393,6 +1487,7 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
     conversations,
     members: projectedMembers,
     assistants: projectedAssistants,
+    assistantInteractions: assistantInteractions(cache.events),
     messages,
     resources: [...resources.values()],
     workspaces: [...workspacesByPath.values()],

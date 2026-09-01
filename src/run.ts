@@ -103,6 +103,14 @@ import type {
   FleetMemberToolGroup,
   FleetMemberView,
 } from './member-view.js'
+import {
+  DEFAULT_FLEET_TURN_REMINDERS,
+  fleetTurnReminderText,
+  inferFleetReminderLocales,
+  selectFleetTurnReminder,
+  type FleetTurnReminderLists,
+  type FleetTurnReminderSlot,
+} from './turn-reminders.js'
 
 export type FleetRunStatus = 'starting' | 'idle' | 'running' | 'paused' | 'finishing' | 'closed' | 'failed'
 export type FleetWorkStatus = 'running' | 'finished' | 'blocked' | 'failed' | 'cancelled'
@@ -941,6 +949,7 @@ export interface FleetRunServiceOptions {
   readonly archives?: FleetArchiveRegistry
   readonly authorization?: FleetAuthorizationService
   readonly configuration?: FleetConfigurationRegistry
+  readonly turnReminders?: FleetTurnReminderLists
 }
 
 export interface FleetResidentAssistantController {
@@ -987,6 +996,9 @@ interface StartRunInput {
   readonly runId?: string
   readonly taskPath: string
   readonly projectRoot: string
+  readonly directive?: string
+  readonly stages?: readonly FleetAssistantStage[]
+  readonly resultStage?: string
 }
 
 interface ResumeRunInput {
@@ -1039,6 +1051,11 @@ export interface ReportFleetInteractionInput {
   readonly report: string
 }
 
+export interface UpdateFleetInteractionInput {
+  readonly runId?: string
+  readonly message: string
+}
+
 export interface TakeOverFleetInteractionInput {
   readonly runId?: string
   readonly reason: string
@@ -1051,6 +1068,7 @@ export interface SendFleetConversationMessageInput {
   readonly replyTo?: string
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
+  readonly noReply?: boolean
   readonly delivery: 'quiet' | 'wakeup' | 'interrupt'
 }
 
@@ -1107,6 +1125,7 @@ export interface FleetTeamSettings {
   readonly positioning: string
   readonly rules: string
   readonly collaborationMethod: string
+  readonly visibilityReminderContextGrowthTokens: number
   readonly updateDensity: 'concise' | 'balanced' | 'detailed'
   readonly notificationPolicy: 'decisions' | 'milestones' | 'continuous'
   readonly contentPreference: string
@@ -2111,6 +2130,8 @@ function isExplicitWaitCall(name: string, rawArguments: string): boolean {
 const NETWORK_RECOVERY_INITIAL_DELAY_MS = 30_000
 const NETWORK_RECOVERY_MAX_DELAY_MS = 5 * 60_000
 const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
+const PROTOCOL_RECOVERY_MAX_ATTEMPTS = 2
+const RETRIABLE_PROTOCOL_FAILURE = /\bmalformed_tool_protocol\b/iu
 const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_HISTORY_LIMIT = 500
@@ -2145,12 +2166,43 @@ interface MemberToolActivity {
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
+interface VisibilityReminderState {
+  /** Largest model input context observed in the current compaction epoch. */
+  latestContextTokens: number
+  /** Context size at the epoch start, last reminder, or Team-visible share. */
+  baselineContextTokens: number | undefined
+  /** True until the first post-compaction context observation establishes a baseline. */
+  awaitingPostCompactionBaseline: boolean
+  /** Number of reminders already retained in the current compaction epoch. */
+  reminderCount: number
+  /** The first reminder in each compaction epoch carries the full explanation. */
+  detailedReminderSent: boolean
+}
+
+type AssistantUserFacingTurn = 'direct' | 'delivery' | 'explicit'
+
+function inputContextTokens(usage: TokenUsage | undefined): number | undefined {
+  if (usage === undefined) return undefined
+  return usage.inputTokens + (usage.cacheReadTokens ?? 0)
+}
+
 interface NetworkRecovery {
   readonly runId: string
   readonly member: string
   readonly route: string
   readonly attempt: number
   timer: ReturnType<typeof setTimeout> | undefined
+}
+
+interface ProtocolRecovery {
+  readonly runId: string
+  readonly member: string
+  readonly attempt: number
+  pending: boolean
+}
+
+function isRetriableProtocolFailure(error: { readonly code: string; readonly message: string }): boolean {
+  return error.code === 'PI_AI_ERROR' && RETRIABLE_PROTOCOL_FAILURE.test(error.message)
 }
 
 export class FleetRunService {
@@ -2166,6 +2218,7 @@ export class FleetRunService {
   private readonly finalizations = new Map<string, Promise<void>>()
   private readonly resumingRunIds = new Set<string>()
   private readonly networkRecoveries = new Map<string, NetworkRecovery>()
+  private readonly protocolRecoveries = new Map<string, ProtocolRecovery>()
   private readonly memberToolActivity = new Map<string, MemberToolActivity>()
   private readonly waitingSessionIds = new Set<string>()
   private readonly abnormalSessionIds = new Set<string>()
@@ -2178,7 +2231,13 @@ export class FleetRunService {
   private readonly assistantInputTeamLoads = new Map<string, Promise<void>>()
   private readonly assistantTurnOutputs = new Map<string, string>()
   private readonly assistantCurrentTurns = new Map<string, number>()
-  private readonly assistantDirectInputTurns = new Map<string, number>()
+  private readonly assistantUserFacingTurns = new Map<string, { readonly turn: number; readonly source: AssistantUserFacingTurn }>()
+  private readonly memberLastSharedTurns = new Map<string, number>()
+  private readonly memberVisibilityReviewedTurns = new Map<string, number>()
+  private readonly visibilityReminderStates = new Map<string, VisibilityReminderState>()
+  private readonly turnReminderLastShown = new Map<string, Map<FleetTurnReminderSlot, Map<string, number>>>()
+  private readonly turnStartReminderTurns = new Map<string, number>()
+  private readonly toolResultReminderSequences = new Map<string, number>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
@@ -2193,6 +2252,8 @@ export class FleetRunService {
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
   private readonly configuration: FleetConfigurationRegistry
+  private readonly turnReminders: FleetTurnReminderLists
+  private userLocale: 'zh-CN' | 'en' | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -2205,6 +2266,7 @@ export class FleetRunService {
     this.archives = options.archives ?? new FleetArchiveRegistry()
     this.authorization = options.authorization
     this.configuration = options.configuration ?? new FleetConfigurationRegistry()
+    this.turnReminders = options.turnReminders ?? DEFAULT_FLEET_TURN_REMINDERS
     const liveAgents = (this.ctx.agents as typeof this.ctx.agents & { list?: () => Agent[] }).list?.() ?? []
     for (const agent of liveAgents) {
       this.bindParticipantInbox(agent)
@@ -2215,6 +2277,22 @@ export class FleetRunService {
       this.bindBudgetGuard(agent)
     })
     this.loadPersistedTeams()
+  }
+
+  private async setupFormalMember(
+    childCtx: Context,
+    runtime: FleetCollaborationTeam,
+    member: string,
+    source: 'create' | 'resume',
+  ): Promise<void> {
+    if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
+    childCtx.on('agent/turn-stopping', ({ agent, turn }) => {
+      this.memberTurnStopping(agent, turn)
+    })
+    childCtx.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
+      return this.preStepReminderDecision(childCtx.agent!, await next())
+    })
+    await installMemberTools(childCtx, runtime, member, false, source)
   }
 
   subscribeChanges(listener: () => void): () => void {
@@ -2229,6 +2307,11 @@ export class FleetRunService {
 
   setResidentAssistantController(controller: FleetResidentAssistantController | undefined): void {
     this.residentAssistants = controller
+  }
+
+  setUserLocale(locale: string): 'zh-CN' | 'en' {
+    this.userLocale = locale.trim().toLocaleLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
+    return this.userLocale
   }
 
   /** Complete assistant tool binding once the native Agent scope is composed. */
@@ -2457,7 +2540,7 @@ export class FleetRunService {
             ? {}
             : { reasoningEffort: ReasoningEffortId(member.reasoningEffort) }),
           ...(memberMaxTokens === undefined ? {} : { maxTokens: memberMaxTokens }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.id, false, 'create'),
+          setup: childCtx => this.setupFormalMember(childCtx, runtime, member.id, 'create'),
         })
         created.push(member.id)
         runtime.memberIdsByName.set(member.id, agent.id)
@@ -2576,7 +2659,7 @@ export class FleetRunService {
     renameSync(temporaryTaskPath, acceptedTaskPath)
     const runtime = this.requireRuntime(record.id)
     const kickoffKey = `${record.id}:${String(launcher.id)}`
-    const kickoff = this.pendingAssistantKickoffs.get(kickoffKey)
+    const kickoff = input.stages === undefined ? this.pendingAssistantKickoffs.get(kickoffKey) : undefined
     this.pendingAssistantKickoffs.delete(kickoffKey)
     const kickoffReplyTaskIds = kickoff === undefined || kickoff.staged
       ? []
@@ -2584,11 +2667,23 @@ export class FleetRunService {
           .filter(candidate => candidate.domain.kind === 'reply'
             && candidate.domain.messageId === kickoff.messageId)
           .map(candidate => candidate.id)
-    const plannedRootOwner = kickoff?.recipients[0]
-    const rootOwner = available.find(member => member.name === plannedRootOwner) ?? available[0]!
-    const plannedStages: FleetAssistantStage[] = kickoff?.stages.length
+    const requestedStages: readonly FleetAssistantStage[] | undefined = input.stages?.length
+      ? input.stages.map(stage => ({
+          ...stage,
+          owners: stage.owners.map(reference => {
+            const member = available.find(candidate => candidate.name === reference || candidate.displayName === reference)
+            if (member === undefined) throw new Error(`Fleet stage owner ${reference} is not available`)
+            return member.name
+          }),
+        }))
+      : kickoff?.stages.length
       ? kickoff.stages
-      : [{
+      : undefined
+    const plannedRootOwner = requestedStages?.find(stage => stage.dependencies.length === 0)?.owners[0]
+      ?? kickoff?.recipients[0]
+    const rootOwner = available.find(member => member.name === plannedRootOwner || member.displayName === plannedRootOwner)
+      ?? available[0]!
+    const plannedStages: readonly FleetAssistantStage[] = requestedStages ?? [{
           key: 'delivery', kind: 'goal', title: 'Deliver the Fleet work item',
           description: acceptedTask, owners: [rootOwner.name], dependencies: [],
         }]
@@ -2607,6 +2702,7 @@ export class FleetRunService {
       })),
       dependencies: kickoffReplyTaskIds,
       rootWorkId: workId,
+      ...(input.resultStage === undefined ? {} : { resultStage: input.resultStage }),
     })
     const rootTask = plan.task
     const stageTasks = plan.stages
@@ -2635,6 +2731,7 @@ export class FleetRunService {
       childTaskIds: [...stageTasks.values()].map(task => task.id),
       taskPath,
       acceptedTaskPath,
+      directive: input.directive?.trim() || kickoff?.text || acceptedTask,
     })
     const launchingAssistant = running.assistants.find(assistant => assistant.sessionId === String(launcher.id))
     if (launchingAssistant !== undefined && runtime.tasks.interactionTask(launchingAssistant.view.id)?.stableState.kind === 'running') {
@@ -2645,29 +2742,6 @@ export class FleetRunService {
       })
     }
 
-    const roster = record.members
-      .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
-      .join('\n')
-    const stagePlan = [...stageTasks.entries()].map(([key, task]) => {
-      const dependencies = task.dependencies.length === 0 ? 'none' : task.dependencies.join(', ')
-      return `- ${key}: ${task.title} (${task.id}); ${task.domain.kind === 'vote' ? 'voters' : 'owners'} ${task.owners.map(owner => `@${owner.member}`).join(', ')}; dependencies ${dependencies}`
-    }).join('\n')
-    if (this.memberCanReply(rootOwner)) {
-      runtime.messages.sendSystemNotification(rootOwner.sessionId, {
-        kind: 'work_start',
-        text: [
-          `[Fleet composite root Task ${rootTask.id} for work ${work.id}]`,
-          `Team: ${record.name}`,
-          `Your Fleet identity: @${rootOwner.displayName ?? rootOwner.name}`,
-          `Members:\n${roster}`,
-          `The assistant created the first formal cohort atomically; do not recreate it:\n${stagePlan}`,
-          'The root has no owner and will wake you through one ReconcileAttempt only when its current cohort settles. Inspect every Goal result and Vote outcome. A rejected review is a completed decision, not a blocked Task: atomically create a remediation Goal and install the next cohort before resolving. Complete the root only after required evidence is accepted; use blocked only when no deterministic continuation is available.',
-          `Work:\n${acceptedTask}`,
-        ].join('\n\n'),
-        delivery: 'wakeup',
-        coalesceKey: `work-start:${work.id}`,
-      })
-    }
     return this.describeRecord(running)
   }
 
@@ -2775,7 +2849,7 @@ export class FleetRunService {
             ...memberTemplate,
             name: member.displayName ?? memberTemplate.name,
           }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.name, false, 'resume'),
+          setup: childCtx => this.setupFormalMember(childCtx, runtime, member.name, 'resume'),
           ...memberAgentOptions,
         })
         runtime.memberIdsByName.set(member.name, resumed.id)
@@ -2813,7 +2887,7 @@ export class FleetRunService {
             role: memberTemplate.role,
             cwd: record.projectRoot,
             persona: persona(effectiveTemplate, memberTemplate),
-            setup: childCtx => installMemberTools(childCtx, runtime, memberTemplate.id, false, 'create'),
+            setup: childCtx => this.setupFormalMember(childCtx, runtime, memberTemplate.id, 'create'),
             ...memberAgentOptions,
           })
           const member: FleetRunMember = {
@@ -2946,6 +3020,7 @@ export class FleetRunService {
   continueAssistantInteraction(caller: Agent, input: ContinueFleetInteractionInput) {
     const record = this.requireCallerRecord(caller, input.runId)
     const assistant = this.requireAssistantConnection(caller, record.id)
+    const runtime = this.requireRuntime(record.id)
     const formalMembers = new Set(record.members.map(member => member.name))
     if (input.goal !== undefined) {
       for (const owner of input.goal.owners) {
@@ -2956,18 +3031,27 @@ export class FleetRunService {
         }
       }
     }
+    const liveTaskIds: string[] = []
     if (input.taskIds !== undefined) {
       for (const taskId of input.taskIds) {
-        const task = this.requireRuntime(record.id).tasks.get(String(caller.id), taskId)
+        const task = runtime.tasks.get(String(caller.id), taskId)
         if (task.domain.kind === 'interaction'
           || !task.owners.some(owner => formalMembers.has(owner.member))) {
           throw new Error(`Interaction continuation Task ${taskId} must be owned by a formal Team member`)
         }
+        if (task.stableState.kind !== 'completed' && task.stableState.kind !== 'cancelled') {
+          liveTaskIds.push(task.id)
+        }
       }
     }
-    return this.requireRuntime(record.id).tasks.deferInteraction(String(caller.id), {
+    if (input.taskIds !== undefined && liveTaskIds.length === 0 && input.goal === undefined) {
+      const task = runtime.tasks.interactionTask(assistant.view.id)
+      if (task === undefined) throw new Error(`Fleet assistant ${assistant.view.id} has no foreground Interaction Task`)
+      return { task, goals: [] }
+    }
+    return runtime.tasks.deferInteraction(String(caller.id), {
       reason: input.reason,
-      ...(input.taskIds === undefined ? {} : { taskIds: input.taskIds }),
+      ...(input.taskIds === undefined ? {} : { taskIds: liveTaskIds }),
       ...(input.goal === undefined ? {} : { goal: input.goal }),
       checkAfterSeconds: input.checkAfterSeconds ?? DEFAULT_INTERACTION_CHECK_SECONDS,
     })
@@ -2979,34 +3063,33 @@ export class FleetRunService {
     return this.requireRuntime(record.id).tasks.takeOverInteraction(String(caller.id), input.reason)
   }
 
-  reportAssistantInteraction(caller: Agent, input: ReportFleetInteractionInput) {
+  private markAssistantUserFacingTurn(caller: Agent, source: AssistantUserFacingTurn): void {
+    const sessionId = String(caller.id)
+    const turn = this.assistantCurrentTurns.get(sessionId) ?? this.currentOpenTurn(caller)
+    if (turn === undefined) return
+    const current = this.assistantUserFacingTurns.get(sessionId)
+    if (current?.turn === turn && (current.source === 'direct' || source === 'explicit')) return
+    this.assistantUserFacingTurns.set(sessionId, { turn, source })
+  }
+
+  updateAssistantInteraction(caller: Agent, input: UpdateFleetInteractionInput) {
     const record = this.requireCallerRecord(caller, input.runId)
     const assistant = this.requireAssistantConnection(caller, record.id)
-    const tasks = this.requireRuntime(record.id).tasks
-    const reported = tasks.submitInteractionReport(String(caller.id), {
+    const updated = this.requireRuntime(record.id).tasks.recordInteractionUpdate(assistant.view.id, input.message)
+    this.markAssistantUserFacingTurn(caller, 'explicit')
+    return updated
+  }
+
+  reportAssistantInteraction(caller: Agent, input: ReportFleetInteractionInput) {
+    const record = this.requireCallerRecord(caller, input.runId)
+    this.requireAssistantConnection(caller, record.id)
+    const reported = this.requireRuntime(record.id).tasks.submitInteractionReport(String(caller.id), {
       outcome: input.outcome,
       reason: input.reason,
       report: input.report,
     })
-    const sessionId = String(caller.id)
-    const output = this.assistantTurnOutputs.get(sessionId)
-    const committed = output === undefined
-      ? undefined
-      : tasks.commitInteractionOutput(assistant.view.id, output)
-    if (committed !== undefined && caller.status === 'running') {
-      const turn = this.assistantCurrentTurns.get(sessionId)
-      if (turn !== undefined) {
-        setTimeout(() => {
-          if (caller.status === 'running' && this.assistantCurrentTurns.get(sessionId) === turn) {
-            caller.cancel(
-              { kind: 'hook', reason: 'Fleet accepted the already-visible foreground response.' },
-              { keepInbox: true },
-            )
-          }
-        }, 0)
-      }
-    }
-    return committed ?? reported
+    this.markAssistantUserFacingTurn(caller, 'delivery')
+    return reported
   }
 
   private assistantExecutionBoundaryReason(
@@ -3024,10 +3107,11 @@ export class FleetRunService {
     const lease = interaction.domain.executionLease
     if (lease?.revision === interaction.domain.inputRevision) return undefined
     return [
-      `Fleet assistant project execution is not routed for Interaction Task ${interaction.id}.`,
+      `[Fleet non-retryable tool route] ${execution.name} is not routed for Interaction Task ${interaction.id} in this turn.`,
       'Normal conversation, status checks, coordination, and read-only inspection remain available.',
       'For Team work, create/link formal-member Tasks and call fleet_user_task action="continue".',
       'Only when the user explicitly asked the assistant to execute personally, no formal member is available, or Team execution has failed, call fleet_user_task action="take_over" with a concrete reason, then retry.',
+      'Do not retry this tool or a substitute project-execution tool before one of those routing states changes.',
     ].join(' ')
   }
 
@@ -3121,6 +3205,7 @@ export class FleetRunService {
       positioning: optionalText(core.positioning, 'core.positioning'),
       rules: message.rules,
       collaborationMethod: message.collaborationMethod,
+      visibilityReminderContextGrowthTokens: message.visibilityReminderContextGrowthTokens,
       updateDensity: ui.userAccess.updateDensity,
       notificationPolicy: ui.userAccess.notificationPolicy,
       contentPreference: ui.userAccess.contentPreference,
@@ -3324,6 +3409,10 @@ export class FleetRunService {
     const positioning = optionalText(input.settings.positioning, 'Fleet Team positioning')
     const rules = optionalText(input.settings.rules, 'Fleet Team rules')
     const collaborationMethod = optionalText(input.settings.collaborationMethod, 'Fleet Team collaboration method')
+    const visibilityReminderContextGrowthTokens = input.settings.visibilityReminderContextGrowthTokens
+    if (!Number.isSafeInteger(visibilityReminderContextGrowthTokens) || visibilityReminderContextGrowthTokens < 0) {
+      throw new Error('Fleet visibility reminder context growth must be a non-negative integer')
+    }
     const contentPreference = optionalText(input.settings.contentPreference, 'Fleet Team content preference')
     const updateDensity = choice(input.settings.updateDensity, 'Fleet Team update density', ['concise', 'balanced', 'detailed'] as const)
     const notificationPolicy = choice(input.settings.notificationPolicy, 'Fleet Team notification policy', ['decisions', 'milestones', 'continuous'] as const)
@@ -3338,7 +3427,12 @@ export class FleetRunService {
       core: { ...core, name, positioning },
       modules: {
         ...modules,
-        [FLEET_MESSAGE_MODULE]: { ...message, rules, collaborationMethod },
+        [FLEET_MESSAGE_MODULE]: {
+          ...message,
+          rules,
+          collaborationMethod,
+          visibilityReminderContextGrowthTokens,
+        },
         [FLEET_UI_MODULE]: {
           ...ui,
           userAccess: { ...userAccess, updateDensity, notificationPolicy, contentPreference },
@@ -3819,7 +3913,7 @@ export class FleetRunService {
         cwd: record.projectRoot,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'create'),
+        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'create'),
       })
       created = true
       runtime.attachMember(agent.id, view)
@@ -3908,7 +4002,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
+        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'resume'),
       })
       if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
       else runtime.rebindMember(member.sessionId, resumed.id, view)
@@ -3937,7 +4031,7 @@ export class FleetRunService {
           role: currentView.role,
           persona: persona({ ...template, members: this.effectiveMemberViews(record) }, currentView),
           ...this.memberRuntimeOptions(record, currentView),
-          setup: childCtx => installMemberTools(childCtx, runtime, currentView.id, false, 'resume'),
+          setup: childCtx => this.setupFormalMember(childCtx, runtime, currentView.id, 'resume'),
         })
         if (restored.id === member.sessionId) runtime.attachMember(restored.id, currentView)
         else runtime.rebindMember(member.sessionId, restored.id, currentView)
@@ -4666,7 +4760,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
+        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'resume'),
       })
       const resumedAgent = this.ctx.agents.get(SessionId(resumed.id))
       if (member.status === 'paused' && resumedAgent !== undefined) {
@@ -4993,6 +5087,9 @@ export class FleetRunService {
     const context = (agent as Agent & { readonly ctx?: Context }).ctx
     if (context === undefined) return
     this.assistantInputBindingAgents.add(agent)
+    context.on('agent/turn-stopping', ({ agent: stoppingAgent, turn }) => {
+      this.memberTurnStopping(stoppingAgent, turn)
+    })
     context.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
       const decision = await next()
       if (decision.kind === 'reject') return decision
@@ -5013,7 +5110,7 @@ export class FleetRunService {
         })
       }
       if (hasDirectUserInput) await this.loadTeamMembersForAssistantInput(agent, record.id)
-      return decision
+      return this.preStepReminderDecision(agent, decision)
     })
     context.on('system-prompt/assemble', async (_assembly, _assembleContext, next) => {
       const assembly = await next()
@@ -5028,9 +5125,11 @@ export class FleetRunService {
         `Every direct foreground user input is already tracked in this Team's persistent Interaction Task. The foreground message is the current revision; do not call fleet_user_task status merely because direct input arrived. Use action="status" with run_id="${record.id}" after a Task Delivery, recovery wake, or when the current Interaction state is otherwise unclear.`,
         'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
         'A normal project imperative remains Team work: delegate before project execution, and take over only when explicitly requested, no formal member is available, or Team execution has failed.',
-        'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: one native response completes the direct Interaction when the turn ends normally.',
+        'When fleet_send returns replyTaskIds for delegated work, do not poll members. After all needed requests have been sent, call fleet_user_task action="continue" once with those task_ids and end the turn. Fleet wakes this assistant from durable Task settlement or its bounded progress deadline.',
+        'Intermediate native output is retained in the Session trace but is not delivered to the user by default. Use fleet_user_task action="update" only for an intentional mid-turn user update; do not use it to duplicate the final answer.',
+        'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: the last non-empty native output completes the direct Interaction and is delivered to the user when the turn ends normally.',
         `Before emitting a native response that settles delegated Team work or a Delivery, or blocks the request, call fleet_user_task with action="report" or action="block" and run_id="${record.id}".`,
-        'Do not write any user-visible answer before that tool call. After it succeeds, emit the answer exactly once and end the turn. A delegated result or block is not complete without both the tool intent and non-empty native output.',
+        'Do not emit the final answer before that tool call. After it succeeds, emit the answer exactly once and end the turn. Fleet commits and delivers that last native output at turn end; a delegated result or block is not complete without both the tool intent and non-empty native output.',
       ].join('\n')
       return {
         ...assembly,
@@ -5274,16 +5373,26 @@ export class FleetRunService {
       action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
-    const result = this.requireRuntime(record.id).messages.send(caller, {
+    const runtime = this.requireRuntime(record.id)
+    // This service route is the foreground-assistant transport. Formal members
+    // use the Message package tool bound inside their Team context.
+    const result = runtime.messages.send(caller, {
       to: input.to,
       text: input.text,
-      delivery: input.delivery,
+      delivery: input.delivery === 'quiet' && input.to.startsWith('#') ? 'fyi' : input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
     })
     this.pendingAssistantKickoffs.delete(`${record.id}:${String(caller.id)}`)
-    return result
+    // Message events may be persisted before their listeners have reconciled
+    // Reply Tasks in every host runtime. Re-run the idempotent reconciliation
+    // here so the tool result can immediately provide stable task ids.
+    const replyTaskIds = runtime.ensureMessageTasks(runtime.messages.getMessage(caller, result.messageId))
+    return {
+      ...result,
+      ...(replyTaskIds.length === 0 ? {} : { replyTaskIds }),
+    }
   }
 
   sendUserConversationMessage(input: SendFleetConversationMessageInput, caller?: Agent): SendMessageResult {
@@ -5462,6 +5571,13 @@ export class FleetRunService {
     if (record === undefined || runtime === undefined) return
     this.appendEvent(record.id, `coordination.${event.type}`, event)
     if (event.type === 'message') {
+      const sender = this.participants(record).find(participant =>
+        participant.name === event.message.from || participant.sessionId === event.message.from)
+      const agent = sender === undefined ? undefined : this.ctx.agents.get(SessionId(sender.sessionId))
+      const turn = agent === undefined ? undefined : this.currentOpenTurn(agent)
+      if (sender !== undefined && turn !== undefined) {
+        this.memberLastSharedTurns.set(sender.sessionId, turn)
+      }
       const recipientIds = event.message.recipientIds ?? []
       queueMicrotask(() => {
         const current = this.records.get(runId)
@@ -5624,6 +5740,275 @@ export class FleetRunService {
     else this.abnormalSessionIds.delete(sessionId)
   }
 
+  private currentOpenTurn(agent: Agent): number | undefined {
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/end') return undefined
+      if (event?.type === 'turn/start') return event.data.turn
+    }
+    return undefined
+  }
+
+  private reminderHistory(sessionId: string, slot: FleetTurnReminderSlot): Map<string, number> {
+    let session = this.turnReminderLastShown.get(sessionId)
+    if (session === undefined) {
+      session = new Map()
+      this.turnReminderLastShown.set(sessionId, session)
+    }
+    let history = session.get(slot)
+    if (history === undefined) {
+      history = new Map()
+      session.set(slot, history)
+    }
+    return history
+  }
+
+  private selectTurnReminderText(
+    agent: Agent,
+    slot: FleetTurnReminderSlot,
+    turn: number,
+    text: string,
+    tools: readonly string[],
+    tags: readonly string[],
+  ): string | undefined {
+    const rules = this.turnReminders[slot]
+    if (rules.length === 0) return undefined
+    const sessionId = String(agent.id)
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      this.records.has(runId) && !this.dormantRunIds.has(runId) && runtime.memberNamesById.has(sessionId))
+    if (entry === undefined) return undefined
+    const [teamId, runtime] = entry
+    const member = runtime.memberNamesById.get(sessionId)
+    const view = this.memberViewForAgent(teamId, sessionId)
+    if (member === undefined || view === undefined) return undefined
+    const inferredLocales = inferFleetReminderLocales(text)
+    const locales = this.userLocale === undefined
+      ? inferredLocales
+      : [this.userLocale, ...inferredLocales.filter(locale => locale !== this.userLocale)]
+    const history = this.reminderHistory(sessionId, slot)
+    const selection = selectFleetTurnReminder(rules, {
+      slot,
+      teamId,
+      memberId: view.id,
+      displayName: view.name,
+      role: view.role,
+      ...(view.responsibility === undefined ? {} : { responsibility: view.responsibility }),
+      turn,
+      text,
+      tools,
+      taskKinds: [...new Set(runtime.tasks.ownerTasks(member).map(task => task.domain.kind))],
+      tags,
+      locales,
+    }, history)
+    if (selection === undefined) return undefined
+    history.set(selection.rule.id, turn)
+    const selectedLocale = locales[0] ?? 'en'
+    const language = selectedLocale.toLocaleLowerCase().startsWith('zh') ? '中文' : 'English'
+    return fleetTurnReminderText(selection.rule, locales, {
+      name: view.name,
+      role: view.role,
+      responsibility: view.responsibility ?? view.role,
+      language,
+    })
+  }
+
+  private recentTurnReminderTools(agent: Agent, turn: number): string[] {
+    const tools: string[] = []
+    for (let index = agent.session.events.length - 1; index >= 0 && tools.length < 8; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start' && event.data.turn < turn - 2) break
+      if (event?.type === 'tool/call' && !tools.includes(event.data.name)) tools.push(event.data.name)
+    }
+    return tools
+  }
+
+  private appendTurnReminder(
+    decision: Exclude<PreStepDecision, { readonly kind: 'reject' }>,
+    slot: FleetTurnReminderSlot,
+    text: string,
+  ): PreStepDecision {
+    return {
+      ...decision,
+      messages: [...decision.messages, createUserMessage({
+        content: [{ type: 'text', text }],
+        source: {
+          kind: 'plugin',
+          plugin: 'dsh-agent-fleet',
+          form: 'snapshot',
+          sections: [{ name: `system-reminder:${slot}`, text }],
+        },
+      })],
+    }
+  }
+
+  private turnStartReminderDecision(
+    agent: Agent,
+    decision: Exclude<PreStepDecision, { readonly kind: 'reject' }>,
+  ): PreStepDecision {
+    if (this.turnReminders['turn-start'].length === 0) return decision
+    const sessionId = String(agent.id)
+    const turn = this.currentOpenTurn(agent)
+    if (turn === undefined || this.turnStartReminderTurns.get(sessionId) === turn) return decision
+    this.turnStartReminderTurns.set(sessionId, turn)
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start') break
+      if (event?.type === 'tool/call' || event?.type === 'tool/result' || event?.type === 'assistant/message') {
+        return decision
+      }
+    }
+    const contextText = decision.messages.map(progressMessageText).join('\n')
+    const reminder = this.selectTurnReminderText(
+      agent, 'turn-start', turn, contextText, this.recentTurnReminderTools(agent, turn), [],
+    )
+    return reminder === undefined ? decision : this.appendTurnReminder(decision, 'turn-start', reminder)
+  }
+
+  private toolResultReminderDecision(
+    agent: Agent,
+    decision: Exclude<PreStepDecision, { readonly kind: 'reject' }>,
+  ): PreStepDecision {
+    if (this.turnReminders['tool-result'].length === 0) return decision
+    const sessionId = String(agent.id)
+    const turn = this.currentOpenTurn(agent)
+    if (turn === undefined) return decision
+    const previousSequence = this.toolResultReminderSequences.get(sessionId) ?? -1
+    const callNames = new Map<string, string>()
+    const results: Array<{ readonly sequence: number; readonly callId: string; readonly text: string }> = []
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start') break
+      if (event?.type === 'tool/call') callNames.set(String(event.data.callId), event.data.name)
+      if (event?.type !== 'tool/result' || event.seq <= previousSequence) continue
+      results.push({
+        sequence: event.seq,
+        callId: String(event.data.message.source.callId),
+        text: progressMessageText(event.data.message),
+      })
+    }
+    if (results.length === 0) return decision
+    this.toolResultReminderSequences.set(sessionId, Math.max(...results.map(result => result.sequence)))
+    const tools = [...new Set([
+      ...results.map(result => callNames.get(result.callId)).filter((name): name is string => name !== undefined),
+      ...this.recentTurnReminderTools(agent, turn),
+    ])]
+    const contextText = [
+      ...results.sort((left, right) => left.sequence - right.sequence).map(result => result.text),
+      ...decision.messages.map(progressMessageText),
+    ].join('\n')
+    const reminder = this.selectTurnReminderText(agent, 'tool-result', turn, contextText, tools, [])
+    return reminder === undefined ? decision : this.appendTurnReminder(decision, 'tool-result', reminder)
+  }
+
+  private preStepReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision {
+    if (decision.kind === 'reject') return decision
+    const withTurnStart = this.turnStartReminderDecision(agent, decision)
+    if (withTurnStart.kind === 'reject') return withTurnStart
+    return this.toolResultReminderDecision(agent, withTurnStart)
+  }
+
+  private turnHasDirectOutput(agent: Agent, turn: number): boolean {
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start' && event.data.turn < turn) break
+      if (event?.type !== 'assistant/message'
+        || event.data.turn !== turn
+        || event.data.interrupted === true) continue
+      if (progressMessageText(event.data).trim().length > 0) return true
+    }
+    return false
+  }
+
+  private turnDirectOutputText(agent: Agent, turn: number): string {
+    const output: string[] = []
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start' && event.data.turn < turn) break
+      if (event?.type !== 'assistant/message'
+        || event.data.turn !== turn
+        || event.data.interrupted === true) continue
+      const text = progressMessageText(event.data).trim()
+      if (text.length > 0) output.unshift(text)
+    }
+    return output.join('\n')
+  }
+
+  private visibilityReminderState(sessionId: string): VisibilityReminderState {
+    const existing = this.visibilityReminderStates.get(sessionId)
+    if (existing !== undefined) return existing
+    const created: VisibilityReminderState = {
+      latestContextTokens: 0,
+      baselineContextTokens: undefined,
+      awaitingPostCompactionBaseline: false,
+      reminderCount: 0,
+      detailedReminderSent: false,
+    }
+    this.visibilityReminderStates.set(sessionId, created)
+    return created
+  }
+
+  private memberTurnStopping(agent: Agent, turn: number): void {
+    const sessionId = String(agent.id)
+    if (this.memberVisibilityReviewedTurns.get(sessionId) === turn) return
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      runtime.memberNamesById.has(sessionId) && !this.dormantRunIds.has(runId))
+    if (entry === undefined) return
+    const [runId, runtime] = entry
+    const record = this.records.get(runId)
+    const member = runtime.memberNamesById.get(sessionId)
+    if (record === undefined || member === undefined) return
+    const formalMember = record.members.some(candidate => candidate.name === member)
+    const foregroundAssistant = record.assistants.some(candidate => candidate.view.id === member)
+    if (!formalMember && !foregroundAssistant) return
+    this.memberVisibilityReviewedTurns.set(sessionId, turn)
+    if (!this.turnHasDirectOutput(agent, turn)) return
+    const reminder = this.visibilityReminderState(sessionId)
+    if (this.memberLastSharedTurns.get(sessionId) === turn) {
+      reminder.baselineContextTokens = reminder.latestContextTokens
+      reminder.awaitingPostCompactionBaseline = false
+      return
+    }
+    const message = parseFleetMessageConfiguration(this.moduleConfiguration(record.id, FLEET_MESSAGE_MODULE))
+    const threshold = message.visibilityReminderContextGrowthTokens
+    if (threshold === 0) return
+    if (reminder.baselineContextTokens === undefined || reminder.awaitingPostCompactionBaseline) {
+      reminder.baselineContextTokens = reminder.latestContextTokens
+      reminder.awaitingPostCompactionBaseline = false
+      return
+    }
+    const multiplier = 2 ** Math.min(reminder.reminderCount, 20)
+    const interval = Math.min(Number.MAX_SAFE_INTEGER, threshold * multiplier)
+    const growth = reminder.latestContextTokens - reminder.baselineContextTokens
+    if (growth < interval) return
+    const detailed = !reminder.detailedReminderSent
+    const userFacingTurn = this.assistantUserFacingTurns.get(sessionId)?.turn === turn
+    const reminderText = this.selectTurnReminderText(
+      agent,
+      'turn-end',
+      turn,
+      this.turnDirectOutputText(agent, turn),
+      this.recentTurnReminderTools(agent, turn),
+      [
+        foregroundAssistant ? 'foreground-assistant' : 'formal-member',
+        detailed ? 'detailed' : 'brief',
+        ...(foregroundAssistant ? [userFacingTurn ? 'user-facing' : 'background'] : []),
+      ],
+    )
+    if (reminderText === undefined) return
+    runtime.messages.sendSystemNotification(sessionId, {
+      kind: 'visibility_reminder',
+      text: reminderText,
+      // A visibility reminder must never create another model turn merely to
+      // acknowledge the reminder. It becomes context for the next organic turn.
+      delivery: 'quiet',
+      coalesceKey: `visibility-reminder:${sessionId}`,
+    })
+    reminder.baselineContextTokens = reminder.latestContextTokens
+    reminder.awaitingPostCompactionBaseline = false
+    reminder.reminderCount += 1
+    reminder.detailedReminderSent = true
+  }
+
   recordMemberSessionEvent(sessionId: string, event: SessionEvent): void {
     if (event.type === 'session/end-seed') return
     const entry = this.collaboration.entries().find(([runId, runtime]) =>
@@ -5643,17 +6028,41 @@ export class FleetRunService {
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     this.recordBudgetUsage(record, member, event)
+    if (event.type === 'assistant/message') {
+      const tokens = inputContextTokens(event.data.usage)
+      if (tokens !== undefined) {
+        const reminder = this.visibilityReminderState(sessionId)
+        reminder.latestContextTokens = Math.max(reminder.latestContextTokens, tokens)
+        if (reminder.baselineContextTokens === undefined) {
+          reminder.baselineContextTokens = reminder.latestContextTokens
+          reminder.awaitingPostCompactionBaseline = false
+        }
+      }
+    }
+    if (event.type === 'compaction/summary' || event.type === 'compaction/prune') {
+      const reminder = this.visibilityReminderState(sessionId)
+      reminder.latestContextTokens = 0
+      reminder.baselineContextTokens = undefined
+      reminder.awaitingPostCompactionBaseline = true
+      reminder.reminderCount = 0
+      reminder.detailedReminderSent = false
+    }
     const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
     if (foregroundAssistant && event.type === 'turn/start') {
       this.assistantCurrentTurns.set(sessionId, event.data.turn)
-      this.assistantDirectInputTurns.delete(sessionId)
+      this.assistantUserFacingTurns.delete(sessionId)
       this.assistantTurnOutputs.delete(sessionId)
+      const interaction = runtime.tasks.interactionTask(member)
+      if (interaction?.domain.kind === 'interaction' && interaction.domain.pendingDelivery !== undefined) {
+        this.assistantUserFacingTurns.set(sessionId, { turn: event.data.turn, source: 'delivery' })
+      }
     }
     if (event.type === 'user/message' && event.data.source?.kind === 'user') {
+      this.protocolRecoveries.delete(sessionId)
       if (foregroundAssistant) {
         this.assistantTurnOutputs.delete(sessionId)
         const turn = this.assistantCurrentTurns.get(sessionId)
-        if (turn !== undefined) this.assistantDirectInputTurns.set(sessionId, turn)
+        if (turn !== undefined) this.assistantUserFacingTurns.set(sessionId, { turn, source: 'direct' })
         runtime.tasks.recordInteractionInput(member, {
           messageId: String(event.data.id),
           text: progressMessageText(event.data),
@@ -5663,7 +6072,6 @@ export class FleetRunService {
     if (foregroundAssistant && event.type === 'assistant/message' && event.data.interrupted !== true) {
       const output = progressMessageText(event.data)
       if (output.trim().length > 0) this.assistantTurnOutputs.set(sessionId, output)
-      runtime.tasks.commitInteractionOutput(member, output)
     }
     if (event.type === 'assistant/chunk') return
     for (const listener of [...this.traceChangeListeners]) listener(runId, member)
@@ -5671,13 +6079,24 @@ export class FleetRunService {
     const reason = event.data.reason
     if (foregroundAssistant
       && reason.kind === 'completed'
-      && this.assistantDirectInputTurns.get(sessionId) === event.data.turn) {
+      && this.assistantUserFacingTurns.get(sessionId)?.turn === event.data.turn) {
       const output = this.assistantTurnOutputs.get(sessionId)
-      if (output !== undefined) runtime.tasks.settleDirectInteractionOutput(member, output)
+      const source = this.assistantUserFacingTurns.get(sessionId)?.source
+      if (output !== undefined) {
+        const settled = runtime.tasks.commitInteractionOutput(member, output)
+          ?? (source === 'direct' ? runtime.tasks.settleDirectInteractionOutput(member, output) : undefined)
+        if (settled === undefined) {
+          const interaction = runtime.tasks.interactionTask(member)
+          if (interaction?.domain.kind === 'interaction'
+            && interaction.domain.settledRevision < interaction.domain.inputRevision) {
+            runtime.tasks.recordInteractionUpdate(member, output)
+          }
+        }
+      }
     }
     this.assistantTurnOutputs.delete(sessionId)
     this.assistantCurrentTurns.delete(sessionId)
-    this.assistantDirectInputTurns.delete(sessionId)
+    this.assistantUserFacingTurns.delete(sessionId)
     if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
       if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
       return
@@ -5685,6 +6104,11 @@ export class FleetRunService {
     runtime.tasks.releaseRunning(member, reason.kind === 'error'
       ? `turn failed with ${reason.error.code}`
       : `turn ended with ${reason.kind} before fleet_reconcile resolve`)
+    if (reason.kind === 'error' && isRetriableProtocolFailure(reason.error) && agent !== undefined) {
+      if (this.scheduleProtocolRecovery(runId, member, agent, reason.error.message)) return
+    } else if (reason.kind === 'error') {
+      this.protocolRecoveries.delete(sessionId)
+    }
     if (reason.kind === 'error') {
       this.appendEvent(runId, 'member_auto_continuation_paused', {
         member,
@@ -5692,6 +6116,8 @@ export class FleetRunService {
         code: reason.error.code,
         reason: clippedProgressText(reason.error.message, 1_000),
       })
+    } else {
+      this.protocolRecoveries.delete(sessionId)
     }
     const route = agent === undefined ? undefined : this.networkRoute(agent)
     this.clearNetworkRecovery(sessionId)
@@ -5774,7 +6200,7 @@ export class FleetRunService {
     if (tasks.length === 0) return false
     const taskInstruction = (task: (typeof tasks)[number]): string => {
       if (task.domain.kind === 'inbox') return `- ${task.title} (${task.id}): call fleet_inbox action="read" to consume unread messages.`
-      if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): finish the requested work, then call fleet_reply with task_id="${task.id}" and content.`
+      if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): respond exactly once with fleet_reply and the actual answer. That reply is the visible conversation message; do not send the same answer first with fleet_send. Read the source with fleet_inbox only if needed.`
       if (task.domain.kind === 'goal') return `- ${task.title} (${task.id}): call fleet_goal action="complete" with the assignment result (including a reject recommendation), or "block" only for an external impediment.`
       if (task.domain.kind === 'interaction') {
         const delivery = task.domain.pendingDelivery
@@ -6001,9 +6427,13 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const record = this.records.get(runId)
     const participant = runtime.memberNamesById.get(agentId)
-    if (record === undefined || participant === undefined
-      || this.autoContinuationPaused(record, participant)
-      || this.abnormalSessionIds.has(agentId)
+    if (record === undefined || participant === undefined) return
+    if (this.autoContinuationPaused(record, participant)) return
+    if (this.protocolRecoveries.get(agentId)?.pending === true) {
+      this.wakeProtocolRecovery(agentId)
+      return
+    }
+    if (this.abnormalSessionIds.has(agentId)
       || this.networkRecoveries.has(agentId)) return
 
     if (this.continueAssignedTask(runId, runtime, record, agent)) return
@@ -6032,10 +6462,17 @@ export class FleetRunService {
 
   agentDisconnected(agentId: string): void {
     this.clearNetworkRecovery(agentId)
+    this.protocolRecoveries.delete(agentId)
     this.clearMemberActivity(agentId)
     this.assistantTurnOutputs.delete(agentId)
     this.assistantCurrentTurns.delete(agentId)
-    this.assistantDirectInputTurns.delete(agentId)
+    this.assistantUserFacingTurns.delete(agentId)
+    this.memberLastSharedTurns.delete(agentId)
+    this.memberVisibilityReviewedTurns.delete(agentId)
+    this.visibilityReminderStates.delete(agentId)
+    this.turnReminderLastShown.delete(agentId)
+    this.turnStartReminderTurns.delete(agentId)
+    this.toolResultReminderSequences.delete(agentId)
     this.abnormalSessionIds.delete(agentId)
     for (const [runId, runtime] of this.collaboration.entries()) {
       if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
@@ -6045,6 +6482,113 @@ export class FleetRunService {
 
   private networkRoute(agent: Agent): string {
     return `${agent.options.provider ?? ''}\u0000${agent.options.model ?? ''}`
+  }
+
+  private scheduleProtocolRecovery(runId: string, member: string, agent: Agent, message: string): boolean {
+    const record = this.records.get(runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running') return false
+    const sessionId = String(agent.id)
+    const attempt = (this.protocolRecoveries.get(sessionId)?.attempt ?? 0) + 1
+    if (attempt > PROTOCOL_RECOVERY_MAX_ATTEMPTS) {
+      this.protocolRecoveries.set(sessionId, {
+        runId,
+        member,
+        attempt: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+        pending: false,
+      })
+      this.appendEvent(runId, 'member_protocol_recovery_exhausted', {
+        member,
+        sessionId,
+        attempts: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+        reason: clippedProgressText(message, 1_000),
+      })
+      return this.escalateProtocolRecovery(record, member, sessionId, message)
+    }
+    this.protocolRecoveries.set(sessionId, { runId, member, attempt, pending: true })
+    this.appendEvent(runId, 'member_protocol_recovery_scheduled', {
+      member,
+      sessionId,
+      attempt,
+      reason: clippedProgressText(message, 1_000),
+    })
+    queueMicrotask(() => { this.wakeProtocolRecovery(sessionId) })
+    return true
+  }
+
+  private wakeProtocolRecovery(sessionId: string): void {
+    const recovery = this.protocolRecoveries.get(sessionId)
+    if (recovery?.pending !== true) return
+    const record = this.records.get(recovery.runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running') {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    const participant = this.participants(record).find(candidate => candidate.sessionId === sessionId)
+    if (participant === undefined) {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    if (this.autoContinuationPaused(record, participant.name)) return
+    if (this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    if (agent.status !== 'idle') return
+    recovery.pending = false
+    const retryGuidance = recovery.attempt === 1
+      ? 'Re-check durable Task state and artifacts, assume an earlier external action may already have completed, and continue from the smallest safe next step without blindly replaying irreversible actions.'
+      : `Retry ${recovery.attempt}/${PROTOCOL_RECOVERY_MAX_ATTEMPTS}: continue from durable state and do not replay irreversible actions.`
+    this.requireRuntime(record.id).messages.sendSystemNotification(sessionId, {
+      kind: 'task_notice',
+      text: [
+        `[Fleet work ${record.work.id} protocol recovery]`,
+        'The previous turn ended because the inference backend returned malformed tool-call protocol.',
+        retryGuidance,
+      ].join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `protocol-recovery:${record.work.id}:${recovery.member}:${recovery.attempt}`,
+    })
+    this.appendEvent(record.id, 'member_protocol_recovery_woken', {
+      member: recovery.member,
+      sessionId,
+      attempt: recovery.attempt,
+    })
+  }
+
+  private escalateProtocolRecovery(
+    record: FleetRunRecord,
+    member: string,
+    failedSessionId: string,
+    message: string,
+  ): boolean {
+    const assistant = record.assistants.find(candidate =>
+      candidate.sessionId !== failedSessionId
+      && candidate.status !== 'paused')
+    if (assistant === undefined) return false
+    this.requireRuntime(record.id).messages.sendSystemNotification(assistant.sessionId, {
+      kind: 'task_notice',
+      text: [
+        `[Fleet work ${record.work?.id ?? 'unknown'} protocol recovery required]`,
+        `Member ${member} exhausted ${PROTOCOL_RECOVERY_MAX_ATTEMPTS} automatic retries after malformed inference tool protocol. Its durable Tasks remain unsettled.`,
+        'Inspect only the affected Task and its latest artifacts, then resume the member with a narrow next step or reassign the remaining work. Do not replay irreversible actions without verifying their durable result.',
+      ].join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `protocol-recovery-escalation:${record.work?.id ?? record.id}:${member}`,
+    })
+    this.appendEvent(record.id, 'member_protocol_recovery_escalated', {
+      member,
+      sessionId: failedSessionId,
+      assistant: assistant.view.id,
+      assistantSessionId: assistant.sessionId,
+      attempts: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+      reason: clippedProgressText(message, 1_000),
+    })
+    return true
   }
 
   private scheduleNetworkRecovery(runId: string, member: string, agent: Agent, code: string): void {
@@ -6814,6 +7358,59 @@ export class FleetRunService {
     }
   }
 
+  async waitMemberProgress(
+    caller: Agent,
+    runId: string | undefined,
+    memberReference: string,
+    options: {
+      readonly afterSequence: number
+      readonly limit?: number
+      readonly includeOutputs?: boolean
+      readonly maxCharsPerItem?: number
+      readonly waitMs: number
+    },
+  ): Promise<FleetMemberProgress> {
+    if (!Number.isSafeInteger(options.waitMs) || options.waitMs < 1 || options.waitMs > 60_000) {
+      throw new Error('waitMs must be an integer from 1 through 60000')
+    }
+    const read = (): Promise<FleetMemberProgress> => this.readMemberProgress(
+      caller,
+      runId,
+      memberReference,
+      options,
+    )
+    const initial = await read()
+    if (initial.items.length > 0 || !['running', 'waiting'].includes(initial.runtimeStatus)) return initial
+    return new Promise<FleetMemberProgress>((resolve, reject) => {
+      let settled = false
+      const finish = (value: FleetMemberProgress): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        stop()
+        resolve(value)
+      }
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        stop()
+        reject(error)
+      }
+      const refresh = (): void => {
+        void read().then(value => {
+          if (value.items.length > 0 || !['running', 'waiting'].includes(value.runtimeStatus)) finish(value)
+        }, fail)
+      }
+      const stop = this.subscribeTraceChanges((changedRunId, changedMember) => {
+        if (changedRunId === initial.runId && changedMember === initial.member) refresh()
+      })
+      const timer = setTimeout(() => { void read().then(finish, fail) }, options.waitMs)
+      // Close the race between the initial snapshot and listener registration.
+      refresh()
+    })
+  }
+
   async readMemberTraceTail(
     runId: string | undefined,
     memberName: string,
@@ -7248,12 +7845,19 @@ export class FleetRunService {
       if (recovery.timer !== undefined) clearTimeout(recovery.timer)
     }
     this.networkRecoveries.clear()
+    this.protocolRecoveries.clear()
     for (const sessionId of [...this.memberToolActivity.keys()]) this.clearMemberActivity(sessionId)
     this.waitingSessionIds.clear()
     this.abnormalSessionIds.clear()
     this.assistantTurnOutputs.clear()
     this.assistantCurrentTurns.clear()
-    this.assistantDirectInputTurns.clear()
+    this.assistantUserFacingTurns.clear()
+    this.memberLastSharedTurns.clear()
+    this.memberVisibilityReviewedTurns.clear()
+    this.visibilityReminderStates.clear()
+    this.turnReminderLastShown.clear()
+    this.turnStartReminderTurns.clear()
+    this.toolResultReminderSequences.clear()
     this.collaboration.close()
     this.dormantRunIds.clear()
     this.manualWakeRequiredRunIds.clear()
@@ -7413,6 +8017,9 @@ export class FleetRunService {
     const terminalSummary = summary.trim()
     if (terminalSummary.length === 0) throw new Error('Fleet team close summary cannot be empty')
     this.clearRunNetworkRecoveries(runId)
+    for (const [sessionId, recovery] of [...this.protocolRecoveries]) {
+      if (recovery.runId === runId) this.protocolRecoveries.delete(sessionId)
+    }
     this.collaboration.get(runId)?.pauseProductivity()
     const endedAt = new Date().toISOString()
     const record = this.replaceRecord(runId, {
@@ -8899,6 +9506,8 @@ const MESSAGE_SEND_RESULT_SCHEMA = {
     recipients: { type: 'integer', required: true },
     delivered: { type: 'integer', required: true },
     woken: { type: 'integer', required: true },
+    replyTaskIds: { type: 'array', items: { type: 'string' } },
+    audienceHint: { type: 'string' },
   },
 } as const
 
@@ -9030,7 +9639,7 @@ const USER_TASK_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', required: true, enum: ['status', 'continue', 'take_over', 'report', 'block'] },
+    action: { type: 'string', required: true, enum: ['status', 'update', 'continue', 'take_over', 'report', 'block'] },
     task: { ...FLEXIBLE_OBJECT_SCHEMA, required: true },
     goals: { type: 'array', items: FLEXIBLE_OBJECT_SCHEMA },
   },
@@ -9058,22 +9667,26 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send a quiet Fleet message. Ordinary messages enter recipients\' Inbox Tasks; every resolved @mention also creates a Reply Task. Use fleet_reply to complete an existing Reply Task.',
+    description: 'Send one quiet Fleet message to the smallest necessary audience. Routing a private message with to="@target" does not require a reply. A valid @target in the message text, or an equivalent structural mention, creates one Reply Task. Use a #channel only when its full audience needs the exact content. Unmentioned messages create no Reply Task.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not create a Reply Task.' },
+      to: { type: 'string', required: true, description: 'Use @fleet-name or @agent-id to route a private message, #channel for Team-visible history, or meeting:id. Routing alone does not require a reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets merged with valid @Name or @member-id mentions parsed from the text.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Structural Reply Task targets merged with valid @mentions parsed from the message text.' },
+      reply_mode: { type: 'string', enum: ['required', 'optional'], description: 'Compatibility shortcut for private messages. Optional is the default; required structurally mentions the routed recipient.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_send')
+      const mentions = args.reply_mode === 'required' && String(args.to).startsWith('@')
+        ? [...new Set([String(args.to), ...(args.mentions ?? [])])]
+        : args.mentions
       return Promise.resolve(service.sendConversationMessage(caller, {
         to: args.to as `@${string}` | `#${string}` | `meeting:${string}`,
         text: args.message,
         delivery: 'quiet',
-        ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
+        ...(mentions === undefined ? {} : { mentions }),
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }))
@@ -9082,12 +9695,13 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_user_task',
-    description: 'Operate the calling assistant persistent foreground Interaction Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Call report/block before the user-visible answer, then emit that answer exactly once; Fleet commits only after native foreground output.',
+    description: 'Operate the calling assistant persistent foreground Interaction Task. Update intentionally delivers one mid-turn progress message without settling or waking the Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Call report/block before the final answer, then emit it exactly once; Fleet commits and delivers the last native output at turn end.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['status', 'continue', 'take_over', 'report', 'block'] },
+      action: { type: 'string', required: true, enum: ['status', 'update', 'continue', 'take_over', 'report', 'block'] },
       run_id: { type: 'string', description: 'Persistent Team id. Defaults to the Team containing the calling assistant.' },
       reason: { type: 'string', description: 'Required for continue, take_over, report, and block.' },
       report: { type: 'string', description: 'Exact foreground result recorded for bookkeeping. Required for report and block; do not emit it before this tool call.' },
+      message: { type: 'string', description: 'For update, the intentional mid-turn message delivered to the user. Do not repeat the final answer.' },
       task_ids: { type: 'array', items: { type: 'string' }, description: 'For continue, optional additional live Tasks owned by formal Team members. Omit to retain existing live waits.' },
       title: { type: 'string', description: 'For continue with instructions, title of the new Goal.' },
       instructions: { type: 'string', description: 'For continue, concrete work for a new formal-member Goal.' },
@@ -9099,6 +9713,22 @@ export function installRunTools(
       const caller = callingAgent(exec.agent, 'fleet_user_task')
       if (args.action === 'status') {
         return Promise.resolve({ action: 'status' as const, task: fleetTaskToolDetail(service.assistantInteraction(caller, args.run_id)) })
+      }
+      if (args.action === 'update') {
+        if (args.message === undefined) throw new Error('fleet_user_task update requires message')
+        const task = service.updateAssistantInteraction(caller, {
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+          message: args.message,
+        })
+        if (task.domain.kind !== 'interaction') throw new Error('fleet_user_task update returned a non-Interaction Task')
+        return Promise.resolve({
+          action: 'update' as const,
+          task: {
+            state: task.stableState.kind,
+            revision: task.domain.inputRevision,
+            delivered: true,
+          },
+        })
       }
       if (args.reason === undefined) throw new Error(`fleet_user_task ${args.action} requires reason`)
       if (args.action === 'continue') {
@@ -9156,12 +9786,29 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_run',
-    description: 'Control the outer Fleet Team lifecycle. A started work item is owned by a zero-owner composite root Task whose ReconcileAttempts atomically continue or finish the work.',
+    description: 'Control the outer Fleet Team lifecycle. Start can atomically create a planned Goal/Vote DAG; successful plans complete their zero-owner root automatically.',
     parameters: {
       action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team where supported.' },
       team_config: { type: 'string', description: 'Team JSON path required for create.' },
       task: { type: 'string', description: 'Work Markdown path required for start.' },
+      directive: { type: 'string', description: 'Concise kickoff summary stored with the work.' },
+      result_stage: { type: 'string', description: 'Stage key whose Goal result becomes the successful root result. Defaults to the last Goal stage.' },
+      stages: {
+        type: 'array',
+        description: 'Complete initial Goal/Vote DAG created atomically with the work root.',
+        items: {
+          type: 'object', additionalProperties: false, properties: {
+            key: { type: 'string', required: true },
+            kind: { type: 'string', enum: ['goal', 'vote'] },
+            title: { type: 'string', required: true },
+            description: { type: 'string' },
+            owners: { type: 'array', required: true, items: { type: 'string' } },
+            dependencies: { type: 'array', items: { type: 'string' } },
+            timeout_at: { type: 'string' },
+          },
+        },
+      },
       cwd: { type: 'string', description: 'Team project root. Defaults to the calling session cwd, which remains the only workspace source.' },
       required_paths: { type: 'array', items: { type: 'string' }, description: 'Optional paths that must exist before Team creation.' },
       provider: { type: 'string', description: 'Optional default provider route for every member, used only by create.' },
@@ -9226,6 +9873,19 @@ export function installRunTools(
           ...(args.run_id === undefined ? {} : { runId: args.run_id }),
           taskPath: args.task,
           projectRoot,
+          ...(args.directive === undefined ? {} : { directive: args.directive }),
+          ...(args.result_stage === undefined ? {} : { resultStage: args.result_stage }),
+          ...(args.stages === undefined ? {} : {
+            stages: args.stages.map(stage => ({
+              key: stage.key,
+              kind: stage.kind ?? 'goal',
+              title: stage.title,
+              description: stage.description ?? '',
+              owners: stage.owners,
+              dependencies: stage.dependencies ?? [],
+              ...(stage.timeout_at === undefined ? {} : { timeoutAt: stage.timeout_at }),
+            })),
+          }),
         }),
       }
     },
@@ -9436,7 +10096,7 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_progress',
-    description: 'Read one reachable Team member\'s current runtime state and bounded recent output, like a compact thread progress view, without exposing full private context.',
+    description: 'Read one reachable Team member\'s current runtime state and bounded recent output without exposing full private context. When waiting for new progress, pass the previous cursor as after_sequence and wait_ms instead of repeating snapshots.',
     parameters: {
       run_id: { type: 'string', description: 'Team id; inferred when the caller belongs to exactly one active Team.' },
       member: { type: 'string', required: true, description: 'Member id, display name, or @member to inspect.' },
@@ -9444,17 +10104,25 @@ export function installRunTools(
       limit: { type: 'integer', description: 'Maximum progress items from 1 through 10. Defaults to 5.' },
       include_outputs: { type: 'boolean', description: 'Include clipped tool arguments and results. Defaults to false.' },
       max_output_chars_per_item: { type: 'integer', description: 'Maximum text per item from 100 through 2000 characters. Defaults to 800.' },
+      wait_ms: { type: 'integer', description: 'Wait up to 60000 ms for progress after after_sequence. Use this instead of polling unchanged state.' },
     },
     output: jsonOutput(PROGRESS_RESULT_SCHEMA),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_progress')
-      return service.readMemberProgress(caller, args.run_id, args.member, {
+      const options = {
         ...(args.after_sequence === undefined ? {} : { afterSequence: args.after_sequence }),
         ...(args.limit === undefined ? {} : { limit: args.limit }),
         ...(args.include_outputs === undefined ? {} : { includeOutputs: args.include_outputs }),
         ...(args.max_output_chars_per_item === undefined
           ? {}
           : { maxCharsPerItem: args.max_output_chars_per_item }),
+      }
+      if (args.wait_ms === undefined) return service.readMemberProgress(caller, args.run_id, args.member, options)
+      if (args.after_sequence === undefined) throw new Error('fleet_progress wait_ms requires after_sequence')
+      return service.waitMemberProgress(caller, args.run_id, args.member, {
+        ...options,
+        afterSequence: args.after_sequence,
+        waitMs: args.wait_ms,
       })
     },
   }))

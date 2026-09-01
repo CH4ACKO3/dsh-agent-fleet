@@ -27,6 +27,7 @@ import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
 import { activateResidentFleetAssistants } from '../src/resident-assistants.js'
 import { normalizeFleetSetupConfiguration } from '../src/setup.js'
+import type { FleetTurnReminderLists } from '../src/turn-reminders.js'
 
 interface FakeEvent {
   readonly seq: number
@@ -64,6 +65,8 @@ function settleDefaultCompositeWork(
   board.submitGoal(actorId, delivery.id, outcome === 'complete'
     ? { kind: 'complete', reason: result, result }
     : { kind: 'block', reason: result })
+  const settled = board.get(actorId, rootTaskId)
+  if (settled.stableState.kind === 'completed') return settled
   const claimed = board.claim(actorId, rootTaskId)
   const attemptId = claimed.activeReconcile?.attemptId
   if (attemptId === undefined) throw new Error('expected root ReconcileAttempt')
@@ -387,6 +390,7 @@ function setup(root: string, options?: {
     readonly nextStep?: readonly UserMessage[]
   }>
   readonly resumedIds?: ReadonlyMap<string, string>
+  readonly turnReminders?: FleetTurnReminderLists
 }): {
   readonly service: FleetRunService
   readonly core: FleetCore
@@ -472,6 +476,7 @@ function setup(root: string, options?: {
     registryDirectory: join(root, '.fleet-registry'),
     ...(options?.archives === undefined ? {} : { archives: options.archives }),
     authorization,
+    ...(options?.turnReminders === undefined ? {} : { turnReminders: options.turnReminders }),
   })
   authorization.installBaseline(service.authorizationBaseline())
   return {
@@ -491,6 +496,67 @@ function setup(root: string, options?: {
 }
 
 describe('FleetRunService', () => {
+  it('injects turn-start and tool-result reminders with independent slot cooldowns', async () => {
+    const { root, configPath } = fixture()
+    const reminder = {
+      default: 'You are {name}; use {language}.',
+      locales: { 'zh-CN': '你是 {name}；使用 {language}。' },
+    }
+    const turnReminders: FleetTurnReminderLists = {
+      'turn-start': [{ id: 'shared-id', text: reminder, cooldownTurns: 5 }],
+      'turn-end': [],
+      'tool-result': [{ id: 'shared-id', text: reminder, cooldownTurns: 5, tools: ['bash'] }],
+    }
+    const { service, runtime, launcher, disconnect } = setup(root, { turnReminders })
+    expect(service.setUserLocale('zh-Hans')).toBe('zh-CN')
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected live Fleet lead')
+    const preStep = (messages: UserMessage[]): PreStepDecision => {
+      const hook = service as unknown as {
+        preStepReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision
+      }
+      return hook.preStepReminderDecision(lead as unknown as Agent, { kind: 'enter', messages })
+    }
+    lead.session.events.push({ type: 'turn/start', seq: 1, time: Date.now(), data: { turn: 1 } })
+    const input = createUserMessage({
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'Run the check.' }],
+    })
+
+    const atStart = preStep([input])
+    if (atStart.kind === 'reject') throw new Error('unexpected rejected pre-step')
+    expect(atStart.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: 你是 Lead；使用 中文。' }),
+    ])
+    expect(preStep([input])).toMatchObject({ messages: [input] })
+
+    lead.session.events.push(
+      { type: 'tool/call', seq: 2, time: Date.now(), data: { turn: 1, callId: 'call-1', name: 'bash', arguments: '{}' } },
+      {
+        type: 'tool/result', seq: 3, time: Date.now(),
+        data: {
+          turn: 1,
+          message: {
+            source: { kind: 'tool', callId: 'call-1' },
+            content: [{ type: 'text', text: 'ok' }],
+          },
+        },
+      },
+    )
+    const afterTool = preStep([])
+    if (afterTool.kind === 'reject') throw new Error('unexpected rejected pre-step')
+    expect(afterTool.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: 你是 Lead；使用 中文。' }),
+    ])
+    expect(preStep([])).toMatchObject({ messages: [] })
+    disconnect()
+  })
+
   it('injects filesystem access before installing foreground assistant resource tools', async () => {
     const { root, configPath } = fixture()
     const configuration = JSON.parse(readFileSync(configPath, 'utf8')) as {
@@ -660,6 +726,7 @@ describe('FleetRunService', () => {
       runId: run.id,
       to: `@${assistantId}`,
       text: 'Persist this required assistant task.',
+      mentions: [`@${assistantId}`],
       delivery: 'quiet',
     })
     first.disconnect()
@@ -741,9 +808,11 @@ describe('FleetRunService', () => {
     expect(request).toContain(`Current Team: ${run.id}`)
     expect(request).toContain('do not call fleet_user_task status merely because direct input arrived')
     expect(request).toContain(`Use action="status" with run_id="${run.id}" after a Task Delivery`)
-    expect(request).toContain('Do not write any user-visible answer before that tool call')
+    expect(request).toContain('Do not emit the final answer before that tool call')
     expect(request).toContain('emit the answer exactly once and end the turn')
     expect(request).toContain('do not call fleet_user_task report')
+    expect(request).toContain('action="update" only for an intentional mid-turn user update')
+    expect(request).toContain('last non-empty native output')
     expect(request).toContain('normal project imperative remains Team work')
     expect(request).not.toContain('Build and review the requested change.')
 
@@ -774,10 +843,19 @@ describe('FleetRunService', () => {
       domain: { inputRevision: 1, latestMessageId: String(incoming.id) },
       entries: [expect.objectContaining({ text: 'Build and review the requested change.' })],
     })
+    service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${assistantId}`,
+      text: 'Build and review the requested change.',
+      delivery: 'quiet',
+    }, launcher as unknown as Agent)
+    expect(service.taskBoard(run.id).pendingReply(assistantId)).toBeUndefined()
+    expect(service.taskBoard(run.id).ownerTasks(assistantId).map(task => task.domain.kind))
+      .toEqual(['interaction'])
     disconnect()
   })
 
-  it('settles output-before-report in one turn without an Interaction self-notification', async () => {
+  it('settles only at turn end even when native output precedes the report intent', async () => {
     const { root, configPath } = fixture()
     const { service, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -798,6 +876,12 @@ describe('FleetRunService', () => {
     const userTask = registered.find(tool => tool.name === 'fleet_user_task')
     if (userTask === undefined) throw new Error('expected fleet_user_task')
 
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 0,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 1 },
+    } as unknown as SessionEvent)
     service.recordMemberSessionEvent(launcher.id, {
       seq: 1,
       time: Date.now(),
@@ -830,8 +914,14 @@ describe('FleetRunService', () => {
         message: { id: 'foreground-assistant-initial', role: 'assistant', content: [{ type: 'text', text: 'First response.' }] },
       },
     } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('running')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2.5,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
     expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('completed')
-    await Promise.resolve()
     const messagesBefore = launcher.messages.length
 
     service.recordMemberSessionEvent(launcher.id, {
@@ -850,6 +940,19 @@ describe('FleetRunService', () => {
       },
     } as unknown as SessionEvent)
     expect(launcher.messages).toHaveLength(messagesBefore)
+    const updateReceipt = await userTask.execute({
+      action: 'update',
+      run_id: run.id,
+      message: '还在处理，马上完成。',
+    }, { agent: launcher as unknown as Agent })
+    expect(updateReceipt).toEqual({
+      action: 'update',
+      task: { state: 'running', revision: 2, delivered: true },
+    })
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.entries.at(-1)).toMatchObject({
+      interactionDelivery: 'update',
+      text: '还在处理，马上完成。',
+    })
 
     service.recordMemberSessionEvent(launcher.id, {
       seq: 5,
@@ -869,16 +972,15 @@ describe('FleetRunService', () => {
     expect(receipt).toEqual({
       action: 'report',
       task: {
-        state: 'completed',
+        state: 'running',
         revision: 2,
-        next: 'end_turn_without_more_output',
+        next: 'emit_native_output_once',
       },
     })
-    await vi.waitFor(() => { expect(launcher.cancelCount).toBe(1) })
     expect(JSON.stringify(receipt).length).toBeLessThan(250)
     expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
-      stableState: { kind: 'completed', result: '好' },
-      domain: { kind: 'interaction', inputRevision: 2, settledRevision: 2 },
+      stableState: { kind: 'running' },
+      domain: { kind: 'interaction', inputRevision: 2, settledRevision: 1 },
     })
     await Promise.resolve()
     expect(launcher.messages).toHaveLength(messagesBefore)
@@ -889,6 +991,10 @@ describe('FleetRunService', () => {
       type: 'turn/end',
       data: { turn: 2, reason: { kind: 'completed' } },
     } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'completed', result: '好' },
+      domain: { kind: 'interaction', inputRevision: 2, settledRevision: 2 },
+    })
     expect(launcher.messages).toHaveLength(messagesBefore)
 
     service.recordMemberSessionEvent(launcher.id, {
@@ -934,7 +1040,7 @@ describe('FleetRunService', () => {
       data: { turn: 4 },
     } as unknown as SessionEvent)
     await new Promise(resolve => setTimeout(resolve, 10))
-    expect(launcher.cancelCount).toBe(1)
+    expect(launcher.cancelCount).toBe(0)
     disconnect()
   })
 
@@ -1170,6 +1276,12 @@ describe('FleetRunService', () => {
       }))
     })
 
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 2 },
+    } as unknown as SessionEvent)
     service.reportAssistantInteraction(launcher as unknown as Agent, {
       runId: run.id,
       outcome: 'complete',
@@ -1181,7 +1293,7 @@ describe('FleetRunService', () => {
       domain: { kind: 'interaction', reportIntent: { revision: 1, outcome: 'complete' } },
     })
     service.recordMemberSessionEvent(launcher.id, {
-      seq: 2,
+      seq: 3,
       time: Date.now(),
       type: 'assistant/message',
       data: {
@@ -1191,6 +1303,13 @@ describe('FleetRunService', () => {
           content: [{ type: 'text', text: 'Verified result.' }],
         },
       },
+    } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('running')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 4,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 2, reason: { kind: 'completed' } },
     } as unknown as SessionEvent)
     expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
       id: interaction.id,
@@ -1408,7 +1527,7 @@ describe('FleetRunService', () => {
     expect(leadPersona).toContain(`You are @${leadMember.displayName}`)
     expect(leadPersona).toContain('Configured groups cover Fleet capabilities only')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
-    expect(leadPersona).toContain('A valid `@Name` or `@member-id` in message text is parsed as a mention')
+    expect(leadPersona).toContain('A valid `@Name` or `@member-id` in the message text explicitly means "this member must answer"')
     expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state')
 
     service.end(launcher as unknown as Agent, 'Display name messaging test complete.', run.id)
@@ -1580,6 +1699,7 @@ describe('FleetRunService', () => {
         positioning: 'Own the active runtime.',
         rules: 'Verify user-visible changes.',
         collaborationMethod: 'Coordinate through the main Channel.',
+        visibilityReminderContextGrowthTokens: 24_000,
         updateDensity: 'detailed',
         notificationPolicy: 'decisions',
         contentPreference: 'Lead with outcomes.',
@@ -1591,6 +1711,7 @@ describe('FleetRunService', () => {
       positioning: 'Own the active runtime.',
       rules: 'Verify user-visible changes.',
       collaborationMethod: 'Coordinate through the main Channel.',
+      visibilityReminderContextGrowthTokens: 24_000,
       updateDensity: 'detailed',
       notificationPolicy: 'decisions',
       contentPreference: 'Lead with outcomes.',
@@ -1602,6 +1723,7 @@ describe('FleetRunService', () => {
         'dsh-agent-fleet/message': {
           rules: 'Verify user-visible changes.',
           collaborationMethod: 'Coordinate through the main Channel.',
+          visibilityReminderContextGrowthTokens: 24_000,
         },
         'dsh-agent-fleet/ui': { userAccess: {
           updateDensity: 'detailed', notificationPolicy: 'decisions', contentPreference: 'Lead with outcomes.',
@@ -2324,14 +2446,19 @@ describe('FleetRunService', () => {
     const guard = vi.fn(() => () => {})
     const get = vi.fn((name: string) => name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
     const memberSetup = vi.fn()
+    const onMemberEvent = vi.fn(() => () => true)
     context.on('fleet/member/setup', memberSetup)
+    const setupAgent = runtime.get(run.members[0]?.sessionId ?? '')
+    if (setupAgent === undefined) throw new Error('expected setup Agent')
     await runtime.creates[0]?.setup?.({
-      agent: runtime.get(run.members[0]?.sessionId ?? '') as unknown as Agent,
+      agent: setupAgent as unknown as Agent,
+      on: onMemberEvent,
       inject: (_deps: readonly string[], callback: (scope: Context) => void) => {
         callback({ tools: { register, restrict, guard, get } } as unknown as Context)
         return Promise.resolve()
       },
     } as unknown as Context)
+    expect(onMemberEvent).toHaveBeenCalledWith('agent/turn-stopping', expect.any(Function))
     expect(restrict).toHaveBeenCalledWith({
       deny: expect.arrayContaining([
         'fleet_agent', 'fleet_archive', 'fleet_setup', 'fleet_trace', 'fleet_activity',
@@ -2829,7 +2956,7 @@ describe('FleetRunService', () => {
       text: 'The foreground assistant is checking in directly.',
       delivery: 'quiet',
     })
-    expect(sent).toMatchObject({ recipients: 2, woken: 0 })
+    expect(sent).toMatchObject({ recipients: 0, delivered: 0, woken: 0 })
     expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages)
       .toContainEqual(expect.objectContaining({
         id: sent.messageId,
@@ -2868,6 +2995,15 @@ describe('FleetRunService', () => {
       }))
     expect(service.taskBoard(run.id).state().tasks.some(task =>
       task.domain.kind === 'reply' && task.domain.messageId === userDirectMessage.messageId,
+    )).toBe(false)
+    const userMentionedDirectMessage = service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${reviewer.id}`,
+      text: '@reviewer Please confirm the latest result.',
+      delivery: 'quiet',
+    })
+    expect(service.taskBoard(run.id).state().tasks.some(task =>
+      task.domain.kind === 'reply' && task.domain.messageId === userMentionedDirectMessage.messageId,
     )).toBe(true)
     expect(service.messageHub(run.id).send(lead, {
       to: '@User',
@@ -3254,15 +3390,9 @@ describe('FleetRunService', () => {
     const acceptedTaskPath = running.work?.acceptedTaskPath
     expect(acceptedTaskPath).toBeDefined()
     expect(readFileSync(acceptedTaskPath ?? '', 'utf8')).toContain('Hook-added acceptance criteria.')
-    const workStart = runtime.get(run.members[0]?.sessionId ?? '')?.messages.at(-1)?.content
-    expect(workStart)
-      .toEqual([expect.objectContaining({ text: expect.stringContaining('Hook-added acceptance criteria.') })])
-    expect(workStart).toEqual([expect.objectContaining({
-      text: expect.stringContaining('composite root Task'),
-    })])
-    expect(workStart).toEqual([expect.objectContaining({
-      text: expect.stringContaining('first formal cohort atomically'),
-    })])
+    const rootTaskId = running.work?.rootTaskId
+    expect(service.taskBoard(run.id).state().tasks.find(task => task.parentId === rootTaskId)?.description)
+      .toContain('Hook-added acceptance criteria.')
 
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
@@ -3443,6 +3573,23 @@ describe('FleetRunService', () => {
         { sequence: 5, kind: 'tool_result', text: 'All reproduction checks passed.' },
       ],
     })
+
+    const changed = service.waitMemberProgress(lead as unknown as Agent, run.id, 'Reviewer', {
+      afterSequence: 6,
+      waitMs: 1_000,
+    })
+    const later = {
+      seq: 7,
+      time: 7_000,
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: 'The follow-up check is complete.' }] } },
+    } as unknown as SessionEvent
+    reviewer.session.events.push(later)
+    service.recordMemberSessionEvent(reviewer.id, later)
+    await expect(changed).resolves.toMatchObject({
+      cursor: 7,
+      items: [{ sequence: 7, kind: 'output', text: 'The follow-up check is complete.' }],
+    })
     disconnect()
   })
 
@@ -3615,6 +3762,237 @@ describe('FleetRunService', () => {
       data: { turn: 2 },
     }))
     expect(leadStatus()).toBe('running')
+    disconnect()
+  })
+
+  it('privately reminds a silent formal member without creating Team messages or a reminder loop', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    const coordinationMessages = (): number => service.readTrace(run.id, 0, 300).events
+      .filter(event => event.type === 'coordination.message').length
+    const turnStopping = (turn: number): void => {
+      const hook = service as unknown as {
+        memberTurnStopping(agent: Agent, turn: number): void
+      }
+      hook.memberTurnStopping(lead as unknown as Agent, turn)
+    }
+    const emitSilentTurn = (turn: number, contextTokens: number, output: string): void => {
+      lead.inbox.nextTurn.length = 0
+      lead.inbox.nextStep.length = 0
+      lead.session.events.push({
+        type: 'turn/start', seq: turn * 10, time: Date.now(), data: { turn },
+      })
+      const outputEvent = {
+        type: 'assistant/message', seq: turn * 10 + 1, time: Date.now(),
+        data: {
+          turn,
+          interrupted: false,
+          message: { content: [{ type: 'text', text: output }] },
+          usage: { inputTokens: contextTokens, outputTokens: 32 },
+        },
+      } as unknown as SessionEvent
+      lead.session.events.push(outputEvent)
+      service.recordMemberSessionEvent(lead.id, outputEvent)
+      turnStopping(turn)
+      lead.session.events.push({
+        type: 'turn/end', seq: turn * 10 + 2, time: Date.now(),
+        data: { turn, reason: { kind: 'completed' } },
+      })
+    }
+    const initialLeadMessages = lead.messages.length
+    const initialReviewerMessages = reviewer.messages.length
+    const initialCoordinationMessages = coordinationMessages()
+
+    emitSilentTurn(1, 8_000, 'I finished the requested analysis.')
+    turnStopping(1)
+
+    expect(lead.messages).toHaveLength(initialLeadMessages)
+    emitSilentTurn(2, 24_000, 'A larger unshared result.')
+
+    expect(lead.messages).toHaveLength(initialLeadMessages + 1)
+    expect(reviewer.messages).toHaveLength(initialReviewerMessages)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('System reminder, no reply:'),
+      }),
+    ])
+    expect(coordinationMessages()).toBe(initialCoordinationMessages)
+    expect(service.readTrace(run.id, 0, 300).events).toContainEqual(expect.objectContaining({
+      type: 'coordination.system_notification',
+      data: expect.stringContaining('visibility_reminder'),
+    }))
+
+    expect(lead.inbox.nextTurn).toHaveLength(0)
+    expect(lead.inbox.nextStep).toHaveLength(1)
+
+    // The second retained reminder needs twice the first context growth.
+    emitSilentTurn(3, 40_000, 'Understood.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 1)
+    emitSilentTurn(4, 56_000, 'Another unshared result.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('System reminder, no reply:'),
+      }),
+    ])
+
+    lead.inbox.nextTurn.length = 0
+    lead.inbox.nextStep.length = 0
+    lead.session.events.push({
+      type: 'turn/start', seq: 50, time: Date.now(), data: { turn: 5 },
+    })
+    service.messageHub(run.id).send(lead, {
+      to: '#main', text: 'Shared result.', delivery: 'quiet',
+    })
+    const sharedOutput = {
+      type: 'assistant/message', seq: 51, time: Date.now(),
+      data: {
+        turn: 5,
+        interrupted: false,
+        message: { content: [{ type: 'text', text: 'Shared result.' }] },
+        usage: { inputTokens: 64_000, outputTokens: 32 },
+      },
+    } as unknown as SessionEvent
+    lead.session.events.push(sharedOutput)
+    service.recordMemberSessionEvent(lead.id, sharedOutput)
+    turnStopping(5)
+    lead.session.events.push({
+      type: 'turn/end', seq: 52, time: Date.now(), data: { turn: 5, reason: { kind: 'completed' } },
+    })
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+
+    // A successful Team-visible send establishes a fresh context-growth baseline.
+    emitSilentTurn(6, 96_000, 'A later result was not shared.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+
+    service.recordMemberSessionEvent(lead.id, {
+      type: 'compaction/summary',
+      seq: 65,
+      time: Date.now(),
+      data: {
+        compactionId: 'compact-1',
+        summary: [{ type: 'text', text: 'summary' }],
+        shadowedRange: { start: 1, end: 60 },
+        shadowedSeqs: [1, 60],
+        shadowedTokenCount: 44_000,
+        provider: 'test',
+        model: 'test',
+      },
+    } as unknown as SessionEvent)
+    emitSilentTurn(7, 2_000, 'First result after compaction.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+
+    emitSilentTurn(8, 18_000, 'Later result after compaction.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 3)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('System reminder, no reply:'),
+      }),
+    ])
+    emitSilentTurn(9, 34_000, 'Below the doubled interval.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 3)
+    emitSilentTurn(10, 50_000, 'The doubled post-compaction interval elapsed.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 4)
+    disconnect()
+  })
+
+  it('reminds a Team assistant which turn output reaches the user and which remains background-only', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const turnStopping = (turn: number): void => {
+      const hook = service as unknown as {
+        memberTurnStopping(agent: Agent, turn: number): void
+      }
+      hook.memberTurnStopping(launcher as unknown as Agent, turn)
+    }
+    const emitOutput = (turn: number, contextTokens: number, text: string): void => {
+      const event = {
+        type: 'assistant/message',
+        seq: turn * 10 + 2,
+        time: Date.now(),
+        data: {
+          turn,
+          interrupted: false,
+          message: { content: [{ type: 'text', text }] },
+          usage: { inputTokens: contextTokens, outputTokens: 16 },
+        },
+      } as unknown as SessionEvent
+      launcher.session.events.push(event)
+      service.recordMemberSessionEvent(launcher.id, event)
+    }
+    const initialMessages = launcher.messages.length
+
+    service.recordMemberSessionEvent(launcher.id, {
+      type: 'turn/start', seq: 10, time: Date.now(), data: { turn: 1 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      type: 'user/message',
+      seq: 11,
+      time: Date.now(),
+      data: {
+        id: 'assistant-reminder-user',
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Give me a status.' }],
+      },
+    } as unknown as SessionEvent)
+    emitOutput(1, 16_000, 'The status is ready.')
+    turnStopping(1)
+    expect(launcher.messages).toHaveLength(initialMessages)
+    service.recordMemberSessionEvent(launcher.id, {
+      type: 'turn/end', seq: 13, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+
+    service.recordMemberSessionEvent(launcher.id, {
+      type: 'turn/start', seq: 20, time: Date.now(), data: { turn: 2 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      type: 'user/message', seq: 21, time: Date.now(), data: {
+        id: 'assistant-reminder-user-2', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Give me another status.' }],
+      },
+    } as unknown as SessionEvent)
+    emitOutput(2, 32_000, 'The next status is ready.')
+    turnStopping(2)
+    expect(launcher.messages).toHaveLength(initialMessages + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('The last native output will reach the user, not the Team'),
+      }),
+    ])
+    service.recordMemberSessionEvent(launcher.id, {
+      type: 'turn/end', seq: 23, time: Date.now(), data: { turn: 2, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+
+    service.recordMemberSessionEvent(launcher.id, {
+      type: 'turn/start', seq: 30, time: Date.now(), data: { turn: 3 },
+    } as unknown as SessionEvent)
+    emitOutput(3, 64_000, 'Background bookkeeping.')
+    turnStopping(3)
+    expect(launcher.messages.length).toBeGreaterThanOrEqual(initialMessages + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Background native output reaches neither user nor Team'),
+      }),
+    ])
     disconnect()
   })
 
@@ -4372,6 +4750,12 @@ describe('FleetRunService', () => {
         content: [{ type: 'text', text: 'This request will be settled before restart.' }],
       },
     } as unknown as SessionEvent
+    first.service.recordMemberSessionEvent(first.launcher.id, {
+      seq: 0,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 1 },
+    } as unknown as SessionEvent)
     first.launcher.session.events.push(userEvent as unknown as FakeEvent)
     first.service.recordMemberSessionEvent(first.launcher.id, userEvent)
     first.service.reportAssistantInteraction(first.launcher as unknown as Agent, {
@@ -4391,6 +4775,12 @@ describe('FleetRunService', () => {
           content: [{ type: 'text', text: 'Settled.' }],
         },
       },
+    } as unknown as SessionEvent)
+    first.service.recordMemberSessionEvent(first.launcher.id, {
+      seq: 3,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
     } as unknown as SessionEvent)
     expect(first.service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('completed')
     for (const member of run.members) {
@@ -4544,6 +4934,91 @@ describe('FleetRunService', () => {
       expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet owner task list]') }),
     ])
     expect(service.status(run.id).assistants[0]?.status).toBe('idle')
+    disconnect()
+  })
+
+  it('retries malformed tool protocol twice, then escalates to one assistant without a storm', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected live lead member')
+    const messagesBeforeFailure = lead.messages.length
+    const malformedTurn = (seq: number): SessionEvent => ({
+      seq,
+      time: Date.now(),
+      type: 'turn/end',
+      data: {
+        turn: seq,
+        reason: {
+          kind: 'error',
+          error: {
+            code: 'PI_AI_ERROR',
+            message: 'malformed_tool_protocol: Inference backend returned malformed tool-call protocol.',
+          },
+        },
+      },
+    })
+
+    service.recordMemberSessionEvent(lead.id, malformedTurn(10))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 1)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('smallest safe next step') }),
+    ])
+    expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_protocol_recovery_scheduled' }),
+      expect.objectContaining({ type: 'member_protocol_recovery_woken' }),
+    ]))
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_auto_continuation_paused')).toBe(false)
+
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 11,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 11 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(11))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 2)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('Retry 2/2') }),
+    ])
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_protocol_recovery_exhausted')).toBe(false)
+
+    const assistantMessagesBeforeEscalation = launcher.messages.length
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 12,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 12 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(12))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 2)
+    expect(launcher.messages).toHaveLength(assistantMessagesBeforeEscalation + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('protocol recovery required') }),
+    ])
+    expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_protocol_recovery_exhausted' }),
+      expect.objectContaining({ type: 'member_protocol_recovery_escalated' }),
+    ]))
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_auto_continuation_paused')).toBe(false)
     disconnect()
   })
 
@@ -4888,9 +5363,6 @@ describe('FleetRunService', () => {
     const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     const rootTaskId = running.work?.rootTaskId
     if (rootTaskId === undefined) throw new Error('expected composite root Task')
-    expect(lead.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining(`[Fleet composite root Task ${rootTaskId}`) }),
-    ])
     expect(reviewer.messages).toHaveLength(0)
     expect(service.taskBoard(run.id).get(lead.id, rootTaskId).domain).toMatchObject({
       kind: 'composite', managedChildren: true, rootWorkId: running.work?.id,
@@ -4928,17 +5400,18 @@ describe('FleetRunService', () => {
         content: [{ type: 'text', text: 'Run the gated Team task.' }],
       },
     } as unknown as SessionEvent)
-    const kickoff = service.sendAssistantMessage(launcher as unknown as Agent, {
-      runId: run.id,
-      kind: 'directive',
-      text: 'Plan: lead implements the change, then reviewer independently verifies the evidence.',
-      recipients: ['reviewer'],
+    const running = service.start(launcher as unknown as Agent, {
+      runId: run.id, taskPath, projectRoot: root,
+      directive: 'Plan: lead implements the change, then reviewer independently verifies the evidence.',
+      resultStage: 'implementation',
       stages: [
         {
           key: 'implementation',
+          kind: 'goal',
           title: 'Implement the delegated change',
           description: 'Produce the requested change and implementation evidence.',
           owners: ['lead'],
+          dependencies: [],
         },
         {
           key: 'review',
@@ -4950,14 +5423,8 @@ describe('FleetRunService', () => {
         },
       ],
     })
-    expect(kickoff.recipients).toEqual(['lead'])
-    expect(kickoff.stages.map(stage => stage.key)).toEqual(['implementation', 'review'])
-    const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     const rootTaskId = running.work?.rootTaskId
     if (rootTaskId === undefined) throw new Error('expected composite root Task')
-    expect(service.taskBoard(run.id).state().tasks.some(task =>
-      task.domain.kind === 'reply' && task.domain.messageId === kickoff.messageId,
-    )).toBe(false)
     const implementation = service.taskBoard(run.id).state().tasks.find(task =>
       task.parentId === rootTaskId && task.title === 'Implement the delegated change')
     const review = service.taskBoard(run.id).state().tasks.find(task =>
@@ -5121,7 +5588,7 @@ describe('FleetRunService', () => {
     const reply = service.taskBoard(run.id).pendingReply('reviewer')
     if (reply === undefined) throw new Error('expected Reply Task')
     expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind))
-      .toEqual(expect.arrayContaining(['inbox', 'reply']))
+      .toEqual(['reply'])
     service.messageHub(run.id).readInbox(reviewer)
     service.taskBoard(run.id).syncInbox('reviewer', 0, 0)
     const delivered = service.messageHub(run.id).send(reviewer, {
@@ -5131,6 +5598,85 @@ describe('FleetRunService', () => {
     expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
     service.end(launcher as unknown as Agent, 'Inbox and Reply test complete.', run.id)
     await service.wait(run.id, 1_000)
+    disconnect()
+  })
+
+  it('does not turn a complete native direct delivery into a duplicate Inbox owner task', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath, projectRoot: root, requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    const pendingContext = reviewer.inbox.nextStep.length
+
+    service.messageHub(run.id).send(lead, {
+      to: '@reviewer', text: 'This complete direct context needs no second fetch.', delivery: 'quiet',
+    })
+
+    expect(service.messageHub(run.id).unreadSummary('reviewer').unreadMessages).toBe(1)
+    expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
+      unreadMessages: 0, unreadChars: 0,
+    })
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
+    expect(reviewer.inbox.nextStep).toHaveLength(pendingContext + 1)
+    disconnect()
+  })
+
+  it('makes private delivery optional until the assistant explicitly mentions its recipient', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath, projectRoot: root, requiredPaths: [],
+    })
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (reviewer === undefined) throw new Error('expected live Fleet reviewer')
+    service.taskBoard(run.id).recordInteractionInput('team-assistant', {
+      messageId: 'foreground-direct-reply-test',
+      text: 'Ask the reviewer for one direct response.',
+    })
+
+    const optional = service.sendConversationMessage(launcher as unknown as Agent, {
+      runId: run.id,
+      to: '@reviewer',
+      text: 'Please return the bounded regression result.',
+      delivery: 'quiet',
+    })
+
+    expect(optional.replyTaskIds).toBeUndefined()
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
+    expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
+      unreadMessages: 0, unreadChars: 0,
+    })
+    expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
+      expect.objectContaining({ text: expect.not.stringContaining('reply-task') }),
+    ])
+
+    const sent = service.sendConversationMessage(launcher as unknown as Agent, {
+      runId: run.id,
+      to: '@reviewer',
+      text: '@reviewer Please return the bounded regression result.',
+      delivery: 'quiet',
+    })
+
+    expect(sent.replyTaskIds).toHaveLength(1)
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
+    expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining('reply-task') }),
+    ])
+
+    const replyTaskId = sent.replyTaskIds?.[0]
+    if (replyTaskId === undefined) throw new Error('expected direct Reply Task id')
+    service.taskBoard(run.id).recordReply(String(reviewer.id), replyTaskId, 'msg_already_settled')
+    const raced = service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'The direct reply raced with continuation.',
+      taskIds: [replyTaskId],
+    })
+    expect(raced.goals).toEqual([])
+    expect(raced.task.stableState.kind).not.toBe('dormant')
     disconnect()
   })
 
@@ -5516,7 +6062,7 @@ describe('FleetRunService', () => {
     service.readWebTeamProjection(run.id, 0, 10)
     expect(transient.teamProjectionEvents.has(run.id)).toBe(true)
     disconnect()
-  })
+  }, 15_000)
 
   it('returns the existing Team when setup creation is retried with the same id', async () => {
     const { root, configPath } = fixture()

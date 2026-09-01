@@ -1,0 +1,9 @@
+services:
+  dsh:
+    environment:
+      FLEET_SOURCE_COMMIT: ${FLEET_SOURCE_COMMIT:?FLEET_SOURCE_COMMIT must identify the source package}
+    volumes:
+      - type: bind
+        source: ${FLEET_PACKAGE_PATH:?FLEET_PACKAGE_PATH must point to a built Fleet tgz}
+        target: /opt/dsh/plugins/dsh-agent-fleet.tgz
+        read_only: true

@@ -76,6 +76,15 @@ describe('FleetAssistantRuntime', () => {
       'read the Inbox Task instead of inferring reply state',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Inbox and Reply Tasks are communication obligations, not automatic authorization for project work',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'A peer mention or your own proposed next step is not by itself such a basis',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Do not acknowledge another acknowledgement or confirm another confirmation',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Reply to foreground native user messages directly with ordinary native assistant output',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
@@ -91,7 +100,10 @@ describe('FleetAssistantRuntime', () => {
       'one persistent Interaction Task',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'Do not write any user-visible answer before that tool call',
+      'Do not emit the final answer before that tool call',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      '`fleet_user_task update` only for an intentional mid-turn user progress message',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'do not call `fleet_user_task report`',
@@ -103,7 +115,7 @@ describe('FleetAssistantRuntime', () => {
       'do not call `fleet_user_task status` merely because direct input arrived',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'omit `recipients` only when every available member should act',
+      'not a preceding assistant message',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Before calling `fleet_run start` for a new Team work item',
@@ -118,25 +130,23 @@ describe('FleetAssistantRuntime', () => {
       'Use the actual roster\'s roles and responsibilities to prepare a concise provisional decomposition',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'post that decomposition once to the main Channel',
+      'Call `fleet_run start` once',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'a structured `stages` plan',
+      'the complete initial `stages` DAG',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'Fleet derives directive recipients from dependency-free stages',
+      'atomically creates the zero-owner root and all initial Goal/Vote stages',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'atomically creates a zero-owner composite root plus its first Goal/Vote cohort',
+      'A rejected Vote or failed stage wakes the coordinator for remediation',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'A rejected Vote is a completed decision result, not a blocked Task',
+      'do not post a separate kickoff message',
     )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('`fleet_goal split`')
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'do not duplicate the kickoff through `fleet_send`',
-    )
-    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'A valid `@Name` or `@member-id` in message text is parsed as a mention',
+      'A valid `@Name` or `@member-id` in the message text explicitly means "this member must answer"',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state',

@@ -1,0 +1,65 @@
+name: ${COMPOSE_PROJECT_NAME:-matilda-eval}
+
+services:
+  model-egress:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/dsh-agent-fleet-matilda-eval:2026-09-02
+    pull_policy: never
+    entrypoint: ["/opt/matilda-eval/network-guard.sh"]
+    restart: "no"
+    cap_add:
+      - NET_ADMIN
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    ports:
+      - "127.0.0.1:${DSH_HOST_PORT:-3093}:3081"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/matilda-network-guard-ready && iptables -C OUTPUT -d 221.194.152.171/32 -p tcp --dport 443 -j ACCEPT && test \"$(iptables -S OUTPUT | head -n 1)\" = '-P OUTPUT DROP' && test \"$(ip6tables -S OUTPUT | head -n 1)\" = '-P OUTPUT DROP'"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  dsh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/dsh-agent-fleet-matilda-eval:2026-09-02
+    pull_policy: never
+    restart: "no"
+    working_dir: /workspace
+    network_mode: "service:model-egress"
+    depends_on:
+      model-egress:
+        condition: service_healthy
+    cap_drop:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    cpus: ${MATILDA_CPUS:-16}
+    mem_limit: ${MATILDA_MEMORY:-16g}
+    stop_grace_period: 30s
+    environment:
+      DSH_HOME: /data/.dsh
+      DSH_PORT: "3080"
+      DSH_PROXY_PORT: "3081"
+      DSH_TRUSTED_HOST: 127.0.0.1:${DSH_HOST_PORT:-3093}
+      DSH_TRUSTED_HOST_ALT: localhost:${DSH_HOST_PORT:-3093}
+      FLEET_SOURCE_COMMIT: ${FLEET_SOURCE_COMMIT:-61dcadf}
+      DEEPSEEK_FLASH_API_KEY: ${DEEPSEEK_FLASH_API_KEY:?DEEPSEEK_FLASH_API_KEY must be set}
+      NPM_CONFIG_OFFLINE: "true"
+      PNPM_CONFIG_OFFLINE: "true"
+      PNPM_CONFIG_STORE_DIR: /root/.local/share/pnpm/store
+      PIP_NO_INDEX: "1"
+    volumes:
+      - dsh-data:/data
+      - type: bind
+        source: ${DSH_WORKSPACE:?DSH_WORKSPACE must be an absolute host directory for this evaluation run}
+        target: /workspace
+
+volumes:
+  dsh-data:
