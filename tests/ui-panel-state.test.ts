@@ -547,6 +547,20 @@ describe('Agent Fleet private-chat projection', () => {
       streaming: true,
     }])
   })
+
+  it('drops a settled assistant step whose only visible text block is empty', () => {
+    const node = {
+      key: 'assistant:empty',
+      kind: 'assistant-step',
+      visibility: 'visible',
+      data: { time: 300, status: 'settled', blocks: [{ kind: 'text', text: '' }] },
+    }
+
+    expect(projectAgentFleetPrivateMessages({
+      order: [node.key],
+      nodes: { get: key => key === node.key ? node : undefined },
+    })).toEqual([])
+  })
 })
 
 const team: FleetPanelTeamSnapshot = {

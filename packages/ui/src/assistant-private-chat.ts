@@ -627,12 +627,14 @@ export function projectAgentFleetPrivateMessages(
     if (node.kind === 'assistant-step') {
       const visible = visibleAssistantContent(data.blocks)
       const streaming = data.status === 'running'
-      if (visible.content.length === 0 && !streaming) continue
+      const hasVisibleContent = visible.content.some(block =>
+        block.type !== 'text' || block.text.trim().length > 0)
+      if (!hasVisibleContent && !streaming) continue
       messages.push({
         id: key,
         sender: 'assistant',
         sentAt: sentAt(data.time),
-        content: visible.content.length === 0 ? [{ type: 'text', text: '' }] : visible.content,
+        content: hasVisibleContent ? visible.content : [{ type: 'text', text: '' }],
         imageAttachments: visible.attachments,
         streaming,
       })
