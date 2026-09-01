@@ -1,6 +1,6 @@
 # Matilda local Fleet evaluation kit
 
-This directory turns the attached Matilda 16 × 16 task into a blind, repeatable local Fleet evaluation. It contains a four-member Team template, an answer-free task statement, and a pinned solver container derived from the local Fleet baseline.
+This directory turns the attached Matilda 16 × 16 task into a blind, repeatable local Fleet evaluation. It contains a four-member Team template, an answer-free task statement, and a pinned solver container derived from the local Fleet baseline. The mathematical input and evidence standard match the source scenario; the collaboration design is intentionally Fleet-native so coordination quality and cost can be compared without copying the source system.
 
 The design uses four parallel evidence lanes rather than a chat-heavy sequence of research rounds:
 
@@ -14,10 +14,12 @@ The foreground assistant stages all lanes atomically, then waits. The terminal a
 ## Files
 
 - `team.local.json`: importable local Team preset; names and model routes remain launcher-selected.
-- `task.md`: authoritative blind benchmark and required staged plan. It intentionally contains no known optimum or prior construction.
+- `task.md`: authoritative blind benchmark containing only the problem, expected evidence, and run isolation. It intentionally contains no known optimum, prior construction, timing policy, or prescribed collaboration plan.
 - `Dockerfile` and `requirements.txt`: Python, Z3, OR-Tools CP-SAT, SciPy/HiGHS, and process instrumentation.
-- `compose.yaml`: isolated DSH state volume, bind-mounted run workspace, configurable CPU/memory/time limits, and a loopback-only UI port.
+- `compose.yaml`: isolated DSH state volume, bind-mounted run workspace, configurable CPU/memory limits, a loopback-only UI port, and a kernel-enforced model-only egress guard.
 - `compose.source.yaml`: optional override for testing a freshly packed Fleet source tree.
+
+All solver dependencies are baked into the image. At runtime, the business container shares a guarded network namespace whose IPv4 and IPv6 output policies drop every new external connection except TCP `221.194.152.171:443`, the configured model endpoint. The business container has neither `NET_ADMIN` nor raw-socket capability, so an Agent shell cannot remove the guard. Docker DNS and all other external destinations remain unreachable.
 
 ## Start a clean run on Windows PowerShell
 
@@ -31,7 +33,8 @@ $env:DEEPSEEK_FLASH_API_KEY = '<local runtime key>'
 New-Item -ItemType Directory -Force -Path $env:DSH_WORKSPACE
 
 docker compose --project-directory examples/matilda-eval build
-docker compose --project-directory examples/matilda-eval run --rm --no-deps --entrypoint python dsh /opt/matilda-eval/verify-environment.py
+docker compose --project-directory examples/matilda-eval run --rm --entrypoint python dsh /opt/matilda-eval/verify-environment.py
+docker compose --project-directory examples/matilda-eval run --rm --entrypoint python dsh /opt/matilda-eval/verify-network-isolation.py
 ```
 
 Prepare each empty run workspace by copying only the benchmark inputs:
@@ -46,7 +49,7 @@ Open `http://127.0.0.1:3093/`. The two benchmark inputs are now available at sta
 
 Then tell the foreground assistant:
 
-> 使用 `/workspace/team.local.json` 创建团队，并以 `/workspace/task.md` 作为任务开始盲测。按模板要求先暂存结构化 stages，再调用 start；不要在对话中自行解题。
+> 请按 `/workspace/task.md` 开始任务。
 
 Choose the provider/model at Team creation time. Blank routes in the preset deliberately inherit that selection and keep credentials and machine-specific routing out of version control.
 
@@ -81,8 +84,6 @@ After collecting the run, remove only that run's isolated Compose volume:
 docker compose --project-directory examples/matilda-eval down --volumes
 ```
 
-Changing `COMPOSE_PROJECT_NAME`, `DSH_HOST_PORT`, and `DSH_WORKSPACE` is sufficient to run another evaluation side by side. Keep solver limits and seed recorded with the result when comparing runs.
+Changing `COMPOSE_PROJECT_NAME`, `DSH_HOST_PORT`, and `DSH_WORKSPACE` is sufficient to run another evaluation side by side. Record any solver limits or seeds actually chosen during a run when comparing results.
 
-`MATILDA_PHASE1_BUDGET_SECONDS` bounds each complete phase-one lane; the Z3 and CP-SAT settings are per-call ceilings inside that total. Lane prompts require one foreground computation at a time and a formal Goal result at the deadline, so a slow experiment cannot silently strand the staged Task chain.
-
-For cross-run comparison, use both mathematical outcome and collaboration cost. The task asks the final bundle to record member model steps, tool calls, aborted calls, Channel/private messages, Reply Tasks, idle recoveries, token usage when exposed, and solver wall time. A missing counter stays `null`; it must not be reconstructed from guesswork. This separates improvements in Team mechanics from changes caused only by a larger compute budget.
+For cross-system comparison, hold the problem and terminal evidence standard constant, then compare both mathematical outcome and collaboration cost. The Fleet Team template asks the final bundle to record member model steps, tool calls, aborted calls, Channel/private messages, Reply Tasks, idle recoveries, token usage when exposed, and solver wall time. A missing counter stays `null`; it must not be reconstructed from guesswork. This lets the evaluation test whether Fleet reaches equally strong evidence with fewer coordination turns and less auxiliary context.
