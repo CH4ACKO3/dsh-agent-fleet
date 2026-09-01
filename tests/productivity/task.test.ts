@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { FleetMemberDirectory } from '@dsh-agent-fleet/core'
 import type { FleetTaskReconcilerSpec } from '../../src/productivity/task.js'
 import {
-  FleetTaskBoard, installGoalTools, installReconcileTools, installTaskTools, installVoteTools, parseFleetTaskState,
+  FleetTaskBoard, fleetTaskToolDetail, fleetTaskToolSummary,
+  installGoalTools, installReconcileTools, installTaskTools, installVoteTools, parseFleetTaskState,
 } from '../../src/productivity/task.js'
 
 const members = [
@@ -603,6 +604,39 @@ describe('FleetTaskBoard v6', () => {
     installReconcileTools(ctx, board, authorize)
     expect(registered.map(tool => tool.name)).toEqual(['fleet_task', 'fleet_goal', 'fleet_vote', 'fleet_reconcile'])
     expect(registered.find(tool => tool.name === 'fleet_task')?.parameters.properties.action?.enum).toEqual(['list', 'owner_list', 'get'])
+  })
+
+  it('keeps model-visible Task views bounded while durable interaction history grows', () => {
+    const board = new FleetTaskBoard(directory)
+    for (let revision = 1; revision <= 40; revision += 1) {
+      board.recordInteractionInput('agent-assistant', {
+        messageId: `user-${String(revision)}`,
+        text: `revision-${String(revision)}:${'x'.repeat(4_000)}`,
+      })
+    }
+    const task = board.interactionTask('agent-assistant')
+    if (task === undefined) throw new Error('expected Interaction Task')
+    expect(JSON.stringify(task).length).toBeGreaterThan(150_000)
+
+    const detail = fleetTaskToolDetail(task)
+    expect(detail).toMatchObject({
+      id: task.id,
+      kind: 'interaction',
+      state: 'running',
+      entryCount: 40,
+      signalCount: 0,
+      domain: { inputRevision: 40, settledRevision: 0, latestMessageId: 'user-40' },
+    })
+    expect(detail).not.toHaveProperty('entries')
+    expect(detail).not.toHaveProperty('signals')
+    expect(detail).not.toHaveProperty('latestEntry')
+    expect(JSON.stringify(detail).length).toBeLessThan(4_000)
+
+    const summary = fleetTaskToolSummary(task)
+    expect(summary).toMatchObject({ id: task.id, kind: 'interaction', state: 'running' })
+    expect(summary).not.toHaveProperty('domain')
+    expect(JSON.stringify(summary).length).toBeLessThan(1_000)
+    board.close()
   })
 
   it('keeps cancellation as a manager operation outside fleet_task', () => {

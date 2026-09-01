@@ -31,11 +31,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-compaction'
-import { createUserMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { FleetCore, RuntimeRequestConfig } from '@dsh-agent-fleet/core'
@@ -83,6 +83,8 @@ import {
 } from './member-view.js'
 import {
   FLEET_TASK_STATE_NAMESPACE,
+  fleetTaskToolDetail,
+  fleetTaskToolSummary,
   parseFleetTaskState,
   type FleetProjectTask,
   type FleetTaskBoard,
@@ -133,7 +135,7 @@ export interface FleetRunMember {
 export interface FleetRunAssistant {
   readonly sessionId: string
   readonly view: FleetAssistantView
-  readonly status?: 'idle' | 'running' | 'offline' | 'paused'
+  readonly status?: 'idle' | 'running' | 'error' | 'offline' | 'paused'
 }
 
 export type FleetBudgetMode = 'tokens' | 'cost'
@@ -2023,10 +2025,19 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const TRACE_EVENT_DATA_LIMIT = 2_000
+
+function traceEventData(value: unknown): string {
+  const data = JSON.stringify(value)
+  return data.length <= TRACE_EVENT_DATA_LIMIT
+    ? data
+    : `${data.slice(0, TRACE_EVENT_DATA_LIMIT)}… [${String(data.length - TRACE_EVENT_DATA_LIMIT)} chars omitted]`
+}
+
 const EXPLICIT_WAIT_DELAY_MS = 2_000
 const QUIET_TOOL_WAIT_DELAY_MS = 90_000
 const DEFAULT_INTERACTION_CHECK_SECONDS = 300
-const FLEET_TASK_REQUEST_MARKER = '[Fleet Task Request]'
+const FLEET_FOREGROUND_PROTOCOL_SECTION = 'fleet:foreground-task-request'
 const ASSISTANT_PROJECT_WRITE_TOOLS = new Set(['write', 'edit'])
 const ASSISTANT_READ_ONLY_SHELL_TOOLS = new Set([
   'pwd', 'ls', 'rg', 'grep', 'cat', 'head', 'tail', 'wc', 'stat', 'file', 'du', 'df',
@@ -2163,7 +2174,11 @@ export class FleetRunService {
   private readonly sharedFileWatchers = new Map<string, FSWatcher>()
   private readonly sharedFileSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly assistantRequestConfigs = new WeakMap<Agent, AssistantRequestConfigRef>()
-  private readonly assistantInputWrapperAgents = new WeakSet<Agent>()
+  private readonly assistantInputBindingAgents = new WeakSet<Agent>()
+  private readonly assistantInputTeamLoads = new Map<string, Promise<void>>()
+  private readonly assistantTurnOutputs = new Map<string, string>()
+  private readonly assistantCurrentTurns = new Map<string, number>()
+  private readonly assistantDirectInputTurns = new Map<string, number>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
@@ -2227,7 +2242,7 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const assistantId = runtime.memberNamesById.get(sessionId)
     if (assistantId === undefined) return
-    this.bindAssistantInputWrapper(agent)
+    this.bindAssistantInput(agent)
     void this.installAssistantTools(agent, runtime, assistantId)
       .then(() => {
         const record = this.records.get(runId)
@@ -2966,12 +2981,32 @@ export class FleetRunService {
 
   reportAssistantInteraction(caller: Agent, input: ReportFleetInteractionInput) {
     const record = this.requireCallerRecord(caller, input.runId)
-    this.requireAssistantConnection(caller, record.id)
-    return this.requireRuntime(record.id).tasks.submitInteractionReport(String(caller.id), {
+    const assistant = this.requireAssistantConnection(caller, record.id)
+    const tasks = this.requireRuntime(record.id).tasks
+    const reported = tasks.submitInteractionReport(String(caller.id), {
       outcome: input.outcome,
       reason: input.reason,
       report: input.report,
     })
+    const sessionId = String(caller.id)
+    const output = this.assistantTurnOutputs.get(sessionId)
+    const committed = output === undefined
+      ? undefined
+      : tasks.commitInteractionOutput(assistant.view.id, output)
+    if (committed !== undefined && caller.status === 'running') {
+      const turn = this.assistantCurrentTurns.get(sessionId)
+      if (turn !== undefined) {
+        setTimeout(() => {
+          if (caller.status === 'running' && this.assistantCurrentTurns.get(sessionId) === turn) {
+            caller.cancel(
+              { kind: 'hook', reason: 'Fleet accepted the already-visible foreground response.' },
+              { keepInbox: true },
+            )
+          }
+        }, 0)
+      }
+    }
+    return committed ?? reported
   }
 
   private assistantExecutionBoundaryReason(
@@ -4191,8 +4226,13 @@ export class FleetRunService {
   }
 
   async loadTeamMembersAsExternal(caller: Agent, runId: string): Promise<FleetRunRecord> {
-    let record = this.requireMutableRecord(runId)
+    const record = this.requireMutableRecord(runId)
     this.requireExternalFleetPermission(record, 'team.manage')
+    return this.loadTeamMembersNow(caller, record)
+  }
+
+  private async loadTeamMembersNow(caller: Agent, initial: FleetRunRecord): Promise<FleetRunRecord> {
+    let record = initial
     const unloaded = record.members
       .filter(member => member.status !== 'paused' && !this.memberCanReply(member))
       .map(member => member.name)
@@ -4201,6 +4241,31 @@ export class FleetRunService {
       record = this.requireRecord(record.id)
     }
     return this.describeRecord(record)
+  }
+
+  private async loadTeamMembersForAssistantInput(caller: Agent, runId: string): Promise<void> {
+    const pending = this.assistantInputTeamLoads.get(runId)
+    if (pending !== undefined) return pending
+    const operation = (async () => {
+      const before = this.requireMutableRecord(runId)
+      const unloaded = before.members
+        .filter(member => member.status !== 'paused' && !this.memberCanReply(member))
+        .map(member => member.name)
+      if (unloaded.length === 0) return
+      await this.loadTeamMembersNow(caller, before)
+      this.appendEvent(runId, 'team_loaded_for_user_input', {
+        assistantSessionId: String(caller.id),
+        members: unloaded,
+      })
+    })().catch((error: unknown) => {
+      this.ctx.logger('dsh-agent-fleet').warn(
+        `Could not load every Fleet member for direct assistant input in Team ${runId}: ${errorMessage(error)}`,
+      )
+    }).finally(() => {
+      if (this.assistantInputTeamLoads.get(runId) === operation) this.assistantInputTeamLoads.delete(runId)
+    })
+    this.assistantInputTeamLoads.set(runId, operation)
+    return operation
   }
 
   async pauseTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
@@ -4784,8 +4849,8 @@ export class FleetRunService {
       await this.installAssistantTools(caller, runtime, current.view.id)
       runtime.messages.connectAgent(callerId, autoJoinChannels)
       this.bindAssistantRequestConfig(caller, this.assistantRequestConfig(current, caller))
-      this.bindAssistantInputWrapper(caller)
-      this.captureLatestAssistantUserInput(record, current, caller)
+      this.bindAssistantInput(caller)
+      await this.captureLatestAssistantUserInput(record, current, caller)
       queueMicrotask(() => { this.signalAssistantInteractionDeliveries(record.id) })
       return { run: this.describeRecord(record), assistant: structuredClone(current) }
     }
@@ -4794,8 +4859,8 @@ export class FleetRunService {
       await this.installAssistantTools(caller, runtime, current.view.id)
       runtime.messages.connectAgent(callerId, autoJoinChannels)
       this.bindAssistantRequestConfig(caller, this.assistantRequestConfig(current, caller))
-      this.bindAssistantInputWrapper(caller)
-      this.captureLatestAssistantUserInput(record, current, caller)
+      this.bindAssistantInput(caller)
+      await this.captureLatestAssistantUserInput(record, current, caller)
       queueMicrotask(() => { this.signalAssistantInteractionDeliveries(record.id) })
       return { run: this.describeRecord(record), assistant: structuredClone(current) }
     }
@@ -4877,33 +4942,41 @@ export class FleetRunService {
       sessionId: callerId,
       view,
     })
-    this.bindAssistantInputWrapper(caller)
-    this.captureLatestAssistantUserInput(updated, assistant, caller)
+    this.bindAssistantInput(caller)
+    await this.captureLatestAssistantUserInput(updated, assistant, caller)
     queueMicrotask(() => { this.signalAssistantInteractionDeliveries(updated.id) })
     return { run: this.describeRecord(updated), assistant: structuredClone(assistant) }
   }
 
-  private captureLatestAssistantUserInput(
+  private async captureLatestAssistantUserInput(
     record: FleetRunRecord,
     assistant: FleetRunAssistant,
     agent: Agent,
-  ): void {
+  ): Promise<void> {
     const input = agent.session.events.findLast(event =>
       event.type === 'user/message' && event.data.source?.kind === 'user')
     if (input?.type !== 'user/message') return
     const tasks = this.collaboration.get(record.id)?.tasks
     if (tasks === undefined) return
-    tasks.recordInteractionInput(assistant.view.id, {
+    const previous = tasks.interactionTask(assistant.view.id)
+    const interaction = tasks.recordInteractionInput(assistant.view.id, {
       messageId: String(input.data.id),
       text: progressMessageText(input.data),
     })
+    const inputIsNew = previous?.domain.kind !== 'interaction'
+      || previous.domain.latestMessageId !== String(input.data.id)
+    const inputIsUnsettled = interaction.domain.kind === 'interaction'
+      && interaction.domain.settledRevision < interaction.domain.inputRevision
+    if (inputIsNew || inputIsUnsettled) {
+      await this.loadTeamMembersForAssistantInput(agent, record.id)
+    }
   }
 
-  private bindAssistantInputWrapper(agent: Agent): void {
-    if (this.assistantInputWrapperAgents.has(agent)) return
+  private bindAssistantInput(agent: Agent): void {
+    if (this.assistantInputBindingAgents.has(agent)) return
     const context = (agent as Agent & { readonly ctx?: Context }).ctx
     if (context === undefined) return
-    this.assistantInputWrapperAgents.add(agent)
+    this.assistantInputBindingAgents.add(agent)
     context.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
       const decision = await next()
       if (decision.kind === 'reject') return decision
@@ -4913,44 +4986,40 @@ export class FleetRunService {
       const tasks = this.collaboration.get(record.id)?.tasks
       if (assistant === undefined || tasks === undefined) return decision
 
-      let wrapped = false
-      const messages = decision.messages.map(message => {
-        if (message.source.kind !== 'user') return message
+      let hasDirectUserInput = false
+      for (const message of decision.messages) {
+        if (message.source.kind !== 'user') continue
+        hasDirectUserInput = true
         const originalText = progressMessageText(message)
-        if (originalText.startsWith(FLEET_TASK_REQUEST_MARKER)) return message
-        const task = tasks.recordInteractionInput(assistant.view.id, {
+        tasks.recordInteractionInput(assistant.view.id, {
           messageId: String(message.id),
           text: originalText,
         })
-        if (task.domain.kind !== 'interaction') return message
-        const request = [
-          FLEET_TASK_REQUEST_MARKER,
-          `Interaction Task: ${task.id}`,
-          `Input revision: ${String(task.domain.inputRevision)}`,
-          '',
-          'This user input is already tracked as your persistent foreground task.',
-          'Required first action: call fleet_user_task with action="status" before responding or doing project work.',
-          'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
-          'A normal project imperative addressed to you is still Team work, not permission to take over personally. If the request names an existing task brief or staged prompt file, pass that path directly to fleet_run start instead of writing a duplicate brief.',
-          'Before crossing into project execution, normally inspect the roster, publish one staged directive, start the Fleet run, and link formal-member Tasks with fleet_user_task action="continue". Formal members own implementation and independent review.',
-          'Use fleet_user_task action="take_over" only when the user explicitly asks you to execute personally, no formal member is available, or Team execution has failed. Before the native response that settles this request, call action="report" or action="block".',
-          'A turn ending is not task completion. Nobody is watching this turn: only a recorded report/block followed by non-empty native output settles the Interaction Task.',
-          '',
-          'Original user request:',
-          originalText.trim() || '(The user submitted a non-text foreground input; inspect the attached content.)',
-        ].join('\n')
-        const firstText = message.content.findIndex(block => block.type === 'text')
-        const content: UserMessage['content'] = []
-        if (firstText < 0) content.push({ type: 'text', text: request })
-        for (const [index, block] of message.content.entries()) {
-          if (block.type !== 'text') content.push(block)
-          else if (index === firstText) content.push({ type: 'text', text: request })
-        }
-        wrapped = true
-        return freezeMessage<UserMessage>({ ...message, content })
-      })
-      if (!wrapped) return decision
-      return { kind: 'enter', messages }
+      }
+      if (hasDirectUserInput) await this.loadTeamMembersForAssistantInput(agent, record.id)
+      return decision
+    })
+    context.on('system-prompt/assemble', async (_assembly, _assembleContext, next) => {
+      const assembly = await next()
+      const record = this.assistantTeamForSession(String(agent.id))
+      if (record === undefined) return assembly
+      const assistant = record.assistants.find(candidate => candidate.sessionId === String(agent.id))
+      if (assistant === undefined) return assembly
+      const request = [
+        '[Fleet Foreground Protocol]',
+        `Current Team: ${record.id}`,
+        '',
+        `Every direct foreground user input is already tracked in this Team's persistent Interaction Task. The foreground message is the current revision; do not call fleet_user_task status merely because direct input arrived. Use action="status" with run_id="${record.id}" after a Task Delivery, recovery wake, or when the current Interaction state is otherwise unclear.`,
+        'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
+        'A normal project imperative remains Team work: delegate before project execution, and take over only when explicitly requested, no formal member is available, or Team execution has failed.',
+        'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: one native response completes the direct Interaction when the turn ends normally.',
+        `Before emitting a native response that settles delegated Team work or a Delivery, or blocks the request, call fleet_user_task with action="report" or action="block" and run_id="${record.id}".`,
+        'Do not write any user-visible answer before that tool call. After it succeeds, emit the answer exactly once and end the turn. A delegated result or block is not complete without both the tool intent and non-empty native output.',
+      ].join('\n')
+      return {
+        ...assembly,
+        sections: [...assembly.sections, { name: FLEET_FOREGROUND_PROTOCOL_SECTION, text: request }],
+      }
     })
   }
 
@@ -5559,8 +5628,16 @@ export class FleetRunService {
     this.recordMemberHealth(sessionId, event)
     this.recordBudgetUsage(record, member, event)
     const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
+    if (foregroundAssistant && event.type === 'turn/start') {
+      this.assistantCurrentTurns.set(sessionId, event.data.turn)
+      this.assistantDirectInputTurns.delete(sessionId)
+      this.assistantTurnOutputs.delete(sessionId)
+    }
     if (event.type === 'user/message' && event.data.source?.kind === 'user') {
       if (foregroundAssistant) {
+        this.assistantTurnOutputs.delete(sessionId)
+        const turn = this.assistantCurrentTurns.get(sessionId)
+        if (turn !== undefined) this.assistantDirectInputTurns.set(sessionId, turn)
         runtime.tasks.recordInteractionInput(member, {
           messageId: String(event.data.id),
           text: progressMessageText(event.data),
@@ -5568,12 +5645,23 @@ export class FleetRunService {
       }
     }
     if (foregroundAssistant && event.type === 'assistant/message' && event.data.interrupted !== true) {
-      runtime.tasks.commitInteractionOutput(member, progressMessageText(event.data))
+      const output = progressMessageText(event.data)
+      if (output.trim().length > 0) this.assistantTurnOutputs.set(sessionId, output)
+      runtime.tasks.commitInteractionOutput(member, output)
     }
     if (event.type === 'assistant/chunk') return
     for (const listener of [...this.traceChangeListeners]) listener(runId, member)
     if (event.type !== 'turn/end') return
     const reason = event.data.reason
+    if (foregroundAssistant
+      && reason.kind === 'completed'
+      && this.assistantDirectInputTurns.get(sessionId) === event.data.turn) {
+      const output = this.assistantTurnOutputs.get(sessionId)
+      if (output !== undefined) runtime.tasks.settleDirectInteractionOutput(member, output)
+    }
+    this.assistantTurnOutputs.delete(sessionId)
+    this.assistantCurrentTurns.delete(sessionId)
+    this.assistantDirectInputTurns.delete(sessionId)
     if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
       if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
       return
@@ -5581,6 +5669,14 @@ export class FleetRunService {
     runtime.tasks.releaseRunning(member, reason.kind === 'error'
       ? `turn failed with ${reason.error.code}`
       : `turn ended with ${reason.kind} before fleet_reconcile resolve`)
+    if (reason.kind === 'error') {
+      this.appendEvent(runId, 'member_auto_continuation_paused', {
+        member,
+        sessionId,
+        code: reason.error.code,
+        reason: clippedProgressText(reason.error.message, 1_000),
+      })
+    }
     const route = agent === undefined ? undefined : this.networkRoute(agent)
     this.clearNetworkRecovery(sessionId)
     if (route !== undefined && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
@@ -5613,6 +5709,7 @@ export class FleetRunService {
       .find(candidate => candidate.sessionId === String(agent.id))
     if (participant === undefined
       || this.autoContinuationPaused(record, participant.name)
+      || this.abnormalSessionIds.has(participant.sessionId)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     if (runtime.tasks.runningFor(participant.name).length > 0) return false
     const pending = runtime.tasks.readyTasks(participant.name)[0]
@@ -5655,6 +5752,7 @@ export class FleetRunService {
       .find(candidate => candidate.sessionId === String(agent.id))
     if (participant === undefined
       || this.autoContinuationPaused(record, participant.name)
+      || this.abnormalSessionIds.has(participant.sessionId)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const tasks = runtime.tasks.ownerTasks(participant.name)
     if (tasks.length === 0) return false
@@ -5680,7 +5778,7 @@ export class FleetRunService {
           'Your running owner Tasks:',
           ...tasks.map(taskInstruction),
           'Use fleet_task action="owner_list" to inspect the complete Task records. Domain tools record your intent or receipt and atomically derive the next Task state.',
-          'Until every owned item is consumed or leaves running, this non-empty list will wake you again.',
+          'While this Session remains healthy, the non-empty list wakes you again until every owned item is consumed or leaves running.',
         ].join('\n'),
         delivery: 'wakeup',
         coalesceKey: `owner-task-list:${participant.name}`,
@@ -5707,6 +5805,7 @@ export class FleetRunService {
     for (const participant of this.participants(record)) {
       if (this.autoContinuationPaused(record, participant.name)
         || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined
+        || this.abnormalSessionIds.has(participant.sessionId)
         || this.networkRecoveries.has(participant.sessionId)
         || runtime.tasks.runningFor(participant.name).length > 0
         || runtime.tasks.readyTasks(participant.name).length === 0) continue
@@ -5725,6 +5824,7 @@ export class FleetRunService {
     for (const participant of this.participants(record)) {
       if (this.autoContinuationPaused(record, participant.name)
         || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined
+        || this.abnormalSessionIds.has(participant.sessionId)
         || this.networkRecoveries.has(participant.sessionId)
         || runtime.tasks.runningFor(participant.name).length > 0
         || runtime.tasks.readyTasks(participant.name).length > 0
@@ -5887,6 +5987,7 @@ export class FleetRunService {
     const participant = runtime.memberNamesById.get(agentId)
     if (record === undefined || participant === undefined
       || this.autoContinuationPaused(record, participant)
+      || this.abnormalSessionIds.has(agentId)
       || this.networkRecoveries.has(agentId)) return
 
     if (this.continueAssignedTask(runId, runtime, record, agent)) return
@@ -5916,6 +6017,9 @@ export class FleetRunService {
   agentDisconnected(agentId: string): void {
     this.clearNetworkRecovery(agentId)
     this.clearMemberActivity(agentId)
+    this.assistantTurnOutputs.delete(agentId)
+    this.assistantCurrentTurns.delete(agentId)
+    this.assistantDirectInputTurns.delete(agentId)
     this.abnormalSessionIds.delete(agentId)
     for (const [runId, runtime] of this.collaboration.entries()) {
       if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
@@ -6028,7 +6132,7 @@ export class FleetRunService {
           sourceSequence: event.member.sequence,
         }),
         type: event.type,
-        data: JSON.stringify(event.data),
+        data: traceEventData(event.data),
       })),
       hasMore: matching.length > limit,
     }
@@ -6611,7 +6715,7 @@ export class FleetRunService {
         sessionId: member.sessionId,
         sourceSequence: event.seq,
         type: `session.${event.type}`,
-        data: JSON.stringify(event.data),
+        data: traceEventData(event.data),
       })),
       hasMore: matching.length > limit,
     }
@@ -6740,7 +6844,7 @@ export class FleetRunService {
         sessionId: item.sessionId,
         sourceSequence: item.event.seq,
         type: `session.${item.event.type}`,
-        data: JSON.stringify(item.event.data),
+        data: traceEventData(item.event.data),
       })),
       hasMore,
     }
@@ -6780,7 +6884,7 @@ export class FleetRunService {
         sessionId: item.sessionId,
         sourceSequence: item.event.seq,
         type: `session.${item.event.type}`,
-        data: JSON.stringify(item.event.data),
+        data: traceEventData(item.event.data),
       })),
       hasMore: page.previous !== undefined,
       ...(page.previous === undefined ? {} : { previous: page.previous }),
@@ -6827,7 +6931,7 @@ export class FleetRunService {
         sessionId: sourceSessionId,
         sourceSequence: event.seq,
         type: `session.${event.type}`,
-        data: JSON.stringify(event.data),
+        data: traceEventData(event.data),
       })),
       hasMore: start > 0 || start + limit < events.length,
       targetSessionId: sourceSessionId,
@@ -6907,7 +7011,7 @@ export class FleetRunService {
     const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
     if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
     const afterSequence = input.afterSequence ?? 0
-    const limit = input.limit ?? 50
+    const limit = input.limit ?? 20
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       throw new Error('afterSequence must be a non-negative integer')
     }
@@ -6926,6 +7030,15 @@ export class FleetRunService {
       if (kind === undefined) return []
       const isAcknowledged = acknowledged.has(event.sequence)
       if (input.unreadOnly === true && isAcknowledged) return []
+      const data = kind === 'task'
+        && typeof event.data === 'object' && event.data !== null
+        && 'task' in event.data
+        && typeof event.data.task === 'object' && event.data.task !== null
+        ? {
+            ...event.data,
+            task: fleetTaskToolSummary(event.data.task as unknown as FleetProjectTask),
+          }
+        : event.data
       return [{
         id: `${record.id}:${event.sequence}`,
         sequence: event.sequence,
@@ -6933,7 +7046,7 @@ export class FleetRunService {
         kind,
         type: event.type,
         acknowledged: isAcknowledged,
-        data: structuredClone(event.data) as Record<string, JsonValue>,
+        data: structuredClone(data) as Record<string, JsonValue>,
       }]
     })
     return {
@@ -7122,6 +7235,9 @@ export class FleetRunService {
     for (const sessionId of [...this.memberToolActivity.keys()]) this.clearMemberActivity(sessionId)
     this.waitingSessionIds.clear()
     this.abnormalSessionIds.clear()
+    this.assistantTurnOutputs.clear()
+    this.assistantCurrentTurns.clear()
+    this.assistantDirectInputTurns.clear()
     this.collaboration.close()
     this.dormantRunIds.clear()
     this.manualWakeRequiredRunIds.clear()
@@ -7451,9 +7567,11 @@ export class FleetRunService {
         ...assistant,
         status: assistant.status === 'paused'
           ? 'paused'
-          : this.collaboration.get(record.id)?.memberNamesById.get(assistant.sessionId) === assistant.view.id
-          ? this.ctx.agents.get(SessionId(assistant.sessionId))?.status ?? 'offline'
-          : 'offline',
+          : this.abnormalSessionIds.has(assistant.sessionId)
+            ? 'error'
+            : this.collaboration.get(record.id)?.memberNamesById.get(assistant.sessionId) === assistant.view.id
+              ? this.ctx.agents.get(SessionId(assistant.sessionId))?.status ?? 'offline'
+              : 'offline',
       })),
     })
   }
@@ -8391,7 +8509,7 @@ const RUN_ASSISTANT_SCHEMA = {
   properties: {
     sessionId: { type: 'string', required: true },
     view: { ...MEMBER_VIEW_SCHEMA, required: true },
-    status: { type: 'string', enum: ['idle', 'running', 'offline', 'paused'] },
+    status: { type: 'string', enum: ['idle', 'running', 'error', 'offline', 'paused'] },
   },
 } as const
 
@@ -8498,6 +8616,112 @@ const RUN_WORK_SCHEMA = {
     summary: { type: 'string' },
   },
 } as const
+
+const RUN_TOOL_WORK_SUMMARY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    rootTaskId: { type: 'string' },
+    status: { type: 'string', required: true, enum: ['running', 'finished', 'blocked', 'failed', 'cancelled'] },
+    summary: { type: 'string' },
+  },
+} as const
+
+const RUN_TOOL_SUMMARY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    name: { type: 'string', required: true },
+    status: {
+      type: 'string',
+      required: true,
+      enum: ['starting', 'idle', 'running', 'paused', 'finishing', 'closed', 'failed'],
+    },
+    runtimeState: { type: 'string', enum: ['active', 'dormant'] },
+    settled: { type: 'boolean', required: true },
+    work: RUN_TOOL_WORK_SUMMARY_SCHEMA,
+    summary: { type: 'string' },
+    error: { type: 'string' },
+  },
+} as const
+
+const MEMBER_TOOL_SUMMARY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    name: { type: 'string', required: true },
+    role: { type: 'string', required: true },
+    responsibility: { type: 'string' },
+    status: {
+      type: 'string',
+      required: true,
+      enum: ['idle', 'running', 'waiting', 'error', 'offline', 'paused', 'unknown'],
+    },
+    provider: { type: 'string' },
+    model: { type: 'string' },
+    assistant: { type: 'boolean', required: true },
+  },
+} as const
+
+function fleetRunToolSummary(record: FleetRunRecord) {
+  return {
+    id: record.id,
+    name: record.name,
+    status: record.status,
+    ...(record.runtimeState === undefined ? {} : { runtimeState: record.runtimeState }),
+    settled: record.settled,
+    ...(record.work === undefined ? {} : {
+      work: {
+        id: record.work.id,
+        ...(record.work.rootTaskId === undefined ? {} : { rootTaskId: record.work.rootTaskId }),
+        status: record.work.status,
+        ...(record.work.summary === undefined ? {} : { summary: record.work.summary }),
+      },
+    }),
+    ...(record.summary === undefined ? {} : { summary: record.summary }),
+    ...(record.error === undefined ? {} : { error: record.error }),
+  }
+}
+
+function fleetMemberToolSummaries(
+  record: FleetRunRecord,
+  views: readonly FleetMemberView[],
+  includeAssistants: boolean,
+) {
+  const viewsById = new Map(views.map(view => [view.id, view]))
+  const members = record.members.map(member => {
+    const view = viewsById.get(member.name)
+    const provider = member.provider ?? view?.provider
+    const model = member.model ?? view?.model
+    return {
+      id: member.name,
+      name: member.displayName ?? view?.name ?? member.name,
+      role: member.role,
+      ...(view?.responsibility === undefined ? {} : { responsibility: view.responsibility }),
+      status: member.status ?? 'unknown' as const,
+      ...(provider === undefined ? {} : { provider }),
+      ...(model === undefined ? {} : { model }),
+      assistant: false as const,
+    }
+  })
+  if (!includeAssistants) return members
+  return [
+    ...members,
+    ...record.assistants.map(assistant => ({
+      id: assistant.view.id,
+      name: assistant.view.name,
+      role: assistant.view.role,
+      ...(assistant.view.responsibility === undefined ? {} : { responsibility: assistant.view.responsibility }),
+      status: assistant.status ?? 'unknown' as const,
+      ...(assistant.view.provider === undefined ? {} : { provider: assistant.view.provider }),
+      ...(assistant.view.model === undefined ? {} : { model: assistant.view.model }),
+      assistant: true as const,
+    })),
+  ]
+}
 
 const RUN_SCHEMA = {
   type: 'object',
@@ -8671,8 +8895,8 @@ const MESSAGE_ACTION_RESULT_SCHEMA = {
 const MEMBER_MANAGEMENT_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
     action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'configure', 'configure_all', 'pause', 'resume', 'remove'] },
-    run: RUN_SCHEMA, member: RUN_MEMBER_SCHEMA,
-    members: { type: 'array', items: RUN_MEMBER_SCHEMA },
+    run: { oneOf: [RUN_SCHEMA, RUN_TOOL_SUMMARY_SCHEMA] }, member: RUN_MEMBER_SCHEMA,
+    members: { type: 'array', items: { oneOf: [RUN_MEMBER_SCHEMA, MEMBER_TOOL_SUMMARY_SCHEMA] } },
     views: { type: 'array', items: MEMBER_VIEW_SCHEMA },
     request: {
       type: 'object',
@@ -8753,7 +8977,8 @@ const ASSISTANT_RESULT_SCHEMA = {
   additionalProperties: false,
   properties: {
     action: { type: 'string', required: true, enum: ['activate', 'deactivate', 'observe', 'message', 'configure'] },
-    run: RUN_SCHEMA,
+    run: { oneOf: [RUN_SCHEMA, RUN_TOOL_SUMMARY_SCHEMA] },
+    members: { type: 'array', items: MEMBER_TOOL_SUMMARY_SCHEMA },
     assistant: RUN_ASSISTANT_SCHEMA,
     request: {
       type: 'object', additionalProperties: false, properties: {
@@ -8784,10 +9009,6 @@ const ASSISTANT_RESULT_SCHEMA = {
 const FLEXIBLE_OBJECT_SCHEMA = {
   type: 'object', additionalProperties: true, properties: {},
 } as const
-
-function flexibleJson(value: unknown): InferValue<typeof FLEXIBLE_OBJECT_SCHEMA> {
-  return value as InferValue<typeof FLEXIBLE_OBJECT_SCHEMA>
-}
 
 const USER_TASK_RESULT_SCHEMA = {
   type: 'object',
@@ -8845,12 +9066,12 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_user_task',
-    description: 'Operate the calling assistant persistent foreground Interaction Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Report/block commits only after native foreground output.',
+    description: 'Operate the calling assistant persistent foreground Interaction Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Call report/block before the user-visible answer, then emit that answer exactly once; Fleet commits only after native foreground output.',
     parameters: {
       action: { type: 'string', required: true, enum: ['status', 'continue', 'take_over', 'report', 'block'] },
       run_id: { type: 'string', description: 'Persistent Team id. Defaults to the Team containing the calling assistant.' },
       reason: { type: 'string', description: 'Required for continue, take_over, report, and block.' },
-      report: { type: 'string', description: 'Exact foreground result to present. Required for report and block.' },
+      report: { type: 'string', description: 'Exact foreground result recorded for bookkeeping. Required for report and block; do not emit it before this tool call.' },
       task_ids: { type: 'array', items: { type: 'string' }, description: 'For continue, optional additional live Tasks owned by formal Team members. Omit to retain existing live waits.' },
       title: { type: 'string', description: 'For continue with instructions, title of the new Goal.' },
       instructions: { type: 'string', description: 'For continue, concrete work for a new formal-member Goal.' },
@@ -8861,7 +9082,7 @@ export function installRunTools(
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_user_task')
       if (args.action === 'status') {
-        return Promise.resolve({ action: 'status' as const, task: flexibleJson(service.assistantInteraction(caller, args.run_id)) })
+        return Promise.resolve({ action: 'status' as const, task: fleetTaskToolDetail(service.assistantInteraction(caller, args.run_id)) })
       }
       if (args.reason === undefined) throw new Error(`fleet_user_task ${args.action} requires reason`)
       if (args.action === 'continue') {
@@ -8883,28 +9104,36 @@ export function installRunTools(
         })
         return Promise.resolve({
           action: 'continue' as const,
-          task: flexibleJson(continued.task),
-          goals: continued.goals.map(flexibleJson),
+          task: fleetTaskToolDetail(continued.task),
+          goals: continued.goals.map(fleetTaskToolSummary),
         })
       }
       if (args.action === 'take_over') {
         return Promise.resolve({
           action: 'take_over' as const,
-          task: flexibleJson(service.takeOverAssistantInteraction(caller, {
+          task: fleetTaskToolDetail(service.takeOverAssistantInteraction(caller, {
             ...(args.run_id === undefined ? {} : { runId: args.run_id }),
             reason: args.reason,
           })),
         })
       }
       if (args.report === undefined) throw new Error(`fleet_user_task ${args.action} requires report`)
+      const task = service.reportAssistantInteraction(caller, {
+        ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+        outcome: args.action === 'report' ? 'complete' : 'block',
+        reason: args.reason,
+        report: args.report,
+      })
+      if (task.domain.kind !== 'interaction') throw new Error('fleet_user_task report returned a non-Interaction Task')
       return Promise.resolve({
         action: args.action,
-        task: flexibleJson(service.reportAssistantInteraction(caller, {
-          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
-          outcome: args.action === 'report' ? 'complete' : 'block',
-          reason: args.reason,
-          report: args.report,
-        })),
+        task: {
+          state: task.stableState.kind,
+          revision: task.domain.inputRevision,
+          next: task.domain.reportIntent === undefined
+            ? 'end_turn_without_more_output'
+            : 'emit_native_output_once',
+        },
       })
     },
   }))
@@ -9059,7 +9288,7 @@ export function installRunTools(
         },
       },
       after_sequence: { type: 'integer', description: 'For observe, return durable Team events after this sequence. Defaults to 0.' },
-      limit: { type: 'integer', description: 'For observe, return from 1 through 200 events. Defaults to 100.' },
+      limit: { type: 'integer', description: 'For observe, return from 1 through 200 compact event summaries. Defaults to 5; data is clipped to 300 characters. Use fleet_trace for detailed events.' },
       assistant_id: { type: 'string', description: 'Existing assistant id to rebind after a restart; omit to add a new assistant.' },
       name: { type: 'string', description: 'Persistent assistant name used when adding a new assistant.' },
       color: { type: 'string', description: 'Persistent assistant color in #RRGGBB.' },
@@ -9143,7 +9372,7 @@ export function installRunTools(
         return { action: 'configure' as const, run: service.status(record.id), ...configured }
       }
       const afterSequence = args.after_sequence ?? 0
-      const limit = args.limit ?? 100
+      const limit = args.limit ?? 5
       if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
         throw new Error('after_sequence must be a non-negative integer')
       }
@@ -9151,10 +9380,15 @@ export function installRunTools(
         throw new Error('limit must be an integer from 1 through 200')
       }
       const trace = service.readTrace(args.run_id, afterSequence, limit, projectRoot)
+      const record = service.status(trace.runId, projectRoot)
       return Promise.resolve({
         action: 'observe' as const,
-        run: service.status(trace.runId, projectRoot),
-        events: trace.events,
+        run: fleetRunToolSummary(record),
+        members: fleetMemberToolSummaries(record, service.memberViews(record.id), true),
+        events: trace.events.map(event => ({
+          ...event,
+          data: clippedProgressText(event.data, 300),
+        })),
         hasMore: trace.hasMore,
       })
     },
@@ -9167,13 +9401,13 @@ export function installRunTools(
       run_id: { type: 'string', description: 'Run id. Defaults to the active run.' },
       member: { type: 'string', description: 'Optional Fleet member name; omit for Team collaboration events.' },
       after_sequence: { type: 'integer', description: 'Return events after this sequence. Defaults to -1 for member Session events and 0 for Team events.' },
-      limit: { type: 'integer', description: 'Maximum events from 1 through 200. Defaults to 100.' },
+      limit: { type: 'integer', description: 'Maximum events from 1 through 200. Defaults to 10; event data is clipped to 2000 characters.' },
     },
     output: jsonOutput(TRACE_RESULT_SCHEMA),
     async execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_trace')
       const projectRoot = caller.session.header.cwd
-      const limit = args.limit ?? 100
+      const limit = args.limit ?? 10
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new Error('limit must be an integer from 1 through 200')
       if (args.after_sequence !== undefined && (!Number.isSafeInteger(args.after_sequence) || args.after_sequence < -1)) {
         throw new Error('after_sequence must be an integer greater than or equal to -1')
@@ -9217,7 +9451,7 @@ export function installRunTools(
       run_id: { type: 'string', description: 'Team id; inferred when the caller belongs to exactly one active Team.' },
       sequence: { type: 'integer', description: 'Activity sequence required for ack.' },
       after_sequence: { type: 'integer', description: 'List activity after this Team sequence.' },
-      limit: { type: 'integer', description: 'Maximum 1 through 100 items.' },
+      limit: { type: 'integer', description: 'Maximum 1 through 100 items. Defaults to 20; Task activity uses bounded Task summaries.' },
       unread_only: { type: 'boolean', description: 'Return only unacknowledged activity.' },
     },
     output: jsonOutput(ACTIVITY_RESULT_SCHEMA),
@@ -9251,6 +9485,7 @@ export function installRunTools(
       action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'configure', 'configure_all', 'pause', 'resume', 'remove'] },
       run_id: { type: 'string', description: 'Team id.' },
       member: { type: 'string', description: 'Member id required for update, configure, pause, resume, or remove.' },
+      include_configuration: { type: 'boolean', description: 'For list, include complete member views such as prompts, tools, permissions, and contacts. Defaults to false.' },
       view: { ...MEMBER_VIEW_SCHEMA, description: 'Complete member view required for add or update.' },
       request: {
         type: 'object',
@@ -9270,11 +9505,12 @@ export function installRunTools(
       const record = service.status(args.run_id, caller.session.header.cwd)
       if (args.action === 'list') {
         const ids = new Set(record.members.map(member => member.name))
+        const views = service.memberViews(record.id).filter(view => ids.has(view.id))
         return {
           action: 'list' as const,
-          run: record,
-          members: record.members,
-          views: service.memberViews(record.id).filter(view => ids.has(view.id)),
+          run: fleetRunToolSummary(record),
+          members: fleetMemberToolSummaries(record, views, false),
+          ...(args.include_configuration === true ? { views } : {}),
         }
       }
       if (args.action === 'add') {

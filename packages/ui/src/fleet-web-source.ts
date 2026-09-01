@@ -85,7 +85,7 @@ interface WireAssistant {
     readonly reasoningEffort?: string
     readonly maxTokens?: number
   }
-  readonly status?: 'idle' | 'running' | 'offline' | 'paused'
+  readonly status?: 'idle' | 'running' | 'error' | 'offline' | 'paused'
 }
 
 interface WireRun {

@@ -91,7 +91,16 @@ describe('FleetAssistantRuntime', () => {
       'one persistent Interaction Task',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'commits it only after that non-empty native assistant output is recorded',
+      'Do not write any user-visible answer before that tool call',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'do not call `fleet_user_task report`',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'emit the answer exactly once and end the turn',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'do not call `fleet_user_task status` merely because direct input arrived',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'omit `recipients` only when every available member should act',

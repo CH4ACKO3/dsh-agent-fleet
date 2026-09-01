@@ -47,6 +47,7 @@ function activatedMessage(message: UserMessage): {
 }
 
 function requeueAfterActivation(agent: Agent, message: UserMessage): PreStepDecision {
+  agent.cancel({ kind: 'hook', reason: 'Fleet activated a new assistant prompt for the queued message.' }, { keepInbox: true })
   agent.followup(createUserMessage({ source: message.source, content: [...message.content] }))
   return { kind: 'reject' }
 }

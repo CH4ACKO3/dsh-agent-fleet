@@ -18,6 +18,7 @@ browser:
 
 > 帮我在这台机器上安装 DeepSeek Harness 和 `dsh-agent-fleet` 插件。请严格按照
 > https://github.com/CH4ACKO3/dsh-agent-fleet#installation 的当前说明执行，使用 npm 已发布版本，不要从源码安装，
+> 并一并安装该章节推荐的 `@ch4acko3/dsh-turn-fold` 和 `dsh-render-engine` 公共渲染插件。
 > 不要使用 headless 模式。缺少兼容的 Node.js 时也请一并安装。完成后启动 `web` profile，在浏览器中确认 WebUI
 > 可以打开，并检查 Fleet patches 和 `the-binding-of-dsh/bidirectional-connection` 均为 `bound`。请持续处理到安装
 > 成功或遇到需要我决定的明确阻塞，最后告诉我 WebUI 地址、安装的版本和验证结果。
@@ -52,6 +53,25 @@ the Fleet patches plus `the-binding-of-dsh/bidirectional-connection` as `bound`.
 
 Fleet installs its compatible Harmony and The Binding of DSH (TBOD) packages into the profile. The separate global
 Harmony installation is still required because its patches must run before the profile loads.
+
+For the recommended Web experience, install
+[`dsh-turn-fold`](https://github.com/CH4ACKO3/dsh-turn-fold) and the public service plugins from
+[`dsh-render-engine`](https://github.com/CH4ACKO3/dsh-render-engine):
+
+```sh
+dsh plugin --profile web add @ch4acko3/dsh-turn-fold@latest
+
+for package in \
+  shiki syntax-highlight code-render markdown-render mermaid-render math-render \
+  structured-render table-render code-frame-render diff-engine diff-render ansi-render
+do
+  dsh plugin --profile web add "@ch4acko3/dsh-${package}@latest"
+done
+```
+
+`dsh-turn-fold` provides the visible compact turn UI. `dsh-render-engine` is the repository name rather than a
+published root package; the commands above install its published renderer services so Web plugins can share syntax,
+Markdown, Mermaid, math, structured-data, table, diagnostics, diff, and terminal rendering.
 
 Install only the optional integrations that the profile uses:
 

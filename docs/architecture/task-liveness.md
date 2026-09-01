@@ -65,11 +65,25 @@ The item disappears as soon as the domain operation is recorded or the Task
 leaves `running`. A Task may have no owner when progression is entirely event,
 child, time, or reconciler driven.
 
+Automatic continuation is also fenced by Session health. A non-network turn
+failure pauses owner-list, ready-Task, and idle continuation for that Session
+instead of immediately feeding the same work back into a broken model route.
+The durable Task remains `running`; an explicit new turn clears the health
+fence and retries it. Transient network failures continue through their
+separate bounded backoff and route-recovery scheduler.
+
 Any real user message addressed to a Team member updates that recipient's
 persistent Inbox and Reply Tasks. If its Session is not loaded, Fleet restores
 only that concrete owner; unrelated members with empty Task lists remain
 offline. The same targeted loader handles Tasks created by internal Team
-activity. There is no input-level "restore the whole Team" path.
+activity.
+
+A direct foreground input to an attached Team assistant is the one broader
+presence boundary: Fleet loads every unpaused formal-member Session before the
+assistant handles it. Loading does not broadcast a wake notification or start
+a model turn. Task owner lists, ready reconcilers, and explicit directives still
+decide which members actually run, so ordinary conversation does not spend one
+model call per member.
 
 This makes an iteration or sprint a normal parent Task: open one child Goal per
 member, let every owner work independently, and arm the parent reconciler for a
@@ -115,14 +129,16 @@ Task is still live, `fleet_user_task report` and `block` are rejected; the
 assistant must repair or repeat the bounded continuation. This prevents a
 stall deadline or progress check from bypassing an unfinished root outcome.
 
-`fleet_user_task report` and `block` record intent but do not directly write a
-terminal state. Fleet commits `completed` or `blocked` only when the same input
-revision subsequently records a non-empty native `assistant/message`. This
-also consumes the pending Delivery. It keeps the scheduler state, Delivery,
-and visible report on the same side of the durability boundary: an interrupted
-turn cannot mark the user request handled without actually reporting it. If a
-turn ends without reporting or installing a continuation, the Interaction
-remains `running`; its non-empty owner list injects the same Delivery again.
+`fleet_user_task report` and `block` record intent but do not complete an
+Interaction without a non-empty native `assistant/message` from the same turn.
+The output and intent may arrive in either order; once both exist for the same
+input revision Fleet atomically commits `completed` or `blocked` and consumes
+the pending Delivery. Interaction state changes do not enter the generic Task
+notification channel, because direct user input and the dedicated owner-list
+Delivery already provide its scheduling signals. If a turn ends without both
+reporting and visible output, or without installing a continuation, the
+Interaction remains `running`; its non-empty owner list injects the same
+Delivery again.
 
 ## ReconcileAttempt and the no-gap invariant
 

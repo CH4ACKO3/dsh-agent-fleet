@@ -767,6 +767,28 @@ export class FleetTaskBoard {
       : { kind: 'blocked', reason: intent.reason }, owner)
   }
 
+  settleDirectInteractionOutput(ownerReference: string, output: string): FleetProjectTask | undefined {
+    const owner = this.resolve(ownerReference)
+    const current = this.interactionTask(owner)
+    if (current === undefined || current.domain.kind !== 'interaction'
+      || current.stableState.kind !== 'running'
+      || current.domain.reportIntent !== undefined
+      || current.domain.pendingDelivery !== undefined
+      || current.domain.executionLease !== undefined
+      || current.domain.waitingTaskIds.length > 0
+      || output.trim().length === 0) return undefined
+    const domain: FleetTaskDomain = {
+      ...current.domain,
+      settledRevision: current.domain.inputRevision,
+      waitingTaskIds: [],
+    }
+    return this.reconcileDomain(current, domain, {
+      kind: 'completed',
+      reason: 'The native assistant response completed this direct foreground interaction.',
+      result: output.trim(),
+    }, owner)
+  }
+
   signalInteractionDelivery(ownerReference: string, result: string): FleetProjectTask | undefined {
     const task = this.interactionTask(ownerReference)
     if (task === undefined || task.domain.kind !== 'interaction'
@@ -2159,8 +2181,118 @@ function caller(agent: Agent | undefined): Agent {
   return agent
 }
 
-function jsonTask(task: FleetProjectTask): Record<string, JsonValue> {
-  return snapshot(task) as unknown as Record<string, JsonValue>
+const TOOL_TEXT_LIMIT = 2_000
+
+function toolText(value: string): string {
+  return value.length <= TOOL_TEXT_LIMIT
+    ? value
+    : `${value.slice(0, TOOL_TEXT_LIMIT)}… [${String(value.length - TOOL_TEXT_LIMIT)} chars omitted]`
+}
+
+function toolStableState(task: FleetProjectTask): Record<string, JsonValue> {
+  const state = task.stableState
+  return {
+    ...state,
+    reason: toolText(state.reason),
+    ...(state.kind === 'completed' && state.result !== undefined ? { result: toolText(state.result) } : {}),
+  } as unknown as Record<string, JsonValue>
+}
+
+function toolDomain(task: FleetProjectTask): Record<string, JsonValue> {
+  const domain = task.domain
+  if (domain.kind === 'goal') {
+    return {
+      ...domain,
+      submissions: Object.fromEntries(Object.entries(domain.submissions).map(([owner, submission]) => [owner, {
+        ...submission,
+        reason: toolText(submission.reason),
+        ...(submission.kind === 'complete' && submission.result !== undefined
+          ? { result: toolText(submission.result) }
+          : {}),
+      }])),
+    } as unknown as Record<string, JsonValue>
+  }
+  if (domain.kind === 'vote') {
+    return {
+      ...domain,
+      statement: toolText(domain.statement),
+      ballots: domain.ballots.map(ballot => ({ ...ballot, reason: toolText(ballot.reason) })),
+    } as unknown as Record<string, JsonValue>
+  }
+  if (domain.kind === 'interaction') {
+    return {
+      ...domain,
+      ...(domain.pendingDelivery === undefined ? {} : {
+        pendingDelivery: {
+          ...domain.pendingDelivery,
+          summary: toolText(domain.pendingDelivery.summary),
+          tasks: domain.pendingDelivery.tasks.map(delivery => ({
+            ...delivery,
+            reason: toolText(delivery.reason),
+            ...(delivery.result === undefined ? {} : { result: toolText(delivery.result) }),
+          })),
+        },
+      }),
+      ...(domain.reportIntent === undefined ? {} : {
+        reportIntent: {
+          revision: domain.reportIntent.revision,
+          outcome: domain.reportIntent.outcome,
+          reason: toolText(domain.reportIntent.reason),
+          reportChars: domain.reportIntent.report.length,
+          submittedAt: domain.reportIntent.submittedAt,
+        },
+      }),
+    } as unknown as Record<string, JsonValue>
+  }
+  return structuredClone(domain) as unknown as Record<string, JsonValue>
+}
+
+export function fleetTaskToolSummary(task: FleetProjectTask): Record<string, JsonValue> {
+  return {
+    id: task.id,
+    title: task.title,
+    kind: task.domain.kind,
+    state: task.stableState.kind,
+    reason: toolText(task.stableState.reason),
+    stateVersion: task.stateVersion,
+    owners: task.owners.map(owner => owner.member),
+    dependencies: [...task.dependencies],
+    ...(task.parentId === undefined ? {} : { parentId: task.parentId }),
+    ...(task.activeReconcile === undefined ? {} : {
+      reconcile: {
+        id: task.activeReconcile.id,
+        attemptId: task.activeReconcile.attemptId,
+        target: task.activeReconcile.target,
+        status: task.activeReconcile.status,
+        reason: toolText(task.activeReconcile.reason),
+        readyAt: task.activeReconcile.readyAt,
+        timeoutAt: task.activeReconcile.timeoutAt,
+      },
+    }),
+    updatedAt: task.updatedAt,
+  } as unknown as Record<string, JsonValue>
+}
+
+export function fleetTaskToolDetail(task: FleetProjectTask): Record<string, JsonValue> {
+  const latestEntry = task.domain.kind === 'interaction' ? undefined : task.entries.at(-1)
+  return {
+    ...fleetTaskToolSummary(task),
+    description: toolText(task.description),
+    priority: task.priority,
+    decision: task.decision,
+    domain: toolDomain(task),
+    stableState: toolStableState(task),
+    createdBy: task.createdBy,
+    assignees: [...task.assignees],
+    reviewers: [...task.reviewers],
+    resources: [...task.resources],
+    entryCount: task.entries.length,
+    signalCount: task.signals.length,
+    ...(latestEntry === undefined ? {} : {
+      latestEntry: { ...latestEntry, text: toolText(latestEntry.text) },
+    }),
+    createdAt: task.createdAt,
+  } as unknown as Record<string, JsonValue>
 }
 
 export function installTaskTools(
@@ -2189,12 +2321,12 @@ export function installTaskTools(
         ...(args.stable_kind === undefined ? {} : { state: args.stable_kind }),
         ...(args.owner === undefined ? {} : { assignee: args.owner }),
         ...(args.parent_id === undefined ? {} : { parentId: args.parent_id }),
-      }).map(jsonTask) })
+      }).map(fleetTaskToolSummary) })
       if (args.action === 'owner_list') {
-        return Promise.resolve({ action: 'owner_list' as const, tasks: tasks.ownerTasks(callerId).map(jsonTask) })
+        return Promise.resolve({ action: 'owner_list' as const, tasks: tasks.ownerTasks(callerId).map(fleetTaskToolSummary) })
       }
       if (args.id === undefined) throw new Error(`fleet_task ${args.action} requires id`)
-      if (args.action === 'get') return Promise.resolve({ action: 'get' as const, task: jsonTask(tasks.get(callerId, args.id)) })
+      if (args.action === 'get') return Promise.resolve({ action: 'get' as const, task: fleetTaskToolDetail(tasks.get(callerId, args.id)) })
       throw new Error(`unsupported fleet_task action ${args.action}`)
     },
   }))
@@ -2226,17 +2358,17 @@ export function installReconcileTools(
         throw new Error(`Agent ${callerId} is not authorized for task.reconcile`)
       }
       if (args.action === 'list') {
-        return Promise.resolve({ action: 'list', tasks: [...tasks.readyTasks(callerId), ...tasks.runningFor(callerId)].map(jsonTask) })
+        return Promise.resolve({ action: 'list', tasks: [...tasks.readyTasks(callerId), ...tasks.runningFor(callerId)].map(fleetTaskToolSummary) })
       }
       if (args.id === undefined) throw new Error(`fleet_reconcile ${args.action} requires id`)
-      if (args.action === 'get') return Promise.resolve({ action: 'get', task: jsonTask(tasks.get(callerId, args.id)) })
-      if (args.action === 'claim') return Promise.resolve({ action: 'claim', task: jsonTask(tasks.claim(callerId, args.id)) })
+      if (args.action === 'get') return Promise.resolve({ action: 'get', task: fleetTaskToolDetail(tasks.get(callerId, args.id)) })
+      if (args.action === 'claim') return Promise.resolve({ action: 'claim', task: fleetTaskToolDetail(tasks.claim(callerId, args.id)) })
       if (args.attempt_id === undefined || args.progress === undefined || args.state === undefined) {
         throw new Error('fleet_reconcile resolve requires attempt_id, progress, and state')
       }
       return Promise.resolve({
         action: 'resolve',
-        task: jsonTask(tasks.settle(callerId, args.id, {
+        task: fleetTaskToolDetail(tasks.settle(callerId, args.id, {
           attemptId: args.attempt_id,
           progress: args.progress,
           next: args.state as unknown as FleetTaskStableStateInput,
@@ -2275,14 +2407,14 @@ export function installGoalTools(
       const callerId = String(agent.id)
       if (args.action === 'list') {
         const goals = tasks.list(callerId).filter(task => task.domain.kind === 'goal')
-        return Promise.resolve({ action: 'list', tasks: goals.map(jsonTask) })
+        return Promise.resolve({ action: 'list', tasks: goals.map(fleetTaskToolSummary) })
       }
       if (args.action === 'create') {
         if (!authorize(callerId, 'task.create') && !authorize(callerId, 'task.manage')) {
           throw new Error(`Agent ${callerId} is not authorized for task.create`)
         }
         if (args.title === undefined) throw new Error('fleet_goal create requires title')
-        return Promise.resolve({ action: 'create', task: jsonTask(tasks.createGoal(callerId, {
+        return Promise.resolve({ action: 'create', task: fleetTaskToolDetail(tasks.createGoal(callerId, {
           title: args.title,
           ...(args.description === undefined ? {} : { description: args.description }),
           ...(args.owners === undefined ? {} : { owners: args.owners }),
@@ -2293,11 +2425,11 @@ export function installGoalTools(
         })) })
       }
       if (args.id === undefined) throw new Error(`fleet_goal ${args.action} requires id`)
-      if (args.action === 'get') return Promise.resolve({ action: 'get', task: jsonTask(tasks.get(callerId, args.id)) })
+      if (args.action === 'get') return Promise.resolve({ action: 'get', task: fleetTaskToolDetail(tasks.get(callerId, args.id)) })
       if (args.reason === undefined) throw new Error(`fleet_goal ${args.action} requires reason`)
       return Promise.resolve({
         action: args.action,
-        task: jsonTask(tasks.submitGoal(callerId, args.id, {
+        task: fleetTaskToolSummary(tasks.submitGoal(callerId, args.id, {
           kind: args.action,
           reason: args.reason,
           ...(args.result === undefined ? {} : { result: args.result }),
@@ -2333,7 +2465,7 @@ export function installVoteTools(
       const callerId = String(agent.id)
       if (args.action === 'list') {
         const votes = tasks.list(callerId).filter(task => task.domain.kind === 'vote')
-        return Promise.resolve({ action: 'list', tasks: votes.map(jsonTask) })
+        return Promise.resolve({ action: 'list', tasks: votes.map(fleetTaskToolSummary) })
       }
       if (args.action === 'create') {
         if (!authorize(callerId, 'task.create') && !authorize(callerId, 'task.manage')) {
@@ -2343,7 +2475,7 @@ export function installVoteTools(
           throw new Error('fleet_vote create requires statement, channel, and voters')
         }
         if (!args.channel.startsWith('#')) throw new Error('fleet_vote channel must start with #')
-        return Promise.resolve({ action: 'create', task: jsonTask(tasks.createVote(callerId, {
+        return Promise.resolve({ action: 'create', task: fleetTaskToolDetail(tasks.createVote(callerId, {
           ...(args.title === undefined ? {} : { title: args.title }),
           statement: args.statement,
           channel: args.channel as `#${string}`,
@@ -2353,9 +2485,9 @@ export function installVoteTools(
         })) })
       }
       if (args.id === undefined) throw new Error(`fleet_vote ${args.action} requires id`)
-      if (args.action === 'get') return Promise.resolve({ action: 'get', task: jsonTask(tasks.get(callerId, args.id)) })
+      if (args.action === 'get') return Promise.resolve({ action: 'get', task: fleetTaskToolDetail(tasks.get(callerId, args.id)) })
       if (args.decision === undefined || args.reason === undefined) throw new Error('fleet_vote cast requires decision and reason')
-      return Promise.resolve({ action: 'cast', task: jsonTask(tasks.castVote(callerId, args.id, args.decision, args.reason)) })
+      return Promise.resolve({ action: 'cast', task: fleetTaskToolDetail(tasks.castVote(callerId, args.id, args.decision, args.reason)) })
     },
   }))
 }

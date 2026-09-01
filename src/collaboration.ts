@@ -46,6 +46,7 @@ import { FLEET_TOOL_CATALOG, fleetToolHasAuthorizedAction } from './tool-discove
 import type { FleetAuthorizationChange, FleetAuthorizationService } from './authorization.js'
 import {
   FleetTaskBoard,
+  fleetTaskToolDetail,
   installGoalTools,
   installReconcileTools,
   installTaskTools,
@@ -82,6 +83,18 @@ function taskMessageResult(value: object): Record<string, JsonValue> {
   return structuredClone(value) as unknown as Record<string, JsonValue>
 }
 
+function taskMessageSearchView(message: FleetMessage): FleetMessage & {
+  readonly textRange?: { readonly start: number; readonly end: number; readonly total: number }
+} {
+  const maximum = 500
+  if (message.text.length <= maximum) return message
+  return {
+    ...message,
+    text: message.text.slice(0, maximum),
+    textRange: { start: 0, end: maximum, total: message.text.length },
+  }
+}
+
 function installTaskMessageTools(
   ctx: Context,
   messages: MessageHub,
@@ -112,12 +125,12 @@ function installTaskMessageTools(
       const callerId = String(agent.id)
       if (args.action === 'status') {
         const task = syncInbox(agent)
-        return Promise.resolve(taskMessageResult({ action: 'status', task, summary: messages.unreadSummary(callerId) }))
+        return Promise.resolve(taskMessageResult({ action: 'status', task: fleetTaskToolDetail(task), summary: messages.unreadSummary(callerId) }))
       }
       if (args.action === 'read') {
         const result = messages.readInbox(agent, args.max_chars ?? 12_000)
         const task = syncInbox(agent)
-        return Promise.resolve(taskMessageResult({ action: 'read', ...result, task }))
+        return Promise.resolve(taskMessageResult({ action: 'read', ...result, task: fleetTaskToolDetail(task) }))
       }
       if (args.action === 'search') {
         return Promise.resolve(taskMessageResult({ action: 'search', messages: messages.search(agent, {
@@ -125,13 +138,13 @@ function installTaskMessageTools(
           ...(args.conversation === undefined ? {} : { conversation: args.conversation as FleetTarget }),
           ...(args.from === undefined ? {} : { from: args.from }),
           ...(args.resource === undefined ? {} : { resource: args.resource }),
-          ...(args.limit === undefined ? {} : { limit: args.limit }),
-        }) }))
+          limit: args.limit ?? 10,
+        }).map(taskMessageSearchView) }))
       }
       if (args.message_id === undefined) throw new Error('fleet_inbox text requires message_id')
       const chunk = messages.readMessageText(agent, args.message_id, args.offset, args.limit ?? 12_000)
       const task = syncInbox(agent)
-      return Promise.resolve(taskMessageResult({ action: 'text', chunk, task }))
+      return Promise.resolve(taskMessageResult({ action: 'text', chunk, task: fleetTaskToolDetail(task) }))
     },
   })))
   stops.push(ctx.tools.register(defineTool({
@@ -150,7 +163,7 @@ function installTaskMessageTools(
       if (task.domain.kind !== 'reply') throw new Error(`Fleet task ${args.id} is not a Reply Task`)
       const domain = task.domain
       if (domain.completionMessageId !== undefined) {
-        return Promise.resolve(taskMessageResult({ action: 'reply', task, messageId: domain.completionMessageId, replayed: true }))
+        return Promise.resolve(taskMessageResult({ action: 'reply', task: fleetTaskToolDetail(task), messageId: domain.completionMessageId, replayed: true }))
       }
       if (!tasks.ownerTasks(callerId).some(candidate => candidate.id === task.id)) {
         throw new Error(`Fleet Reply Task ${args.id} is not owned by the calling member`)
@@ -170,7 +183,7 @@ function installTaskMessageTools(
         action: 'reply',
         messageId,
         replayed: existing !== undefined,
-        task: tasks.recordReply(callerId, task.id, messageId),
+        task: fleetTaskToolDetail(tasks.recordReply(callerId, task.id, messageId)),
       }))
     },
   })))
@@ -635,7 +648,8 @@ export class FleetCollaborationService {
         input.onTask?.(event, tasks.state())
         if (event.task.domain.kind === 'reply') revealRequiredTaskTool(event.task.domain.assignee)
         const initialRequiredTask = event.action === 'created' && event.task.domain.kind === 'reply'
-        if (event.action !== 'due' && event.action !== 'notification' && !initialRequiredTask) {
+        if (event.task.domain.kind !== 'interaction'
+          && event.action !== 'due' && event.action !== 'notification' && !initialRequiredTask) {
           const recipients = [
             ...(event.action === 'created' ? [] : event.task.assignees),
             ...event.task.reviewers,

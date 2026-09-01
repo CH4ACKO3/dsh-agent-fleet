@@ -9,3 +9,8 @@ docs/local/
 .env
 .env.*
 !.env.example
+
+# Local benchmark provider profiles and machine-specific Memorax patch.
+/integrations/agents-last-exam/agent-memorax.yaml
+/integrations/agents-last-exam/agent-deepseek.yaml
+/integrations/agents-last-exam/memorax-headless.patch.yml

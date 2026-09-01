@@ -91,11 +91,11 @@ class FakeAgentContext {
     }
   }
 
-  async assemble(base: { readonly variables: Record<string, unknown> }): Promise<{ readonly variables: Record<string, unknown> }> {
+  async assemble<T extends { readonly variables: Record<string, unknown> }>(base: T): Promise<T> {
     let next = () => Promise.resolve(base)
     for (const listener of [...(this.listeners.get('system-prompt/assemble') ?? [])].reverse()) {
       const following = next
-      next = () => Promise.resolve(listener({}, {}, following) as Promise<typeof base>)
+      next = () => Promise.resolve(listener(base, {}, following) as Promise<T>)
     }
     return next()
   }
@@ -713,7 +713,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('records and wraps direct assistant input as a Fleet Task Request before model entry', async () => {
+  it('records direct assistant input unchanged and injects its foreground protocol through the system prompt', async () => {
     const { root, configPath } = fixture()
     const { service, launcher, disconnect } = setup(root)
     const scoped = new FakeAgentContext()
@@ -730,6 +730,23 @@ describe('FleetRunService', () => {
       content: [{ type: 'text', text: 'Build and review the requested change.' }],
     })
 
+    const assembly = await scoped.assemble({
+      sections: [] as Array<{ name: string; text: string }>,
+      contexts: [],
+      tools: [],
+      variables: {},
+    })
+    const request = assembly.sections.find(section => section.name === 'fleet:foreground-task-request')?.text ?? ''
+    expect(request).toContain('[Fleet Foreground Protocol]')
+    expect(request).toContain(`Current Team: ${run.id}`)
+    expect(request).toContain('do not call fleet_user_task status merely because direct input arrived')
+    expect(request).toContain(`Use action="status" with run_id="${run.id}" after a Task Delivery`)
+    expect(request).toContain('Do not write any user-visible answer before that tool call')
+    expect(request).toContain('emit the answer exactly once and end the turn')
+    expect(request).toContain('do not call fleet_user_task report')
+    expect(request).toContain('normal project imperative remains Team work')
+    expect(request).not.toContain('Build and review the requested change.')
+
     const decision = await scoped.preStep([incoming])
     if (decision.kind !== 'enter') throw new Error('expected step entry')
     const interaction = service.taskBoard(run.id).interactionTask(assistantId)
@@ -741,26 +758,367 @@ describe('FleetRunService', () => {
       },
       entries: [expect.objectContaining({ text: 'Build and review the requested change.' })],
     })
-    expect(decision.messages[0]).toMatchObject({ id: incoming.id, source: { kind: 'user' } })
-    const wrappedText = decision.messages[0]?.content
+    expect(decision.messages[0]).toEqual(incoming)
+    const visibleText = decision.messages[0]?.content
       .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') ?? ''
-    expect(wrappedText).toContain('[Fleet Task Request]')
-    expect(wrappedText).toContain(`Interaction Task: ${interaction?.id ?? ''}`)
-    expect(wrappedText).toContain('Required first action: call fleet_user_task')
-    expect(wrappedText).toContain('is still Team work, not permission to take over personally')
-    expect(wrappedText).toContain('pass that path directly to fleet_run start')
-    expect(wrappedText).toContain('Build and review the requested change.')
+    expect(visibleText).toBe('Build and review the requested change.')
+    expect(visibleText).not.toContain('[Fleet Foreground Protocol]')
 
     service.recordMemberSessionEvent(launcher.id, {
       seq: 1,
       time: Date.now(),
       type: 'user/message',
-      data: decision.messages[0],
+      data: incoming,
     } as unknown as SessionEvent)
     expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
       domain: { inputRevision: 1, latestMessageId: String(incoming.id) },
       entries: [expect.objectContaining({ text: 'Build and review the requested change.' })],
     })
+    disconnect()
+  })
+
+  it('settles output-before-report in one turn without an Interaction self-notification', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected assistant')
+    launcher.status = 'running'
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: { readonly agent: Agent }): Promise<unknown>
+    }> = []
+    installRunTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} } },
+    } as unknown as Context, service, {} as never)
+    const userTask = registered.find(tool => tool.name === 'fleet_user_task')
+    if (userTask === undefined) throw new Error('expected fleet_user_task')
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-initial', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'First request.' }],
+      },
+    } as unknown as SessionEvent)
+    const pendingReceipt = await userTask.execute({
+      action: 'report',
+      run_id: run.id,
+      reason: 'The first request is complete.',
+      report: 'First response.',
+    }, { agent: launcher as unknown as Agent })
+    expect(pendingReceipt).toEqual({
+      action: 'report',
+      task: {
+        state: 'running',
+        revision: 1,
+        next: 'emit_native_output_once',
+      },
+    })
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { id: 'foreground-assistant-initial', role: 'assistant', content: [{ type: 'text', text: 'First response.' }] },
+      },
+    } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('completed')
+    await Promise.resolve()
+    const messagesBefore = launcher.messages.length
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 3,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 2 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 4,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-output-first', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Only reply with 好.' }],
+      },
+    } as unknown as SessionEvent)
+    expect(launcher.messages).toHaveLength(messagesBefore)
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 5,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { id: 'foreground-assistant-output-first', role: 'assistant', content: [{ type: 'text', text: '好' }] },
+      },
+    } as unknown as SessionEvent)
+    const receipt = await userTask.execute({
+      action: 'report',
+      run_id: run.id,
+      reason: 'Replied exactly as requested.',
+      report: '好',
+    }, { agent: launcher as unknown as Agent })
+    expect(receipt).toEqual({
+      action: 'report',
+      task: {
+        state: 'completed',
+        revision: 2,
+        next: 'end_turn_without_more_output',
+      },
+    })
+    await vi.waitFor(() => { expect(launcher.cancelCount).toBe(1) })
+    expect(JSON.stringify(receipt).length).toBeLessThan(250)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'completed', result: '好' },
+      domain: { kind: 'interaction', inputRevision: 2, settledRevision: 2 },
+    })
+    await Promise.resolve()
+    expect(launcher.messages).toHaveLength(messagesBefore)
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 6,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 2, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+    expect(launcher.messages).toHaveLength(messagesBefore)
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 7,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 3 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 8,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-cancel-fence', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Reply once more.' }],
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 9,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { id: 'foreground-assistant-cancel-fence', role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+      },
+    } as unknown as SessionEvent)
+    await userTask.execute({
+      action: 'report',
+      run_id: run.id,
+      reason: 'Replied once more.',
+      report: 'Done.',
+    }, { agent: launcher as unknown as Agent })
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 10,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 3, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 11,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 4 },
+    } as unknown as SessionEvent)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(launcher.cancelCount).toBe(1)
+    disconnect()
+  })
+
+  it('settles a direct Interaction from one normal native response without a report tool call', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected assistant')
+    launcher.status = 'running'
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 1 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-direct', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Only reply with 好.' }],
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 3,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { id: 'foreground-assistant-direct', role: 'assistant', content: [{ type: 'text', text: '好' }] },
+      },
+    } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('running')
+    const messagesBeforeEnd = launcher.messages.length
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 4,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'completed', result: '好' },
+      domain: { kind: 'interaction', inputRevision: 1, settledRevision: 1 },
+    })
+    expect(launcher.messages).toHaveLength(messagesBeforeEnd)
+    disconnect()
+  })
+
+  it('does not settle a foreground Interaction from an internal plugin turn', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected assistant')
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 1 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-pending', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Keep this request pending.' }],
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 3,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 4,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 2 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 5,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'fleet-owner-list-snapshot', role: 'user',
+        source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'snapshot', sections: [] },
+        content: [{ type: 'text', text: '[Fleet owner task list]' }],
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 6,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { id: 'internal-recovery-output', role: 'assistant', content: [{ type: 'text', text: 'Internal recovery.' }] },
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 7,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 2, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'running' },
+      domain: { kind: 'interaction', inputRevision: 1, settledRevision: 0 },
+    })
+    disconnect()
+  })
+
+  it('keeps assistant observe and member list receipts compact by default', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: { readonly agent: Agent }): Promise<unknown>
+    }> = []
+    installRunTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} } },
+    } as unknown as Context, service, {} as never)
+    const assistantTool = registered.find(tool => tool.name === 'fleet_assistant')
+    const memberTool = registered.find(tool => tool.name === 'fleet_member')
+    if (assistantTool === undefined || memberTool === undefined) throw new Error('expected Fleet management tools')
+
+    const observed = await assistantTool.execute({ action: 'observe', run_id: run.id }, {
+      agent: launcher as unknown as Agent,
+    }) as {
+      readonly run: Readonly<Record<string, unknown>>
+      readonly members: readonly Readonly<Record<string, unknown>>[]
+      readonly events: readonly { readonly data: string }[]
+    }
+    expect(observed.run).toMatchObject({ id: run.id, name: run.name, settled: false })
+    expect(observed.run).not.toHaveProperty('configPath')
+    expect(observed.run).not.toHaveProperty('budget')
+    expect(observed.members).toHaveLength(run.members.length + run.assistants.length)
+    expect(observed.events).toHaveLength(Math.min(5, observed.events.length))
+    expect(observed.events.every(event => event.data.length <= 303)).toBe(true)
+    expect(JSON.stringify(observed)).not.toContain('assistantSessionAliases')
+    expect(JSON.stringify(observed).length).toBeLessThan(4_000)
+
+    const listed = await memberTool.execute({ action: 'list', run_id: run.id }, {
+      agent: launcher as unknown as Agent,
+    }) as {
+      readonly run: Readonly<Record<string, unknown>>
+      readonly members: readonly Readonly<Record<string, unknown>>[]
+      readonly views?: readonly Readonly<Record<string, unknown>>[]
+    }
+    expect(listed.views).toBeUndefined()
+    expect(listed.run).not.toHaveProperty('members')
+    expect(listed.members).toHaveLength(run.members.length)
+    expect(listed.members.every(member => member.prompt === undefined && member.sessionId === undefined)).toBe(true)
+    expect(JSON.stringify(listed).length).toBeLessThan(3_000)
+
+    const configured = await memberTool.execute({
+      action: 'list',
+      run_id: run.id,
+      include_configuration: true,
+    }, { agent: launcher as unknown as Agent }) as {
+      readonly views?: readonly Readonly<Record<string, unknown>>[]
+    }
+    expect(configured.views).toHaveLength(run.members.length)
+    expect(configured.views?.every(view => typeof view.prompt === 'string')).toBe(true)
     disconnect()
   })
 
@@ -903,6 +1261,9 @@ describe('FleetRunService', () => {
     }, { agent: launcher as unknown as Agent })
 
     expect(result).toMatchObject({ action: 'continue', goals: [] })
+    expect(result).not.toHaveProperty('task.entries')
+    expect(result).not.toHaveProperty('task.signals')
+    expect(JSON.stringify(result).length).toBeLessThan(5_000)
     expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
       stableState: { kind: 'dormant' },
       domain: { waitingTaskIds: [linked.id] },
@@ -1617,7 +1978,10 @@ describe('FleetRunService', () => {
     })
     expect(runtime.creates).toHaveLength(createCount)
     expect(runtime.resumes).toHaveLength(resumeCount)
-    await expect(scoped.assemble({ variables: { provider: 'provider-old', model: 'model-old' } }))
+    await expect(scoped.assemble({
+      sections: [], contexts: [], tools: [],
+      variables: { provider: 'provider-old', model: 'model-old' },
+    }))
       .resolves.toMatchObject({ variables: { provider: 'provider-new', model: 'model-new' } })
     await expect(scoped.request({ provider: 'provider-old', model: 'model-old', maxTokens: 512 }))
       .resolves.toEqual({
@@ -1667,7 +2031,10 @@ describe('FleetRunService', () => {
         provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium',
       })
     }
-    await scoped.assemble({ variables: { provider: 'provider-old', model: 'model-old' } })
+    await scoped.assemble({
+      sections: [], contexts: [], tools: [],
+      variables: { provider: 'provider-old', model: 'model-old' },
+    })
     await expect(scoped.request({ provider: 'provider-old', model: 'model-old' })).resolves.toEqual({
       provider: 'provider-team', model: 'model-team', reasoningEffort: 'medium',
     })
@@ -3569,6 +3936,43 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('bounds Task activity and raw trace payloads exposed to models', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected Fleet lead')
+    const goal = service.taskBoard(run.id).createGoal(launcher.id, {
+      title: 'Bounded activity task',
+      description: 'd'.repeat(20_000),
+      owners: ['lead'],
+    })
+
+    const activity = service.activityInbox(lead as unknown as Agent, { runId: run.id })
+      .items.find(item => item.kind === 'task' && JSON.stringify(item.data).includes(goal.id))
+    expect(activity).toBeDefined()
+    expect(activity?.data).toMatchObject({
+      task: { id: goal.id, kind: 'goal', state: 'running' },
+    })
+    expect(activity?.data).not.toHaveProperty('task.entries')
+    expect(activity?.data).not.toHaveProperty('task.description')
+    expect(JSON.stringify(activity?.data).length).toBeLessThan(2_000)
+
+    const internal = service as unknown as {
+      appendEvent(runId: string, type: string, data: unknown): void
+    }
+    internal.appendEvent(run.id, 'test.large', { text: 't'.repeat(20_000) })
+    const trace = service.readTrace(run.id, 0, 1_000).events.find(event => event.type === 'test.large')
+    expect(trace?.data.length).toBeLessThan(2_100)
+    expect(trace?.data).toContain('chars omitted')
+
+    disconnect()
+  })
+
   it('loads dormant Team state at DSH startup and resumes it repeatedly', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)
@@ -3939,6 +4343,131 @@ describe('FleetRunService', () => {
 
     second.disconnect()
     await second.core.close()
+  })
+
+  it('loads every unpaused formal member for a new direct assistant input without broadcasting a wake', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, {
+      launcherId: 'replacement-launcher',
+      persisted: first.persisted,
+      persistedHeaders: first.persistedHeaders,
+    })
+    const input = {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'new-direct-assistant-input', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Please coordinate the Team on this request.' }],
+      },
+    } as unknown as SessionEvent
+    second.launcher.session.events.push(input as unknown as FakeEvent)
+
+    await second.service.attachAssistant(second.launcher as unknown as Agent, {
+      runId: run.id,
+      assistantId,
+    })
+
+    expect(second.runtime.resumes.map(resume => resume.id)).toEqual(
+      expect.arrayContaining(run.members.map(member => member.sessionId)),
+    )
+    expect(second.runtime.resumes).toHaveLength(run.members.length)
+    expect(second.service.status(run.id)).toMatchObject({
+      runtimeState: 'active',
+      members: run.members.map(member => expect.objectContaining({ name: member.name, status: 'idle' })),
+    })
+    for (const member of second.service.status(run.id).members) {
+      const messages = second.runtime.get(member.sessionId)?.messages ?? []
+      expect(messages.flatMap(message => message.content)
+        .some(block => block.type === 'text' && block.text.includes('Team was explicitly woken'))).toBe(false)
+    }
+    expect(second.service.readTrace(run.id, 0, 300).events).toContainEqual(expect.objectContaining({
+      type: 'team_loaded_for_user_input',
+      data: expect.stringContaining('"members":["lead","reviewer"]'),
+    }))
+
+    second.disconnect()
+    await second.core.close()
+  })
+
+  it('pauses automatic owner-task continuation after a non-network turn failure', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'credential-failure-input', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Continue this persistent foreground request.' }],
+      },
+    } as unknown as SessionEvent)
+    const messagesBeforeFailure = launcher.messages.length
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'turn/end',
+      data: {
+        turn: 1,
+        reason: {
+          kind: 'error',
+          error: { code: 'NO_CREDENTIAL', message: 'No credential is configured for this provider route.' },
+        },
+      },
+    } as unknown as SessionEvent)
+    service.agentIdle(launcher as unknown as Agent)
+    await Promise.resolve()
+
+    expect(launcher.messages).toHaveLength(messagesBeforeFailure)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'running' },
+      owners: [{ member: assistantId }],
+    })
+    expect(service.status(run.id).assistants[0]?.status).toBe('error')
+    expect(service.readTrace(run.id, 0, 300).events.filter(event =>
+      event.type === 'member_auto_continuation_paused')).toEqual([
+      expect.objectContaining({
+        data: expect.stringContaining('NO_CREDENTIAL'),
+      }),
+    ])
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 3,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 2 },
+    } as unknown as SessionEvent)
+    service.agentIdle(launcher as unknown as Agent)
+
+    expect(launcher.messages).toHaveLength(messagesBeforeFailure + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet owner task list]') }),
+    ])
+    expect(service.status(run.id).assistants[0]?.status).toBe('idle')
+    disconnect()
   })
 
   it('pauses only loaded members and wakes the partially loaded Team', async () => {

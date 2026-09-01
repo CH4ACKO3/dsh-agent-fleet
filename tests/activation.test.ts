@@ -6,7 +6,8 @@ import { encodeFleetActivation } from '@dsh-agent-fleet/core/activation'
 import { activateFleetFromMessages } from '../src/activation.js'
 
 const followup = vi.fn()
-const agent = { id: 'setup-session', followup } as unknown as Agent
+const cancel = vi.fn()
+const agent = { id: 'setup-session', cancel, followup } as unknown as Agent
 
 describe('Fleet UI activation bridge', () => {
   beforeEach(() => { vi.clearAllMocks() })
@@ -27,6 +28,11 @@ describe('Fleet UI activation bridge', () => {
     expect(followup).toHaveBeenCalledWith(expect.objectContaining({
       content: [{ type: 'text', text: '帮我组建长期团队' }],
     }))
+    expect(cancel).toHaveBeenCalledWith(
+      { kind: 'hook', reason: 'Fleet activated a new assistant prompt for the queued message.' },
+      { keepInbox: true },
+    )
+    expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(followup.mock.invocationCallOrder[0] ?? 0)
   })
 
   it('requeues a configured Team first input into the attached native assistant Session', async () => {
@@ -70,6 +76,11 @@ describe('Fleet UI activation bridge', () => {
     expect(followup).toHaveBeenCalledWith(expect.objectContaining({
       content: [{ type: 'text', text: '开始工作' }],
     }))
+    expect(cancel).toHaveBeenCalledWith(
+      { kind: 'hook', reason: 'Fleet activated a new assistant prompt for the queued message.' },
+      { keepInbox: true },
+    )
+    expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(followup.mock.invocationCallOrder[0] ?? 0)
     expect(decision).toEqual({ kind: 'reject' })
   })
 
