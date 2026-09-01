@@ -1533,6 +1533,51 @@ const panelStyles = `
 
 .dsh-fleet-budget-popover::backdrop { background: transparent; }
 
+.dsh-fleet-budget-popover-switch {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 12px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.dsh-fleet-budget-popover-switch button {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 28px;
+  padding-inline: 10px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-fleet-budget-popover-switch button:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsh-fleet-budget-popover-switch button[data-active="true"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-menu);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--dsw-alias-label-primary) 14%, transparent);
+}
+
+.dsh-fleet-budget-popover-switch button:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-focus, #6d8cff);
+  outline-offset: -1px;
+}
+
 .dsh-fleet-budget-popover-header {
   display: flex;
   align-items: baseline;
@@ -1571,6 +1616,18 @@ const panelStyles = `
   height: 100%;
   border-radius: 1px;
   background: var(--budget-member-color, var(--dsw-alias-label-tertiary));
+}
+
+.dsh-fleet-budget-popover-progress[data-context="true"] span[data-kind="system"] {
+  --budget-member-color: var(--dsw-static-neutral-bluish-400);
+}
+
+.dsh-fleet-budget-popover-progress[data-context="true"] span[data-kind="tools"] {
+  --budget-member-color: #a78bfa;
+}
+
+.dsh-fleet-budget-popover-progress[data-context="true"] span[data-kind="messages"] {
+  --budget-member-color: var(--dsw-static-blue-450);
 }
 
 .dsh-fleet-budget-popover-members {
@@ -1633,6 +1690,26 @@ const panelStyles = `
   color: var(--dsw-alias-label-primary);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+.dsh-fleet-budget-popover-member-dot[data-kind="system"] {
+  --budget-member-color: var(--dsw-static-neutral-bluish-400);
+}
+
+.dsh-fleet-budget-popover-member-dot[data-kind="tools"] {
+  --budget-member-color: #a78bfa;
+}
+
+.dsh-fleet-budget-popover-member-dot[data-kind="messages"] {
+  --budget-member-color: var(--dsw-static-blue-450);
+}
+
+.dsh-fleet-budget-popover-empty {
+  margin: 2px 0 0;
+  padding: 10px 2px 2px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
 }
 
 .dsh-fleet-budget-popover-manage {
@@ -6109,6 +6186,29 @@ export interface FleetPanelTeamSettings {
 export type FleetPanelBudgetState = 'unlimited' | 'normal' | 'warning' | 'danger' | 'exhausted'
 export type FleetPanelBudgetMode = 'tokens' | 'cost'
 
+export interface FleetContextPressure {
+  readonly projectedTokens?: number
+  readonly pressureTokens?: number
+  readonly contextWindow?: number
+}
+
+export interface FleetContextBreakdown {
+  readonly systemTokens: number
+  readonly toolsTokens: number
+  readonly messageTokens: number
+}
+
+export type FleetContextProjectionHook = <Selection = unknown>(
+  name: string,
+  selector?: (snapshot: unknown) => Selection,
+) => Selection | undefined
+
+export interface FleetContextOccupancy {
+  readonly percent: number
+  readonly usedTokens: number
+  readonly contextWindow: number
+}
+
 export interface FleetPanelBudgetModelRate {
   readonly provider: string
   readonly model: string
@@ -8720,6 +8820,88 @@ function formatApproximateBudgetAmount(value: number, mode: FleetPanelBudgetMode
   return value === 0 ? amount : `~${amount}`
 }
 
+export function fleetContextOccupancy(pressure: FleetContextPressure | undefined): FleetContextOccupancy | null {
+  const usedTokens = pressure?.projectedTokens ?? pressure?.pressureTokens
+  const contextWindow = pressure?.contextWindow
+  if (usedTokens === undefined || contextWindow === undefined || contextWindow <= 0) return null
+  return {
+    percent: Math.min(100, Math.max(0, Math.round(usedTokens / contextWindow * 100))),
+    usedTokens: Math.max(0, usedTokens),
+    contextWindow,
+  }
+}
+
+function ContextUsage({ useProjection }: {
+  readonly useProjection?: FleetContextProjectionHook
+}): ReactElement {
+  const pressure = useProjection?.<FleetContextPressure>('contextPressure')
+  const breakdown = useProjection?.<FleetContextBreakdown>('contextBreakdown')
+  const context = fleetContextOccupancy(pressure)
+  if (context === null) return jsx('p', {
+    className: 'dsh-fleet-budget-popover-empty',
+    role: 'status',
+    children: panelText('当前还没有可用的上下文用量。完成一次模型调用后会自动显示。', 'Context usage is not available yet. It will appear after a model call completes.'),
+  })
+
+  const rows = [
+    { key: 'system', label: panelText('系统提示词', 'System prompt'), value: breakdown?.systemTokens ?? 0 },
+    { key: 'tools', label: panelText('工具', 'Tools'), value: breakdown?.toolsTokens ?? 0 },
+    { key: 'messages', label: panelText('会话', 'Conversation'), value: breakdown?.messageTokens ?? 0 },
+  ] as const
+  const breakdownTotal = rows.reduce((total, row) => total + row.value, 0)
+  const segments = breakdown === undefined || breakdownTotal === 0
+    ? [{ key: 'total', width: context.percent }]
+    : rows.filter(row => row.value > 0).map(row => ({
+        key: row.key,
+        width: context.percent * row.value / breakdownTotal,
+      }))
+
+  return jsxs(Fragment, { children: [
+    jsxs('div', { className: 'dsh-fleet-budget-popover-header', children: [
+      jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: panelText('上下文已用', '') }),
+      jsx('span', { className: 'dsh-fleet-budget-popover-percent', children: `${context.percent}%` }),
+      jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: panelText('', 'of context used') }),
+      jsx('span', {
+        className: 'dsh-fleet-budget-popover-figures',
+        children: `~${formatBudgetCompactTokens(context.usedTokens)} / ${formatBudgetCompactTokens(context.contextWindow)}`,
+      }),
+    ] }),
+    jsx('div', {
+      className: 'dsh-fleet-budget-popover-progress',
+      'data-context': 'true',
+      role: 'progressbar',
+      'aria-label': panelText('上下文用量', 'Context usage'),
+      'aria-valuemin': 0,
+      'aria-valuemax': context.contextWindow,
+      'aria-valuenow': Math.min(context.usedTokens, context.contextWindow),
+      children: segments.map(segment => jsx('span', {
+        'data-kind': segment.key,
+        style: { width: `${segment.width}%` },
+      }, segment.key)),
+    }),
+    breakdown !== undefined && jsx('dl', {
+      className: 'dsh-fleet-budget-popover-members',
+      children: rows.map(row => jsxs('div', {
+        className: 'dsh-fleet-budget-popover-member',
+        children: [
+          jsxs('dt', { children: [
+            jsx('span', {
+              className: 'dsh-fleet-budget-popover-member-dot',
+              'data-kind': row.key,
+              'aria-hidden': 'true',
+            }),
+            jsx('span', { className: 'dsh-fleet-budget-popover-member-name', children: row.label }),
+          ] }),
+          jsx('dd', {
+            className: 'dsh-fleet-budget-popover-member-usage',
+            children: `~${formatBudgetCompactTokens(row.value)}`,
+          }),
+        ],
+      }, row.key)),
+    }),
+  ] })
+}
+
 function budgetStateText(account: FleetPanelBudgetAccount): string {
   if (account.state === 'exhausted') return panelText('已用尽', 'Exhausted')
   if (account.state === 'danger') return panelText('即将用尽', 'Nearly exhausted')
@@ -8762,10 +8944,12 @@ function budgetModelKey(provider: string, model: string): string {
   return JSON.stringify([provider, model])
 }
 
-export function FleetBudgetMeter({ teamId, budget: suppliedBudget, memberId, Tooltip }: {
+export function FleetBudgetMeter({ teamId, budget: suppliedBudget, memberId, contextUsage = false, useProjection, Tooltip }: {
   readonly teamId: string
   readonly budget?: FleetPanelTeamBudget
   readonly memberId?: string
+  readonly contextUsage?: boolean
+  readonly useProjection?: FleetContextProjectionHook
   readonly Tooltip?: ComponentType<{
     readonly label: string
     readonly side: 'top'
@@ -8776,6 +8960,7 @@ export function FleetBudgetMeter({ teamId, budget: suppliedBudget, memberId, Too
 }): ReactElement {
   installPanelStyles()
   const popover = useFleetAnchoredPopover('below-end')
+  const [popoverView, setPopoverView] = useState<'budget' | 'context'>('budget')
   const subscribe = useCallback((listener: () => void) => teamDirectorySource?.subscribe(listener) ?? EMPTY_UNSUBSCRIBE, [])
   const liveBudget = useSyncExternalStore(
     subscribe,
@@ -8790,6 +8975,10 @@ export function FleetBudgetMeter({ teamId, budget: suppliedBudget, memberId, Too
   const scopeName = member === undefined
     ? panelText('团队预算', 'Team budget')
     : panelText(`${member.name} 的预算`, `${member.name} budget`)
+  const activePopoverView = contextUsage ? popoverView : 'budget'
+  const popoverLabel = activePopoverView === 'context'
+    ? panelText('上下文用量', 'Context usage')
+    : scopeName
 
   const percent = account?.limit === undefined || account.limit === 0
     ? 0
@@ -8849,48 +9038,74 @@ export function FleetBudgetMeter({ teamId, budget: suppliedBudget, memberId, Too
       popover: 'auto',
       className: 'dsh-fleet-budget-popover',
       role: 'dialog',
-      'aria-label': scopeName,
+      'aria-label': popoverLabel,
       onClick: (event: ReactMouseEvent<HTMLElement>) => { event.stopPropagation() },
       children: [
-        jsxs('div', { className: 'dsh-fleet-budget-popover-header', children: [
-          jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: account.limit === undefined
-            ? panelText('预算未设置上限', 'No budget limit set')
-            : panelText('预算已用', '') }),
-          account.limit !== undefined && jsx('span', { className: 'dsh-fleet-budget-popover-percent', children: `${Math.round(percent)}%` }),
-          account.limit !== undefined && jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: panelText('', 'of budget used') }),
-          jsx('span', { className: 'dsh-fleet-budget-popover-figures', children: figures }),
-        ] }),
-        jsx('div', { className: 'dsh-fleet-budget-popover-progress', role: 'progressbar',
-          'aria-valuemin': 0, 'aria-valuemax': account.limit ?? undefined, 'aria-valuenow': account.limit === undefined ? undefined : Math.min(account.used, account.limit),
-          children: progressSegments.map(segment => jsx('span', {
-            title: `${segment.member.name} · ${formatBudgetPopoverAmount(segment.member.used, budget.mode)}`,
-            style: { width: `${segment.width}%`, '--budget-member-color': segment.member.color ?? '#737985' } as CSSProperties,
-          }, segment.member.memberId)),
-        }),
-        jsx('dl', { className: 'dsh-fleet-budget-popover-members', children: displayedMembers.map(candidate => jsxs('div', {
-          className: 'dsh-fleet-budget-popover-member',
+        contextUsage && jsxs('div', {
+          className: 'dsh-fleet-budget-popover-switch',
+          role: 'group',
+          'aria-label': panelText('用量视图', 'Usage view'),
           children: [
-            jsxs('dt', { children: [
-              jsx('span', { className: 'dsh-fleet-budget-popover-member-dot', style: { '--budget-member-color': candidate.color ?? '#737985' } as CSSProperties, 'aria-hidden': 'true' }),
-              jsx('span', { className: 'dsh-fleet-budget-popover-member-name', children: candidate.name }),
-              jsx('span', {
-                className: 'dsh-fleet-budget-popover-member-role',
-                children: candidate.active
-                  ? candidate.role
-                  : `${candidate.role}${candidate.role === '' ? '' : ' · '}${panelText('已移除', 'Removed')}`,
-              }),
-            ] }),
-            jsx('dd', {
-              className: 'dsh-fleet-budget-popover-member-usage',
-              children: formatApproximateBudgetAmount(candidate.used, budget.mode),
+            jsx('button', {
+              type: 'button',
+              'aria-pressed': activePopoverView === 'budget',
+              'data-active': activePopoverView === 'budget' ? 'true' : undefined,
+              onClick: () => { setPopoverView('budget') },
+              children: panelText('成本用量', 'Cost'),
+            }),
+            jsx('button', {
+              type: 'button',
+              'aria-pressed': activePopoverView === 'context',
+              'data-active': activePopoverView === 'context' ? 'true' : undefined,
+              onClick: () => { setPopoverView('context') },
+              children: panelText('上下文用量', 'Context'),
             }),
           ],
-        }, candidate.memberId)) }),
-        teamId !== FLEET_TUTORIAL_TEAM_ID && jsx('button', {
-          type: 'button', className: 'dsh-fleet-budget-popover-manage',
-          onClick: () => { popover.close(); requestFleetTeamSettings(teamId, 'budget') },
-          children: panelText('管理预算与模型计费', 'Manage budget and model pricing'),
         }),
+        activePopoverView === 'context'
+          ? jsx(ContextUsage, { useProjection })
+          : jsxs(Fragment, { children: [
+              jsxs('div', { className: 'dsh-fleet-budget-popover-header', children: [
+                jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: account.limit === undefined
+                  ? panelText('预算未设置上限', 'No budget limit set')
+                  : panelText('预算已用', '') }),
+                account.limit !== undefined && jsx('span', { className: 'dsh-fleet-budget-popover-percent', children: `${Math.round(percent)}%` }),
+                account.limit !== undefined && jsx('span', { className: 'dsh-fleet-budget-popover-headline', children: panelText('', 'of budget used') }),
+                jsx('span', { className: 'dsh-fleet-budget-popover-figures', children: figures }),
+              ] }),
+              jsx('div', { className: 'dsh-fleet-budget-popover-progress', role: 'progressbar',
+                'aria-label': panelText('成本用量', 'Cost usage'),
+                'aria-valuemin': 0, 'aria-valuemax': account.limit ?? undefined, 'aria-valuenow': account.limit === undefined ? undefined : Math.min(account.used, account.limit),
+                children: progressSegments.map(segment => jsx('span', {
+                  title: `${segment.member.name} · ${formatBudgetPopoverAmount(segment.member.used, budget.mode)}`,
+                  style: { width: `${segment.width}%`, '--budget-member-color': segment.member.color ?? '#737985' } as CSSProperties,
+                }, segment.member.memberId)),
+              }),
+              jsx('dl', { className: 'dsh-fleet-budget-popover-members', children: displayedMembers.map(candidate => jsxs('div', {
+                className: 'dsh-fleet-budget-popover-member',
+                children: [
+                  jsxs('dt', { children: [
+                    jsx('span', { className: 'dsh-fleet-budget-popover-member-dot', style: { '--budget-member-color': candidate.color ?? '#737985' } as CSSProperties, 'aria-hidden': 'true' }),
+                    jsx('span', { className: 'dsh-fleet-budget-popover-member-name', children: candidate.name }),
+                    jsx('span', {
+                      className: 'dsh-fleet-budget-popover-member-role',
+                      children: candidate.active
+                        ? candidate.role
+                        : `${candidate.role}${candidate.role === '' ? '' : ' · '}${panelText('已移除', 'Removed')}`,
+                    }),
+                  ] }),
+                  jsx('dd', {
+                    className: 'dsh-fleet-budget-popover-member-usage',
+                    children: formatApproximateBudgetAmount(candidate.used, budget.mode),
+                  }),
+                ],
+              }, candidate.memberId)) }),
+              teamId !== FLEET_TUTORIAL_TEAM_ID && jsx('button', {
+                type: 'button', className: 'dsh-fleet-budget-popover-manage',
+                onClick: () => { popover.close(); requestFleetTeamSettings(teamId, 'budget') },
+                children: panelText('管理预算与模型计费', 'Manage budget and model pricing'),
+              }),
+            ] }),
       ],
     }),
   ] })
@@ -11776,6 +11991,8 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
       usageMeter: jsx(FleetBudgetMeter, {
         teamId: owner.snapshot.teamId,
         budget: owner.snapshot.budget,
+        contextUsage: conversation.kind === 'direct' && peer !== undefined,
+        useProjection,
         ...(conversation.kind === 'direct' && peer !== undefined ? { memberId: peer.id } : {}),
       }),
       footer,

@@ -57,6 +57,7 @@ import {
   getFleetTeamDirectorySnapshot,
   parseFleetConversationCommand,
   subscribeFleetTeamDirectory,
+  type FleetContextProjectionHook,
   type FleetModelDirectory,
   type FleetModelDirectoryState,
   type FleetPanelTeamSummary,
@@ -7175,7 +7176,11 @@ export function withFleetComposerActivation(
         }),
         renderSlot: (name: string, owner: Readonly<Record<string, unknown>>, options?: Readonly<Record<string, unknown>>) =>
           name === 'conversation.input.model' ? null : renderSlot(name, owner, options),
-        usageMeter: jsx(FleetBudgetMeter, { teamId: assistantTeam.teamId }),
+        usageMeter: jsx(FleetBudgetMeter, {
+          teamId: assistantTeam.teamId,
+          contextUsage: true,
+          useProjection: props.useProjection as FleetContextProjectionHook | undefined,
+        }),
         footer: !teamArchived && assistantError === undefined ? undefined : jsx('span', {
           className: 'dsh-fleet-assistant-composer-status',
           'data-error': assistantError === undefined ? undefined : 'true',

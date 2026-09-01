@@ -9,6 +9,7 @@ import {
   fleetActivityGroups,
   fleetActivityWindow,
   fleetAssistantMailboxMentions,
+  fleetContextOccupancy,
   fleetPanelSelectedMemberId,
   fleetTimelineTicks,
   fleetPanelMemberRunControls,
@@ -178,6 +179,40 @@ describe('Fleet assistant mailbox mentions', () => {
       .toEqual(['@team-assistant'])
     expect(fleetAssistantMailboxMentions('Send this to Albany.', 'team-assistant', 'Albany')).toEqual([])
     expect(fleetAssistantMailboxMentions('@AlbanySuffix is different.', 'team-assistant', 'Albany')).toEqual([])
+  })
+})
+
+describe('Fleet private context usage', () => {
+  it('prefers projected tokens and preserves the native pressure fallback', () => {
+    expect(fleetContextOccupancy({
+      projectedTokens: 6_144,
+      pressureTokens: 4_096,
+      contextWindow: 16_384,
+    })).toEqual({
+      percent: 38,
+      usedTokens: 6_144,
+      contextWindow: 16_384,
+    })
+    expect(fleetContextOccupancy({ pressureTokens: 8_192, contextWindow: 16_384 })).toEqual({
+      percent: 50,
+      usedTokens: 8_192,
+      contextWindow: 16_384,
+    })
+  })
+
+  it('clamps invalid readings and waits for a usable provider capacity', () => {
+    expect(fleetContextOccupancy({ projectedTokens: 20_000, contextWindow: 10_000 })).toEqual({
+      percent: 100,
+      usedTokens: 20_000,
+      contextWindow: 10_000,
+    })
+    expect(fleetContextOccupancy({ projectedTokens: -10, contextWindow: 10_000 })).toEqual({
+      percent: 0,
+      usedTokens: 0,
+      contextWindow: 10_000,
+    })
+    expect(fleetContextOccupancy({ projectedTokens: 1_000 })).toBeNull()
+    expect(fleetContextOccupancy({ projectedTokens: 1_000, contextWindow: 0 })).toBeNull()
   })
 })
 

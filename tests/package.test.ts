@@ -30,7 +30,7 @@ test('passes native new-Session workspace readiness into the Fleet Hero entry', 
   expect(patch).toContain('renderSlot("conversation.hero.agentPreset", { sessionId, workspaceSelected: chipTitle !== void 0 })')
 })
 
-test('uses native assistant chat while retaining Fleet composer commands and cost usage', () => {
+test('uses native assistant chat while retaining Fleet composer commands and switchable usage', () => {
   const panel = readFileSync(resolve('packages/ui/src/team-panel.ts'), 'utf8')
   const entry = readFileSync(resolve('packages/ui/src/index.ts'), 'utf8')
 
@@ -43,4 +43,8 @@ test('uses native assistant chat while retaining Fleet composer commands and cos
   expect(entry).toContain('disabled: teamArchived')
   expect(entry).toContain('fleetPrivateConversationCommands(')
   expect(entry).toContain('usageMeter: jsx(FleetBudgetMeter')
+  expect(entry).toContain('contextUsage: true')
+  expect(panel).toContain("contextUsage: conversation.kind === 'direct' && peer !== undefined")
+  expect(panel).toContain("panelText('成本用量', 'Cost')")
+  expect(panel).toContain("panelText('上下文用量', 'Context')")
 })
