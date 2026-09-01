@@ -76,6 +76,15 @@ describe('FleetAssistantRuntime', () => {
       'read the Inbox Task instead of inferring reply state',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Inbox and Reply Tasks are communication obligations, not automatic authorization for project work',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'A peer mention or your own proposed next step is not by itself such a basis',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Do not acknowledge another acknowledgement or confirm another confirmation',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Reply to foreground native user messages directly with ordinary native assistant output',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
