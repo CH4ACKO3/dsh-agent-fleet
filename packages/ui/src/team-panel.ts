@@ -197,6 +197,16 @@ const panelStyles = `
   outline-offset: 2px;
 }
 
+.dsh-fleet-panel-member-avatar-anchor-compact,
+.dsh-fleet-panel-member-avatar-anchor-compact .dsh-fleet-panel-member-avatar-trigger {
+  width: 24px;
+  height: 24px;
+}
+
+.dsh-fleet-panel-member-avatar-anchor-compact .dsh-fleet-panel-member-avatar-trigger {
+  border-radius: 7px;
+}
+
 .dsh-fleet-panel-receipt-member-anchor {
   min-width: 0;
   flex: 1;
@@ -11052,14 +11062,17 @@ function FleetMemberListRow({ member, owner }: {
   })
 }
 
-function FleetMemberAvatarPopover({ member, showDetails, showContext }: {
+function FleetMemberAvatarPopover({ member, showDetails, showContext, size = 34 }: {
   readonly member: FleetPanelMember
   readonly showDetails?: (memberId: string) => void
   readonly showContext?: (memberId: string) => void
+  readonly size?: 24 | 34
 }): ReactElement {
   return jsx(FleetMemberPopover, {
     member,
-    className: 'dsh-fleet-panel-member-avatar-anchor',
+    className: size === 24
+      ? 'dsh-fleet-panel-member-avatar-anchor dsh-fleet-panel-member-avatar-anchor-compact'
+      : 'dsh-fleet-panel-member-avatar-anchor',
     showStatusText: member.operator !== true,
     ...(member.operator === true ? { editProfile: updateFleetOperatorProfile } : {}),
     ...(showDetails === undefined ? {} : { showDetails }),
@@ -11071,7 +11084,7 @@ function FleetMemberAvatarPopover({ member, showDetails, showContext }: {
           ? panelText('查看或编辑你的资料', 'View or edit your profile')
           : panelText(`查看 ${member.name} 的成员信息`, `View member information for ${member.name}`),
         ...interaction,
-        children: jsx(FleetChatAvatar, { member }),
+        children: jsx(FleetChatAvatar, { member, size }),
       }),
   })
 }
@@ -11935,6 +11948,7 @@ function FleetPanelChatThread({ owner, conversation, thread, members, selfId }: 
     const projectedCommentSender = comment.sender ?? members.get(comment.senderId)
     const commentSender = projectedCommentSender?.operator === true ? operator : projectedCommentSender
     if (commentSender === undefined) return []
+    const commentMember = members.get(commentSender.id)
     const commentOwner: FleetPanelMessageOwner = {
       panel: owner,
       conversation,
@@ -11946,6 +11960,16 @@ function FleetPanelChatThread({ owner, conversation, thread, members, selfId }: 
       sender: commentSender,
       sentAt: comment.sentAt,
       content: comment.content,
+      ...(commentMember === undefined ? {} : {
+        avatar: jsx(FleetMemberAvatarPopover, {
+          member: commentMember,
+          size: 24,
+          ...(commentMember.operator === true ? {} : {
+            showDetails: owner.showMemberDetails,
+            showContext: owner.showMemberContext,
+          }),
+        }),
+      }),
       ...(comment.receipt === undefined ? {} : {
         receipt: messageReadReceipt(
           owner.snapshot,

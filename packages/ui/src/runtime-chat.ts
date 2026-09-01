@@ -935,6 +935,8 @@ export interface FleetChatCommentProps {
   readonly sentAt: string
   readonly content: readonly FleetChatContentBlock[]
   readonly operatorLabel?: string
+  /** Optional integration-owned avatar treatment, such as a member profile popover. */
+  readonly avatar?: ReactNode
   readonly renderText?: (text: string) => ReactNode
   readonly renderImage?: (image: FleetChatImageBlock) => ReactNode
   readonly renderMention?: (mention: FleetChatMentionBlock) => ReactNode | undefined
@@ -1706,6 +1708,7 @@ export function FleetChatComment({
   sentAt,
   content,
   operatorLabel = fleetText(' · 外部用户', ' · External user'),
+  avatar,
   renderText,
   renderImage,
   renderMention,
@@ -1724,7 +1727,7 @@ export function FleetChatComment({
     'data-operator': sender.operator ? 'true' : undefined,
     'data-operator-label': sender.operator ? operatorLabel : undefined,
     children: [
-      jsx(FleetChatAvatar, { member: sender, size: 24, showPresence: false }),
+      avatar ?? jsx(FleetChatAvatar, { member: sender, size: 24, showPresence: false }),
       jsxs('div', {
         className: 'dsh-fleet-chat-comment-main',
         children: [
