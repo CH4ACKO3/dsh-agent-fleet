@@ -26,6 +26,8 @@ const STYLE_ID = 'dsh-agent-fleet-assistant-private-chat'
 
 const styles = `
 .dsh-fleet-assistant-private {
+  --dsh-fleet-assistant-composer-width: 760px;
+
   min-width: 0;
   min-height: 0;
   color: var(--dsw-alias-label-primary);
@@ -436,7 +438,7 @@ const styles = `
   bottom: 5px;
   left: clamp(
     12px,
-    calc(50% - var(--dsh-fleet-assistant-chat-column-width, 760px) / 2 + 12px),
+    calc(50% - var(--dsh-fleet-assistant-composer-width) / 2 + 12px),
     calc(100% - 220px)
   );
 }
@@ -912,7 +914,7 @@ function AgentFleetWorkStatus({ members }: { readonly members: readonly FleetRun
   if (groups.length === 0) return null
   const working = groups.find(group => group.id === 'working')?.members ?? []
   const summary = working.length === 0
-    ? fleetText('当前没有成员工作', 'No members are working')
+    ? fleetText('团队空闲', 'Team idle')
     : working.length === 1
       ? fleetText(`${working[0]?.name ?? ''} 正在工作`, `${working[0]?.name ?? ''} is working`)
       : fleetText(
