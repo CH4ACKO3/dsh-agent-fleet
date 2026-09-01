@@ -139,4 +139,53 @@ describe('Fleet collaboration identities', () => {
     }))
     collaboration.close()
   })
+
+  it('returns a successful terminal instruction after a formal member replies', async () => {
+    const reviewer = view('reviewer')
+    const agent = {
+      id: 'agent-reviewer', inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(),
+    }
+    const authorization = new FleetAuthorizationService()
+    authorization.installBaseline({
+      resolveSubject: (_teamId, subject) => subject.id === reviewer.id ? reviewer : undefined,
+      authorizeResource: () => true,
+    })
+    const collaboration = new FleetCollaborationService({
+      agents: { get: (id: string) => id === agent.id ? agent : undefined },
+      fs: { contains: () => true },
+      on: () => () => {},
+    } as never, authorization)
+    const team = collaboration.open({
+      id: 'team-reply-result', memberViews: [reviewer], defaultVoters: [reviewer.id],
+      projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-reply-result',
+      onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
+    })
+    team.attachMember(agent.id, reviewer)
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: unknown): Promise<unknown>
+    }> = []
+    team.installTools({
+      tools: {
+        register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} },
+        restrict: () => () => {},
+        guard: () => () => {},
+        get: () => undefined,
+      },
+    } as never, reviewer.id)
+    const reply = registered.find(candidate => candidate.name === 'fleet_reply')
+    if (reply === undefined) throw new Error('expected fleet_reply to be installed')
+    team.sendUserMessage({
+      to: '@reviewer', text: 'Please review this.', mentions: ['@reviewer'], delivery: 'quiet',
+    })
+
+    await expect(reply.execute({ content: 'Review complete.' }, { agent })).resolves.toMatchObject({
+      action: 'reply',
+      replayed: false,
+      instruction: expect.stringContaining('End this turn now'),
+      task: { stableState: { kind: 'completed' } },
+    })
+    expect(agent.cancel).not.toHaveBeenCalled()
+    collaboration.close()
+  })
 })

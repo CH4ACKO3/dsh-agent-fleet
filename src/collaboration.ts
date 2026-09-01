@@ -174,8 +174,17 @@ function installTaskMessageTools(
       }
       if (task.domain.kind !== 'reply') throw new Error(`Fleet task ${args.id} is not a Reply Task`)
       const domain = task.domain
+      const completionInstruction = tasks.interactionTask(callerId) === undefined
+        ? 'Reply delivered and Reply Task completed. End this turn now; do not send, repeat, or narrate a delivery confirmation.'
+        : 'Reply delivered and Reply Task completed. Do not repeat or narrate a delivery confirmation. Continue only if the current user Interaction still has unfinished work.'
       if (domain.completionMessageId !== undefined) {
-        return Promise.resolve(taskMessageResult({ action: 'reply', task: fleetTaskToolDetail(task), messageId: domain.completionMessageId, replayed: true }))
+        return Promise.resolve(taskMessageResult({
+          action: 'reply',
+          task: fleetTaskToolDetail(task),
+          messageId: domain.completionMessageId,
+          replayed: true,
+          instruction: completionInstruction,
+        }))
       }
       if (!tasks.ownerTasks(callerId).some(candidate => candidate.id === task.id)) {
         throw new Error(`Fleet Reply Task ${args.id} is not owned by the calling member`)
@@ -194,16 +203,8 @@ function installTaskMessageTools(
         messageId,
         replayed: existing !== undefined,
         task: fleetTaskToolDetail(tasks.recordReply(callerId, task.id, messageId)),
+        instruction: completionInstruction,
       })
-      // Formal members have completed the only visible response through the
-      // Reply Task. End before the model emits a private acknowledgement that
-      // no collaborator can see. Foreground assistants retain their turn so
-      // they can finish the persistent Interaction and user delivery.
-      if (tasks.interactionTask(callerId) === undefined) {
-        queueMicrotask(() => {
-          agent.cancel({ kind: 'hook', reason: 'Fleet Reply Task completed.' }, { keepInbox: true })
-        })
-      }
       return Promise.resolve(result)
     },
   })))
