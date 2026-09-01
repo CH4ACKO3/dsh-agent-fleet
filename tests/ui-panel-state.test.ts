@@ -10,6 +10,7 @@ import {
   fleetActivityViewPosition,
   fleetActivityWindow,
   fleetAssistantMailboxMentions,
+  fleetContextOccupancy,
   fleetPanelMentionMembers,
   fleetPanelSelectedMemberId,
   fleetTimelineTicks,
@@ -42,6 +43,7 @@ import {
 import {
   archiveFleetAssistantSession,
   archiveFleetAssistantTeam,
+  fleetAssistantSessionTitle,
   resolveFleetAssistantArchiveTarget,
 } from '../packages/ui/src/meta-assistant.js'
 
@@ -49,6 +51,20 @@ describe('Fleet conversation audience labels', () => {
   it('makes private and broadcast scope explicit', () => {
     expect(fleetConversationAudienceLabel('direct')).toBe('私聊 · 仅会话双方')
     expect(fleetConversationAudienceLabel('channel')).toBe('频道 · 全体成员可见')
+  })
+})
+
+describe('Fleet assistant Session titles', () => {
+  it('combines the normalized Team and assistant names', () => {
+    expect(fleetAssistantSessionTitle(' Small software Team ', ' Harriet '))
+      .toBe('Small software Team · Harriet')
+    expect(fleetAssistantSessionTitle('小型软件工程团队', '海伦'))
+      .toBe('小型软件工程团队 · 海伦')
+  })
+
+  it('waits until both identity parts are available', () => {
+    expect(fleetAssistantSessionTitle(undefined, 'Harriet')).toBeUndefined()
+    expect(fleetAssistantSessionTitle('Small Team', '   ')).toBeUndefined()
   })
 })
 
@@ -244,6 +260,40 @@ describe('Fleet message reply threads', () => {
   it('keeps a reply visible as a normal message when its source is outside the loaded page', () => {
     expect(groupFleetMessageThreads([message('message-5', 'older-message')]))
       .toEqual([{ message: message('message-5', 'older-message'), comments: [] }])
+  })
+})
+
+describe('Fleet private context usage', () => {
+  it('prefers projected tokens and preserves the native pressure fallback', () => {
+    expect(fleetContextOccupancy({
+      projectedTokens: 6_144,
+      pressureTokens: 4_096,
+      contextWindow: 16_384,
+    })).toEqual({
+      percent: 38,
+      usedTokens: 6_144,
+      contextWindow: 16_384,
+    })
+    expect(fleetContextOccupancy({ pressureTokens: 8_192, contextWindow: 16_384 })).toEqual({
+      percent: 50,
+      usedTokens: 8_192,
+      contextWindow: 16_384,
+    })
+  })
+
+  it('clamps invalid readings and waits for a usable provider capacity', () => {
+    expect(fleetContextOccupancy({ projectedTokens: 20_000, contextWindow: 10_000 })).toEqual({
+      percent: 100,
+      usedTokens: 20_000,
+      contextWindow: 10_000,
+    })
+    expect(fleetContextOccupancy({ projectedTokens: -10, contextWindow: 10_000 })).toEqual({
+      percent: 0,
+      usedTokens: 0,
+      contextWindow: 10_000,
+    })
+    expect(fleetContextOccupancy({ projectedTokens: 1_000 })).toBeNull()
+    expect(fleetContextOccupancy({ projectedTokens: 1_000, contextWindow: 0 })).toBeNull()
   })
 })
 

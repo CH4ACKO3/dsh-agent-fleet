@@ -58,11 +58,15 @@ import {
   getFleetTeamDirectorySnapshot,
   parseFleetConversationCommand,
   subscribeFleetTeamDirectory,
+  type FleetContextProjectionHook,
   type FleetModelDirectory,
   type FleetModelDirectoryState,
   type FleetPanelTeamSummary,
 } from './team-panel.js'
-import { useFleetMetaAssistantSession } from './meta-assistant.js'
+import {
+  useFleetAssistantSessionTitle,
+  useFleetMetaAssistantSession,
+} from './meta-assistant.js'
 import { AgentFleetWorkStatus } from './assistant-private-chat.js'
 import { uploadFleetSetupFile } from './web-client.js'
 
@@ -6940,6 +6944,11 @@ export function withFleetComposerActivation(
     const meta = activation?.request.mode === 'meta'
     const teamAssistant = fleetAssistant && assistantTeam !== undefined
     const teamArchived = teamAssistant && assistantTeam.status === 'closed'
+    useFleetAssistantSessionTitle(
+      teamAssistant ? sessionId : undefined,
+      assistantTeam?.teamName,
+      assistantName,
+    )
     const inputActions = props.inputActions as NativeInputActions | undefined
     const keyboard = props.keyboard as NativeComposerKeyboard | undefined
     const [assistantError, setAssistantError] = useState<string>()
@@ -7206,7 +7215,11 @@ export function withFleetComposerActivation(
         }),
         renderSlot: (name: string, owner: Readonly<Record<string, unknown>>, options?: Readonly<Record<string, unknown>>) =>
           name === 'conversation.input.model' ? null : renderSlot(name, owner, options),
-        usageMeter: jsx(FleetBudgetMeter, { teamId: assistantTeam.teamId }),
+        usageMeter: jsx(FleetBudgetMeter, {
+          teamId: assistantTeam.teamId,
+          contextUsage: true,
+          useProjection: props.useProjection as FleetContextProjectionHook | undefined,
+        }),
         footer: !teamArchived && assistantError === undefined ? undefined : jsx('span', {
           className: 'dsh-fleet-assistant-composer-status',
           'data-error': assistantError === undefined ? undefined : 'true',
