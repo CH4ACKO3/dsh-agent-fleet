@@ -498,13 +498,17 @@ function setup(root: string, options?: {
 describe('FleetRunService', () => {
   it('injects turn-start and tool-result reminders with independent slot cooldowns', async () => {
     const { root, configPath } = fixture()
-    const reminder = { default: 'Keep this slot-specific.' }
+    const reminder = {
+      default: 'You are {name}; use {language}.',
+      locales: { 'zh-CN': '你是 {name}；使用 {language}。' },
+    }
     const turnReminders: FleetTurnReminderLists = {
       'turn-start': [{ id: 'shared-id', text: reminder, cooldownTurns: 5 }],
       'turn-end': [],
       'tool-result': [{ id: 'shared-id', text: reminder, cooldownTurns: 5, tools: ['bash'] }],
     }
     const { service, runtime, launcher, disconnect } = setup(root, { turnReminders })
+    expect(service.setUserLocale('zh-Hans')).toBe('zh-CN')
     const run = await service.create(launcher as unknown as Agent, {
       configPath,
       projectRoot: root,
@@ -527,7 +531,7 @@ describe('FleetRunService', () => {
     const atStart = preStep([input])
     if (atStart.kind === 'reject') throw new Error('unexpected rejected pre-step')
     expect(atStart.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: Keep this slot-specific.' }),
+      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: 你是 Lead；使用 中文。' }),
     ])
     expect(preStep([input])).toMatchObject({ messages: [input] })
 
@@ -547,7 +551,7 @@ describe('FleetRunService', () => {
     const afterTool = preStep([])
     if (afterTool.kind === 'reject') throw new Error('unexpected rejected pre-step')
     expect(afterTool.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: Keep this slot-specific.' }),
+      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: 你是 Lead；使用 中文。' }),
     ])
     expect(preStep([])).toMatchObject({ messages: [] })
     disconnect()
@@ -3818,7 +3822,7 @@ describe('FleetRunService', () => {
     expect(lead.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining('ordinary model output from the previous turn is visible only in this private Session'),
+        text: expect.stringContaining('System reminder, no reply:'),
       }),
     ])
     expect(coordinationMessages()).toBe(initialCoordinationMessages)
@@ -3838,7 +3842,7 @@ describe('FleetRunService', () => {
     expect(lead.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining('Direct output remains private to this Session'),
+        text: expect.stringContaining('System reminder, no reply:'),
       }),
     ])
 
@@ -3893,7 +3897,7 @@ describe('FleetRunService', () => {
     expect(lead.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining('ordinary model output from the previous turn is visible only in this private Session'),
+        text: expect.stringContaining('System reminder, no reply:'),
       }),
     ])
     emitSilentTurn(9, 34_000, 'Below the doubled interval.')
@@ -3970,10 +3974,9 @@ describe('FleetRunService', () => {
     expect(launcher.messages.at(-1)?.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining('last non-empty native output is delivered to the user automatically'),
+        text: expect.stringContaining('The last native output will reach the user, not the Team'),
       }),
     ])
-    expect(JSON.stringify(launcher.messages.at(-1)?.content)).toContain('Team members do not see it')
     service.recordMemberSessionEvent(launcher.id, {
       type: 'turn/end', seq: 23, time: Date.now(), data: { turn: 2, reason: { kind: 'completed' } },
     } as unknown as SessionEvent)

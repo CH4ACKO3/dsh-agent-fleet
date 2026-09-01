@@ -2239,6 +2239,7 @@ export class FleetRunService {
   private readonly authorization: FleetAuthorizationService | undefined
   private readonly configuration: FleetConfigurationRegistry
   private readonly turnReminders: FleetTurnReminderLists
+  private userLocale: 'zh-CN' | 'en' | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -2292,6 +2293,11 @@ export class FleetRunService {
 
   setResidentAssistantController(controller: FleetResidentAssistantController | undefined): void {
     this.residentAssistants = controller
+  }
+
+  setUserLocale(locale: string): 'zh-CN' | 'en' {
+    this.userLocale = locale.trim().toLocaleLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
+    return this.userLocale
   }
 
   /** Complete assistant tool binding once the native Agent scope is composed. */
@@ -5761,7 +5767,10 @@ export class FleetRunService {
     const member = runtime.memberNamesById.get(sessionId)
     const view = this.memberViewForAgent(teamId, sessionId)
     if (member === undefined || view === undefined) return undefined
-    const locales = inferFleetReminderLocales(text)
+    const inferredLocales = inferFleetReminderLocales(text)
+    const locales = this.userLocale === undefined
+      ? inferredLocales
+      : [this.userLocale, ...inferredLocales.filter(locale => locale !== this.userLocale)]
     const history = this.reminderHistory(sessionId, slot)
     const selection = selectFleetTurnReminder(rules, {
       slot,
@@ -5779,7 +5788,14 @@ export class FleetRunService {
     }, history)
     if (selection === undefined) return undefined
     history.set(selection.rule.id, turn)
-    return fleetTurnReminderText(selection.rule, locales)
+    const selectedLocale = locales[0] ?? 'en'
+    const language = selectedLocale.toLocaleLowerCase().startsWith('zh') ? '中文' : 'English'
+    return fleetTurnReminderText(selection.rule, locales, {
+      name: view.name,
+      role: view.role,
+      responsibility: view.responsibility ?? view.role,
+      language,
+    })
   }
 
   private recentTurnReminderTools(agent: Agent, turn: number): string[] {

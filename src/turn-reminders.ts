@@ -45,35 +45,146 @@ export interface FleetTurnReminderSelection {
   readonly relevant: boolean
 }
 
+export interface FleetReminderVariables {
+  readonly name?: string
+  readonly role?: string
+  readonly responsibility?: string
+  readonly language?: string
+}
+
 const localized = (english: string, chinese: string): FleetLocalizedReminderText => ({
   default: english,
   locales: { 'zh-CN': chinese, zh: chinese },
 })
 
-/**
- * Existing output-visibility reminders live in the turn-end slot. Turn-start
- * and tool-result copy are intentionally left empty until their catalog is reviewed.
- */
 export const DEFAULT_FLEET_TURN_REMINDERS: FleetTurnReminderLists = {
-  'turn-start': [],
-  'tool-result': [],
-  'turn-end': [
+  'turn-start': [
     {
-      id: 'visibility-member-detailed',
-      tags: ['formal-member', 'detailed'],
-      cooldownTurns: 0,
+      id: 'identity-formal', tags: ['formal-member'], cooldownTurns: 10,
       text: localized(
-        [
-          'Your ordinary model output from the previous turn is visible only in this private Session; other Team members do not automatically see it.',
-          'If it contains a result, decision, question, or handoff another member needs, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest audience and do not resend user-only or already-shared text.',
-          'If nothing needs sharing, end without commentary.',
-        ].join(' '),
-        '你上一轮的普通模型输出仅在当前私有 Session 中可见，其他团队成员不会自动看到。若其中包含他人需要的结果、决策、问题或交接，只用 fleet_send、fleet_reply 或对应 Fleet Task 发送相关内容，并选择最小必要受众；不要重复发送仅面向用户或已经共享的内容。若无需共享，直接结束即可。',
+        'You are {name}, serving as {role}, responsible for {responsibility}. Advance work in your scope first and share only necessary information with the smallest audience.',
+        '你是 {name}，担任 {role}，职责是 {responsibility}。优先推进职责内工作，只向最小必要受众共享协作所需信息。',
       ),
     },
     {
-      id: 'visibility-member-brief',
-      tags: ['formal-member', 'brief'],
+      id: 'identity-assistant', tags: ['foreground-assistant'], cooldownTurns: 10,
+      text: localized(
+        'You are {name}, serving as {role}, responsible for {responsibility}. As Team assistant, synthesize conclusions for the user, delegate execution, and omit irrelevant internal process.',
+        '你是 {name}，担任 {role}，职责是 {responsibility}。作为团队助理，面向用户收敛结论、交派执行，并省略无关内部过程。',
+      ),
+    },
+    {
+      id: 'user-locale', cooldownTurns: 8,
+      text: localized(
+        "The user's selected language is {language}; use {language} for work and collaboration unless the content requires another language.",
+        '用户选择的语言是 {language}；除非内容本身要求其他语言，工作和协作也应使用 {language}。',
+      ),
+    },
+    {
+      id: 'audience-scope', cooldownTurns: 5,
+      tools: ['fleet_send', 'fleet_reply'], keywords: ['channel', 'private', '频道', '私聊'],
+      text: localized(
+        'Use private messages for one or a few members; post to a Channel only when its whole audience needs the content.',
+        '只需一人或少数成员处理时使用私聊；仅当整个频道都需要时才发到频道。',
+      ),
+    },
+    {
+      id: 'explicit-response', cooldownTurns: 4,
+      taskKinds: ['reply', 'inbox'], keywords: ['reply', 'respond', '回复', '答复'],
+      text: localized(
+        'A private message does not require a reply; mention the recipient with @ when an explicit response is required.',
+        '私聊本身不要求答复；需要明确回复时，请在私聊中 @ 对方。',
+      ),
+    },
+    {
+      id: 'mention-meaning', cooldownTurns: 5,
+      keywords: ['@', 'mention', '提及'],
+      text: localized(
+        '@ means that member must handle or answer the message; do not use it as a casual salutation.',
+        '@ 表示要求该成员处理或答复，不要把它当作普通称呼。',
+      ),
+    },
+    {
+      id: 'work-intent', cooldownTurns: 6,
+      keywords: ['channel', 'task', 'goal', '频道', '任务'],
+      text: localized(
+        'A Channel message is not automatically a new Task; create or claim work only when it carries clear work intent.',
+        '频道消息不天然等于新任务；只有存在明确工作意图时才创建或认领工作。',
+      ),
+    },
+    {
+      id: 'owned-task', cooldownTurns: 3,
+      taskKinds: ['reply', 'vote', 'composite', 'inbox', 'goal', 'interaction'],
+      text: localized(
+        'Advance or update your existing Fleet Task before creating another Task for the same work.',
+        '若已有你负责的 Fleet Task，先推进或更新它，不要为相同工作另建任务。',
+      ),
+    },
+  ],
+  'tool-result': [
+    {
+      id: 'use-result', cooldownTurns: 4,
+      text: localized(
+        'Use the tool result directly; do not report that it was read, received, or successful.',
+        '直接使用工具结果，不要额外报告“已读取”“已收到”或“调用成功”。',
+      ),
+    },
+    {
+      id: 'retry-with-change', cooldownTurns: 2,
+      keywords: ['error', 'failed', 'unavailable', '错误', '失败', '不可用'],
+      text: localized(
+        'After a tool error, change the parameters or strategy before retrying; do not repeat an unchanged call.',
+        '工具失败后先调整参数或策略；不要原样重复调用。',
+      ),
+    },
+    {
+      id: 'aborted-result', cooldownTurns: 2,
+      keywords: ['aborted', 'cancelled', '中止', '取消'],
+      text: localized(
+        'An aborted tool call may come from turn end, steering, or cancellation; confirm the current state before treating it as work failure.',
+        '工具调用中止可能来自 turn 结束、转向或取消；先确认当前状态，不要直接视为业务失败。',
+      ),
+    },
+    {
+      id: 'inbox-read', cooldownTurns: 4, tools: ['fleet_inbox'],
+      text: localized(
+        'Reading inbox only updates your context; do not send a read receipt unless the message requires a reply.',
+        '读取 inbox 只更新你的上下文；除非消息要求答复，否则不要发送阅读回执。',
+      ),
+    },
+    {
+      id: 'send-complete', cooldownTurns: 4, tools: ['fleet_send'],
+      text: localized(
+        'A successful fleet_send already delivered the message; do not send a receipt or duplicate its text.',
+        'fleet_send 成功即表示消息已送达；不要再发送回执或重复原文。',
+      ),
+    },
+    {
+      id: 'reply-once', cooldownTurns: 4, tools: ['fleet_reply'],
+      text: localized(
+        'fleet_reply is the actual answer; send it once and do not duplicate it with fleet_send or native output.',
+        'fleet_reply 就是实际答复；只发送一次，不要再用 fleet_send 或原生输出重复。',
+      ),
+    },
+    {
+      id: 'task-result', cooldownTurns: 3,
+      tools: ['fleet_goal', 'fleet_reconcile', 'fleet_vote', 'fleet_task'],
+      text: localized(
+        'Record completed work in its Fleet Task; do not leave the result only in private model output.',
+        '完成工作后把结果写入对应 Fleet Task，不要只留在私有模型输出中。',
+      ),
+    },
+    {
+      id: 'result-audience', cooldownTurns: 5,
+      text: localized(
+        'Share a tool result only when someone needs it to continue, and use the smallest necessary audience.',
+        '只有他人继续工作确实需要时才共享工具结果，并选择最小必要受众。',
+      ),
+    },
+  ],
+  'turn-end': [
+    {
+      id: 'visibility-member', tags: ['formal-member'],
       cooldownTurns: 0,
       text: localized(
         'Direct output remains private to this Session. Share only newly relevant content with the smallest necessary audience; otherwise end silently.',
@@ -81,17 +192,7 @@ export const DEFAULT_FLEET_TURN_REMINDERS: FleetTurnReminderLists = {
       ),
     },
     {
-      id: 'visibility-assistant-user-detailed',
-      tags: ['foreground-assistant', 'user-facing', 'detailed'],
-      cooldownTurns: 0,
-      text: localized(
-        'This is a user-facing turn: its last non-empty native output is delivered to the user automatically at normal turn end, but Team members do not see it. Use fleet_user_task update only for an intentional mid-turn update; do not repeat the automatic final delivery. Share only newly relevant Team content with the smallest necessary audience.',
-        '这是面向用户的 turn：正常结束时，最后一条非空原生输出会自动发送给用户，但团队成员看不到。仅在有意发送中途进展时使用 fleet_user_task update，不要重复自动发送的最终回复；团队内容只发送给最小必要受众。',
-      ),
-    },
-    {
-      id: 'visibility-assistant-user-brief',
-      tags: ['foreground-assistant', 'user-facing', 'brief'],
+      id: 'visibility-assistant-user', tags: ['foreground-assistant', 'user-facing'],
       cooldownTurns: 0,
       text: localized(
         'The last native output will reach the user, not the Team. Do not duplicate it; share only newly relevant Team content with the smallest audience.',
@@ -99,21 +200,33 @@ export const DEFAULT_FLEET_TURN_REMINDERS: FleetTurnReminderLists = {
       ),
     },
     {
-      id: 'visibility-assistant-background-detailed',
-      tags: ['foreground-assistant', 'background', 'detailed'],
-      cooldownTurns: 0,
-      text: localized(
-        'This is a background turn: ordinary native output remains only in the Session trace and reaches neither the user nor Team members. Send only an intentional user update or newly relevant Team content with the smallest necessary audience; otherwise end silently.',
-        '这是后台 turn：普通原生输出只保留在 Session trace 中，用户和团队成员都不会收到。只发送有意的用户进展或新的相关团队内容，并选择最小必要受众；否则直接结束。',
-      ),
-    },
-    {
-      id: 'visibility-assistant-background-brief',
-      tags: ['foreground-assistant', 'background', 'brief'],
+      id: 'visibility-assistant-background', tags: ['foreground-assistant', 'background'],
       cooldownTurns: 0,
       text: localized(
         'Background native output reaches neither user nor Team. Send only an intentional user update or newly relevant Team content; otherwise end silently.',
         '后台原生输出不会发送给用户或团队。只发送有意的用户进展或新的相关团队内容；否则直接结束。',
+      ),
+    },
+    {
+      id: 'task-continuity', tags: ['formal-member'], cooldownTurns: 1,
+      taskKinds: ['reply', 'vote', 'composite', 'inbox', 'goal', 'interaction'],
+      text: localized(
+        'Before ending, settle or persist your Fleet Task state; do not leave progress only in private output.',
+        '结束前完成或持久化 Fleet Task 状态，不要只把进展留在私有输出中。',
+      ),
+    },
+    {
+      id: 'required-reply', tags: ['formal-member'], cooldownTurns: 1, taskKinds: ['reply'],
+      text: localized(
+        'If this turn requires a reply, answer once with fleet_reply and do not duplicate it elsewhere.',
+        '若本轮要求答复，请只用 fleet_reply 回复一次，不要在其他位置重复。',
+      ),
+    },
+    {
+      id: 'unshared-result', tags: ['formal-member'], cooldownTurns: 2,
+      text: localized(
+        'Share a new result only if another member needs it to continue; otherwise end silently.',
+        '只有其他成员继续工作需要时才共享新结果；否则直接结束。',
       ),
     },
   ],
@@ -243,6 +356,20 @@ export function selectFleetTurnReminder(
   return selected === undefined ? undefined : { rule: selected.rule, relevant: selected.relevant }
 }
 
-export function fleetTurnReminderText(rule: FleetTurnReminderRule, locales: readonly string[]): string {
-  return `System reminder, no reply: ${resolveFleetReminderText(rule.text, locales)}`
+export function renderFleetReminderText(text: string, variables: FleetReminderVariables): string {
+  const values: Readonly<Record<string, string>> = {
+    name: variables.name?.trim() ?? '',
+    role: variables.role?.trim() ?? '',
+    responsibility: variables.responsibility?.trim() ?? '',
+    language: variables.language?.trim() ?? '',
+  }
+  return text.replace(/\{(name|role|responsibility|language)\}/g, (_match, key: string) => values[key] ?? '')
+}
+
+export function fleetTurnReminderText(
+  rule: FleetTurnReminderRule,
+  locales: readonly string[],
+  variables: FleetReminderVariables = {},
+): string {
+  return `System reminder, no reply: ${renderFleetReminderText(resolveFleetReminderText(rule.text, locales), variables)}`
 }

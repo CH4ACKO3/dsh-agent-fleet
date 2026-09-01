@@ -14,6 +14,7 @@ describe('FleetWebRemote', () => {
   it('delegates directory, incremental projections, and resource previews to FleetRunService', async () => {
     const ctx = new Context()
     const runs = {
+      setUserLocale: vi.fn(() => 'zh-CN' as const),
       list: vi.fn(() => [{ id: 'team-one' }]),
       readWebTeamProjection: vi.fn(() => ({ run: { id: 'team-one' }, memberViews: [], events: [], hasMore: false })),
       readMemberProjection: vi.fn(() => ({ run: { id: 'team-one' }, view: { id: 'lead' }, events: [], hasMore: false })),
@@ -31,6 +32,8 @@ describe('FleetWebRemote', () => {
     const remote = new FleetWebRemote(ctx, runs, setups)
     const signal = new AbortController().signal
 
+    expect(remote.locale({ locale: 'zh-CN' }, signal)).toEqual({ locale: 'zh-CN' })
+    expect(runs.setUserLocale).toHaveBeenCalledWith('zh-CN')
     expect(remote.list(signal)).toEqual([{ id: 'team-one' }])
     expect(remote.project({ teamId: 'team-one', afterSequence: 4, limit: 20 }, signal))
       .toMatchObject({ run: { id: 'team-one' }, events: [] })
@@ -59,7 +62,7 @@ describe('FleetWebRemote', () => {
     expect(runs.readResourcePreview).toHaveBeenNthCalledWith(1, 'team-one', 'plan', signal, undefined)
     expect(runs.readResourcePreview).toHaveBeenNthCalledWith(2, 'team-one', 'plan', signal, 'rev-one')
     expect(FLEET_WEB_INVOCATIONS.map(invocation => invocation.method))
-      .toEqual(['list', 'project', 'send', 'member', 'control', 'upload', 'removeResource', 'uploadSetup', 'archive'])
+      .toEqual(['locale', 'list', 'project', 'send', 'member', 'control', 'upload', 'removeResource', 'uploadSetup', 'archive'])
     expect(FLEET_WEB_INVOCATIONS.every(invocation =>
       invocation.result.mode === 'strict'
       && invocation.parameters.every(parameter => parameter.codec.mode === 'strict'),

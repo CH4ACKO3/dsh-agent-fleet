@@ -73,6 +73,10 @@ export function isChineseLocale(): boolean {
   return resolveChineseLocale(documentLanguage, navigatorLanguage)
 }
 
+export function selectedFleetLocale(): 'zh-CN' | 'en' {
+  return isChineseLocale() ? 'zh-CN' : 'en'
+}
+
 export function fleetText(chinese: string, english: string): string {
   return isChineseLocale() ? chinese : english
 }

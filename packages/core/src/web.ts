@@ -21,6 +21,7 @@ export interface FleetWebUploadedResource {
 }
 
 export interface FleetWebClient {
+  locale?(input: { readonly locale: string }, signal?: AbortSignal): Promise<RemoteResult<unknown>>
   list(signal?: AbortSignal): Promise<RemoteResult<unknown>>
   project(input: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>>
   send(input: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>>
@@ -70,6 +71,7 @@ function invocation(method: string, input = false): InvocationDescriptor {
 }
 
 export const FLEET_WEB_INVOCATIONS = [
+  invocation('locale', true),
   invocation('list'),
   invocation('project', true),
   invocation('send', true),

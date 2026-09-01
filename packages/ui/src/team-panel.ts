@@ -58,6 +58,7 @@ import {
   fleetText,
   fleetLocaleDictionaries,
   isChineseLocale,
+  selectedFleetLocale,
 } from './locale.js'
 import { createFleetWebPanelSource } from './fleet-web-source.js'
 import { configureFleetWebClient } from './web-client.js'
@@ -16560,6 +16561,16 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
   const disposeLocale = ctx.locale.register(FLEET_LOCALE_NAMESPACE, fleetLocaleDictionaries)
   configureFleetMetaAssistantLocale(ctx.locale)
   configureFleetWebClient(fleetWeb)
+  let reportedLocale: string | undefined
+  const reportLocale = (): void => {
+    const locale = selectedFleetLocale()
+    if (locale === reportedLocale) return
+    reportedLocale = locale
+    const request = fleetWeb.locale?.({ locale })
+    void request?.catch(() => undefined)
+  }
+  reportLocale()
+  const disposeLocaleReport = ctx.locale.subscribe(reportLocale)
   const injectedSource = ctx.get?.(FLEET_PANEL_SOURCE_SERVICE) as FleetPanelSource | undefined
   const liveSource = injectedSource ?? createFleetWebPanelSource(() => Promise.resolve(fleetWeb))
   const source = createFleetTutorialPanelSource(liveSource)
@@ -16663,6 +16674,7 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
     configureFleetActivationWorkspaces(undefined)
     configureFleetMetaAssistantTeams(undefined)
     configureFleetMetaAssistantLocale(undefined)
+    disposeLocaleReport()
     disposeLocale()
     disposeConfigurationModules?.()
     if (fleetModelDirectoryResolver === modelDirectoryResolver) fleetModelDirectoryResolver = undefined

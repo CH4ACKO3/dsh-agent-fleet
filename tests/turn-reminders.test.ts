@@ -5,6 +5,7 @@ import {
   fleetTurnReminderText,
   inferFleetReminderLocales,
   resolveFleetReminderText,
+  renderFleetReminderText,
   selectFleetTurnReminder,
   type FleetTurnReminderContext,
   type FleetTurnReminderRule,
@@ -33,8 +34,8 @@ const context = (overrides: Partial<FleetTurnReminderContext> = {}): FleetTurnRe
 
 describe('Fleet turn reminders', () => {
   it('keeps independent catalogs for all three slots', () => {
-    expect(DEFAULT_FLEET_TURN_REMINDERS['turn-start']).toEqual([])
-    expect(DEFAULT_FLEET_TURN_REMINDERS['tool-result']).toEqual([])
+    expect(DEFAULT_FLEET_TURN_REMINDERS['turn-start'].length).toBeGreaterThan(0)
+    expect(DEFAULT_FLEET_TURN_REMINDERS['tool-result'].length).toBeGreaterThan(0)
     expect(DEFAULT_FLEET_TURN_REMINDERS['turn-end'].length).toBeGreaterThan(0)
   })
 
@@ -111,5 +112,12 @@ describe('Fleet turn reminders', () => {
   it('uses the localized short non-conversational wrapper', () => {
     expect(fleetTurnReminderText({ id: 'rule', text: copy('Use the narrow channel.', '使用最小范围。') }, ['zh-CN']))
       .toBe('System reminder, no reply: 使用最小范围。')
+  })
+
+  it('renders only the supported reminder variables', () => {
+    expect(renderFleetReminderText(
+      '{name}/{role}/{responsibility}/{language}/{unknown}',
+      { name: 'Alex', role: 'Engineer', responsibility: 'Test', language: 'English' },
+    )).toBe('Alex/Engineer/Test/English/{unknown}')
   })
 })
