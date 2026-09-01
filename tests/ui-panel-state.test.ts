@@ -7,6 +7,7 @@ import {
   decorateFleetMetaWelcomeSnapshot,
   expandFleetTargetFold,
   fleetActivityGroups,
+  fleetActivityViewPosition,
   fleetActivityWindow,
   fleetAssistantMailboxMentions,
   fleetPanelSelectedMemberId,
@@ -210,6 +211,20 @@ describe('Fleet activity grouping', () => {
 
     expect(fleetActivityGroups(activity, true)).toHaveLength(1)
     expect(fleetActivityGroups(activity, false).map(group => group.items.map(item => item.id))).toEqual([['1'], ['2']])
+  })
+
+  it('re-anchors a retained timeline to the nearest event in a newly selected view', () => {
+    const groups = fleetActivityGroups([
+      { id: '1', kind: 'message', type: 'coordination.message', text: 'earlier', createdAt: '2026-08-26T04:00:00.000Z' },
+      { id: '2', kind: 'message', type: 'coordination.message', text: 'later', createdAt: '2026-08-26T08:00:00.000Z' },
+    ], false)
+
+    expect(fleetActivityViewPosition(groups, Date.parse('2026-08-27T12:00:00.000Z'))).toEqual({
+      key: 'item:2',
+      timestamp: Date.parse('2026-08-26T08:00:00.000Z'),
+      window: { start: 0, end: 2 },
+    })
+    expect(fleetActivityViewPosition([], Date.now())).toBeUndefined()
   })
 
   it('keeps only a bounded render window around the current activity', () => {

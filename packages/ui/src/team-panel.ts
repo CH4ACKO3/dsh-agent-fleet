@@ -15410,12 +15410,14 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
     : owner.snapshot.activity.filter(item => item.kind === owner.activeItem)
   const groups = fleetActivityGroups(activity, owner.activeItem === 'all')
   const groupKeys = groups.map(group => group.key).join('\u0000')
+  const activityViewKey = `${owner.snapshot.teamId}\u0000${owner.activeItem}`
   const activityScrollRef = useRef<HTMLDivElement>(null)
   const activityNodes = useRef(new Map<string, HTMLElement>())
   const pendingPosition = useRef<FleetActivityPendingPosition | undefined>(groups.at(-1) === undefined
     ? undefined
     : { kind: 'jump', key: groups.at(-1)!.key, behavior: 'auto' })
   const previousLastTimestamp = useRef(fleetActivityGroupEnd(groups.at(-1)))
+  const previousActivityView = useRef(activityViewKey)
   const timelineDrivingActivity = useRef(false)
   const timelineReleaseFrame = useRef<number>()
   const timelineReleaseTimer = useRef<number>()
@@ -15438,14 +15440,27 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
   const firstTimestamp = fleetActivityGroupStart(groups[0])
   const lastTimestamp = fleetActivityGroupEnd(groups.at(-1))
 
-  useEffect(() => {
-    if (groups.length === 0) {
-      setVisibleWindow({ start: 0, end: 0 })
-      return
-    }
+  useLayoutEffect(() => {
+    const viewChanged = previousActivityView.current !== activityViewKey
+    previousActivityView.current = activityViewKey
     const previousLast = previousLastTimestamp.current
     const latestTimestamp = fleetActivityGroupEnd(groups.at(-1))
     previousLastTimestamp.current = latestTimestamp
+    if (groups.length === 0) {
+      pendingPosition.current = undefined
+      timelineDrivingActivity.current = false
+      setVisibleWindow({ start: 0, end: 0 })
+      return
+    }
+    if (viewChanged) {
+      const position = fleetActivityViewPosition(groups, currentTime)
+      if (position === undefined) return
+      timelineDrivingActivity.current = true
+      pendingPosition.current = { kind: 'jump', key: position.key, behavior: 'auto' }
+      setCurrentTime(position.timestamp)
+      setVisibleWindow(position.window)
+      return
+    }
     if (previousLast !== undefined && currentTime !== previousLast) return
     const latestIndex = groups.length - 1
     const latest = groups[latestIndex]
@@ -15454,7 +15469,7 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
     pendingPosition.current = { kind: 'jump', key: latest.key, behavior: 'auto' }
     setCurrentTime(latestTimestamp)
     setVisibleWindow(fleetActivityWindow(groups.length, latestIndex))
-  }, [groupKeys])
+  }, [activityViewKey, groupKeys])
 
   useEffect(() => {
     const visibleKeys = new Set(visibleGroups.map(group => group.key))
@@ -15462,7 +15477,7 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
       const retained = new Set([...current].filter(key => visibleKeys.has(key)))
       return retained.size === current.size ? current : retained
     })
-  }, [visibleWindow.start, visibleWindow.end])
+  }, [groupKeys, visibleWindow.start, visibleWindow.end])
 
   useLayoutEffect(() => {
     const scroller = activityScrollRef.current
@@ -15516,7 +15531,7 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
       + node.getBoundingClientRect().height / 2 - scroller.clientHeight / 2
     scroller.scrollTo({ top, behavior: pending.behavior })
     if (timelineDrivingActivity.current) releaseTimelineDriver()
-  }, [visibleWindow.start, visibleWindow.end])
+  }, [activityViewKey, groupKeys, visibleWindow.start, visibleWindow.end])
 
   const setWindowAtEdge = (direction: 'previous' | 'next'): void => {
     const next = shiftFleetActivityWindow(visibleWindow, direction, groups.length)
@@ -15796,10 +15811,29 @@ function ActivityMain(owner: FleetPanelPaneOwner): ReactElement {
   })
 }
 
-interface FleetActivityGroup {
+export interface FleetActivityGroup {
   readonly key: string
   readonly type: string
   readonly items: readonly [FleetPanelActivity, ...FleetPanelActivity[]]
+}
+
+export interface FleetActivityViewPosition {
+  readonly key: string
+  readonly timestamp: number
+  readonly window: FleetActivityWindow
+}
+
+/** Re-anchor a retained activity pane to the nearest event when its Team or filter view changes. */
+export function fleetActivityViewPosition(
+  groups: readonly FleetActivityGroup[],
+  currentTime: number,
+): FleetActivityViewPosition | undefined {
+  if (groups.length === 0) return undefined
+  const index = nearestFleetActivityGroupIndex(groups, currentTime)
+  const group = groups[index]
+  const timestamp = fleetActivityGroupCenter(group)
+  if (group === undefined || timestamp === undefined) return undefined
+  return { key: group.key, timestamp, window: fleetActivityWindow(groups.length, index) }
 }
 
 export function groupFleetActivity(activity: readonly FleetPanelActivity[]): readonly FleetActivityGroup[] {
