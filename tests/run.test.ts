@@ -1393,6 +1393,69 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('does not publish native waiting output unless the assistant explicitly sends an update', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 1 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 2,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-waiting', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Delegate this check and wait for it.' }],
+      },
+    } as unknown as SessionEvent)
+    service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'Waiting for delegated evidence.',
+      goal: { title: 'Delegated evidence', description: 'Produce evidence.', owners: ['lead'] },
+      checkAfterSeconds: 300,
+    })
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 3,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: {
+          id: 'foreground-assistant-waiting', role: 'assistant',
+          content: [{ type: 'text', text: 'The delegated check is still running.' }],
+        },
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 4,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent)
+
+    const interaction = service.taskBoard(run.id).interactionTask(assistantId)
+    expect(interaction).toMatchObject({
+      stableState: { kind: 'dormant' },
+      domain: { kind: 'interaction', inputRevision: 1, settledRevision: 0 },
+    })
+    expect(interaction?.entries).not.toContainEqual(expect.objectContaining({
+      interactionDelivery: 'update',
+      text: 'The delegated check is still running.',
+    }))
+    disconnect()
+  })
+
   it('accepts a foreground report when linked Tasks are terminal before work status catches up', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
@@ -1490,6 +1553,85 @@ describe('FleetRunService', () => {
       .some(task => task.title === 'Unrelated long work')).toBe(true)
     expect(launcher.messages.flatMap(message => message.content)
       .some(block => block.type === 'text' && block.text.includes('Persistent completion Delivery'))).toBe(true)
+    disconnect()
+  })
+
+  it('wakes a dormant assistant after every formal member stays idle through the quiescence grace period', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (assistantId === undefined || lead === undefined) throw new Error('expected assistant and lead')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-user-quiescence', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Delegate this work and recover if the Team stalls.' }],
+      },
+    } as unknown as SessionEvent)
+    const deferred = service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'Waiting for delegated work.',
+      goal: { title: 'Potentially stalled work', description: 'Produce evidence.', owners: ['lead'] },
+      checkAfterSeconds: 300,
+    })
+    expect(deferred.task.stableState.kind).toBe('dormant')
+
+    await vi.advanceTimersByTimeAsync(2_999)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('dormant')
+
+    lead.status = 'running'
+    service.agentStatusChanged(lead as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(1)
+    lead.completeTurn()
+    service.agentStatusChanged(lead as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(2_999)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('dormant')
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'running' },
+      domain: { pendingDelivery: { cause: 'team_quiescent' } },
+    })
+    const deliveryCount = launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('Persistent completion Delivery'))).length
+    const firstSignalCount = service.taskBoard(run.id).interactionTask(assistantId)?.signals.length ?? 0
+    service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'The assistant chose to keep waiting without any new Team activity.',
+      checkAfterSeconds: 300,
+    })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('dormant')
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.signals).toHaveLength(firstSignalCount)
+    expect(launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('Persistent completion Delivery')))).toHaveLength(deliveryCount)
+
+    lead.status = 'running'
+    service.agentStatusChanged(lead as unknown as Agent)
+    lead.completeTurn()
+    service.agentStatusChanged(lead as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)).toMatchObject({
+      stableState: { kind: 'running' },
+      domain: { pendingDelivery: { cause: 'team_quiescent' } },
+    })
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.signals).toHaveLength(firstSignalCount + 1)
+    expect(launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('Persistent completion Delivery')))).toHaveLength(deliveryCount)
+    service.agentStatusChanged(lead as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.signals).toHaveLength(firstSignalCount + 1)
+    expect(launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('Persistent completion Delivery')))).toHaveLength(deliveryCount)
     disconnect()
   })
 
@@ -1820,6 +1962,16 @@ describe('FleetRunService', () => {
     })
     await expect(scoped.request({ provider: 'provider-one', model: 'model-one', maxTokens: 512 }))
       .resolves.toMatchObject({ maxTokens: 40 })
+
+    const memberUnlimited = service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id, scope: 'member', member: assistant.view.id, limit: null,
+    })
+    const unlimitedAccount = memberUnlimited.members.find(member => member.memberId === assistant.view.id)
+    expect(unlimitedAccount).toMatchObject({ used: 0, state: 'unlimited' })
+    expect(unlimitedAccount).not.toHaveProperty('limit')
+    service.configureBudget(launcher as unknown as Agent, {
+      runId: run.id, scope: 'member', member: assistant.view.id, limit: 60,
+    })
 
     const teamReset = service.configureBudget(launcher as unknown as Agent, {
       runId: run.id, scope: 'team', reset: true,
@@ -2963,6 +3115,9 @@ describe('FleetRunService', () => {
         from: 'team-assistant',
         text: 'The foreground assistant is checking in directly.',
       }))
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected foreground assistant')
+    const assistantMessagesBeforeChannelPost = launcher.messages.length
     const userChannelMessage = service.sendUserConversationMessage({
       runId: run.id,
       to: '#main',
@@ -2970,6 +3125,9 @@ describe('FleetRunService', () => {
       delivery: 'quiet',
     })
     expect(userChannelMessage).toMatchObject({ recipients: 3, woken: 0 })
+    expect(launcher.messages.slice(assistantMessagesBeforeChannelPost)).toEqual([])
+    expect(service.messageHub(run.id).unreadSummary(assistantId)).toMatchObject({ unreadMessages: 1 })
+    expect(service.messageHub(run.id).taskUnreadSummary(assistantId)).toMatchObject({ unreadMessages: 0 })
     expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages)
       .toContainEqual(expect.objectContaining({
         id: userChannelMessage.messageId,
@@ -4085,8 +4243,10 @@ describe('FleetRunService', () => {
     }
     expect(journalReads).toBe(0)
     expect(projectedEvents.filter(event => event.type === 'coordination.message')).toHaveLength(100)
-    // The 50 newest-message read receipts remain inside the bounded projection.
-    expect(projectedEvents.filter(event => event.type === 'coordination.inbox')).toHaveLength(250)
+    // One formal-member notice per retained message plus the 50 newest-message
+    // read receipts remain inside the bounded projection. The assistant keeps
+    // Channel history without receiving notice deliveries.
+    expect(projectedEvents.filter(event => event.type === 'coordination.inbox')).toHaveLength(150)
     expect(projectedEvents).toContainEqual(expect.objectContaining({
       type: 'member_status.updated',
       data: expect.objectContaining({

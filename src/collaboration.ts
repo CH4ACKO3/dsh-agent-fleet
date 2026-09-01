@@ -538,6 +538,10 @@ export class FleetCollaborationService {
         () => ({ kind: 'send', input: message }),
       ),
       requiredActionInstruction: (message, participantId) => requiredActionInstruction(message, participantId),
+      // Foreground assistants retain ordinary Channel posts in their durable
+      // Inbox without injecting a mid-turn notice. Explicit @mentions still
+      // create Reply Tasks and wake through the Task notification path.
+      muteChannelNotice: participantId => assistantNames.has(participantId),
     })
     const canManage = (agentId: string, namespace: string): boolean => {
       const member = memberNamesById.get(agentId)

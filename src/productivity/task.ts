@@ -788,16 +788,72 @@ export class FleetTaskBoard {
     if (current.stableState.kind !== 'running') {
       throw new Error(`Fleet Interaction ${current.id} is ${current.stableState.kind}`)
     }
-    const liveTasks = current.domain.waitingTaskIds.filter(id => !this.settled(this.requireTask(id)))
-    if (liveTasks.length > 0) {
-      throw new Error(`Fleet Interaction ${current.id} still waits for live Tasks: ${liveTasks.join(', ')}; continue the Interaction instead of reporting it`)
+    const reason = requiredText(input.reason, 'interaction report reason')
+    const report = requiredText(input.report, 'interaction foreground report')
+    const liveTasks = current.domain.waitingTaskIds
+      .map(id => this.requireTask(id))
+      .filter(task => !this.settled(task))
+    const quiescentBlock = input.outcome === 'block'
+      && current.domain.pendingDelivery?.cause === 'team_quiescent'
+    if (liveTasks.length > 0 && !quiescentBlock) {
+      throw new Error(`Fleet Interaction ${current.id} still waits for live Tasks: ${liveTasks.map(task => task.id).join(', ')}; continue the Interaction instead of reporting it`)
     }
     const reportIntent: FleetInteractionReportIntent = {
       revision: current.domain.inputRevision,
       outcome: input.outcome,
-      reason: requiredText(input.reason, 'interaction report reason'),
-      report: requiredText(input.report, 'interaction foreground report'),
+      reason,
+      report,
       submittedAt: new Date().toISOString(),
+    }
+    if (quiescentBlock && liveTasks.length > 0) {
+      const now = reportIntent.submittedAt
+      const staged = new Map(this.tasks)
+      const cancelled: FleetProjectTask[] = []
+      for (const task of liveTasks) {
+        if (task.parentId !== current.id || task.createdBy !== owner || task.domain.kind !== 'goal') continue
+        const { activeReconcile: _activeReconcile, ...base } = task
+        const updated: FleetProjectTask = {
+          ...base,
+          stableState: {
+            kind: 'cancelled', cancelledAt: now,
+            reason: `The foreground Interaction blocked after Team quiescence: ${reason}`,
+          },
+          stateVersion: task.stateVersion + 1,
+          entries: [...task.entries, {
+            id: `entry_${randomUUID()}`,
+            kind: 'progress',
+            author: owner,
+            text: `Task cancelled by its foreground Interaction recovery: ${reason}`,
+            resources: [],
+            createdAt: now,
+          }],
+          updatedAt: now,
+        }
+        staged.set(updated.id, updated)
+        cancelled.push(updated)
+      }
+      const domain: FleetTaskDomain = {
+        ...current.domain,
+        waitingTaskIds: [],
+        reportIntent,
+      }
+      const { activeReconcile: _activeReconcile, ...base } = current
+      const updated: FleetProjectTask = {
+        ...base,
+        domain,
+        stableState: this.normalizeState(this.runningState(
+          `Foreground blocked report for input revision ${String(reportIntent.revision)} is awaiting native assistant output.`,
+          [],
+        ), now, staged, [], current.id),
+        stateVersion: current.stateVersion + 1,
+        updatedAt: now,
+      }
+      staged.set(updated.id, updated)
+      this.commit(staged, [updated, ...cancelled])
+      for (const task of cancelled) this.emit({ action: 'cancelled', task, actor: owner })
+      this.emit({ action: 'domain_updated', task: updated, actor: owner })
+      this.evaluateDependents([updated.id, ...cancelled.map(task => task.id)])
+      return snapshot(updated)
     }
     return this.reconcileDomain(current, { ...current.domain, reportIntent }, this.runningState(
       `Foreground report for input revision ${String(reportIntent.revision)} is awaiting native assistant output.`,
@@ -1317,7 +1373,9 @@ export class FleetTaskBoard {
         + `call fleet_reconcile resolve with id="${id}", attempt_id="${reconcile.attemptId ?? ''}", progress, and state`,
       )
     }
-    if (reconcile?.status !== 'ready') throw new Error(`Fleet task ${id} has no ready ReconcileAttempt`)
+    if (reconcile?.status !== 'ready') {
+      throw new Error(`Fleet task ${id} has no ready ReconcileAttempt. Retrying cannot create one; wait for a Task state change or use the Task's domain tool.`)
+    }
     if (reconcile.target !== actor) {
       throw new Error(`Fleet task ${id} ReconcileAttempt is reserved for ${reconcile.target}, not ${actor}`)
     }

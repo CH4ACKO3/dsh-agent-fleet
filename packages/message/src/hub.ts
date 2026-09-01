@@ -121,6 +121,7 @@ export interface MessageHubOptions {
   readonly validateTaskReference?: (taskId: string, assigneeId?: string) => void
   readonly beforeSend?: (sender: MessageAgent, input: SendMessageInput) => SendMessageDecision
   readonly requiredActionInstruction?: (message: FleetMessage, participantId: string) => string
+  readonly muteChannelNotice?: (participantId: string, message: FleetMessage) => boolean
 }
 
 export class MessageHub {
@@ -1712,6 +1713,8 @@ export class MessageHub {
     const unread = this.history.filter(message => message.from !== participantId
       && this.canSeeMessage(participantId, message)
       && this.isInboxRelevant(participantId, message)
+      && !(message.conversation.startsWith('#')
+        && this.options.muteChannelNotice?.(participantId, snapshot(message)) === true)
       && !this.isFullyRead(participantId, message)
       && !deliveredInFull.has(message.id))
     return {
@@ -1920,6 +1923,9 @@ export class MessageHub {
     content: 'full' | 'notice',
     wake: boolean,
   ): boolean {
+    if (content === 'notice' && this.options.muteChannelNotice?.(participantId, snapshot(message)) === true) {
+      return true
+    }
     const target = this.agents.get(participantId)
     if (target === undefined) {
       this.recordDeliveryBlock(participantId, message.id, 'no_active_session')
