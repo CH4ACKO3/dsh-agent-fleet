@@ -305,9 +305,10 @@ export interface DeferFleetInteractionInput {
 }
 
 export type FleetTaskChildOperation =
-  | { readonly kind: 'create'; readonly task: Omit<CreateFleetProjectTaskInput, 'parentId'> }
+  | { readonly kind: 'create'; readonly key?: string; readonly task: Omit<CreateFleetProjectTaskInput, 'parentId'> }
   | {
       readonly kind: 'goal'
+      readonly key?: string
       readonly title: string
       readonly description?: string
       readonly owners: readonly string[]
@@ -319,6 +320,7 @@ export type FleetTaskChildOperation =
   | { readonly kind: 'cancel'; readonly taskId: string; readonly reason: string }
   | {
       readonly kind: 'vote'
+      readonly key?: string
       readonly title?: string
       readonly channel: `#${string}`
       readonly statement: string
@@ -363,6 +365,17 @@ export interface SettleFleetTaskAttemptInput {
   readonly attemptId: string
   readonly progress: string
   readonly next: FleetTaskStableStateInput
+  readonly owners?: readonly string[]
+  readonly childOps?: readonly FleetTaskChildOperation[]
+}
+
+export type FleetTaskReconcileOutcome = 'continue' | 'complete' | 'block' | 'pause' | 'cancel'
+
+export interface SettleFleetTaskOutcomeInput {
+  readonly attemptId: string
+  readonly progress: string
+  readonly outcome: FleetTaskReconcileOutcome
+  readonly result?: string
   readonly owners?: readonly string[]
   readonly childOps?: readonly FleetTaskChildOperation[]
 }
@@ -1370,7 +1383,7 @@ export class FleetTaskBoard {
     if (reconcile?.status === 'running') {
       throw new Error(
         `Fleet task ${id} ReconcileAttempt ${reconcile.attemptId ?? reconcile.id} is already claimed; `
-        + `call fleet_reconcile resolve with id="${id}", attempt_id="${reconcile.attemptId ?? ''}", progress, and state`,
+        + `call fleet_reconcile resolve with id="${id}", attempt_id="${reconcile.attemptId ?? ''}", progress, and outcome`,
       )
     }
     if (reconcile?.status !== 'ready') {
@@ -1424,24 +1437,41 @@ export class FleetTaskBoard {
     const changedChildren: Array<{ action: 'created' | 'reconciled'; task: FleetProjectTask }> = []
     const addedToCohort: string[] = []
     const voteChildren: FleetProjectTask[] = []
+    const operationKeys = new Map<string, string>()
+
+    const registerOperationKey = (key: string | undefined, childId: string): void => {
+      if (key === undefined) return
+      const normalized = requiredText(key, 'child operation key')
+      if (operationKeys.has(normalized)) throw new Error(`duplicate child operation key ${normalized}`)
+      operationKeys.set(normalized, childId)
+    }
+    const operationDependencies = (dependencies: readonly string[] | undefined): string[] | undefined => dependencies?.map(reference =>
+      operationKeys.get(reference) ?? reference)
 
     for (const operation of input.childOps ?? []) {
       if (operation.kind === 'create') {
-        const child = this.buildTask(actor, { ...operation.task, parentId: current.id }, staged)
+        const dependencies = operationDependencies(operation.task.dependencies)
+        const child = this.buildTask(actor, {
+          ...operation.task,
+          parentId: current.id,
+          ...(dependencies === undefined ? {} : { dependencies }),
+        }, staged)
         const materialized = this.materialize(child, new Map(staged).set(child.id, child))
         staged.set(child.id, materialized)
         changedChildren.push({ action: 'created', task: materialized })
         addedToCohort.push(child.id)
+        registerOperationKey(operation.key, child.id)
       } else if (operation.kind === 'goal') {
         const rootWorkId = current.domain.kind === 'composite' || current.domain.kind === 'goal'
           ? current.domain.rootWorkId
           : undefined
+        const dependencies = operationDependencies(operation.dependencies)
         const child = this.buildGoalTask(actor, {
           title: operation.title,
           ...(operation.description === undefined ? {} : { description: operation.description }),
           owners: operation.owners,
           parentId: current.id,
-          ...(operation.dependencies === undefined ? {} : { dependencies: operation.dependencies }),
+          ...(dependencies === undefined ? {} : { dependencies }),
           ...(operation.resources === undefined ? {} : { resources: operation.resources }),
           ...(rootWorkId === undefined ? {} : { rootWorkId }),
           ...(operation.timeoutAt === undefined ? {} : { timeoutAt: operation.timeoutAt }),
@@ -1450,6 +1480,7 @@ export class FleetTaskBoard {
         staged.set(child.id, materialized)
         changedChildren.push({ action: 'created', task: materialized })
         addedToCohort.push(child.id)
+        registerOperationKey(operation.key, child.id)
       } else if (operation.kind === 'link') {
         const linked = this.requireTaskFrom(staged, operation.taskId)
         if (linked.id === current.id) throw new Error('a Fleet task cannot include itself in its cohort')
@@ -1467,11 +1498,16 @@ export class FleetTaskBoard {
         staged.set(child.id, cancelled)
         changedChildren.push({ action: 'reconciled', task: cancelled })
       } else {
-        const child = this.buildVoteTask(current, actor, operation, now, staged)
+        const dependencies = operationDependencies(operation.dependencies)
+        const child = this.buildVoteTask(current, actor, {
+          ...operation,
+          ...(dependencies === undefined ? {} : { dependencies }),
+        }, now, staged)
         staged.set(child.id, child)
         changedChildren.push({ action: 'created', task: child })
         addedToCohort.push(child.id)
         voteChildren.push(child)
+        registerOperationKey(operation.key, child.id)
       }
     }
 
@@ -1512,6 +1548,41 @@ export class FleetTaskBoard {
     }
     this.evaluateDependents([updated.id, ...changedChildren.map(child => child.task.id)])
     return snapshot(this.requireTask(updated.id))
+  }
+
+  settleOutcome(callerId: string, id: string, input: SettleFleetTaskOutcomeInput): FleetProjectTask {
+    const reason = requiredText(input.progress, 'task reconciliation progress')
+    if (input.outcome === 'continue' && (input.childOps?.length ?? 0) === 0) {
+      throw new Error('fleet_reconcile outcome continue requires at least one atomic child operation')
+    }
+    const target = this.member(callerId)
+    const next: FleetTaskStableStateInput = input.outcome === 'continue'
+      ? this.runningState(reason, [{
+          id: 'continue-after-children',
+          when: { kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort' },
+          target,
+          priority: 0,
+          retryAfterSeconds: 0,
+          maxWakeups: 3,
+          onTimeout: { kind: 'blocked', reason: 'Follow-up work exhausted its reconciliation attempts.' },
+        }])
+      : input.outcome === 'complete'
+        ? {
+            kind: 'completed', reason,
+            ...(input.result === undefined ? {} : { result: input.result }),
+          }
+        : input.outcome === 'block'
+          ? { kind: 'blocked', reason }
+          : input.outcome === 'pause'
+            ? { kind: 'paused', reason }
+            : { kind: 'cancelled', reason }
+    return this.settle(callerId, id, {
+      attemptId: input.attemptId,
+      progress: reason,
+      next,
+      ...(input.owners === undefined ? {} : { owners: input.owners }),
+      ...(input.childOps === undefined ? {} : { childOps: input.childOps }),
+    })
   }
 
   signalEvent(id: string, eventKey: string, result = 'Event completed.'): FleetProjectTask {
@@ -2244,15 +2315,39 @@ export class FleetTaskBoard {
     const plan = current.domain.plan
     const required = plan.requiredStageIds.map(id => this.requireTask(id))
     if (required.some(task => !this.settled(task))) return false
-    if (required.some(task => task.stableState.kind !== 'completed')) return false
+    const failed = required.filter(task => task.stableState.kind !== 'completed')
+    if (failed.length > 0) {
+      this.reconcileDomain(current, current.domain, {
+        kind: 'blocked',
+        reason: `Composite plan stopped because required work did not complete: ${failed
+          .map(task => `${task.title} (${task.stableState.kind}): ${task.stableState.reason}`)
+          .join('; ')}`,
+      })
+      return true
+    }
     const votes = plan.acceptanceVoteIds.map(id => this.requireTask(id))
-    if (votes.some(task => task.domain.kind !== 'vote' || task.domain.outcome !== 'approve')) return false
+    const rejected = votes.filter(task => task.domain.kind === 'vote' && task.domain.outcome === 'reject')
     const result = plan.resultStageId === undefined ? undefined : this.requireTask(plan.resultStageId)
-    if (result?.stableState.kind !== 'completed' || result.stableState.result === undefined) return false
+    const resultText = result?.stableState.kind === 'completed'
+      ? result.stableState.result ?? result.stableState.reason
+      : undefined
+    if (rejected.length > 0) {
+      const rejection = rejected.map(task => `${task.title}: ${task.stableState.reason}`).join('; ')
+      this.reconcileDomain(current, current.domain, {
+        kind: 'completed',
+        reason: `Composite plan concluded with rejected acceptance: ${rejection}`,
+        result: [
+          `Acceptance rejected: ${rejection}`,
+          ...(resultText === undefined ? [] : [`Candidate result: ${resultText}`]),
+        ].join('\n\n'),
+      })
+      return true
+    }
+    if (votes.some(task => task.domain.kind !== 'vote' || task.domain.outcome !== 'approve')) return false
     this.reconcileDomain(current, current.domain, {
       kind: 'completed',
       reason: 'Every required stage completed and every acceptance Vote approved.',
-      result: result.stableState.result,
+      ...(resultText === undefined ? {} : { result: resultText }),
     })
     return true
   }
@@ -2441,11 +2536,11 @@ export class FleetTaskBoard {
 const FLEX_OBJECT_SCHEMA = { type: 'object', additionalProperties: true } as const
 const STABLE_STATE_SCHEMA = {
   ...FLEX_OBJECT_SCHEMA,
-  description: 'Explicit next stable state for the current ReconcileAttempt. Every state carries a reason. Terminal: {kind:"completed",reason,result?} or {kind:"blocked"|"paused"|"cancelled",reason}. Live: {kind:"running",reason,cohort?:taskIds,reconcilers:[...]} or {kind:"dormant",reason,reconcilers:[...]}.',
+  description: 'Legacy custom state input. Prefer outcome; use this only when a non-standard durable trigger is genuinely required.',
 } as const
 const CHILD_OPERATION_SCHEMA = {
   ...FLEX_OBJECT_SCHEMA,
-  description: 'Atomic child operation: {kind:"goal",title,description?,owners,dependencies?,resources?,timeoutAt?}, {kind:"vote",title?,channel,statement,voters,dependencies?,timeoutAt?}, {kind:"create",task:{title,...}}, {kind:"link",taskId}, or {kind:"cancel",taskId,reason}. Created Goal/Vote/Task children join the next running cohort automatically.',
+  description: 'Atomic child operation: Goal/Vote/create may declare a key; dependencies may reference earlier keys. Created or linked children join the standard continuation cohort automatically.',
 } as const
 
 const TASK_SCHEMA = FLEX_OBJECT_SCHEMA
@@ -2546,12 +2641,12 @@ export function fleetTaskToolSummary(task: FleetProjectTask): Record<string, Jso
     ...(task.activeReconcile === undefined ? {} : {
       reconcile: {
         id: task.activeReconcile.id,
-        attemptId: task.activeReconcile.attemptId,
+        ...(task.activeReconcile.attemptId === undefined ? {} : { attemptId: task.activeReconcile.attemptId }),
         target: task.activeReconcile.target,
         status: task.activeReconcile.status,
         reason: toolText(task.activeReconcile.reason),
         readyAt: task.activeReconcile.readyAt,
-        timeoutAt: task.activeReconcile.timeoutAt,
+        ...(task.activeReconcile.timeoutAt === undefined ? {} : { timeoutAt: task.activeReconcile.timeoutAt }),
       },
     }),
     updatedAt: task.updatedAt,
@@ -2624,12 +2719,14 @@ export function installReconcileTools(
 ): () => void {
   return ctx.tools.register(defineTool({
     name: 'fleet_reconcile',
-    description: 'Inspect or atomically resolve a ReconcileAttempt reserved for the calling member. A [Fleet task attempt] notice is already claimed: resolve it directly. Use claim only for a ready Task discovered manually through list. Resolution must provide the next stable state before the current attempt can end.',
+    description: 'Inspect or atomically resolve a reserved ReconcileAttempt. For resolve, choose a high-level outcome; Fleet derives the stable state and continuation trigger. A [Fleet task attempt] notice is already claimed.',
     parameters: {
       action: { type: 'string', required: true, enum: ['list', 'get', 'claim', 'resolve'], description: 'Use resolve for the already-claimed attempt in a [Fleet task attempt] notice.' },
       id: { type: 'string', description: 'Task id (task_...), never a ReconcileAttempt or reconciler id.' },
       attempt_id: { type: 'string', description: 'For resolve, the exact attempt_... id from the current [Fleet task attempt] notice.' },
       progress: { type: 'string' },
+      outcome: { type: 'string', enum: ['continue', 'complete', 'block', 'pause', 'cancel'], description: 'Preferred resolution. continue requires atomic child_ops; Fleet installs the child completion trigger.' },
+      result: { type: 'string', description: 'Optional result for outcome=complete.' },
       state: STABLE_STATE_SCHEMA,
       owners: { type: 'array', items: { type: 'string' } },
       child_ops: { type: 'array', items: CHILD_OPERATION_SCHEMA },
@@ -2648,8 +2745,24 @@ export function installReconcileTools(
       if (args.id === undefined) throw new Error(`fleet_reconcile ${args.action} requires id`)
       if (args.action === 'get') return Promise.resolve({ action: 'get', task: fleetTaskToolDetail(tasks.get(callerId, args.id)) })
       if (args.action === 'claim') return Promise.resolve({ action: 'claim', task: fleetTaskToolDetail(tasks.claim(callerId, args.id)) })
-      if (args.attempt_id === undefined || args.progress === undefined || args.state === undefined) {
-        throw new Error('fleet_reconcile resolve requires attempt_id, progress, and state')
+      if (args.attempt_id === undefined || args.progress === undefined || (args.outcome === undefined && args.state === undefined)) {
+        throw new Error('fleet_reconcile resolve requires attempt_id, progress, and outcome')
+      }
+      if (args.outcome !== undefined) {
+        return Promise.resolve({
+          action: 'resolve',
+          task: fleetTaskToolDetail(tasks.settleOutcome(callerId, args.id, {
+            attemptId: args.attempt_id,
+            progress: args.progress,
+            outcome: args.outcome,
+            ...(args.result === undefined ? {} : { result: args.result }),
+            ...(args.owners === undefined ? {} : { owners: args.owners }),
+            ...(args.child_ops === undefined ? {} : { childOps: args.child_ops as unknown as FleetTaskChildOperation[] }),
+          })),
+        })
+      }
+      if (typeof args.state !== 'object' || args.state === null || Array.isArray(args.state)) {
+        throw new Error('fleet_reconcile legacy state must be an object; prefer outcome')
       }
       return Promise.resolve({
         action: 'resolve',

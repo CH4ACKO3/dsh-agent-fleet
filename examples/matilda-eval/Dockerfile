@@ -43,7 +43,8 @@ RUN python3 -m venv /opt/matilda-eval/venv \
 COPY scripts/verify-environment.py /opt/matilda-eval/verify-environment.py
 COPY scripts/verify-network-isolation.py /opt/matilda-eval/verify-network-isolation.py
 COPY scripts/network-guard.sh /opt/matilda-eval/network-guard.sh
-RUN chmod 0555 /opt/matilda-eval/network-guard.sh
+RUN sed -i 's/\r$//' /opt/matilda-eval/network-guard.sh \
+    && chmod 0555 /opt/matilda-eval/network-guard.sh
 
 ENV PATH="/opt/matilda-eval/venv/bin:${PATH}" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \

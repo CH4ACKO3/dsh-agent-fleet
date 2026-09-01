@@ -6185,7 +6185,7 @@ export class FleetRunService {
         'Fleet already claimed this ReconcileAttempt for the current turn. Do not call fleet_reconcile claim.',
         task.description,
         readyReason,
-        `Work only this ReconcileAttempt. Inspect every current cohort result before deciding. A rejected Vote is a completed decision: continue with a remediation Goal and later a fresh Vote instead of completing or blocking the parent. Before the turn ends, call fleet_reconcile action="resolve", id="${task.id}", attempt_id="${reconcile.attemptId}", progress="...", and state={...}. The id is the Task id, not the attempt or reconciler id. A running or dormant state must include durable reconcilers; child_ops may atomically create Goal work, open a Vote, create/link a generic child, or cancel an obsolete child. Fleet commits the state, child operations, and next triggers before releasing you.`,
+        `Work only this ReconcileAttempt. Inspect every current cohort result before deciding. Before the turn ends, call fleet_reconcile action="resolve", id="${task.id}", attempt_id="${reconcile.attemptId}", progress="...", and outcome="continue|complete|block|pause|cancel". The id is the Task id, not the attempt or reconciler id. Use continue only with atomic child_ops; Goal/Vote operations may use keys and later operations may depend on earlier keys. Fleet derives the cohort and next trigger. A terminal acceptance Vote is already final; do not invent remediation unless explicitly requested as new work.`,
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `assigned-task:${task.id}`,

@@ -66,7 +66,7 @@ function settleDefaultCompositeWork(
     ? { kind: 'complete', reason: result, result }
     : { kind: 'block', reason: result })
   const settled = board.get(actorId, rootTaskId)
-  if (settled.stableState.kind === 'completed') return settled
+  if (settled.stableState.kind !== 'running' && settled.stableState.kind !== 'dormant') return settled
   const claimed = board.claim(actorId, rootTaskId)
   const attemptId = claimed.activeReconcile?.attemptId
   if (attemptId === undefined) throw new Error('expected root ReconcileAttempt')
@@ -5621,69 +5621,13 @@ describe('FleetRunService', () => {
     expect(service.taskBoard(run.id).ownerTasks('lead').map(task => task.id)).not.toContain(rootTaskId)
     expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.id)).toContain(review.id)
     service.taskBoard(run.id).castVote(reviewer.id, review.id, 'reject', 'Independent evidence found a defect.')
-    expect(service.taskBoard(run.id).readyTasks('lead').map(task => task.id)).toContain(rootTaskId)
-    const rejectedAttempt = service.taskBoard(run.id).claim(lead.id, rootTaskId).activeReconcile?.attemptId
-    if (rejectedAttempt === undefined) throw new Error('expected rejected root ReconcileAttempt')
-    expect(() => service.taskBoard(run.id).settle(lead.id, rootTaskId, {
-      attemptId: rejectedAttempt,
-      progress: 'Tried to accept rejected evidence.',
-      next: { kind: 'completed', reason: 'Must not complete.', result: 'Premature result.' },
-    })).toThrow('requires an approved Vote child')
-    const remediationRound = service.taskBoard(run.id).settle(lead.id, rootTaskId, {
-      attemptId: rejectedAttempt,
-      progress: 'Opened remediation for the rejected review.',
-      childOps: [{
-        kind: 'goal', title: 'Repair the rejected implementation', owners: ['lead'],
-        description: 'Fix the defect and produce fresh evidence.',
-      }],
-      next: {
-        kind: 'running', reason: 'Waiting for remediation.',
-        reconcilers: [{
-          id: 'after-remediation',
-          when: { kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort' },
-          target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
-          onTimeout: { kind: 'blocked', reason: 'Remediation reconciliation exhausted.' },
-        }],
-      },
-    })
-    if (remediationRound.stableState.kind !== 'running') throw new Error('expected remediation round')
-    expect(service.status(run.id)).toMatchObject({ status: 'running', work: { status: 'running' } })
-    const remediationId = remediationRound.stableState.cohort[0]!
-    service.taskBoard(run.id).submitGoal(lead.id, remediationId, {
-      kind: 'complete', reason: 'Defect repaired.', result: 'Fresh implementation evidence.',
-    })
-    const repairedAttempt = service.taskBoard(run.id).claim(lead.id, rootTaskId).activeReconcile?.attemptId
-    if (repairedAttempt === undefined) throw new Error('expected repaired root ReconcileAttempt')
-    const acceptanceRound = service.taskBoard(run.id).settle(lead.id, rootTaskId, {
-      attemptId: repairedAttempt,
-      progress: 'Opened a fresh independent review.',
-      childOps: [{
-        kind: 'vote', title: 'Independent review #2', channel: '#main',
-        statement: 'Approve the repaired implementation.', voters: ['reviewer'],
-      }],
-      next: {
-        kind: 'running', reason: 'Waiting for fresh independent acceptance.',
-        reconcilers: [{
-          id: 'after-review',
-          when: { kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort' },
-          target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
-          onTimeout: { kind: 'blocked', reason: 'Review reconciliation exhausted.' },
-        }],
-      },
-    })
-    if (acceptanceRound.stableState.kind !== 'running') throw new Error('expected fresh acceptance round')
-    service.taskBoard(run.id).castVote(
-      reviewer.id, acceptanceRound.stableState.cohort[0]!, 'approve', 'Fresh evidence passes.',
-    )
-    const acceptedAttempt = service.taskBoard(run.id).claim(lead.id, rootTaskId).activeReconcile?.attemptId
-    if (acceptedAttempt === undefined) throw new Error('expected accepted root ReconcileAttempt')
-    service.taskBoard(run.id).settle(lead.id, rootTaskId, {
-      attemptId: acceptedAttempt,
-      progress: 'Remediation passed the fresh independent review.',
-      next: { kind: 'completed', reason: 'Current acceptance Vote approved.', result: 'Accepted result.' },
+    expect(service.taskBoard(run.id).readyTasks('lead')).toEqual([])
+    expect(service.taskBoard(run.id).get(lead.id, rootTaskId).stableState).toMatchObject({
+      kind: 'completed',
+      result: expect.stringContaining('Acceptance rejected'),
     })
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
-      status: 'idle', work: { status: 'finished', summary: 'Accepted result.' },
+      status: 'idle', work: { status: 'finished', summary: expect.stringContaining('Acceptance rejected') },
     })
     expect(() => service.reportAssistantInteraction(launcher as unknown as Agent, {
       runId: run.id,

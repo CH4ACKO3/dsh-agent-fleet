@@ -139,7 +139,7 @@ describe('FleetAssistantRuntime', () => {
       'atomically creates the zero-owner root and all initial Goal/Vote stages',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'A rejected Vote or failed stage wakes the coordinator for remediation',
+      'rejection completes it with a negative acceptance result',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'do not post a separate kickoff message',
@@ -155,10 +155,10 @@ describe('FleetAssistantRuntime', () => {
       'Fleet already claimed for this turn. Do not call `fleet_reconcile claim` again',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'its `id` is always the Task id, never an attempt or reconciler id',
+      'with the exact Task id, exact `attempt_id`',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'a delivery notice alone does not',
+      'Quiet Channel posts remain visible in Channel history but create no Inbox obligation or wakeup',
     )
     expect(fixture.restrict).not.toHaveBeenCalled()
 

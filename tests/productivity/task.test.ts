@@ -112,6 +112,42 @@ describe('FleetTaskBoard v6', () => {
     expect(board.get('agent-lead', task.id).activeReconcile).toMatchObject({ status: 'running', attemptId })
   })
 
+  it('derives a gap-free continuation and resolves child dependency keys', () => {
+    const board = new FleetTaskBoard(directory)
+    const task = board.create('agent-lead', { title: 'High-level reconciliation', assignees: ['lead'] })
+    const claimed = board.claim('agent-lead', task.id)
+    const attemptId = claimed.activeReconcile?.attemptId
+    if (attemptId === undefined) throw new Error('expected attempt')
+
+    const continued = board.settleOutcome('agent-lead', task.id, {
+      attemptId,
+      progress: 'Repair and independent review are required.',
+      outcome: 'continue',
+      childOps: [
+        { kind: 'create', key: 'spec', task: { title: 'Repair specification', assignees: ['lead'] } },
+        { kind: 'goal', key: 'repair', title: 'Repair', owners: ['reviewer'], dependencies: ['spec'] },
+        {
+          kind: 'vote', key: 'review', title: 'Review', channel: '#main', statement: 'Approve repair.',
+          voters: ['qa'], dependencies: ['repair'],
+        },
+      ],
+    })
+    if (continued.stableState.kind !== 'running') throw new Error('expected continuation')
+    const specification = board.state().tasks.find(candidate => candidate.parentId === task.id && candidate.title === 'Repair specification')
+    const repair = board.state().tasks.find(candidate => candidate.parentId === task.id && candidate.title === 'Repair')
+    const review = board.state().tasks.find(candidate => candidate.parentId === task.id && candidate.title === 'Review')
+    if (specification === undefined || repair === undefined || review === undefined) throw new Error('expected atomic children')
+    expect(repair.dependencies).toEqual([specification.id])
+    expect(review.dependencies).toEqual([repair.id])
+    expect(continued.stableState).toMatchObject({
+      cohort: expect.arrayContaining([specification.id, repair.id, review.id]),
+      reconcilers: [expect.objectContaining({ target: 'lead' })],
+    })
+    expect(() => board.settleOutcome('agent-lead', task.id, {
+      attemptId, progress: 'Invalid continuation.', outcome: 'continue', childOps: [],
+    })).toThrow('requires at least one atomic child operation')
+  })
+
   it('retries one target and applies the configured fallback', () => {
     const board = new FleetTaskBoard(directory)
     const task = board.create('agent-lead', {
@@ -443,7 +479,7 @@ describe('FleetTaskBoard v6', () => {
     }).stableState.kind).toBe('completed')
   })
 
-  it('continues a rejected review through remediation and a fresh acceptance round without a liveness gap', () => {
+  it('settles a rejected planned review as a terminal negative result without a coordinator turn', () => {
     const board = new FleetTaskBoard(directory)
     const plan = board.createCompositePlan('agent-lead', {
       title: 'Planned release', coordinator: 'lead', rootWorkId: 'work-1',
@@ -476,64 +512,14 @@ describe('FleetTaskBoard v6', () => {
     expect(board.ownerTasks('qa').map(task => task.id)).toContain(review.id)
     board.castVote('agent-qa', review.id, 'reject', 'Supplier normalization is incorrect.')
 
-    const rejected = board.claim('agent-lead', root.id)
-    const rejectedAttempt = rejected.activeReconcile?.attemptId
-    if (rejectedAttempt === undefined) throw new Error('expected rejected review reconciliation')
-    expect(() => board.settle('agent-lead', root.id, {
-      attemptId: rejectedAttempt,
-      progress: 'Tried to accept a rejected review.',
-      next: { kind: 'completed', reason: 'Must not complete.' },
-    })).toThrow('requires an approved Vote child')
-    const remediationRound = board.settle('agent-lead', root.id, {
-      attemptId: rejectedAttempt,
-      progress: 'Review rejected candidate-1; opened bounded remediation.',
-      childOps: [{
-        kind: 'goal', title: 'Repair supplier normalization', owners: ['reviewer'],
-        description: 'Fix the rejected criterion and provide fresh evidence.',
-      }],
-      next: {
-        kind: 'running', reason: 'Waiting for remediation.',
-        reconcilers: [reconciler('lead', {
-          kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort',
-        })],
+    expect(board.get('agent-lead', root.id)).toMatchObject({
+      stableState: {
+        kind: 'completed',
+        reason: expect.stringContaining('rejected acceptance'),
+        result: expect.stringContaining('Acceptance rejected'),
       },
     })
-    if (remediationRound.stableState.kind !== 'running') throw new Error('expected remediation round')
-    expect(remediationRound.stableState.cohort).toHaveLength(1)
-    const remediationId = remediationRound.stableState.cohort[0]!
-    board.submitGoal('agent-reviewer', remediationId, {
-      kind: 'complete', reason: 'Rejected criterion repaired.', result: 'candidate-2',
-    })
-
-    const repaired = board.claim('agent-lead', root.id)
-    const repairedAttempt = repaired.activeReconcile?.attemptId
-    if (repairedAttempt === undefined) throw new Error('expected repaired candidate reconciliation')
-    const acceptanceRound = board.settle('agent-lead', root.id, {
-      attemptId: repairedAttempt,
-      progress: 'Opened a fresh independent acceptance round for candidate-2.',
-      childOps: [{
-        kind: 'vote', title: 'Acceptance review #2', channel: '#main',
-        statement: 'Approve repaired candidate-2.', voters: ['qa'],
-      }],
-      next: {
-        kind: 'running', reason: 'Waiting for fresh acceptance.',
-        reconcilers: [reconciler('lead', {
-          kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort',
-        })],
-      },
-    })
-    if (acceptanceRound.stableState.kind !== 'running') throw new Error('expected acceptance round')
-    const acceptanceId = acceptanceRound.stableState.cohort[0]!
-    board.castVote('agent-qa', acceptanceId, 'approve', 'Fresh evidence passes.')
-
-    const accepted = board.claim('agent-lead', root.id)
-    const acceptedAttempt = accepted.activeReconcile?.attemptId
-    if (acceptedAttempt === undefined) throw new Error('expected accepted reconciliation')
-    expect(board.settle('agent-lead', root.id, {
-      attemptId: acceptedAttempt,
-      progress: 'The repaired candidate passed independent acceptance.',
-      next: { kind: 'completed', reason: 'Current acceptance Vote approved.', result: 'candidate-2' },
-    }).stableState).toMatchObject({ kind: 'completed', result: 'candidate-2' })
+    expect(board.readyTasks('lead')).toEqual([])
   })
 
   it('completes a successful planned root without a coordinator turn', () => {
@@ -673,8 +659,10 @@ describe('FleetTaskBoard v6', () => {
       kind: 'block', reason: 'External acknowledgement channel is unavailable.',
     })
 
-    const claimed = board.claim('agent-lead', plan.task.id)
-    expect(claimed.activeReconcile).toMatchObject({ status: 'running', target: 'lead' })
+    expect(board.get('agent-lead', plan.task.id).stableState).toMatchObject({
+      kind: 'blocked', reason: expect.stringContaining('Acknowledge kickoff'),
+    })
+    expect(board.readyTasks('lead')).toEqual([])
   })
 
   it('blocks a multi-owner Goal on a concrete owner blocker', () => {
@@ -812,6 +800,11 @@ describe('FleetTaskBoard v6', () => {
     expect(summary).toMatchObject({ id: task.id, kind: 'interaction', state: 'running' })
     expect(summary).not.toHaveProperty('domain')
     expect(JSON.stringify(summary).length).toBeLessThan(1_000)
+
+    const ready = board.create('agent-assistant', { title: 'Ready summary', assignees: ['assistant'] })
+    const readySummary = fleetTaskToolSummary(ready)
+    expect(readySummary.reconcile).not.toHaveProperty('attemptId')
+    expect(readySummary.reconcile).not.toHaveProperty('timeoutAt')
     board.close()
   })
 
