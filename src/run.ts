@@ -103,6 +103,12 @@ import type {
   FleetMemberToolGroup,
   FleetMemberView,
 } from './member-view.js'
+import {
+  DEFAULT_FLEET_TURN_REMINDERS,
+  fleetTurnReminderText,
+  selectFleetTurnReminder,
+  type FleetTurnReminderRule,
+} from './turn-reminders.js'
 
 export type FleetRunStatus = 'starting' | 'idle' | 'running' | 'paused' | 'finishing' | 'closed' | 'failed'
 export type FleetWorkStatus = 'running' | 'finished' | 'blocked' | 'failed' | 'cancelled'
@@ -941,6 +947,7 @@ export interface FleetRunServiceOptions {
   readonly archives?: FleetArchiveRegistry
   readonly authorization?: FleetAuthorizationService
   readonly configuration?: FleetConfigurationRegistry
+  readonly turnReminders?: readonly FleetTurnReminderRule[]
 }
 
 export interface FleetResidentAssistantController {
@@ -2212,6 +2219,8 @@ export class FleetRunService {
   private readonly memberLastSharedTurns = new Map<string, number>()
   private readonly memberVisibilityReviewedTurns = new Map<string, number>()
   private readonly visibilityReminderStates = new Map<string, VisibilityReminderState>()
+  private readonly turnReminderLastShown = new Map<string, Map<string, number>>()
+  private readonly turnReminderInjectedTurns = new Map<string, number>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
@@ -2226,6 +2235,7 @@ export class FleetRunService {
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
   private readonly configuration: FleetConfigurationRegistry
+  private readonly turnReminders: readonly FleetTurnReminderRule[]
 
   constructor(
     private readonly ctx: Context,
@@ -2238,6 +2248,7 @@ export class FleetRunService {
     this.archives = options.archives ?? new FleetArchiveRegistry()
     this.authorization = options.authorization
     this.configuration = options.configuration ?? new FleetConfigurationRegistry()
+    this.turnReminders = options.turnReminders ?? DEFAULT_FLEET_TURN_REMINDERS
     const liveAgents = (this.ctx.agents as typeof this.ctx.agents & { list?: () => Agent[] }).list?.() ?? []
     for (const agent of liveAgents) {
       this.bindParticipantInbox(agent)
@@ -2259,6 +2270,9 @@ export class FleetRunService {
     if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
     childCtx.on('agent/turn-stopping', ({ agent, turn }) => {
       this.memberTurnStopping(agent, turn)
+    })
+    childCtx.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
+      return this.turnReminderDecision(childCtx.agent!, await next())
     })
     await installMemberTools(childCtx, runtime, member, false, source)
   }
@@ -5073,7 +5087,7 @@ export class FleetRunService {
         })
       }
       if (hasDirectUserInput) await this.loadTeamMembersForAssistantInput(agent, record.id)
-      return decision
+      return this.turnReminderDecision(agent, decision)
     })
     context.on('system-prompt/assemble', async (_assembly, _assembleContext, next) => {
       const assembly = await next()
@@ -5712,6 +5726,60 @@ export class FleetRunService {
     return undefined
   }
 
+  private turnReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision {
+    if (decision.kind === 'reject' || this.turnReminders.length === 0) return decision
+    const sessionId = String(agent.id)
+    const turn = this.currentOpenTurn(agent)
+    if (turn === undefined || this.turnReminderInjectedTurns.get(sessionId) === turn) return decision
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      this.records.has(runId) && runtime.memberNamesById.has(sessionId))
+    if (entry === undefined) return decision
+    const [teamId, runtime] = entry
+    const participant = this.participants(this.records.get(teamId)!)
+      .find(candidate => candidate.sessionId === sessionId)
+    if (participant === undefined) return decision
+    const view = this.memberViewForAgent(teamId, sessionId)
+    if (view === undefined) return decision
+
+    const tools: string[] = []
+    for (let index = agent.session.events.length - 1; index >= 0 && tools.length < 8; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start' && event.data.turn < turn - 2) break
+      if (event?.type === 'tool/call' && !tools.includes(event.data.name)) tools.push(event.data.name)
+    }
+    const taskKinds = [...new Set(runtime.tasks.ownerTasks(participant.name).map(task => task.domain.kind))]
+    const history = this.turnReminderLastShown.get(sessionId) ?? new Map<string, number>()
+    const selection = selectFleetTurnReminder(this.turnReminders, {
+      teamId,
+      memberId: view.id,
+      displayName: view.name,
+      role: view.role,
+      ...(view.responsibility === undefined ? {} : { responsibility: view.responsibility }),
+      turn,
+      text: decision.messages.map(progressMessageText).join('\n'),
+      tools,
+      taskKinds,
+    }, history)
+    if (selection === undefined) return decision
+
+    const text = fleetTurnReminderText(selection.rule)
+    history.set(selection.rule.id, turn)
+    this.turnReminderLastShown.set(sessionId, history)
+    this.turnReminderInjectedTurns.set(sessionId, turn)
+    return {
+      ...decision,
+      messages: [...decision.messages, createUserMessage({
+        content: [{ type: 'text', text }],
+        source: {
+          kind: 'plugin',
+          plugin: 'dsh-agent-fleet',
+          form: 'snapshot',
+          sections: [{ name: 'turn-reminder', text }],
+        },
+      })],
+    }
+  }
+
   private turnHasDirectOutput(agent: Agent, turn: number): boolean {
     for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
       const event = agent.session.events[index]
@@ -6257,6 +6325,8 @@ export class FleetRunService {
     this.memberLastSharedTurns.delete(agentId)
     this.memberVisibilityReviewedTurns.delete(agentId)
     this.visibilityReminderStates.delete(agentId)
+    this.turnReminderLastShown.delete(agentId)
+    this.turnReminderInjectedTurns.delete(agentId)
     this.abnormalSessionIds.delete(agentId)
     for (const [runId, runtime] of this.collaboration.entries()) {
       if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
@@ -7531,6 +7601,8 @@ export class FleetRunService {
     this.memberLastSharedTurns.clear()
     this.memberVisibilityReviewedTurns.clear()
     this.visibilityReminderStates.clear()
+    this.turnReminderLastShown.clear()
+    this.turnReminderInjectedTurns.clear()
     this.collaboration.close()
     this.dormantRunIds.clear()
     this.manualWakeRequiredRunIds.clear()
