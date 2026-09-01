@@ -1059,6 +1059,7 @@ export interface SendFleetConversationMessageInput {
   readonly replyTo?: string
   readonly resources?: readonly string[]
   readonly mentions?: readonly string[]
+  readonly noReply?: boolean
   readonly delivery: 'quiet' | 'wakeup' | 'interrupt'
 }
 
@@ -2157,10 +2158,12 @@ interface MemberToolActivity {
 interface VisibilityReminderState {
   /** Largest model input context observed in the current compaction epoch. */
   latestContextTokens: number
-  /** Context size at the last reminder or Team-visible share. */
-  baselineContextTokens: number
-  /** A successful compaction makes the next eligible reminder immediate. */
-  afterCompaction: boolean
+  /** Context size at the epoch start, last reminder, or Team-visible share. */
+  baselineContextTokens: number | undefined
+  /** True until the first post-compaction context observation establishes a baseline. */
+  awaitingPostCompactionBaseline: boolean
+  /** Number of reminders already retained in the current compaction epoch. */
+  reminderCount: number
   /** The first reminder in each compaction epoch carries the full explanation. */
   detailedReminderSent: boolean
 }
@@ -2980,6 +2983,7 @@ export class FleetRunService {
   continueAssistantInteraction(caller: Agent, input: ContinueFleetInteractionInput) {
     const record = this.requireCallerRecord(caller, input.runId)
     const assistant = this.requireAssistantConnection(caller, record.id)
+    const runtime = this.requireRuntime(record.id)
     const formalMembers = new Set(record.members.map(member => member.name))
     if (input.goal !== undefined) {
       for (const owner of input.goal.owners) {
@@ -2990,18 +2994,27 @@ export class FleetRunService {
         }
       }
     }
+    const liveTaskIds: string[] = []
     if (input.taskIds !== undefined) {
       for (const taskId of input.taskIds) {
-        const task = this.requireRuntime(record.id).tasks.get(String(caller.id), taskId)
+        const task = runtime.tasks.get(String(caller.id), taskId)
         if (task.domain.kind === 'interaction'
           || !task.owners.some(owner => formalMembers.has(owner.member))) {
           throw new Error(`Interaction continuation Task ${taskId} must be owned by a formal Team member`)
         }
+        if (task.stableState.kind !== 'completed' && task.stableState.kind !== 'cancelled') {
+          liveTaskIds.push(task.id)
+        }
       }
     }
-    return this.requireRuntime(record.id).tasks.deferInteraction(String(caller.id), {
+    if (input.taskIds !== undefined && liveTaskIds.length === 0 && input.goal === undefined) {
+      const task = runtime.tasks.interactionTask(assistant.view.id)
+      if (task === undefined) throw new Error(`Fleet assistant ${assistant.view.id} has no foreground Interaction Task`)
+      return { task, goals: [] }
+    }
+    return runtime.tasks.deferInteraction(String(caller.id), {
       reason: input.reason,
-      ...(input.taskIds === undefined ? {} : { taskIds: input.taskIds }),
+      ...(input.taskIds === undefined ? {} : { taskIds: liveTaskIds }),
       ...(input.goal === undefined ? {} : { goal: input.goal }),
       checkAfterSeconds: input.checkAfterSeconds ?? DEFAULT_INTERACTION_CHECK_SECONDS,
     })
@@ -3057,10 +3070,11 @@ export class FleetRunService {
     const lease = interaction.domain.executionLease
     if (lease?.revision === interaction.domain.inputRevision) return undefined
     return [
-      `Fleet assistant project execution is not routed for Interaction Task ${interaction.id}.`,
+      `[Fleet non-retryable tool route] ${execution.name} is not routed for Interaction Task ${interaction.id} in this turn.`,
       'Normal conversation, status checks, coordination, and read-only inspection remain available.',
       'For Team work, create/link formal-member Tasks and call fleet_user_task action="continue".',
       'Only when the user explicitly asked the assistant to execute personally, no formal member is available, or Team execution has failed, call fleet_user_task action="take_over" with a concrete reason, then retry.',
+      'Do not retry this tool or a substitute project-execution tool before one of those routing states changes.',
     ].join(' ')
   }
 
@@ -5074,6 +5088,7 @@ export class FleetRunService {
         `Every direct foreground user input is already tracked in this Team's persistent Interaction Task. The foreground message is the current revision; do not call fleet_user_task status merely because direct input arrived. Use action="status" with run_id="${record.id}" after a Task Delivery, recovery wake, or when the current Interaction state is otherwise unclear.`,
         'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
         'A normal project imperative remains Team work: delegate before project execution, and take over only when explicitly requested, no formal member is available, or Team execution has failed.',
+        'When fleet_send returns replyTaskIds for delegated work, do not poll members. After all needed requests have been sent, call fleet_user_task action="continue" once with those task_ids and end the turn. Fleet wakes this assistant from durable Task settlement or its bounded progress deadline.',
         'Intermediate native output is retained in the Session trace but is not delivered to the user by default. Use fleet_user_task action="update" only for an intentional mid-turn user update; do not use it to duplicate the final answer.',
         'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: the last non-empty native output completes the direct Interaction and is delivered to the user when the turn ends normally.',
         `Before emitting a native response that settles delegated Team work or a Delivery, or blocks the request, call fleet_user_task with action="report" or action="block" and run_id="${record.id}".`,
@@ -5321,16 +5336,31 @@ export class FleetRunService {
       action: input.delivery === 'interrupt' ? 'message.interrupt' : 'message.wakeup',
       resource: { kind: 'conversation', id: input.to },
     })
-    const result = this.requireRuntime(record.id).messages.send(caller, {
+    const runtime = this.requireRuntime(record.id)
+    // This service route is the foreground-assistant transport. Formal members
+    // use the Message package tool bound inside their Team context.
+    const defaultDirectReply = input.to.startsWith('@')
+      && input.noReply !== true
+    const mentions = defaultDirectReply
+      ? [...new Set([input.to, ...(input.mentions ?? [])])]
+      : input.mentions
+    const result = runtime.messages.send(caller, {
       to: input.to,
       text: input.text,
-      delivery: input.delivery,
+      delivery: input.delivery === 'quiet' && input.to.startsWith('#') ? 'fyi' : input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
-      ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
+      ...(mentions === undefined ? {} : { mentions }),
     })
     this.pendingAssistantKickoffs.delete(`${record.id}:${String(caller.id)}`)
-    return result
+    // Message events may be persisted before their listeners have reconciled
+    // Reply Tasks in every host runtime. Re-run the idempotent reconciliation
+    // here so the tool result can immediately provide stable task ids.
+    const replyTaskIds = runtime.ensureMessageTasks(runtime.messages.getMessage(caller, result.messageId))
+    return {
+      ...result,
+      ...(replyTaskIds.length === 0 ? {} : { replyTaskIds }),
+    }
   }
 
   sendUserConversationMessage(input: SendFleetConversationMessageInput, caller?: Agent): SendMessageResult {
@@ -5704,8 +5734,9 @@ export class FleetRunService {
     if (existing !== undefined) return existing
     const created: VisibilityReminderState = {
       latestContextTokens: 0,
-      baselineContextTokens: 0,
-      afterCompaction: false,
+      baselineContextTokens: undefined,
+      awaitingPostCompactionBaseline: false,
+      reminderCount: 0,
       detailedReminderSent: false,
     }
     this.visibilityReminderStates.set(sessionId, created)
@@ -5730,23 +5761,28 @@ export class FleetRunService {
     const reminder = this.visibilityReminderState(sessionId)
     if (this.memberLastSharedTurns.get(sessionId) === turn) {
       reminder.baselineContextTokens = reminder.latestContextTokens
-      reminder.afterCompaction = false
+      reminder.awaitingPostCompactionBaseline = false
       return
     }
     const message = parseFleetMessageConfiguration(this.moduleConfiguration(record.id, FLEET_MESSAGE_MODULE))
     const threshold = message.visibilityReminderContextGrowthTokens
     if (threshold === 0) return
+    if (reminder.baselineContextTokens === undefined || reminder.awaitingPostCompactionBaseline) {
+      reminder.baselineContextTokens = reminder.latestContextTokens
+      reminder.awaitingPostCompactionBaseline = false
+      return
+    }
+    const multiplier = 2 ** Math.min(reminder.reminderCount, 20)
+    const interval = Math.min(Number.MAX_SAFE_INTEGER, threshold * multiplier)
     const growth = reminder.latestContextTokens - reminder.baselineContextTokens
-    if (!reminder.afterCompaction && growth < threshold) return
+    if (growth < interval) return
     const detailed = !reminder.detailedReminderSent
     const userFacingTurn = this.assistantUserFacingTurns.get(sessionId)?.turn === turn
     const reminderText = foregroundAssistant
       ? detailed
         ? [
             '[Fleet assistant visibility reminder]',
-            reminder.afterCompaction
-              ? 'This Session was compacted. Re-check both visibility boundaries before ending this turn.'
-              : 'Re-check both visibility boundaries before ending this turn.',
+            'Re-check both visibility boundaries before ending this turn.',
             userFacingTurn
               ? 'This is a user-facing turn: its last non-empty native output is delivered to the user automatically at normal turn end, but Team members do not see it.'
               : 'This is a background turn: ordinary native output remains only in the Session trace and is delivered to neither the user nor Team members.',
@@ -5759,9 +5795,7 @@ export class FleetRunService {
       : detailed
         ? [
             '[Fleet visibility reminder]',
-            reminder.afterCompaction
-              ? 'This Session was compacted. Re-check the visibility boundary now: ordinary model output is visible only in this private Session; other Team members do not automatically see it.'
-              : 'Your ordinary model output from the previous turn is visible only in this private Session; other Team members do not automatically see it.',
+            'Your ordinary model output from the previous turn is visible only in this private Session; other Team members do not automatically see it.',
             'If it contains a result, decision, question, or handoff another member needs, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest audience: send one-member or subset work privately to an accountable owner, and use a Channel only when its full audience needs the content. Do not resend user-only text or information already shared.',
             'Do not acknowledge or report reading this reminder. If nothing needs sharing, end without commentary. This private reminder creates no Team message or Task.',
           ].join('\n')
@@ -5769,11 +5803,14 @@ export class FleetRunService {
     runtime.messages.sendSystemNotification(sessionId, {
       kind: 'visibility_reminder',
       text: reminderText,
-      delivery: 'wakeup',
+      // A visibility reminder must never create another model turn merely to
+      // acknowledge the reminder. It becomes context for the next organic turn.
+      delivery: 'quiet',
       coalesceKey: `visibility-reminder:${sessionId}`,
     })
     reminder.baselineContextTokens = reminder.latestContextTokens
-    reminder.afterCompaction = false
+    reminder.awaitingPostCompactionBaseline = false
+    reminder.reminderCount += 1
     reminder.detailedReminderSent = true
   }
 
@@ -5801,13 +5838,18 @@ export class FleetRunService {
       if (tokens !== undefined) {
         const reminder = this.visibilityReminderState(sessionId)
         reminder.latestContextTokens = Math.max(reminder.latestContextTokens, tokens)
+        if (reminder.baselineContextTokens === undefined) {
+          reminder.baselineContextTokens = reminder.latestContextTokens
+          reminder.awaitingPostCompactionBaseline = false
+        }
       }
     }
     if (event.type === 'compaction/summary' || event.type === 'compaction/prune') {
       const reminder = this.visibilityReminderState(sessionId)
       reminder.latestContextTokens = 0
-      reminder.baselineContextTokens = 0
-      reminder.afterCompaction = true
+      reminder.baselineContextTokens = undefined
+      reminder.awaitingPostCompactionBaseline = true
+      reminder.reminderCount = 0
       reminder.detailedReminderSent = false
     }
     const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
@@ -6996,6 +7038,59 @@ export class FleetRunService {
       cursor,
       hasMore,
     }
+  }
+
+  async waitMemberProgress(
+    caller: Agent,
+    runId: string | undefined,
+    memberReference: string,
+    options: {
+      readonly afterSequence: number
+      readonly limit?: number
+      readonly includeOutputs?: boolean
+      readonly maxCharsPerItem?: number
+      readonly waitMs: number
+    },
+  ): Promise<FleetMemberProgress> {
+    if (!Number.isSafeInteger(options.waitMs) || options.waitMs < 1 || options.waitMs > 60_000) {
+      throw new Error('waitMs must be an integer from 1 through 60000')
+    }
+    const read = (): Promise<FleetMemberProgress> => this.readMemberProgress(
+      caller,
+      runId,
+      memberReference,
+      options,
+    )
+    const initial = await read()
+    if (initial.items.length > 0 || !['running', 'waiting'].includes(initial.runtimeStatus)) return initial
+    return new Promise<FleetMemberProgress>((resolve, reject) => {
+      let settled = false
+      const finish = (value: FleetMemberProgress): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        stop()
+        resolve(value)
+      }
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        stop()
+        reject(error)
+      }
+      const refresh = (): void => {
+        void read().then(value => {
+          if (value.items.length > 0 || !['running', 'waiting'].includes(value.runtimeStatus)) finish(value)
+        }, fail)
+      }
+      const stop = this.subscribeTraceChanges((changedRunId, changedMember) => {
+        if (changedRunId === initial.runId && changedMember === initial.member) refresh()
+      })
+      const timer = setTimeout(() => { void read().then(finish, fail) }, options.waitMs)
+      // Close the race between the initial snapshot and listener registration.
+      refresh()
+    })
   }
 
   async readMemberTraceTail(
@@ -9086,6 +9181,7 @@ const MESSAGE_SEND_RESULT_SCHEMA = {
     recipients: { type: 'integer', required: true },
     delivered: { type: 'integer', required: true },
     woken: { type: 'integer', required: true },
+    replyTaskIds: { type: 'array', items: { type: 'string' } },
     audienceHint: { type: 'string' },
   },
 } as const
@@ -9246,11 +9342,12 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send one quiet Fleet message to the smallest necessary audience. Use a direct @target for one-member work and send subset work privately to one accountable owner, who can coordinate with peers. Use a #channel only when its full audience needs the exact content. A Channel post with mentions notifies only those members but remains visible to the full Channel. Each mention creates a Reply Task; use fleet_reply to finish an existing Reply Task.',
+    description: 'Send one quiet Fleet message to the smallest necessary audience. A direct @target is a response request by default and creates one Reply Task; use reply_mode="optional" only for optional context that needs no answer. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is FYI history and wakes nobody. Channel mentions create targeted Reply Tasks.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Use @fleet-name or @agent-id for private one-member work, #channel for a Team-visible broadcast, or meeting:id. A direct @target delivers the full message but creates no Reply Task unless that recipient is also mentioned in the text or mentions parameter.' },
+      to: { type: 'string', required: true, description: 'Use @fleet-name or @agent-id for a private one-member response request, #channel for Team-visible history, or meeting:id.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets merged with valid @Name or @member-id mentions parsed from the text.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Additional structural Reply Task targets merged with parsed mentions. A direct @target already requires its recipient to reply.' },
+      reply_mode: { type: 'string', enum: ['required', 'optional'], description: 'Direct messages default to required. Set optional only when the recipient should not receive a Reply Task.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
@@ -9262,6 +9359,7 @@ export function installRunTools(
         text: args.message,
         delivery: 'quiet',
         ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
+        ...(args.reply_mode === 'optional' ? { noReply: true } : {}),
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }))
@@ -9671,7 +9769,7 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_progress',
-    description: 'Read one reachable Team member\'s current runtime state and bounded recent output, like a compact thread progress view, without exposing full private context.',
+    description: 'Read one reachable Team member\'s current runtime state and bounded recent output without exposing full private context. When waiting for new progress, pass the previous cursor as after_sequence and wait_ms instead of repeating snapshots.',
     parameters: {
       run_id: { type: 'string', description: 'Team id; inferred when the caller belongs to exactly one active Team.' },
       member: { type: 'string', required: true, description: 'Member id, display name, or @member to inspect.' },
@@ -9679,17 +9777,25 @@ export function installRunTools(
       limit: { type: 'integer', description: 'Maximum progress items from 1 through 10. Defaults to 5.' },
       include_outputs: { type: 'boolean', description: 'Include clipped tool arguments and results. Defaults to false.' },
       max_output_chars_per_item: { type: 'integer', description: 'Maximum text per item from 100 through 2000 characters. Defaults to 800.' },
+      wait_ms: { type: 'integer', description: 'Wait up to 60000 ms for progress after after_sequence. Use this instead of polling unchanged state.' },
     },
     output: jsonOutput(PROGRESS_RESULT_SCHEMA),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_progress')
-      return service.readMemberProgress(caller, args.run_id, args.member, {
+      const options = {
         ...(args.after_sequence === undefined ? {} : { afterSequence: args.after_sequence }),
         ...(args.limit === undefined ? {} : { limit: args.limit }),
         ...(args.include_outputs === undefined ? {} : { includeOutputs: args.include_outputs }),
         ...(args.max_output_chars_per_item === undefined
           ? {}
           : { maxCharsPerItem: args.max_output_chars_per_item }),
+      }
+      if (args.wait_ms === undefined) return service.readMemberProgress(caller, args.run_id, args.member, options)
+      if (args.after_sequence === undefined) throw new Error('fleet_progress wait_ms requires after_sequence')
+      return service.waitMemberProgress(caller, args.run_id, args.member, {
+        ...options,
+        afterSequence: args.after_sequence,
+        waitMs: args.wait_ms,
       })
     },
   }))

@@ -5086,7 +5086,7 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
                       }),
                       jsx(ConfigurationField, {
                         label: text('可见性提醒上下文增量（Token）', 'Visibility reminder context growth (tokens)'),
-                        hint: text('0 表示关闭；上下文压缩后会立即进入待提醒状态。', '0 disables it; compaction makes a reminder immediately eligible.'),
+                        hint: text('0 表示关闭；初始及压缩后首个上下文只建立基线，后续提醒间隔按 1×、2×、4× 递增。', '0 disables it; the initial and first post-compaction context establish a baseline, then reminder intervals grow by 1×, 2×, and 4×.'),
                         children: jsx('input', {
                           className: 'dsh-fleet-config-input',
                           type: 'number',

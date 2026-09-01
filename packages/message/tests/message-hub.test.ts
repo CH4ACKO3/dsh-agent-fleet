@@ -202,12 +202,33 @@ describe('MessageHub', () => {
     expect(reviewer.injected[0]).toContain('Please inspect the parser.')
     expect(reviewer.injected[0]).toContain('do not call fleet_inbox merely to read it again')
     expect(reviewer.injected[0]).not.toContain('reply-task')
+    expect(hub.unreadSummary(reviewer.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: 'Please inspect the parser.'.length,
+    })
+    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
       from: 'lead',
       resources: ['res_parser'],
     })
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+  })
+
+  it('keeps an FYI Channel post in shared history without creating member Inbox work', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: 'The alignment conclusion is available for reference.',
+      delivery: 'fyi',
+    })
+
+    expect(sent).toMatchObject({ recipients: 0, delivered: 0, woken: 0 })
+    expect(reviewer.injected).toHaveLength(0)
+    expect(qa.injected).toHaveLength(0)
+    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+    expect(hub.search(reviewer, { conversation: '#general', query: 'alignment conclusion' }))
+      .toContainEqual(expect.objectContaining({ id: sent.messageId, delivery: 'fyi' }))
   })
 
   it('promotes trusted direct-human messages while leaving ordinary Agent relays optional', () => {

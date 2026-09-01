@@ -36,7 +36,7 @@ export interface AgentDirectory {
 export type FleetMessagePermission = 'channel.manage' | 'meeting.manage' | 'vote.create'
 
 export type FleetTarget = `@${string}` | `#${string}` | `meeting:${string}`
-export type FleetDelivery = 'quiet' | 'wakeup' | 'interrupt'
+export type FleetDelivery = 'fyi' | 'quiet' | 'wakeup' | 'interrupt'
 export type FleetSystemNotificationKind =
   | 'message_notice'
   | 'work_start'
@@ -106,6 +106,8 @@ export interface SendMessageResult {
   readonly recipients: number
   readonly delivered: number
   readonly woken: number
+  /** Reply Tasks created by this message when the host exposes Task state. */
+  readonly replyTaskIds?: string[]
   /** Non-blocking guidance when the selected audience is probably broader than necessary. */
   readonly audienceHint?: string
 }

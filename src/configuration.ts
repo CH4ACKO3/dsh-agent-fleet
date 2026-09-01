@@ -29,7 +29,7 @@ export interface FleetMessageConfiguration {
   readonly defaultChannel: { readonly id: string; readonly name: string }
   readonly rules: string
   readonly collaborationMethod: string
-  /** Input-context growth between private visibility reminders. Zero disables them. */
+  /** First input-context growth interval for private visibility reminders. Later intervals double. */
   readonly visibilityReminderContextGrowthTokens: number
 }
 
