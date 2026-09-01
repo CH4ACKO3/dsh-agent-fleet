@@ -29,6 +29,8 @@ export interface FleetMessageConfiguration {
   readonly defaultChannel: { readonly id: string; readonly name: string }
   readonly rules: string
   readonly collaborationMethod: string
+  /** Eligible silent turns between private visibility reminders. Zero disables them. */
+  readonly visibilityReminderIntervalTurns: number
 }
 
 export interface FleetResourcesConfiguration {
@@ -67,6 +69,12 @@ function optionalText(value: unknown, label: string): string {
   return value.trim()
 }
 
+function optionalNonNegativeInteger(value: unknown, label: string, fallback: number): number {
+  if (value === undefined) return fallback
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${label} must be a non-negative integer`)
+  return Number(value)
+}
+
 export function fleetConfigurationValue(value: unknown, label = 'configuration'): FleetConfigurationValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
   if (typeof value === 'number') {
@@ -91,6 +99,11 @@ export function parseFleetMessageConfiguration(value: unknown): FleetMessageConf
     },
     rules: optionalText(input.rules, `${FLEET_MESSAGE_MODULE}.rules`),
     collaborationMethod: optionalText(input.collaborationMethod, `${FLEET_MESSAGE_MODULE}.collaborationMethod`),
+    visibilityReminderIntervalTurns: optionalNonNegativeInteger(
+      input.visibilityReminderIntervalTurns,
+      `${FLEET_MESSAGE_MODULE}.visibilityReminderIntervalTurns`,
+      3,
+    ),
   }
 }
 
@@ -145,6 +158,7 @@ export class FleetConfigurationRegistry {
           defaultChannel: { id: 'main', name: 'Main' },
           rules: '',
           collaborationMethod: '',
+          visibilityReminderIntervalTurns: 3,
         },
       },
       parse: parseFleetMessageConfiguration,

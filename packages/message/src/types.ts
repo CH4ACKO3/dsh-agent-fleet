@@ -47,6 +47,7 @@ export type FleetSystemNotificationKind =
   | 'team_quiescent'
   | 'network_recovery'
   | 'task_notice'
+  | 'visibility_reminder'
   | 'schedule_notice'
   | 'calendar_notice'
 export type FleetMessageKind =

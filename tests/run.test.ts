@@ -2326,14 +2326,19 @@ describe('FleetRunService', () => {
     const guard = vi.fn(() => () => {})
     const get = vi.fn((name: string) => name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
     const memberSetup = vi.fn()
+    const onMemberEvent = vi.fn(() => () => true)
     context.on('fleet/member/setup', memberSetup)
+    const setupAgent = runtime.get(run.members[0]?.sessionId ?? '')
+    if (setupAgent === undefined) throw new Error('expected setup Agent')
     await runtime.creates[0]?.setup?.({
-      agent: runtime.get(run.members[0]?.sessionId ?? '') as unknown as Agent,
+      agent: setupAgent as unknown as Agent,
+      on: onMemberEvent,
       inject: (_deps: readonly string[], callback: (scope: Context) => void) => {
         callback({ tools: { register, restrict, guard, get } } as unknown as Context)
         return Promise.resolve()
       },
     } as unknown as Context)
+    expect(onMemberEvent).toHaveBeenCalledWith('agent/turn-stopping', expect.any(Function))
     expect(restrict).toHaveBeenCalledWith({
       deny: expect.arrayContaining([
         'fleet_agent', 'fleet_archive', 'fleet_setup', 'fleet_trace', 'fleet_activity',
@@ -3611,6 +3616,93 @@ describe('FleetRunService', () => {
       data: { turn: 2 },
     }))
     expect(leadStatus()).toBe('running')
+    disconnect()
+  })
+
+  it('privately reminds a silent formal member without creating Team messages or a reminder loop', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    const coordinationMessages = (): number => service.readTrace(run.id, 0, 300).events
+      .filter(event => event.type === 'coordination.message').length
+    const turnStopping = (turn: number): void => {
+      const hook = service as unknown as {
+        memberTurnStopping(agent: Agent, turn: number): void
+      }
+      hook.memberTurnStopping(lead as unknown as Agent, turn)
+    }
+    const emitSilentTurn = (turn: number, output: string): void => {
+      lead.inbox.nextTurn.length = 0
+      lead.inbox.nextStep.length = 0
+      lead.session.events.push({
+        type: 'turn/start', seq: turn * 10, time: Date.now(), data: { turn },
+      })
+      lead.session.events.push({
+        type: 'assistant/message', seq: turn * 10 + 1, time: Date.now(),
+        data: { turn, interrupted: false, message: { content: [{ type: 'text', text: output }] } },
+      })
+      turnStopping(turn)
+      lead.session.events.push({
+        type: 'turn/end', seq: turn * 10 + 2, time: Date.now(),
+        data: { turn, reason: { kind: 'completed' } },
+      })
+    }
+    const initialLeadMessages = lead.messages.length
+    const initialReviewerMessages = reviewer.messages.length
+    const initialCoordinationMessages = coordinationMessages()
+
+    emitSilentTurn(1, 'I finished the requested analysis.')
+    turnStopping(1)
+
+    expect(lead.messages).toHaveLength(initialLeadMessages + 1)
+    expect(reviewer.messages).toHaveLength(initialReviewerMessages)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('ordinary model output from the previous turn is visible only in this private Session'),
+      }),
+    ])
+    expect(coordinationMessages()).toBe(initialCoordinationMessages)
+    expect(service.readTrace(run.id, 0, 300).events).toContainEqual(expect.objectContaining({
+      type: 'coordination.system_notification',
+      data: expect.stringContaining('visibility_reminder'),
+    }))
+
+    // A model that merely acknowledges the reminder must not wake itself forever.
+    emitSilentTurn(2, 'Understood.')
+    emitSilentTurn(3, 'Still understood.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 1)
+    emitSilentTurn(4, 'Another unshared result.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+
+    lead.inbox.nextTurn.length = 0
+    lead.inbox.nextStep.length = 0
+    lead.session.events.push({
+      type: 'turn/start', seq: 50, time: Date.now(), data: { turn: 5 },
+    })
+    service.messageHub(run.id).send(lead, {
+      to: '#main', text: 'Shared result.', delivery: 'quiet',
+    })
+    lead.session.events.push({
+      type: 'assistant/message', seq: 51, time: Date.now(),
+      data: { turn: 5, interrupted: false, message: { content: [{ type: 'text', text: 'Shared result.' }] } },
+    })
+    turnStopping(5)
+    lead.session.events.push({
+      type: 'turn/end', seq: 52, time: Date.now(), data: { turn: 5, reason: { kind: 'completed' } },
+    })
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+
+    // A successful Team-visible send resets the cooldown, so the next regression is caught immediately.
+    emitSilentTurn(6, 'A later result was not shared.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 3)
     disconnect()
   })
 

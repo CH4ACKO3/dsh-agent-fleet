@@ -5,6 +5,7 @@ import {
   FLEET_RESOURCES_MODULE,
   FLEET_UI_MODULE,
   FleetConfigurationRegistry,
+  parseFleetMessageConfiguration,
 } from '../src/configuration.js'
 import { FleetConfigurationModuleRegistry } from '../packages/ui/src/configuration-modules.js'
 
@@ -23,6 +24,15 @@ function builtIns(): Record<string, unknown> {
 }
 
 describe('Fleet configuration modules', () => {
+  it('defaults visibility reminders to every third eligible turn and allows disabling them', () => {
+    const base = builtIns()[FLEET_MESSAGE_MODULE] as Record<string, unknown>
+    expect(parseFleetMessageConfiguration(base).visibilityReminderIntervalTurns).toBe(3)
+    expect(parseFleetMessageConfiguration({
+      ...base,
+      visibilityReminderIntervalTurns: 0,
+    }).visibilityReminderIntervalTurns).toBe(0)
+  })
+
   it('lets installed Host modules parse their own block while preserving unknown modules', () => {
     const registry = new FleetConfigurationRegistry()
     registry.register({

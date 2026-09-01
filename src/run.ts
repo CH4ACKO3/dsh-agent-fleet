@@ -2182,6 +2182,9 @@ export class FleetRunService {
   private readonly assistantTurnOutputs = new Map<string, string>()
   private readonly assistantCurrentTurns = new Map<string, number>()
   private readonly assistantDirectInputTurns = new Map<string, number>()
+  private readonly memberLastSharedTurns = new Map<string, number>()
+  private readonly memberVisibilityReviewedTurns = new Map<string, number>()
+  private readonly visibilityReminderCountdowns = new Map<string, number>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
@@ -2218,6 +2221,19 @@ export class FleetRunService {
       this.bindBudgetGuard(agent)
     })
     this.loadPersistedTeams()
+  }
+
+  private async setupFormalMember(
+    childCtx: Context,
+    runtime: FleetCollaborationTeam,
+    member: string,
+    source: 'create' | 'resume',
+  ): Promise<void> {
+    if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
+    childCtx.on('agent/turn-stopping', ({ agent, turn }) => {
+      this.memberTurnStopping(agent, turn)
+    })
+    await installMemberTools(childCtx, runtime, member, false, source)
   }
 
   subscribeChanges(listener: () => void): () => void {
@@ -2460,7 +2476,7 @@ export class FleetRunService {
             ? {}
             : { reasoningEffort: ReasoningEffortId(member.reasoningEffort) }),
           ...(memberMaxTokens === undefined ? {} : { maxTokens: memberMaxTokens }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.id, false, 'create'),
+          setup: childCtx => this.setupFormalMember(childCtx, runtime, member.id, 'create'),
         })
         created.push(member.id)
         runtime.memberIdsByName.set(member.id, agent.id)
@@ -2769,7 +2785,7 @@ export class FleetRunService {
             ...memberTemplate,
             name: member.displayName ?? memberTemplate.name,
           }),
-          setup: childCtx => installMemberTools(childCtx, runtime, member.name, false, 'resume'),
+          setup: childCtx => this.setupFormalMember(childCtx, runtime, member.name, 'resume'),
           ...memberAgentOptions,
         })
         runtime.memberIdsByName.set(member.name, resumed.id)
@@ -2807,7 +2823,7 @@ export class FleetRunService {
             role: memberTemplate.role,
             cwd: record.projectRoot,
             persona: persona(effectiveTemplate, memberTemplate),
-            setup: childCtx => installMemberTools(childCtx, runtime, memberTemplate.id, false, 'create'),
+            setup: childCtx => this.setupFormalMember(childCtx, runtime, memberTemplate.id, 'create'),
             ...memberAgentOptions,
           })
           const member: FleetRunMember = {
@@ -3813,7 +3829,7 @@ export class FleetRunService {
         cwd: record.projectRoot,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'create'),
+        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'create'),
       })
       created = true
       runtime.attachMember(agent.id, view)
@@ -3902,7 +3918,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
+        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'resume'),
       })
       if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
       else runtime.rebindMember(member.sessionId, resumed.id, view)
@@ -3931,7 +3947,7 @@ export class FleetRunService {
           role: currentView.role,
           persona: persona({ ...template, members: this.effectiveMemberViews(record) }, currentView),
           ...this.memberRuntimeOptions(record, currentView),
-          setup: childCtx => installMemberTools(childCtx, runtime, currentView.id, false, 'resume'),
+          setup: childCtx => this.setupFormalMember(childCtx, runtime, currentView.id, 'resume'),
         })
         if (restored.id === member.sessionId) runtime.attachMember(restored.id, currentView)
         else runtime.rebindMember(member.sessionId, restored.id, currentView)
@@ -4660,7 +4676,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => installMemberTools(childCtx, runtime, view.id, false, 'resume'),
+        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'resume'),
       })
       const resumedAgent = this.ctx.agents.get(SessionId(resumed.id))
       if (member.status === 'paused' && resumedAgent !== undefined) {
@@ -5456,6 +5472,14 @@ export class FleetRunService {
     if (record === undefined || runtime === undefined) return
     this.appendEvent(record.id, `coordination.${event.type}`, event)
     if (event.type === 'message') {
+      const sender = this.participants(record).find(participant =>
+        participant.name === event.message.from || participant.sessionId === event.message.from)
+      const agent = sender === undefined ? undefined : this.ctx.agents.get(SessionId(sender.sessionId))
+      const turn = agent === undefined ? undefined : this.currentOpenTurn(agent)
+      if (sender !== undefined && turn !== undefined) {
+        this.memberLastSharedTurns.set(sender.sessionId, turn)
+        this.visibilityReminderCountdowns.delete(sender.sessionId)
+      }
       const recipientIds = event.message.recipientIds ?? []
       queueMicrotask(() => {
         const current = this.records.get(runId)
@@ -5616,6 +5640,66 @@ export class FleetRunService {
     if (event.type !== 'turn/end') return
     if (event.data.reason.kind === 'error') this.abnormalSessionIds.add(sessionId)
     else this.abnormalSessionIds.delete(sessionId)
+  }
+
+  private currentOpenTurn(agent: Agent): number | undefined {
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/end') return undefined
+      if (event?.type === 'turn/start') return event.data.turn
+    }
+    return undefined
+  }
+
+  private turnHasDirectOutput(agent: Agent, turn: number): boolean {
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start' && event.data.turn < turn) break
+      if (event?.type !== 'assistant/message'
+        || event.data.turn !== turn
+        || event.data.interrupted === true) continue
+      if (progressMessageText(event.data).trim().length > 0) return true
+    }
+    return false
+  }
+
+  private memberTurnStopping(agent: Agent, turn: number): void {
+    const sessionId = String(agent.id)
+    if (this.memberVisibilityReviewedTurns.get(sessionId) === turn) return
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      runtime.memberNamesById.has(sessionId) && !this.dormantRunIds.has(runId))
+    if (entry === undefined) return
+    const [runId, runtime] = entry
+    const record = this.records.get(runId)
+    const member = runtime.memberNamesById.get(sessionId)
+    if (record === undefined || member === undefined
+      || !record.members.some(candidate => candidate.name === member)) return
+    this.memberVisibilityReviewedTurns.set(sessionId, turn)
+    if (!this.turnHasDirectOutput(agent, turn)) return
+    if (this.memberLastSharedTurns.get(sessionId) === turn) {
+      this.visibilityReminderCountdowns.delete(sessionId)
+      return
+    }
+    const message = parseFleetMessageConfiguration(this.moduleConfiguration(record.id, FLEET_MESSAGE_MODULE))
+    const interval = message.visibilityReminderIntervalTurns
+    if (interval === 0) return
+    const countdown = this.visibilityReminderCountdowns.get(sessionId) ?? 0
+    if (countdown > 0) {
+      this.visibilityReminderCountdowns.set(sessionId, countdown - 1)
+      return
+    }
+    runtime.messages.sendSystemNotification(sessionId, {
+      kind: 'visibility_reminder',
+      text: [
+        '[Fleet visibility reminder]',
+        'Your ordinary model output from the previous turn is visible only in this private Session; other Team members do not automatically see it.',
+        'If it contains a result, decision, question, or handoff another member needs, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Do not resend user-only text or information already shared.',
+        'Do not acknowledge or report reading this reminder. If nothing needs sharing, end without commentary. This private reminder creates no Team message or Task.',
+      ].join('\n'),
+      delivery: 'wakeup',
+      coalesceKey: `visibility-reminder:${sessionId}`,
+    })
+    this.visibilityReminderCountdowns.set(sessionId, interval - 1)
   }
 
   recordMemberSessionEvent(sessionId: string, event: SessionEvent): void {
@@ -6030,6 +6114,9 @@ export class FleetRunService {
     this.assistantTurnOutputs.delete(agentId)
     this.assistantCurrentTurns.delete(agentId)
     this.assistantDirectInputTurns.delete(agentId)
+    this.memberLastSharedTurns.delete(agentId)
+    this.memberVisibilityReviewedTurns.delete(agentId)
+    this.visibilityReminderCountdowns.delete(agentId)
     this.abnormalSessionIds.delete(agentId)
     for (const [runId, runtime] of this.collaboration.entries()) {
       if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
@@ -7248,6 +7335,9 @@ export class FleetRunService {
     this.assistantTurnOutputs.clear()
     this.assistantCurrentTurns.clear()
     this.assistantDirectInputTurns.clear()
+    this.memberLastSharedTurns.clear()
+    this.memberVisibilityReviewedTurns.clear()
+    this.visibilityReminderCountdowns.clear()
     this.collaboration.close()
     this.dormantRunIds.clear()
     this.manualWakeRequiredRunIds.clear()
