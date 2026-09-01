@@ -427,18 +427,18 @@ const styles = `
   overflow-y: auto;
 }
 
-.dsh-fleet-assistant-private[data-team-conversation="true"] .dsh-fleet-assistant-private-column {
-  padding-bottom: 50px;
+[data-composer-seat]:has(> .dsh-fleet-assistant-work-status) {
+  position: relative;
 }
 
 .dsh-fleet-assistant-work-status {
   z-index: 5;
   max-width: min(420px, calc(100% - 32px));
   position: absolute;
-  bottom: 5px;
+  top: -22px;
   left: clamp(
     12px,
-    calc(50% - var(--dsh-fleet-assistant-composer-width) / 2 + 12px),
+    calc(50% - var(--dsh-fleet-assistant-composer-width, 760px) / 2 + 12px),
     calc(100% - 220px)
   );
 }
@@ -537,7 +537,6 @@ export interface AgentFleetPrivateMessage {
 
 export interface AgentFleetConversationIdentity {
   readonly assistant: FleetChatMember
-  readonly members?: readonly FleetRuntimeMember[]
   readonly interactions: readonly AgentFleetInteractionTurn[]
   readonly interactionPending: boolean
 }
@@ -909,7 +908,7 @@ function AgentFleetAvatarPopover({ member, running, showDetails, showContext }: 
   })
 }
 
-function AgentFleetWorkStatus({ members }: { readonly members: readonly FleetRuntimeMember[] }): ReactElement | null {
+export function AgentFleetWorkStatus({ members }: { readonly members: readonly FleetRuntimeMember[] }): ReactElement | null {
   const groups = projectAgentFleetWorkStatuses(members)
   if (groups.length === 0) return null
   const working = groups.find(group => group.id === 'working')?.members ?? []
@@ -1169,7 +1168,6 @@ export function AgentFleetPrivateChat({
         title: resizeLabel,
         ...column.handle,
       }),
-      identity?.members !== undefined && jsx(AgentFleetWorkStatus, { members: identity.members }),
       jsx('div', {
         className: 'dsh-fleet-assistant-private-scroll',
         children: jsxs('div', {

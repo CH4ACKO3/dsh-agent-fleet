@@ -6973,6 +6973,11 @@ export function getFleetTeamDirectorySnapshot(): FleetPanelTeamDirectory {
   return teamDirectorySource?.getSnapshot().directory ?? emptyDirectory
 }
 
+/** Fully projected Team currently loaded by the Fleet panel source. */
+export function getFleetSelectedTeamSnapshot(): FleetPanelTeamSnapshot | undefined {
+  return teamDirectorySource?.getSnapshot().team
+}
+
 /** Display name of the Team assistant connected to a foreground Session. */
 export function getFleetAssistantDisplayName(sessionId: string | undefined): string | undefined {
   if (sessionId === undefined) return undefined
@@ -7064,7 +7069,6 @@ function fleetAssistantConversationIdentity(snapshot: FleetPanelSnapshot, sessio
   const interaction = team?.assistantInteractions?.find(candidate => candidate.assistantId === visibleAssistant.id)
   return {
     assistant: visibleAssistant,
-    ...(team === undefined ? {} : { members: [...team.members, ...(team.assistants ?? [])] }),
     interactions: interaction?.turns ?? [],
     interactionPending: interaction?.pending === true,
   }

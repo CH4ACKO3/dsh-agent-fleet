@@ -54,6 +54,7 @@ import {
   FleetBudgetMeter,
   getFleetAssistantDisplayName,
   getFleetModelDirectory,
+  getFleetSelectedTeamSnapshot,
   getFleetTeamDirectorySnapshot,
   parseFleetConversationCommand,
   subscribeFleetTeamDirectory,
@@ -62,6 +63,7 @@ import {
   type FleetPanelTeamSummary,
 } from './team-panel.js'
 import { useFleetMetaAssistantSession } from './meta-assistant.js'
+import { AgentFleetWorkStatus } from './assistant-private-chat.js'
 import { uploadFleetSetupFile } from './web-client.js'
 
 const STYLE_ID = 'dsh-agent-fleet-team-entry'
@@ -6917,6 +6919,14 @@ export function withFleetComposerActivation(
         sessionId !== undefined && team.assistantSessionIds?.includes(sessionId) === true),
       () => undefined,
     )
+    const assistantTeamSnapshot = useSyncExternalStore(
+      subscribeFleetTeamDirectory,
+      () => {
+        const selected = getFleetSelectedTeamSnapshot()
+        return selected?.teamId === assistantTeam?.teamId ? selected : undefined
+      },
+      () => undefined,
+    )
     const assistantName = useSyncExternalStore(
       subscribeFleetTeamDirectory,
       () => getFleetAssistantDisplayName(sessionId),
@@ -7169,7 +7179,7 @@ export function withFleetComposerActivation(
           }),
         ],
       })
-      return jsx(InputBar, {
+      const assistantInputBar = jsx(InputBar, {
         ...props,
         disabled: teamArchived,
         blocked: undefined,
@@ -7206,6 +7216,14 @@ export function withFleetComposerActivation(
             ? isChineseLocale() ? '团队已归档，此助理会话为只读。' : 'The Team is archived. This assistant Session is read-only.'
             : assistantError,
         }),
+      })
+      return jsxs(Fragment, {
+        children: [
+          assistantTeamSnapshot !== undefined && jsx(AgentFleetWorkStatus, {
+            members: [...assistantTeamSnapshot.members, ...(assistantTeamSnapshot.assistants ?? [])],
+          }),
+          assistantInputBar,
+        ],
       })
     }
 
