@@ -2111,7 +2111,7 @@ function isExplicitWaitCall(name: string, rawArguments: string): boolean {
 const NETWORK_RECOVERY_INITIAL_DELAY_MS = 30_000
 const NETWORK_RECOVERY_MAX_DELAY_MS = 5 * 60_000
 const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
-const PROTOCOL_RECOVERY_MAX_ATTEMPTS = 1
+const PROTOCOL_RECOVERY_MAX_ATTEMPTS = 2
 const RETRIABLE_PROTOCOL_FAILURE = /\bmalformed_tool_protocol\b/iu
 const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
@@ -5700,10 +5700,11 @@ export class FleetRunService {
     runtime.tasks.releaseRunning(member, reason.kind === 'error'
       ? `turn failed with ${reason.error.code}`
       : `turn ended with ${reason.kind} before fleet_reconcile resolve`)
-    if (reason.kind === 'error'
-      && isRetriableProtocolFailure(reason.error)
-      && agent !== undefined
-      && this.scheduleProtocolRecovery(runId, member, agent, reason.error.message)) return
+    if (reason.kind === 'error' && isRetriableProtocolFailure(reason.error) && agent !== undefined) {
+      if (this.scheduleProtocolRecovery(runId, member, agent, reason.error.message)) return
+    } else if (reason.kind === 'error') {
+      this.protocolRecoveries.delete(sessionId)
+    }
     if (reason.kind === 'error') {
       this.appendEvent(runId, 'member_auto_continuation_paused', {
         member,
@@ -6079,14 +6080,19 @@ export class FleetRunService {
     const sessionId = String(agent.id)
     const attempt = (this.protocolRecoveries.get(sessionId)?.attempt ?? 0) + 1
     if (attempt > PROTOCOL_RECOVERY_MAX_ATTEMPTS) {
-      this.protocolRecoveries.delete(sessionId)
+      this.protocolRecoveries.set(sessionId, {
+        runId,
+        member,
+        attempt: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+        pending: false,
+      })
       this.appendEvent(runId, 'member_protocol_recovery_exhausted', {
         member,
         sessionId,
         attempts: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
         reason: clippedProgressText(message, 1_000),
       })
-      return false
+      return this.escalateProtocolRecovery(record, member, sessionId, message)
     }
     this.protocolRecoveries.set(sessionId, { runId, member, attempt, pending: true })
     this.appendEvent(runId, 'member_protocol_recovery_scheduled', {
@@ -6124,21 +6130,55 @@ export class FleetRunService {
     }
     if (agent.status !== 'idle') return
     recovery.pending = false
+    const retryGuidance = recovery.attempt === 1
+      ? 'Re-check durable Task state and artifacts, assume an earlier external action may already have completed, and continue from the smallest safe next step without blindly replaying irreversible actions.'
+      : `Retry ${recovery.attempt}/${PROTOCOL_RECOVERY_MAX_ATTEMPTS}: continue from durable state and do not replay irreversible actions.`
     this.requireRuntime(record.id).messages.sendSystemNotification(sessionId, {
       kind: 'task_notice',
       text: [
         `[Fleet work ${record.work.id} protocol recovery]`,
         'The previous turn ended because the inference backend returned malformed tool-call protocol.',
-        'This is the only automatic retry for this failure streak. Re-check durable Task state and artifacts, assume an external action may already have completed, and continue with one small step without replaying irreversible actions blindly.',
+        retryGuidance,
       ].join('\n\n'),
       delivery: 'wakeup',
-      coalesceKey: `protocol-recovery:${record.work.id}:${recovery.member}`,
+      coalesceKey: `protocol-recovery:${record.work.id}:${recovery.member}:${recovery.attempt}`,
     })
     this.appendEvent(record.id, 'member_protocol_recovery_woken', {
       member: recovery.member,
       sessionId,
       attempt: recovery.attempt,
     })
+  }
+
+  private escalateProtocolRecovery(
+    record: FleetRunRecord,
+    member: string,
+    failedSessionId: string,
+    message: string,
+  ): boolean {
+    const assistant = record.assistants.find(candidate =>
+      candidate.sessionId !== failedSessionId
+      && candidate.status !== 'paused')
+    if (assistant === undefined) return false
+    this.requireRuntime(record.id).messages.sendSystemNotification(assistant.sessionId, {
+      kind: 'task_notice',
+      text: [
+        `[Fleet work ${record.work?.id ?? 'unknown'} protocol recovery required]`,
+        `Member ${member} exhausted ${PROTOCOL_RECOVERY_MAX_ATTEMPTS} automatic retries after malformed inference tool protocol. Its durable Tasks remain unsettled.`,
+        'Inspect only the affected Task and its latest artifacts, then resume the member with a narrow next step or reassign the remaining work. Do not replay irreversible actions without verifying their durable result.',
+      ].join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `protocol-recovery-escalation:${record.work?.id ?? record.id}:${member}`,
+    })
+    this.appendEvent(record.id, 'member_protocol_recovery_escalated', {
+      member,
+      sessionId: failedSessionId,
+      assistant: assistant.view.id,
+      assistantSessionId: assistant.sessionId,
+      attempts: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+      reason: clippedProgressText(message, 1_000),
+    })
+    return true
   }
 
   private scheduleNetworkRecovery(runId: string, member: string, agent: Agent, code: string): void {

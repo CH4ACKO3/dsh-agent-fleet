@@ -4547,7 +4547,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('retries malformed tool protocol once without turning the retry into a storm', async () => {
+  it('retries malformed tool protocol twice, then escalates to one assistant without a storm', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -4581,7 +4581,7 @@ describe('FleetRunService', () => {
 
     expect(lead.messages).toHaveLength(messagesBeforeFailure + 1)
     expect(lead.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining('only automatic retry') }),
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('smallest safe next step') }),
     ])
     expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'member_protocol_recovery_scheduled' }),
@@ -4600,14 +4600,35 @@ describe('FleetRunService', () => {
     service.agentIdle(lead as unknown as Agent)
     await Promise.resolve()
 
-    expect(lead.messages).toHaveLength(messagesBeforeFailure + 1)
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 2)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('Retry 2/2') }),
+    ])
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_protocol_recovery_exhausted')).toBe(false)
+
+    const assistantMessagesBeforeEscalation = launcher.messages.length
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 12,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 12 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(12))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 2)
+    expect(launcher.messages).toHaveLength(assistantMessagesBeforeEscalation + 1)
+    expect(launcher.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('protocol recovery required') }),
+    ])
     expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'member_protocol_recovery_exhausted' }),
-      expect.objectContaining({
-        type: 'member_auto_continuation_paused',
-        data: expect.stringContaining('malformed_tool_protocol'),
-      }),
+      expect.objectContaining({ type: 'member_protocol_recovery_escalated' }),
     ]))
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_auto_continuation_paused')).toBe(false)
     disconnect()
   })
 

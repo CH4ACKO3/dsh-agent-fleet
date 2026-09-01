@@ -66,11 +66,15 @@ leaves `running`. A Task may have no owner when progression is entirely event,
 child, time, or reconciler driven.
 
 Automatic continuation is also fenced by Session health. A non-network turn
-failure pauses owner-list, ready-Task, and idle continuation for that Session
-instead of immediately feeding the same work back into a broken model route.
-The durable Task remains `running`; an explicit new turn clears the health
-fence and retries it. Transient network failures continue through their
-separate bounded backoff and route-recovery scheduler.
+failure normally pauses owner-list, ready-Task, and idle continuation for that
+Session instead of immediately feeding the same work back into a broken model
+route. Malformed inference tool protocol is handled separately: Fleet retries
+the affected Session twice from durable Task state, then wakes one available
+foreground assistant to inspect or reassign the unsettled work. It neither
+broadcasts the failure nor leaves the failed owner as an invisible liveness
+gap. Other durable Tasks remain `running`; an explicit new turn clears their
+health fence. Transient network failures continue through their separate
+bounded backoff and route-recovery scheduler.
 
 Any real user message addressed to a Team member updates that recipient's
 persistent Inbox and Reply Tasks. If its Session is not loaded, Fleet restores
