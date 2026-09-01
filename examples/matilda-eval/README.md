@@ -63,6 +63,8 @@ docker compose --project-directory examples/matilda-eval -f examples/matilda-eva
 
 Use an absolute `FLEET_PACKAGE_PATH` shared with Docker Desktop. Never place runtime keys in `.env.example`, Team JSON, task Markdown, or output artifacts.
 
+When replacing a source tgz without changing its package version or path, use a new `COMPOSE_PROJECT_NAME` (and therefore a new `dsh-data` volume). pnpm may reuse the earlier file dependency from an existing profile even when the host tgz was overwritten, which makes a container appear updated while it still runs the previous package contents.
+
 ## Collect and reset
 
 The terminal evidence is under `$env:DSH_WORKSPACE/e2e-output/matilda-eval/final/`. Preserve that directory together with the Team trace/export needed by the evaluation protocol.
@@ -80,5 +82,7 @@ docker compose --project-directory examples/matilda-eval down --volumes
 ```
 
 Changing `COMPOSE_PROJECT_NAME`, `DSH_HOST_PORT`, and `DSH_WORKSPACE` is sufficient to run another evaluation side by side. Keep solver limits and seed recorded with the result when comparing runs.
+
+`MATILDA_PHASE1_BUDGET_SECONDS` bounds each complete phase-one lane; the Z3 and CP-SAT settings are per-call ceilings inside that total. Lane prompts require one foreground computation at a time and a formal Goal result at the deadline, so a slow experiment cannot silently strand the staged Task chain.
 
 For cross-run comparison, use both mathematical outcome and collaboration cost. The task asks the final bundle to record member model steps, tool calls, aborted calls, Channel/private messages, Reply Tasks, idle recoveries, token usage when exposed, and solver wall time. A missing counter stays `null`; it must not be reconstructed from guesswork. This separates improvements in Team mechanics from changes caused only by a larger compute budget.

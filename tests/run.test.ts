@@ -4547,6 +4547,70 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('retries malformed tool protocol once without turning the retry into a storm', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected live lead member')
+    const messagesBeforeFailure = lead.messages.length
+    const malformedTurn = (seq: number): SessionEvent => ({
+      seq,
+      time: Date.now(),
+      type: 'turn/end',
+      data: {
+        turn: seq,
+        reason: {
+          kind: 'error',
+          error: {
+            code: 'PI_AI_ERROR',
+            message: 'malformed_tool_protocol: Inference backend returned malformed tool-call protocol.',
+          },
+        },
+      },
+    })
+
+    service.recordMemberSessionEvent(lead.id, malformedTurn(10))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 1)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('only automatic retry') }),
+    ])
+    expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_protocol_recovery_scheduled' }),
+      expect.objectContaining({ type: 'member_protocol_recovery_woken' }),
+    ]))
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_auto_continuation_paused')).toBe(false)
+
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 11,
+      time: Date.now(),
+      type: 'turn/start',
+      data: { turn: 11 },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(11))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 1)
+    expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_protocol_recovery_exhausted' }),
+      expect.objectContaining({
+        type: 'member_auto_continuation_paused',
+        data: expect.stringContaining('malformed_tool_protocol'),
+      }),
+    ]))
+    disconnect()
+  })
+
   it('pauses only loaded members and wakes the partially loaded Team', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)

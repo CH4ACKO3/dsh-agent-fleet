@@ -2111,6 +2111,8 @@ function isExplicitWaitCall(name: string, rawArguments: string): boolean {
 const NETWORK_RECOVERY_INITIAL_DELAY_MS = 30_000
 const NETWORK_RECOVERY_MAX_DELAY_MS = 5 * 60_000
 const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
+const PROTOCOL_RECOVERY_MAX_ATTEMPTS = 1
+const RETRIABLE_PROTOCOL_FAILURE = /\bmalformed_tool_protocol\b/iu
 const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_HISTORY_LIMIT = 500
@@ -2153,6 +2155,17 @@ interface NetworkRecovery {
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
+interface ProtocolRecovery {
+  readonly runId: string
+  readonly member: string
+  readonly attempt: number
+  pending: boolean
+}
+
+function isRetriableProtocolFailure(error: { readonly code: string; readonly message: string }): boolean {
+  return error.code === 'PI_AI_ERROR' && RETRIABLE_PROTOCOL_FAILURE.test(error.message)
+}
+
 export class FleetRunService {
   private readonly records = new Map<string, FleetRunRecord>()
   private readonly dormantRunIds = new Set<string>()
@@ -2166,6 +2179,7 @@ export class FleetRunService {
   private readonly finalizations = new Map<string, Promise<void>>()
   private readonly resumingRunIds = new Set<string>()
   private readonly networkRecoveries = new Map<string, NetworkRecovery>()
+  private readonly protocolRecoveries = new Map<string, ProtocolRecovery>()
   private readonly memberToolActivity = new Map<string, MemberToolActivity>()
   private readonly waitingSessionIds = new Set<string>()
   private readonly abnormalSessionIds = new Set<string>()
@@ -5650,6 +5664,7 @@ export class FleetRunService {
       this.assistantTurnOutputs.delete(sessionId)
     }
     if (event.type === 'user/message' && event.data.source?.kind === 'user') {
+      this.protocolRecoveries.delete(sessionId)
       if (foregroundAssistant) {
         this.assistantTurnOutputs.delete(sessionId)
         const turn = this.assistantCurrentTurns.get(sessionId)
@@ -5685,6 +5700,10 @@ export class FleetRunService {
     runtime.tasks.releaseRunning(member, reason.kind === 'error'
       ? `turn failed with ${reason.error.code}`
       : `turn ended with ${reason.kind} before fleet_reconcile resolve`)
+    if (reason.kind === 'error'
+      && isRetriableProtocolFailure(reason.error)
+      && agent !== undefined
+      && this.scheduleProtocolRecovery(runId, member, agent, reason.error.message)) return
     if (reason.kind === 'error') {
       this.appendEvent(runId, 'member_auto_continuation_paused', {
         member,
@@ -5692,6 +5711,8 @@ export class FleetRunService {
         code: reason.error.code,
         reason: clippedProgressText(reason.error.message, 1_000),
       })
+    } else {
+      this.protocolRecoveries.delete(sessionId)
     }
     const route = agent === undefined ? undefined : this.networkRoute(agent)
     this.clearNetworkRecovery(sessionId)
@@ -6001,9 +6022,13 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const record = this.records.get(runId)
     const participant = runtime.memberNamesById.get(agentId)
-    if (record === undefined || participant === undefined
-      || this.autoContinuationPaused(record, participant)
-      || this.abnormalSessionIds.has(agentId)
+    if (record === undefined || participant === undefined) return
+    if (this.autoContinuationPaused(record, participant)) return
+    if (this.protocolRecoveries.get(agentId)?.pending === true) {
+      this.wakeProtocolRecovery(agentId)
+      return
+    }
+    if (this.abnormalSessionIds.has(agentId)
       || this.networkRecoveries.has(agentId)) return
 
     if (this.continueAssignedTask(runId, runtime, record, agent)) return
@@ -6032,6 +6057,7 @@ export class FleetRunService {
 
   agentDisconnected(agentId: string): void {
     this.clearNetworkRecovery(agentId)
+    this.protocolRecoveries.delete(agentId)
     this.clearMemberActivity(agentId)
     this.assistantTurnOutputs.delete(agentId)
     this.assistantCurrentTurns.delete(agentId)
@@ -6045,6 +6071,74 @@ export class FleetRunService {
 
   private networkRoute(agent: Agent): string {
     return `${agent.options.provider ?? ''}\u0000${agent.options.model ?? ''}`
+  }
+
+  private scheduleProtocolRecovery(runId: string, member: string, agent: Agent, message: string): boolean {
+    const record = this.records.get(runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running') return false
+    const sessionId = String(agent.id)
+    const attempt = (this.protocolRecoveries.get(sessionId)?.attempt ?? 0) + 1
+    if (attempt > PROTOCOL_RECOVERY_MAX_ATTEMPTS) {
+      this.protocolRecoveries.delete(sessionId)
+      this.appendEvent(runId, 'member_protocol_recovery_exhausted', {
+        member,
+        sessionId,
+        attempts: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+        reason: clippedProgressText(message, 1_000),
+      })
+      return false
+    }
+    this.protocolRecoveries.set(sessionId, { runId, member, attempt, pending: true })
+    this.appendEvent(runId, 'member_protocol_recovery_scheduled', {
+      member,
+      sessionId,
+      attempt,
+      reason: clippedProgressText(message, 1_000),
+    })
+    queueMicrotask(() => { this.wakeProtocolRecovery(sessionId) })
+    return true
+  }
+
+  private wakeProtocolRecovery(sessionId: string): void {
+    const recovery = this.protocolRecoveries.get(sessionId)
+    if (recovery?.pending !== true) return
+    const record = this.records.get(recovery.runId)
+    if (record?.status !== 'running' || record.work?.status !== 'running') {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    const participant = this.participants(record).find(candidate => candidate.sessionId === sessionId)
+    if (participant === undefined) {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    if (this.autoContinuationPaused(record, participant.name)) return
+    if (this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) {
+      this.protocolRecoveries.delete(sessionId)
+      return
+    }
+    if (agent.status !== 'idle') return
+    recovery.pending = false
+    this.requireRuntime(record.id).messages.sendSystemNotification(sessionId, {
+      kind: 'task_notice',
+      text: [
+        `[Fleet work ${record.work.id} protocol recovery]`,
+        'The previous turn ended because the inference backend returned malformed tool-call protocol.',
+        'This is the only automatic retry for this failure streak. Re-check durable Task state and artifacts, assume an external action may already have completed, and continue with one small step without replaying irreversible actions blindly.',
+      ].join('\n\n'),
+      delivery: 'wakeup',
+      coalesceKey: `protocol-recovery:${record.work.id}:${recovery.member}`,
+    })
+    this.appendEvent(record.id, 'member_protocol_recovery_woken', {
+      member: recovery.member,
+      sessionId,
+      attempt: recovery.attempt,
+    })
   }
 
   private scheduleNetworkRecovery(runId: string, member: string, agent: Agent, code: string): void {
@@ -7248,6 +7342,7 @@ export class FleetRunService {
       if (recovery.timer !== undefined) clearTimeout(recovery.timer)
     }
     this.networkRecoveries.clear()
+    this.protocolRecoveries.clear()
     for (const sessionId of [...this.memberToolActivity.keys()]) this.clearMemberActivity(sessionId)
     this.waitingSessionIds.clear()
     this.abnormalSessionIds.clear()
@@ -7413,6 +7508,9 @@ export class FleetRunService {
     const terminalSummary = summary.trim()
     if (terminalSummary.length === 0) throw new Error('Fleet team close summary cannot be empty')
     this.clearRunNetworkRecoveries(runId)
+    for (const [sessionId, recovery] of [...this.protocolRecoveries]) {
+      if (recovery.runId === runId) this.protocolRecoveries.delete(sessionId)
+    }
     this.collaboration.get(runId)?.pauseProductivity()
     const endedAt = new Date().toISOString()
     const record = this.replaceRecord(runId, {
