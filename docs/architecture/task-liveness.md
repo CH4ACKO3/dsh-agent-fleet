@@ -25,6 +25,9 @@ The public write surface is intentionally higher-level:
 - Inbox: every member has one persistent Inbox Task. Unread messages move it
   from `dormant` to `running`; `fleet_inbox read` consumes an aggregate bounded
   batch across visible conversations and the domain reconciles it automatically.
+  A complete message already queued in the member's native Session remains
+  unread for UI receipts but is excluded from Inbox owner work, so the model is
+  never asked to fetch the same body twice.
 - Reply: every resolved `@mention` creates one Reply Task per target.
   `fleet_reply` sends the response, records the delivery message id, and
   atomically completes the Task.
@@ -269,4 +272,30 @@ no model turns.
 
 `fleet_progress` is deliberately outside Task state. It is a read-only compact
 thread-style view of one reachable member's current runtime status and bounded
-recent output. Reading it never wakes, interrupts, or changes that member.
+recent output. Reading it never wakes, interrupts, or changes that member. A
+caller waiting on a known cursor can suspend the read until that member's trace
+changes instead of polling identical snapshots. Foreground assistants should
+normally link Reply/Goal Tasks through their Interaction and let Task settlement
+wake them; progress waiting is only an observation fallback.
+
+An unmentioned `fleet_send` Channel post is stored as FYI history. It creates no
+recipient Inbox work and wakes nobody. Mentions continue to create targeted
+Reply Tasks, while `fleet_reply` addresses only the source participant. When a
+member owns exactly one Reply Task, `fleet_reply` binds it automatically if the
+id is omitted or stale. A foreground assistant's direct message to one formal
+member is a response request by default and therefore creates one Reply Task;
+`reply_mode="optional"` explicitly keeps it optional, while an empty mention list cannot
+accidentally suppress the default. Direct user input to that
+assistant does not create a parallel Reply Task because its Interaction Task is
+already the durable delivery path. A formal member's successful `fleet_reply`
+ends that turn before redundant private acknowledgement text is generated.
+The assistant-scoped `fleet_send` reconciles the Reply Task before returning, so
+the first send returns its stable `replyTaskIds`. `fleet_user_task continue` is
+idempotent when a requested Reply Task settles before the wait is installed.
+
+Private visibility reminders are queued without waking the Session. The first
+model context observed at startup or after compaction establishes the epoch
+baseline and cannot trigger a reminder. Subsequent reminder intervals are the
+configured growth, then twice that growth, then four times it, and so on within
+the compaction epoch; this reduces reminder density as earlier reminders remain
+in context.

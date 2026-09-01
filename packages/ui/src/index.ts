@@ -54,6 +54,7 @@ import {
   FleetBudgetMeter,
   getFleetAssistantDisplayName,
   getFleetModelDirectory,
+  getFleetSelectedTeamSnapshot,
   getFleetTeamDirectorySnapshot,
   parseFleetConversationCommand,
   subscribeFleetTeamDirectory,
@@ -62,6 +63,7 @@ import {
   type FleetPanelTeamSummary,
 } from './team-panel.js'
 import { useFleetMetaAssistantSession } from './meta-assistant.js'
+import { AgentFleetWorkStatus } from './assistant-private-chat.js'
 import { uploadFleetSetupFile } from './web-client.js'
 
 const STYLE_ID = 'dsh-agent-fleet-team-entry'
@@ -2579,6 +2581,7 @@ interface FleetConfigurationDraft {
   readonly channelName: string
   readonly rules: string
   readonly collaborationMethod: string
+  readonly visibilityReminderContextGrowthTokens: number
   readonly sharedResources: readonly File[]
   readonly updateDensity: string
   readonly notificationPolicy: string
@@ -2881,6 +2884,7 @@ function emptyConfiguration(): FleetConfigurationDraft {
     channelName: 'Main',
     rules: '',
     collaborationMethod: '',
+    visibilityReminderContextGrowthTokens: 16_000,
     sharedResources: [],
     updateDensity: 'concise',
     notificationPolicy: 'decisions',
@@ -3189,6 +3193,11 @@ function configurationFromPreset(value: unknown): FleetConfigurationDraft {
     channelName: presetString(defaultChannel.name, 'channel name', 'Main'),
     rules: presetString(editor.rules ?? message.rules, 'rules'),
     collaborationMethod: presetString(editor.collaborationMethod ?? message.collaborationMethod, 'collaboration method'),
+    visibilityReminderContextGrowthTokens: typeof message.visibilityReminderContextGrowthTokens === 'number'
+      && Number.isSafeInteger(message.visibilityReminderContextGrowthTokens)
+      && message.visibilityReminderContextGrowthTokens >= 0
+      ? message.visibilityReminderContextGrowthTokens
+      : 16_000,
     sharedResources: [],
     updateDensity: presetString(userAccess.updateDensity, 'update density', 'concise'),
     notificationPolicy: presetString(userAccess.notificationPolicy, 'notification policy', 'decisions'),
@@ -3223,6 +3232,7 @@ function configurationPreset(draft: FleetConfigurationDraft, library: PresetLibr
         defaultChannel: { id: draft.channelId, name: draft.channelName },
         rules: resolvedPresetText(draft, 'rules', draft.rules, library, chinese),
         collaborationMethod: resolvedPresetText(draft, 'collaboration', draft.collaborationMethod, library, chinese),
+        visibilityReminderContextGrowthTokens: draft.visibilityReminderContextGrowthTokens,
       },
       [FLEET_RESOURCES_CONFIGURATION_MODULE]: {
         policy: resolvedPresetText(draft, 'resources', '', library, chinese),
@@ -3317,6 +3327,7 @@ function configurationDraftChanged(current: FleetConfigurationDraft, initial: Fl
     channelName: draft.channelName,
     rules: draft.rules,
     collaborationMethod: draft.collaborationMethod,
+    visibilityReminderContextGrowthTokens: draft.visibilityReminderContextGrowthTokens,
     sharedResources: draft.sharedResources.map(file => [file.name, file.size, file.lastModified, file.type]),
     updateDensity: draft.updateDensity,
     notificationPolicy: draft.notificationPolicy,
@@ -5072,6 +5083,18 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
                             onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setDraft({ ...draft, positioning: event.target.value }),
                           }),
                         ],
+                      }),
+                      jsx(ConfigurationField, {
+                        label: text('可见性提醒上下文增量（Token）', 'Visibility reminder context growth (tokens)'),
+                        hint: text('0 表示关闭；初始及压缩后首个上下文只建立基线，后续提醒间隔按 1×、2×、4× 递增。', '0 disables it; the initial and first post-compaction context establish a baseline, then reminder intervals grow by 1×, 2×, and 4×.'),
+                        children: jsx('input', {
+                          className: 'dsh-fleet-config-input',
+                          type: 'number',
+                          min: 0,
+                          step: 1000,
+                          value: draft.visibilityReminderContextGrowthTokens,
+                          onChange: (event: ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, visibilityReminderContextGrowthTokens: Number(event.target.value) }),
+                        }),
                       }),
                       jsx(ConfigurationField, {
                         label: text('默认频道标识', 'Default channel id'),
@@ -6896,6 +6919,14 @@ export function withFleetComposerActivation(
         sessionId !== undefined && team.assistantSessionIds?.includes(sessionId) === true),
       () => undefined,
     )
+    const assistantTeamSnapshot = useSyncExternalStore(
+      subscribeFleetTeamDirectory,
+      () => {
+        const selected = getFleetSelectedTeamSnapshot()
+        return selected?.teamId === assistantTeam?.teamId ? selected : undefined
+      },
+      () => undefined,
+    )
     const assistantName = useSyncExternalStore(
       subscribeFleetTeamDirectory,
       () => getFleetAssistantDisplayName(sessionId),
@@ -7148,7 +7179,7 @@ export function withFleetComposerActivation(
           }),
         ],
       })
-      return jsx(InputBar, {
+      const assistantInputBar = jsx(InputBar, {
         ...props,
         disabled: teamArchived,
         blocked: undefined,
@@ -7185,6 +7216,14 @@ export function withFleetComposerActivation(
             ? isChineseLocale() ? '团队已归档，此助理会话为只读。' : 'The Team is archived. This assistant Session is read-only.'
             : assistantError,
         }),
+      })
+      return jsxs(Fragment, {
+        children: [
+          assistantTeamSnapshot !== undefined && jsx(AgentFleetWorkStatus, {
+            members: [...assistantTeamSnapshot.members, ...(assistantTeamSnapshot.assistants ?? [])],
+          }),
+          assistantInputBar,
+        ],
       })
     }
 
@@ -7269,6 +7308,7 @@ export type {
   FleetPanelHomeOwner,
   FleetPanelMember,
   FleetPanelMessage,
+  FleetPanelMessageThread,
   FleetPanelMessageBlockOwner,
   FleetPanelMessageOwner,
   FleetPanelMemberTrace,
@@ -7311,9 +7351,11 @@ export type { FleetAnchoredPopoverController, FleetPopoverPlacement } from './an
 
 export {
   FleetChatAvatar,
+  FleetChatComment,
   FleetChatDivider,
   FleetInfoHint,
   FleetChatMessage,
+  FleetChatMemberStatusPopover,
   FleetChatNotice,
   FleetChatReadReceipt,
   FleetPresenceLabel,
@@ -7337,12 +7379,16 @@ export type {
 } from './configuration-modules.js'
 export type {
   FleetChatAvatarProps,
+  FleetChatCommentProps,
   FleetChatContentBlock,
   FleetChatDividerProps,
   FleetChatExtensionBlock,
   FleetChatImageBlock,
   FleetChatMember,
   FleetChatMentionBlock,
+  FleetChatMemberStatusGroup,
+  FleetChatMemberStatusPopoverProps,
+  FleetChatMemberStatusPopoverTriggerProps,
   FleetChatMessageProps,
   FleetChatNoticeProps,
   FleetChatResourceBlock,

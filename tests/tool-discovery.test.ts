@@ -43,12 +43,12 @@ describe('Fleet member tool catalog', () => {
   it('reports create permissions on Goal and Vote without restricting owner intent', () => {
     expect(searchFleetTools('goal', all, new Set())
       .find(match => match.name === 'fleet_goal')).toMatchObject({
-        actions: ['list', 'get', 'complete', 'block'],
+        actions: ['list', 'get', 'split', 'complete', 'block'],
         restrictedActions: [{ action: 'create', permissions: ['task.create'] }],
       })
     expect(searchFleetTools('goal', all, new Set(), new Set(['task.create']))
       .find(match => match.name === 'fleet_goal')?.actions)
-      .toEqual(['list', 'get', 'create', 'complete', 'block'])
+      .toEqual(['list', 'get', 'create', 'split', 'complete', 'block'])
   })
 
   it('tracks fleet_progress as a resident observation tool without a status-write permission', () => {

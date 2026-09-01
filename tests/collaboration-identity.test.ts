@@ -106,9 +106,13 @@ describe('Fleet collaboration identities', () => {
     })
     const required = first.tasks.pendingReply('reviewer')
     if (required === undefined) throw new Error('expected required task')
-    const delivered = first.messages.send(agents.get('agent-reviewer') as never, {
-      to: '#general', text: 'Release inspection complete.', replyTo: sent.messageId, delivery: 'quiet',
+    const delivered = first.messages.reply(agents.get('agent-reviewer') as never, {
+      messageId: sent.messageId, text: '@lead Release inspection complete.',
     })
+    expect(first.messages.getMessage(agents.get('agent-lead') as never, delivered.messageId)).toMatchObject({
+      kind: 'reply', recipientIds: ['lead'], mentions: [], replyTo: sent.messageId,
+    })
+    expect(first.tasks.pendingReply('lead')).toBeUndefined()
     const completed = first.tasks.recordReply('agent-reviewer', required.id, delivered.messageId)
     expect(completed.domain).toMatchObject({ kind: 'reply', completionMessageId: delivered.messageId })
     const taskState = first.tasks.state()
@@ -133,6 +137,55 @@ describe('Fleet collaboration identities', () => {
       domain: expect.objectContaining({ kind: 'inbox', owner: 'reviewer', unreadMessages: 0 }),
       stableState: expect.objectContaining({ kind: 'dormant' }),
     }))
+    collaboration.close()
+  })
+
+  it('returns a successful terminal instruction after a formal member replies', async () => {
+    const reviewer = view('reviewer')
+    const agent = {
+      id: 'agent-reviewer', inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(),
+    }
+    const authorization = new FleetAuthorizationService()
+    authorization.installBaseline({
+      resolveSubject: (_teamId, subject) => subject.id === reviewer.id ? reviewer : undefined,
+      authorizeResource: () => true,
+    })
+    const collaboration = new FleetCollaborationService({
+      agents: { get: (id: string) => id === agent.id ? agent : undefined },
+      fs: { contains: () => true },
+      on: () => () => {},
+    } as never, authorization)
+    const team = collaboration.open({
+      id: 'team-reply-result', memberViews: [reviewer], defaultVoters: [reviewer.id],
+      projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-reply-result',
+      onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
+    })
+    team.attachMember(agent.id, reviewer)
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: unknown): Promise<unknown>
+    }> = []
+    team.installTools({
+      tools: {
+        register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} },
+        restrict: () => () => {},
+        guard: () => () => {},
+        get: () => undefined,
+      },
+    } as never, reviewer.id)
+    const reply = registered.find(candidate => candidate.name === 'fleet_reply')
+    if (reply === undefined) throw new Error('expected fleet_reply to be installed')
+    team.sendUserMessage({
+      to: '@reviewer', text: 'Please review this.', mentions: ['@reviewer'], delivery: 'quiet',
+    })
+
+    await expect(reply.execute({ content: 'Review complete.' }, { agent })).resolves.toMatchObject({
+      action: 'reply',
+      replayed: false,
+      instruction: expect.stringContaining('End this turn now'),
+      task: { stableState: { kind: 'completed' } },
+    })
+    expect(agent.cancel).not.toHaveBeenCalled()
     collaboration.close()
   })
 })

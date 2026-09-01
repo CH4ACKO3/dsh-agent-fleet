@@ -93,6 +93,10 @@ export interface FleetTaskEntry {
   readonly text: string
   readonly resources: string[]
   readonly createdAt: string
+  /** Direct user/assistant exchange metadata for the persistent Interaction Task transcript. */
+  readonly interactionRevision?: number
+  readonly interactionMessageId?: string
+  readonly interactionDelivery?: 'update' | 'final'
 }
 
 export interface FleetTaskSignal {
@@ -160,6 +164,12 @@ export type FleetTaskDomain =
       readonly kind: 'composite'
       readonly rootWorkId?: string
       readonly managedChildren?: true
+      readonly plan?: {
+        readonly stages: Readonly<Record<string, string>>
+        readonly requiredStageIds: readonly string[]
+        readonly resultStageId?: string
+        readonly acceptanceVoteIds: readonly string[]
+      }
     }
   | {
       readonly kind: 'inbox'
@@ -335,6 +345,17 @@ export interface CreateFleetCompositePlanInput {
   readonly stages: readonly FleetCompositeStageInput[]
   readonly dependencies?: readonly string[]
   readonly rootWorkId?: string
+  readonly resultStage?: string
+  readonly timeoutAt?: string
+}
+
+export interface FleetGoalSplitStageInput {
+  readonly key: string
+  readonly title: string
+  readonly description?: string
+  readonly owners: readonly string[]
+  readonly dependencies?: readonly string[]
+  readonly resources?: readonly string[]
   readonly timeoutAt?: string
 }
 
@@ -402,6 +423,7 @@ export class FleetTaskBoard {
         : source.activeReconcile
       this.tasks.set(source.id, snapshot({ ...task, ...(activeReconcile === undefined ? {} : { activeReconcile }) }))
     }
+    this.evaluateDependents([...this.tasks.keys()])
     this.evaluateAll()
   }
 
@@ -461,8 +483,10 @@ export class FleetTaskBoard {
     this.tasks.set(task.id, materialized)
     this.arm(materialized)
     this.emit({ action: 'created', task: materialized, actor: createdBy })
-    if (materialized.activeReconcile !== undefined) this.emit({ action: 'reconcile_ready', task: materialized })
-    return snapshot(materialized)
+    this.evaluateDependents(materialized.dependencies)
+    const current = this.requireTask(materialized.id)
+    if (current.activeReconcile !== undefined) this.emit({ action: 'reconcile_ready', task: current })
+    return snapshot(current)
   }
 
   ensureInboxTask(ownerReference: string): FleetProjectTask {
@@ -544,6 +568,10 @@ export class FleetTaskBoard {
       text,
       resources: [],
       createdAt: now,
+      interactionRevision: existing === undefined ? 1 : existing.domain.kind === 'interaction'
+        ? existing.domain.inputRevision + 1
+        : 1,
+      interactionMessageId: messageId,
     }
     if (existing === undefined) {
       const task = this.buildTask(owner, {
@@ -586,6 +614,38 @@ export class FleetTaskBoard {
     this.replace(updated)
     this.emit({ action: 'domain_updated', task: updated, actor: SYSTEM_TARGET })
     this.evaluateDependents([updated.id])
+    return snapshot(updated)
+  }
+
+  recordInteractionUpdate(ownerReference: string, text: string): FleetProjectTask {
+    const owner = this.resolve(ownerReference)
+    const current = this.interactionTask(owner)
+    if (current === undefined || current.domain.kind !== 'interaction') {
+      throw new Error(`Fleet assistant ${owner} has no foreground Interaction Task`)
+    }
+    if (current.domain.settledRevision >= current.domain.inputRevision
+      || current.stableState.kind === 'completed' || current.stableState.kind === 'blocked'
+      || current.stableState.kind === 'cancelled') {
+      throw new Error(`Fleet Interaction ${current.id} has no unsettled user revision`)
+    }
+    const output = requiredText(text, 'interaction user update')
+    const latest = current.entries.at(-1)
+    if (latest?.interactionRevision === current.domain.inputRevision
+      && latest.interactionDelivery === 'update' && latest.text.trim() === output) return snapshot(current)
+    const now = new Date().toISOString()
+    const entry: FleetTaskEntry = {
+      id: `entry_${randomUUID()}`,
+      kind: 'progress',
+      author: owner,
+      text: output,
+      resources: [],
+      createdAt: now,
+      interactionRevision: current.domain.inputRevision,
+      interactionDelivery: 'update',
+    }
+    const updated = { ...current, entries: [...current.entries, entry], updatedAt: now }
+    this.replace(updated)
+    this.emit({ action: 'progressed', task: updated, actor: owner })
     return snapshot(updated)
   }
 
@@ -764,7 +824,11 @@ export class FleetTaskBoard {
     }
     return this.reconcileDomain(current, domain, intent.outcome === 'complete'
       ? { kind: 'completed', reason: intent.reason, result: intent.report }
-      : { kind: 'blocked', reason: intent.reason }, owner)
+      : { kind: 'blocked', reason: intent.reason }, owner, {
+        author: owner,
+        text: output,
+        interactionRevision: intent.revision,
+      })
   }
 
   settleDirectInteractionOutput(ownerReference: string, output: string): FleetProjectTask | undefined {
@@ -786,7 +850,11 @@ export class FleetTaskBoard {
       kind: 'completed',
       reason: 'The native assistant response completed this direct foreground interaction.',
       result: output.trim(),
-    }, owner)
+    }, owner, {
+      author: owner,
+      text: output,
+      interactionRevision: current.domain.inputRevision,
+    })
   }
 
   signalInteractionDelivery(ownerReference: string, result: string): FleetProjectTask | undefined {
@@ -855,9 +923,15 @@ export class FleetTaskBoard {
 
   ownerTasks(reference: string): FleetProjectTask[] {
     const owner = this.resolve(reference)
-    return [...this.tasks.values()]
+    const owned = [...this.tasks.values()]
       .filter(task => task.stableState.kind === 'running')
       .filter(task => task.owners.some(candidate => candidate.member === owner) && this.pendingForOwner(task, owner))
+    const replyPending = owned.some(task => task.domain.kind === 'reply')
+    return owned
+      // A Reply Task already carries the action for its source Inbox message.
+      // Keep Inbox state durable, but do not expose it as a second obligation
+      // until every pending Reply has been completed.
+      .filter(task => !replyPending || task.domain.kind !== 'inbox')
       .sort((left, right) => {
         const priority = { high: 0, normal: 1, low: 2 } as const
         return priority[left.priority] - priority[right.priority] || left.createdAt.localeCompare(right.createdAt)
@@ -873,10 +947,7 @@ export class FleetTaskBoard {
     const actor = this.member(callerId)
     const coordinator = this.resolve(input.coordinator)
     if (input.stages.length === 0) throw new Error('Fleet composite plan requires at least one stage')
-    const acceptanceVote = input.stages.some(stage => stage.kind === 'vote'
-      && !input.stages.some(candidate => candidate.dependencies?.some(
-        dependency => dependency.trim() === stage.key.trim(),
-      ) === true))
+    const acceptanceVote = input.stages.some(stage => stage.kind === 'vote')
     const stageKeys = new Set<string>()
     const now = new Date().toISOString()
     const staged = new Map(this.tasks)
@@ -930,6 +1001,21 @@ export class FleetTaskBoard {
       staged.set(stage.id, stage)
     }
 
+    const resultStage = input.resultStage === undefined
+      ? [...stages.entries()].reverse().find(([, stage]) => stage.domain.kind === 'goal')
+      : [input.resultStage, stages.get(input.resultStage)] as const
+    const plan = {
+      stages: Object.fromEntries([...stages].map(([key, stage]) => [key, stage.id])),
+      requiredStageIds: unique([
+        ...[...stages.values()].map(stage => stage.id),
+        ...(input.dependencies ?? []),
+      ]),
+      ...(resultStage?.[1] === undefined ? {} : { resultStageId: resultStage[1].id }),
+      acceptanceVoteIds: [...stages.values()]
+        .filter(stage => stage.domain.kind === 'vote')
+        .map(stage => stage.id),
+    }
+
     const cohort = unique([
       ...[...stages.values()].map(stage => stage.id),
       ...(input.dependencies ?? []),
@@ -946,6 +1032,7 @@ export class FleetTaskBoard {
     }
     const planned: FleetProjectTask = {
       ...root,
+      domain: { ...(root.domain as Extract<FleetTaskDomain, { kind: 'composite' }>), plan },
       stableState: this.normalizeState({
         kind: 'running',
         reason: `Waiting for ${String(cohort.length)} current cohort Task${cohort.length === 1 ? '' : 's'} to settle.`,
@@ -988,7 +1075,8 @@ export class FleetTaskBoard {
     this.tasks.set(task.id, task)
     this.arm(task)
     this.emit({ action: 'created', task, actor: creator })
-    return snapshot(task)
+    this.evaluateDependents(task.dependencies)
+    return snapshot(this.requireTask(task.id))
   }
 
   submitGoal(callerId: string, id: string, input: {
@@ -1051,6 +1139,68 @@ export class FleetTaskBoard {
       `Goal received ${String(current.owners.length - pending.length)} of ${String(current.owners.length)} owner submissions.`,
       [],
     ), owner)
+  }
+
+  splitGoal(callerId: string, id: string, input: {
+    readonly children: readonly FleetGoalSplitStageInput[]
+  }): { readonly task: FleetProjectTask; readonly children: ReadonlyMap<string, FleetProjectTask> } {
+    const owner = this.member(callerId)
+    const current = this.requireTask(id)
+    if (current.domain.kind !== 'goal') throw new Error(`Fleet task ${id} is not a Goal`)
+    if (current.stableState.kind !== 'running') throw new Error(`Fleet Goal ${id} is ${current.stableState.kind}`)
+    if (!current.owners.some(candidate => candidate.member === owner)) throw new Error(`Fleet member ${owner} does not own Goal ${id}`)
+    const incompleteDependencies = current.dependencies.filter(dependency =>
+      this.requireTask(dependency).stableState.kind !== 'completed')
+    if (incompleteDependencies.length > 0) {
+      throw new Error(`Fleet Goal ${id} has incomplete dependencies: ${incompleteDependencies.join(', ')}`)
+    }
+    if (input.children.length === 0) throw new Error(`Fleet Goal ${id} split requires child Goals`)
+
+    const staged = new Map(this.tasks)
+    const children = new Map<string, FleetProjectTask>()
+    for (const inputChild of input.children) {
+      const key = requiredText(inputChild.key, 'split child key')
+      if (children.has(key)) throw new Error(`duplicate Fleet split child key ${key}`)
+      const dependencies = (inputChild.dependencies ?? []).map(dependencyKey => {
+        const dependency = children.get(dependencyKey)
+        if (dependency === undefined) throw new Error(`Fleet split child ${key} has unknown earlier dependency ${dependencyKey}`)
+        return dependency.id
+      })
+      const child = this.buildGoalTask(owner, {
+        title: inputChild.title,
+        ...(inputChild.description === undefined ? {} : { description: inputChild.description }),
+        owners: inputChild.owners,
+        parentId: current.id,
+        dependencies,
+        ...(inputChild.resources === undefined ? {} : { resources: inputChild.resources }),
+        ...(current.domain.rootWorkId === undefined ? {} : { rootWorkId: current.domain.rootWorkId }),
+        ...(inputChild.timeoutAt === undefined ? {} : { timeoutAt: inputChild.timeoutAt }),
+      }, staged)
+      children.set(key, child)
+      staged.set(child.id, child)
+    }
+
+    const now = new Date().toISOString()
+    const { activeReconcile: _activeReconcile, ...base } = current
+    const updated: FleetProjectTask = {
+      ...base,
+      stableState: {
+        kind: 'running', since: now,
+        reason: `Waiting for ${String(children.size)} split child Goal${children.size === 1 ? '' : 's'} to settle.`,
+        cohort: [...children.values()].map(child => child.id),
+        reconcilers: [],
+      },
+      stateVersion: current.stateVersion + 1,
+      updatedAt: now,
+    }
+    staged.set(updated.id, updated)
+    this.commit(staged, [updated, ...children.values()])
+    for (const child of children.values()) this.emit({ action: 'created', task: child, actor: owner })
+    this.emit({ action: 'domain_updated', task: updated, actor: owner })
+    return {
+      task: snapshot(updated),
+      children: new Map([...children].map(([key, child]) => [key, snapshot(child)])),
+    }
   }
 
   createVote(callerId: string, input: {
@@ -1679,15 +1829,39 @@ export class FleetTaskBoard {
     domain: FleetTaskDomain,
     nextInput: FleetTaskStableStateInput,
     actor = SYSTEM_TARGET,
+    interactionOutput?: {
+      readonly author: string
+      readonly text: string
+      readonly interactionRevision: number
+    },
   ): FleetProjectTask {
     const now = new Date().toISOString()
     const next = this.normalizeState(nextInput, now, this.tasks, [], current.id)
     const { activeReconcile: _activeReconcile, ...base } = current
+    let entries = current.entries
+    if (interactionOutput !== undefined) {
+      const text = requiredText(interactionOutput.text, 'interaction output')
+      const latest = entries.at(-1)
+      entries = latest?.interactionRevision === interactionOutput.interactionRevision
+        && latest.interactionDelivery === 'update' && latest.text.trim() === text
+        ? [...entries.slice(0, -1), { ...latest, kind: 'comment', text, createdAt: now, interactionDelivery: 'final' }]
+        : [...entries, {
+            id: `entry_${randomUUID()}`,
+            kind: 'comment' as const,
+            author: interactionOutput.author,
+            text,
+            resources: [],
+            createdAt: now,
+            interactionRevision: interactionOutput.interactionRevision,
+            interactionDelivery: 'final' as const,
+          }]
+    }
     const updated: FleetProjectTask = {
       ...base,
       domain,
       stableState: next,
       stateVersion: current.stateVersion + 1,
+      ...(interactionOutput === undefined ? {} : { entries }),
       updatedAt: now,
     }
     this.replace(updated)
@@ -1930,6 +2104,7 @@ export class FleetTaskBoard {
   private evaluateTask(id: string): void {
     const current = this.tasks.get(id)
     if (current === undefined || current.activeReconcile !== undefined) return
+    if (this.completeCompositePlan(current)) return
     if (current.stableState.kind === 'running' || current.stableState.kind === 'dormant') {
       const expired = current.stableState.reconcilers
         .filter(spec => spec.timeoutAt !== undefined && new Date(spec.timeoutAt).getTime() <= Date.now())
@@ -1966,10 +2141,62 @@ export class FleetTaskBoard {
   }
 
   private evaluateDependents(changedIds: readonly string[]): void {
-    const changed = new Set(changedIds)
-    for (const task of [...this.tasks.values()]) {
-      if (task.stableState.kind === 'running' && task.stableState.cohort.some(id => changed.has(id))) this.evaluateTask(task.id)
+    const pending = [...changedIds]
+    const changed = new Set<string>()
+    while (pending.length > 0) {
+      const changedId = pending.shift()!
+      if (changed.has(changedId)) continue
+      changed.add(changedId)
+      for (const task of [...this.tasks.values()]) {
+        if (task.stableState.kind !== 'running' && task.stableState.kind !== 'dormant') continue
+        if (task.dependencies.includes(changedId)) {
+          const failed = task.dependencies
+            .map(dependency => this.requireTask(dependency))
+            .find(dependency => dependency.stableState.kind === 'blocked'
+              || dependency.stableState.kind === 'cancelled'
+              || (dependency.domain.kind === 'vote' && dependency.domain.outcome === 'reject'))
+          if (failed !== undefined) {
+            const now = new Date().toISOString()
+            const { activeReconcile: _activeReconcile, ...base } = task
+            const cancelled: FleetProjectTask = {
+              ...base,
+              stableState: {
+                kind: 'cancelled', cancelledAt: now,
+                reason: `dependency_not_completed:${failed.id}`,
+              },
+              stateVersion: task.stateVersion + 1,
+              updatedAt: now,
+            }
+            this.replace(cancelled)
+            this.emit({ action: 'cancelled', task: cancelled, actor: SYSTEM_TARGET })
+            pending.push(cancelled.id)
+            continue
+          }
+        }
+        if (task.stableState.kind === 'running' && task.stableState.cohort.includes(changedId)) {
+          this.evaluateTask(task.id)
+        }
+      }
     }
+  }
+
+  private completeCompositePlan(current: FleetProjectTask): boolean {
+    if (current.domain.kind !== 'composite' || current.domain.plan === undefined
+      || current.stableState.kind !== 'running') return false
+    const plan = current.domain.plan
+    const required = plan.requiredStageIds.map(id => this.requireTask(id))
+    if (required.some(task => !this.settled(task))) return false
+    if (required.some(task => task.stableState.kind !== 'completed')) return false
+    const votes = plan.acceptanceVoteIds.map(id => this.requireTask(id))
+    if (votes.some(task => task.domain.kind !== 'vote' || task.domain.outcome !== 'approve')) return false
+    const result = plan.resultStageId === undefined ? undefined : this.requireTask(plan.resultStageId)
+    if (result?.stableState.kind !== 'completed' || result.stableState.result === undefined) return false
+    this.reconcileDomain(current, current.domain, {
+      kind: 'completed',
+      reason: 'Every required stage completed and every acceptance Vote approved.',
+      result: result.stableState.result,
+    })
+    return true
   }
 
   private triggerDue(id: string): void {
@@ -2387,9 +2614,9 @@ export function installGoalTools(
 ): () => void {
   return ctx.tools.register(defineTool({
     name: 'fleet_goal',
-    description: 'Create and inspect leaf Goals, submit a completed assignment result, or report an external blocker. Completing a Goal does not by itself accept its parent composite; that outcome belongs to the parent ReconcileAttempt.',
+    description: 'Create and inspect Goals, atomically split owned work into child Goals, submit a completed result, or report an external blocker.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'complete', 'block'] },
+      action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'split', 'complete', 'block'] },
       id: { type: 'string' },
       title: { type: 'string' },
       description: { type: 'string' },
@@ -2398,6 +2625,21 @@ export function installGoalTools(
       dependencies: { type: 'array', items: { type: 'string' }, description: 'Goal ids that must settle before this owner is woken; every dependency must complete before this Goal can complete.' },
       resources: { type: 'array', items: { type: 'string' } },
       timeout_at: { type: 'string', description: 'Optional ISO deadline. Its deterministic system reconciler blocks the Goal if the deadline arrives first.' },
+      children: {
+        type: 'array',
+        description: 'Complete child Goal DAG created in one operation. Dependencies use earlier child keys.',
+        items: {
+          type: 'object', additionalProperties: false, properties: {
+            key: { type: 'string', required: true },
+            title: { type: 'string', required: true },
+            description: { type: 'string' },
+            owners: { type: 'array', required: true, items: { type: 'string' } },
+            dependencies: { type: 'array', items: { type: 'string' } },
+            resources: { type: 'array', items: { type: 'string' } },
+            timeout_at: { type: 'string' },
+          },
+        },
+      },
       reason: { type: 'string' },
       result: { type: 'string' },
     },
@@ -2426,6 +2668,24 @@ export function installGoalTools(
       }
       if (args.id === undefined) throw new Error(`fleet_goal ${args.action} requires id`)
       if (args.action === 'get') return Promise.resolve({ action: 'get', task: fleetTaskToolDetail(tasks.get(callerId, args.id)) })
+      if (args.action === 'split') {
+        const split = tasks.splitGoal(callerId, args.id, {
+          children: (args.children ?? []).map(child => ({
+            key: child.key,
+            title: child.title,
+            ...(child.description === undefined ? {} : { description: child.description }),
+            owners: child.owners,
+            ...(child.dependencies === undefined ? {} : { dependencies: child.dependencies }),
+            ...(child.resources === undefined ? {} : { resources: child.resources }),
+            ...(child.timeout_at === undefined ? {} : { timeoutAt: child.timeout_at }),
+          })),
+        })
+        return Promise.resolve({
+          action: 'split',
+          task: fleetTaskToolDetail(split.task),
+          tasks: [...split.children.values()].map(fleetTaskToolDetail),
+        })
+      }
       if (args.reason === undefined) throw new Error(`fleet_goal ${args.action} requires reason`)
       return Promise.resolve({
         action: args.action,

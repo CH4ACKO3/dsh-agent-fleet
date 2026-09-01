@@ -52,6 +52,10 @@ export interface FleetWebProjectInput {
   readonly limit?: number
 }
 
+export interface FleetWebLocaleInput {
+  readonly locale: string
+}
+
 export interface FleetWebSendInput {
   readonly sessionId: string
   readonly teamId: string
@@ -170,6 +174,11 @@ export class FleetWebRemote extends TypertRemoteService {
   list(signal: AbortSignal) {
     signal.throwIfAborted()
     return this.runs.list()
+  }
+
+  locale(input: FleetWebLocaleInput, signal: AbortSignal) {
+    signal.throwIfAborted()
+    return { locale: this.runs.setUserLocale(required(input.locale, 'locale')) }
   }
 
   project(input: FleetWebProjectInput, signal: AbortSignal) {

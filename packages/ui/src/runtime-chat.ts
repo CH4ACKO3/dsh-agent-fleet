@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement, ReactNode } from 'react'
+import type { CSSProperties, FocusEvent, MouseEvent, ReactElement, ReactNode } from 'react'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { HoverHint, type HoverHintProps, type HoverHintTriggerProps } from 'dsh-hover-hint'
@@ -406,8 +406,16 @@ const runtimeChatStyles = `
 
 .dsh-fleet-message-receipt-columns {
   min-width: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--dsh-fleet-status-column-count, 3), minmax(0, 1fr));
   display: grid;
+}
+
+.dsh-fleet-member-status-popover {
+  width: min(
+    calc(var(--dsh-fleet-status-column-count, 3) * 180px + 24px),
+    600px,
+    calc(100vw - 24px)
+  );
 }
 
 .dsh-fleet-channel-members-popover {
@@ -668,6 +676,121 @@ button.dsh-fleet-chat-content-resource:focus-visible {
   color: var(--dsw-alias-state-error-primary);
 }
 
+.dsh-fleet-chat-comments {
+  min-width: 0;
+  margin-top: 10px;
+  padding-top: 8px;
+  position: relative;
+}
+
+.dsh-fleet-chat-comments::before {
+  width: 100%;
+  height: 1px;
+  background: var(--dsw-alias-border-l3);
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+}
+
+.dsh-fleet-chat-comments-heading {
+  margin-bottom: 7px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-strong-13, var(--dsw-font-xs-13));
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.dsh-fleet-chat-comments-list {
+  min-width: 0;
+  flex-direction: column;
+  gap: 9px;
+  display: flex;
+}
+
+.dsh-fleet-chat-comment {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  grid-template-columns: 24px minmax(0, 1fr);
+  column-gap: 8px;
+  display: grid;
+}
+
+.dsh-fleet-chat-comment-main {
+  min-width: 0;
+}
+
+.dsh-fleet-chat-comment-meta {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 1px;
+  font-size: 11px;
+  line-height: 16px;
+  display: flex;
+}
+
+.dsh-fleet-chat-comment-name {
+  min-width: 0;
+  max-width: min(220px, 42vw);
+  color: var(--dsw-alias-label-primary);
+  flex: 0 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  overflow: hidden;
+}
+
+.dsh-fleet-chat-comment[data-operator="true"] .dsh-fleet-chat-comment-name::after {
+  color: var(--dsw-alias-state-business-primary);
+  content: attr(data-operator-label);
+  margin-left: 5px;
+  font-size: 10px;
+  font-weight: 560;
+}
+
+.dsh-fleet-chat-comment-role {
+  min-width: 0;
+  flex: 0 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.dsh-fleet-chat-comment-time {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-fleet-chat-comment-actions {
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease-out;
+  display: flex;
+}
+
+.dsh-fleet-chat-comment-actions:empty {
+  display: none;
+}
+
+.dsh-fleet-chat-comment:hover .dsh-fleet-chat-comment-actions,
+.dsh-fleet-chat-comment:focus-within .dsh-fleet-chat-comment-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dsh-fleet-chat-comment-body {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .dsh-fleet-chat-divider {
   color: var(--dsw-alias-label-secondary);
   align-items: center;
@@ -809,6 +932,33 @@ export interface FleetChatMessageProps {
   readonly onOpenResource?: (resource: FleetChatResourceBlock) => void
   readonly receipt?: FleetChatReadReceiptData
   readonly actions?: ReactNode
+  /** Replies or comments visually owned by this message. */
+  readonly comments?: ReactNode
+  readonly commentCount?: number
+}
+
+export interface FleetChatCommentProps {
+  readonly id: string
+  readonly sender: FleetChatMember
+  readonly sentAt: string
+  readonly content: readonly FleetChatContentBlock[]
+  readonly operatorLabel?: string
+  /** Optional integration-owned avatar treatment, such as a member profile popover. */
+  readonly avatar?: ReactNode
+  readonly renderText?: (text: string) => ReactNode
+  readonly renderImage?: (image: FleetChatImageBlock) => ReactNode
+  readonly renderMention?: (mention: FleetChatMentionBlock) => ReactNode | undefined
+  readonly renderBlock?: (block: FleetChatContentBlock, index: number) => ReactNode | undefined
+  readonly onOpenResource?: (resource: FleetChatResourceBlock) => void
+  readonly receipt?: FleetChatReadReceiptData
+  readonly actions?: ReactNode
+}
+
+export function fleetConversationAudienceLabel(kind: FleetConversationKind): string {
+  if (kind === 'direct') return fleetText('私聊 · 仅会话双方', 'Direct · Participants only')
+  if (kind === 'channel') return fleetText('频道 · 全体成员可见', 'Channel · Visible to all members')
+  if (kind === 'context') return fleetText('Agent 上下文', 'Agent context')
+  return fleetText('跨团队', 'Cross-Team')
 }
 
 export interface FleetChatReadReceiptData {
@@ -822,6 +972,37 @@ export interface FleetChatReadReceiptData {
   readonly renderMember?: (member: FleetChatMember, source?: FleetChatReceiptSource) => ReactNode
   /** Reserved for the future context-jump affordance. */
   readonly onOpenSource?: (source: FleetChatReceiptSource) => void
+}
+
+export interface FleetChatMemberStatusGroup {
+  readonly id: string
+  readonly label: string
+  readonly members: readonly FleetChatMember[]
+  readonly details?: ReadonlyMap<string, string>
+}
+
+export interface FleetChatMemberStatusPopoverTriggerProps {
+  readonly 'aria-haspopup': 'dialog'
+  readonly 'aria-expanded': boolean
+  readonly 'aria-controls': string
+  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void
+  readonly onMouseEnter?: (event: MouseEvent<HTMLButtonElement>) => void
+  readonly onFocus?: (event: FocusEvent<HTMLButtonElement>) => void
+  readonly onBlur?: (event: FocusEvent<HTMLButtonElement>) => void
+}
+
+export interface FleetChatMemberStatusPopoverProps {
+  readonly groups: readonly FleetChatMemberStatusGroup[]
+  readonly ariaLabel: string
+  readonly mode?: 'click' | 'hover'
+  readonly hideEmptyGroups?: boolean
+  readonly placement?: 'below-start' | 'below-end' | 'right'
+  readonly className?: string
+  readonly style?: CSSProperties
+  readonly renderMember?: (member: FleetChatMember, source?: FleetChatReceiptSource) => ReactNode
+  readonly sources?: readonly FleetChatReceiptSource[]
+  readonly onOpenSource?: (source: FleetChatReceiptSource) => void
+  readonly trigger: (props: FleetChatMemberStatusPopoverTriggerProps) => ReactElement
 }
 
 export interface FleetChatPendingDelivery {
@@ -1208,6 +1389,95 @@ function FleetChatMemberList({ members, details, sources, renderMember, onOpenSo
   })
 }
 
+const MEMBER_STATUS_POPOVER_CLOSE_DELAY_MS = 180
+
+export function FleetChatMemberStatusPopover({
+  groups: inputGroups,
+  ariaLabel,
+  mode = 'click',
+  hideEmptyGroups = false,
+  placement = 'below-end',
+  className,
+  style,
+  renderMember,
+  sources,
+  onOpenSource,
+  trigger,
+}: FleetChatMemberStatusPopoverProps): ReactElement | null {
+  const groups = hideEmptyGroups ? inputGroups.filter(group => group.members.length > 0) : inputGroups
+  const controller = useFleetAnchoredPopover(placement, 7)
+  const closeTimer = useRef<number>()
+  const cancelClose = (): void => {
+    if (closeTimer.current === undefined) return
+    window.clearTimeout(closeTimer.current)
+    closeTimer.current = undefined
+  }
+  const closeSoon = (): void => {
+    cancelClose()
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = undefined
+      controller.close()
+    }, MEMBER_STATUS_POPOVER_CLOSE_DELAY_MS)
+  }
+  useEffect(() => cancelClose, [])
+  if (groups.length === 0) return null
+  const interaction: FleetChatMemberStatusPopoverTriggerProps = {
+    'aria-haspopup': 'dialog',
+    'aria-expanded': controller.open,
+    'aria-controls': controller.popoverId,
+    onClick: event => {
+      if (mode === 'hover') controller.openAt(event.currentTarget)
+      else controller.toggleAt(event.currentTarget)
+    },
+    ...(mode === 'hover' ? {
+      onMouseEnter: (event: MouseEvent<HTMLButtonElement>) => {
+        cancelClose()
+        controller.openAt(event.currentTarget)
+      },
+      onFocus: (event: FocusEvent<HTMLButtonElement>) => { controller.openAt(event.currentTarget) },
+      onBlur: (event: FocusEvent<HTMLButtonElement>) => {
+        if (event.relatedTarget instanceof Node && controller.popover.current?.contains(event.relatedTarget) === true) return
+        cancelClose()
+        controller.close()
+      },
+    } : {}),
+  }
+  return jsxs('span', {
+    className,
+    style,
+    ...(mode === 'hover' ? { onMouseLeave: closeSoon } : {}),
+    children: [
+      trigger(interaction),
+      controller.mounted && jsx('div', {
+        ref: controller.popover,
+        id: controller.popoverId,
+        popover: 'auto',
+        className: 'dsh-fleet-message-receipt-popover dsh-fleet-member-status-popover',
+        style: { '--dsh-fleet-status-column-count': String(groups.length) } as CSSProperties,
+        role: 'dialog',
+        'aria-label': ariaLabel,
+        ...(mode === 'hover' ? { onMouseEnter: cancelClose, onMouseLeave: closeSoon } : {}),
+        children: jsx('div', {
+          className: 'dsh-fleet-message-receipt-columns',
+          children: groups.map(group => jsxs('section', {
+            className: 'dsh-fleet-message-receipt-column',
+            children: [
+              jsx('h3', { className: 'dsh-fleet-message-receipt-heading', children: group.label }),
+              jsx(FleetChatMemberList, {
+                members: group.members,
+                details: group.details,
+                sources,
+                renderMember,
+                onOpenSource,
+              }),
+            ],
+          }, group.id)),
+        }),
+      }),
+    ],
+  })
+}
+
 export function FleetChatReadReceipt({
   readMembers,
   deliveredMembers: explicitDeliveredMembers,
@@ -1217,7 +1487,6 @@ export function FleetChatReadReceipt({
   renderMember,
   onOpenSource,
 }: FleetChatReadReceiptData): ReactElement | null {
-  const controller = useFleetAnchoredPopover('below-end', 7)
   const deliveredMembers = explicitDeliveredMembers ?? unreadMembers ?? []
   const pendingMembers = pendingDeliveries.map(delivery => delivery.member)
   const total = readMembers.length + deliveredMembers.length + pendingMembers.length
@@ -1230,11 +1499,32 @@ export function FleetChatReadReceipt({
     `${String(readMembers.length)}/${String(total)} read · ${String(deliveredMembers.length)} delivered · ${String(pendingMembers.length)} pending`,
   )
   const pendingDetails = new Map(pendingDeliveries.map(delivery => [delivery.member.id, pendingDeliveryDetail(delivery)]))
-  return jsxs('span', {
+  return jsx(FleetChatMemberStatusPopover, {
+    groups: [
+      {
+        id: 'read',
+        label: fleetText(`已读 · ${String(readMembers.length)}`, `Read · ${String(readMembers.length)}`),
+        members: readMembers,
+      },
+      {
+        id: 'delivered',
+        label: fleetText(`已送达 · ${String(deliveredMembers.length)}`, `Delivered · ${String(deliveredMembers.length)}`),
+        members: deliveredMembers,
+      },
+      {
+        id: 'pending',
+        label: fleetText(`待送达 · ${String(pendingMembers.length)}`, `Pending · ${String(pendingMembers.length)}`),
+        members: pendingMembers,
+        details: pendingDetails,
+      },
+    ],
+    ariaLabel: fleetText('消息送达与已读情况', 'Message delivery and read status'),
     className: 'dsh-fleet-message-receipt',
     style: { '--dsh-fleet-read-angle': angle } as CSSProperties,
-    children: [
-      jsx(FleetInfoHint, {
+    sources,
+    renderMember,
+    onOpenSource,
+    trigger: (interaction: FleetChatMemberStatusPopoverTriggerProps) => jsx(FleetInfoHint, {
         label: fleetText('查看消息回执说明', 'About message receipts'),
         title: fleetText('消息回执', 'Message receipts'),
         seenMarker: 'fleet.message.receipt',
@@ -1242,14 +1532,11 @@ export function FleetChatReadReceipt({
         footer: null,
         trigger: (hintProps: HoverHintTriggerProps) => jsx('button', {
           ...hintProps,
+          ...interaction,
           type: 'button',
           className: 'dsh-fleet-message-receipt-trigger',
           'data-summary': summary,
           'aria-label': fleetText(`${summary}，查看成员明细`, `${summary}; view member details`),
-          'aria-haspopup': 'dialog',
-          'aria-expanded': controller.open ? 'true' : 'false',
-          'aria-controls': controller.popoverId,
-          onClick: (event: { readonly currentTarget: HTMLElement }) => { controller.toggleAt(event.currentTarget) },
           children: jsx('span', {
             className: 'dsh-fleet-message-receipt-indicator',
             'data-complete': complete ? 'true' : 'false',
@@ -1282,54 +1569,6 @@ export function FleetChatReadReceipt({
           ],
         }),
       }),
-      controller.mounted && jsx('div', {
-        ref: controller.popover,
-        id: controller.popoverId,
-        popover: 'auto',
-        className: 'dsh-fleet-message-receipt-popover',
-        role: 'dialog',
-        'aria-label': fleetText('消息送达与已读情况', 'Message delivery and read status'),
-        children: jsxs('div', {
-          className: 'dsh-fleet-message-receipt-columns',
-          children: [
-            jsxs('section', {
-              className: 'dsh-fleet-message-receipt-column',
-              children: [
-                jsx('h3', {
-                  className: 'dsh-fleet-message-receipt-heading',
-                  children: fleetText(`已读 · ${String(readMembers.length)}`, `Read · ${String(readMembers.length)}`),
-                }),
-                jsx(FleetChatMemberList, { members: readMembers, sources, renderMember, onOpenSource }),
-              ],
-            }),
-            jsxs('section', {
-              className: 'dsh-fleet-message-receipt-column',
-              children: [
-                jsx('h3', {
-                  className: 'dsh-fleet-message-receipt-heading',
-                  children: fleetText(`已送达 · ${String(deliveredMembers.length)}`, `Delivered · ${String(deliveredMembers.length)}`),
-                }),
-                jsx(FleetChatMemberList, { members: deliveredMembers, sources, renderMember, onOpenSource }),
-              ],
-            }),
-            jsxs('section', {
-              className: 'dsh-fleet-message-receipt-column',
-              children: [
-                jsx('h3', {
-                  className: 'dsh-fleet-message-receipt-heading',
-                  children: fleetText(`待送达 · ${String(pendingMembers.length)}`, `Pending · ${String(pendingMembers.length)}`),
-                }),
-                jsx(FleetChatMemberList, {
-                  members: pendingMembers,
-                  details: pendingDetails,
-                  renderMember,
-                }),
-              ],
-            }),
-          ],
-        }),
-      }),
-    ],
   })
 }
 
@@ -1413,7 +1652,6 @@ function FleetConversationMembersMeta({ members, onlineMembers, renderMember }: 
 
 export function FleetConversationHeader(props: FleetConversationHeaderProps): ReactElement {
   const direct = props.kind === 'direct'
-  const crossTeam = props.kind === 'cross-team'
   const context = props.kind === 'context'
   const presence = props.peer?.presence ?? 'offline'
   const active = props.onlineMembers?.length ?? props.activeCount ?? 0
@@ -1434,13 +1672,7 @@ export function FleetConversationHeader(props: FleetConversationHeaderProps): Re
               jsx('h2', { className: 'dsh-fleet-conversation-header-title', children: props.name }),
               jsx('span', {
                 className: 'dsh-fleet-conversation-header-kind',
-                children: direct
-                  ? fleetText('私聊', 'Direct message')
-                  : context
-                    ? fleetText('Agent 上下文', 'Agent context')
-                    : crossTeam
-                      ? fleetText('跨团队', 'Cross-Team')
-                      : fleetText('频道', 'Channel'),
+                children: fleetConversationAudienceLabel(props.kind),
               }),
             ],
           }),
@@ -1485,6 +1717,8 @@ export function FleetChatMessage({
   onOpenResource,
   receipt,
   actions,
+  comments,
+  commentCount = 0,
 }: FleetChatMessageProps): ReactElement {
   const time = new Date(sentAt)
   const timeLabel = Number.isNaN(time.getTime())
@@ -1547,6 +1781,76 @@ export function FleetChatMessage({
             'data-state': deliveryState,
             role: deliveryState === 'failed' ? 'alert' : 'status',
             children: stateLabel,
+          }),
+          comments !== undefined && commentCount > 0 && jsxs('section', {
+            className: 'dsh-fleet-chat-comments',
+            'aria-label': fleetText(`${String(commentCount)} 条回复`, `${String(commentCount)} replies`),
+            children: [
+              jsx('div', {
+                className: 'dsh-fleet-chat-comments-heading',
+                children: fleetText(`${String(commentCount)} 条回复`, `${String(commentCount)} replies`),
+              }),
+              jsx('div', { className: 'dsh-fleet-chat-comments-list', children: comments }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+export function FleetChatComment({
+  id,
+  sender,
+  sentAt,
+  content,
+  operatorLabel = fleetText(' · 外部用户', ' · External user'),
+  avatar,
+  renderText,
+  renderImage,
+  renderMention,
+  renderBlock,
+  onOpenResource,
+  receipt,
+  actions,
+}: FleetChatCommentProps): ReactElement {
+  const time = new Date(sentAt)
+  const timeLabel = Number.isNaN(time.getTime())
+    ? sentAt
+    : time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return jsxs('article', {
+    className: 'dsh-fleet-chat-comment',
+    'data-comment-id': id,
+    'data-operator': sender.operator ? 'true' : undefined,
+    'data-operator-label': sender.operator ? operatorLabel : undefined,
+    children: [
+      avatar ?? jsx(FleetChatAvatar, { member: sender, size: 24, showPresence: false }),
+      jsxs('div', {
+        className: 'dsh-fleet-chat-comment-main',
+        children: [
+          jsxs('div', {
+            className: 'dsh-fleet-chat-comment-meta',
+            children: [
+              jsx('span', { className: 'dsh-fleet-chat-comment-name', children: sender.name }),
+              jsx('span', { className: 'dsh-fleet-chat-comment-role', children: sender.role }),
+              jsx('time', { className: 'dsh-fleet-chat-comment-time', dateTime: sentAt, children: timeLabel }),
+              receipt !== undefined && jsx(FleetChatReadReceipt, receipt),
+              actions !== undefined && jsx('span', {
+                className: 'dsh-fleet-chat-comment-actions',
+                children: actions,
+              }),
+            ],
+          }),
+          jsx('div', {
+            className: 'dsh-fleet-chat-comment-body',
+            children: jsx(FleetChatContent, {
+              content,
+              renderText,
+              renderImage,
+              renderMention,
+              renderBlock,
+              onOpenResource,
+            }),
           }),
         ],
       }),
