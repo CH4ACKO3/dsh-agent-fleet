@@ -29,8 +29,8 @@ export interface FleetMessageConfiguration {
   readonly defaultChannel: { readonly id: string; readonly name: string }
   readonly rules: string
   readonly collaborationMethod: string
-  /** Eligible silent turns between private visibility reminders. Zero disables them. */
-  readonly visibilityReminderIntervalTurns: number
+  /** Input-context growth between private visibility reminders. Zero disables them. */
+  readonly visibilityReminderContextGrowthTokens: number
 }
 
 export interface FleetResourcesConfiguration {
@@ -99,10 +99,10 @@ export function parseFleetMessageConfiguration(value: unknown): FleetMessageConf
     },
     rules: optionalText(input.rules, `${FLEET_MESSAGE_MODULE}.rules`),
     collaborationMethod: optionalText(input.collaborationMethod, `${FLEET_MESSAGE_MODULE}.collaborationMethod`),
-    visibilityReminderIntervalTurns: optionalNonNegativeInteger(
-      input.visibilityReminderIntervalTurns,
-      `${FLEET_MESSAGE_MODULE}.visibilityReminderIntervalTurns`,
-      3,
+    visibilityReminderContextGrowthTokens: optionalNonNegativeInteger(
+      input.visibilityReminderContextGrowthTokens,
+      `${FLEET_MESSAGE_MODULE}.visibilityReminderContextGrowthTokens`,
+      16_000,
     ),
   }
 }
@@ -158,7 +158,7 @@ export class FleetConfigurationRegistry {
           defaultChannel: { id: 'main', name: 'Main' },
           rules: '',
           collaborationMethod: '',
-          visibilityReminderIntervalTurns: 3,
+          visibilityReminderContextGrowthTokens: 16_000,
         },
       },
       parse: parseFleetMessageConfiguration,

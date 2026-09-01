@@ -65,7 +65,7 @@ import { fleetConfigurationModules } from './configuration-modules.js'
 import { createFleetTutorialPanelSource, FLEET_TUTORIAL_TEAM_ID } from './tutorial-team.js'
 import {
   AgentFleetPrivateChat,
-  type AgentFleetMailbox,
+  type AgentFleetConversationIdentity,
 } from './assistant-private-chat.js'
 import {
   FLEET_CHAT_COLUMN_DEFAULT_WIDTH as CHAT_COLUMN_DEFAULT_WIDTH,
@@ -94,7 +94,6 @@ import {
 
 const PANEL_STYLE_ID = 'dsh-agent-fleet-team-panel'
 const RENDER_ENGINE_STYLE_ID = 'dsh-agent-fleet-render-engine'
-const FLEET_ASSISTANT_PRIVATE_CHAT_ENABLED = false
 
 const panelStyles = `
 [data-conversation-scroll]:has(.dsh-fleet-panel) {
@@ -6115,6 +6114,7 @@ export interface FleetPanelTeamSettings {
   readonly positioning: string
   readonly rules: string
   readonly collaborationMethod: string
+  readonly visibilityReminderContextGrowthTokens: number
   readonly updateDensity: 'concise' | 'balanced' | 'detailed'
   readonly notificationPolicy: 'decisions' | 'milestones' | 'continuous'
   readonly contentPreference: string
@@ -6879,6 +6879,13 @@ const operator: FleetPanelMember = {
 }
 
 function teamAgents(team: FleetPanelTeamSnapshot): readonly FleetPanelMember[] {
+  return fleetPanelMentionMembers(team)
+}
+
+/** Every visible Team participant that can be named in message text. */
+export function fleetPanelMentionMembers(
+  team: Pick<FleetPanelTeamSnapshot, 'members' | 'assistants'>,
+): readonly FleetPanelMember[] {
   return [...team.members, ...(team.assistants ?? [])]
 }
 
@@ -7013,10 +7020,10 @@ export async function configureFleetAssistantSessionModel(
   })
 }
 
-function fleetAssistantMailbox(snapshot: FleetPanelSnapshot, sessionId: string | undefined): AgentFleetMailbox | undefined {
+function fleetAssistantConversationIdentity(snapshot: FleetPanelSnapshot, sessionId: string | undefined): AgentFleetConversationIdentity | undefined {
   if (sessionId === undefined) return undefined
   const summary = snapshot.directory.teams.find(candidate =>
-    candidate.status !== 'closed' && candidate.assistantSessionIds?.includes(sessionId) === true)
+    candidate.assistantSessionIds?.includes(sessionId) === true)
   if (summary === undefined) return undefined
   const assistantSessionId = summary.assistantSessionAliases?.[sessionId] ?? sessionId
   const assistantId = summary.assistantParticipantIds?.[sessionId]
@@ -7030,50 +7037,8 @@ function fleetAssistantMailbox(snapshot: FleetPanelSnapshot, sessionId: string |
     presence: 'active',
   }
   const visibleAssistant = assistant ?? fallbackAssistant
-  const membersById = new Map([...(team?.members ?? []), ...(team?.assistants ?? [])].map(member => [member.id, member]))
   return {
     assistant: visibleAssistant,
-    operator,
-    running: assistant?.presence === 'busy',
-    state: snapshot.connection?.status === 'disconnected'
-      ? 'error'
-      : team === undefined ? 'loading' : 'open',
-    messages: (team?.messages ?? []).filter(message => message.conversationId === `@${assistantId ?? assistantSessionId}`).map(message => ({
-      id: message.id,
-      sender: message.sender?.operator === true
-        ? operator
-        : message.sender ?? (message.senderId === visibleAssistant.id ? visibleAssistant : operator),
-      sentAt: message.sentAt,
-      content: message.content,
-      ...(message.receipt === undefined ? {} : {
-        receipt: {
-          readMembers: message.receipt.readMemberIds.flatMap(id => {
-            const member = membersById.get(id)
-            return member === undefined ? [] : [member]
-          }),
-          ...(message.receipt.deliveredMemberIds === undefined && message.receipt.pendingMemberIds === undefined
-            ? {
-                unreadMembers: message.receipt.unreadMemberIds.flatMap(id => {
-                  const member = membersById.get(id)
-                  return member === undefined ? [] : [member]
-                }),
-              }
-            : {
-                deliveredMembers: (message.receipt.deliveredMemberIds ?? []).flatMap(id => {
-                  const member = membersById.get(id)
-                  return member === undefined ? [] : [member]
-                }),
-                pendingDeliveries: (message.receipt.pendingMemberIds ?? []).flatMap(id => {
-                  const member = membersById.get(id)
-                  if (member === undefined) return []
-                  const blocker = message.receipt?.pendingDeliveries?.find(candidate => candidate.memberId === id)
-                  return [{ member, ...blocker }]
-                }),
-              }),
-          ...(message.receipt.sources === undefined ? {} : { sources: message.receipt.sources }),
-        },
-      }),
-    })),
   }
 }
 
@@ -7527,15 +7492,15 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
       () => teamDirectorySource?.getSnapshot() ?? emptySnapshot,
       () => emptySnapshot,
     )
-    const mailbox = useMemo(() => fleetAssistantMailbox(fleetSnapshot, sessionId), [fleetSnapshot, sessionId])
-    const mailboxTeamId = fleetSnapshot.directory.teams.find(candidate =>
+    const identity = useMemo(() => fleetAssistantConversationIdentity(fleetSnapshot, sessionId), [fleetSnapshot, sessionId])
+    const conversationTeamId = fleetSnapshot.directory.teams.find(candidate =>
       candidate.assistantSessionIds?.includes(sessionId ?? '') === true)?.teamId
     useEffect(() => {
-      if (mailbox === undefined) return
+      if (identity === undefined) return
       const teamId = fleetSnapshot.directory.teams.find(candidate =>
         candidate.assistantSessionIds?.includes(sessionId ?? '') === true)?.teamId
       if (teamId !== undefined && fleetSnapshot.team?.teamId !== teamId) teamDirectorySource?.selectTeam(teamId)
-    }, [fleetSnapshot.directory.teams, fleetSnapshot.team?.teamId, mailbox, sessionId])
+    }, [fleetSnapshot.directory.teams, fleetSnapshot.team?.teamId, identity, sessionId])
     const decorateSnapshot = useMemo(() => {
       if (welcome === null) return (source: any): any => source
       let previousSource: any
@@ -7552,31 +7517,31 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
       source => selector(decorateSnapshot(source)),
       equality,
     )
-    const mailboxMembers = useMemo<readonly FleetPanelMember[]>(() => {
-      const team = fleetSnapshot.team?.teamId === mailboxTeamId ? fleetSnapshot.team : undefined
+    const mentionMembers = useMemo<readonly FleetPanelMember[]>(() => {
+      const team = fleetSnapshot.team?.teamId === conversationTeamId ? fleetSnapshot.team : undefined
       return team === undefined ? [] : [operator, ...teamAgents(team)]
-    }, [fleetSnapshot.team, mailboxTeamId])
-    const showMemberDetails = mailboxTeamId === undefined || sessionId === undefined
+    }, [fleetSnapshot.team, conversationTeamId])
+    const showMemberDetails = conversationTeamId === undefined || sessionId === undefined
       ? undefined
       : (memberId: string) => {
           requestFleetPanelNavigation({
             sessionId,
-            teamId: mailboxTeamId,
+            teamId: conversationTeamId,
             memberId,
             target: 'details',
           })
         }
-    const showMemberContext = mailboxTeamId === undefined || sessionId === undefined
+    const showMemberContext = conversationTeamId === undefined || sessionId === undefined
       ? undefined
       : (memberId: string) => {
           requestFleetPanelNavigation({
             sessionId,
-            teamId: mailboxTeamId,
+            teamId: conversationTeamId,
             memberId,
             target: 'context',
           })
         }
-    const content = welcome === null && (!fleetAssistant || !FLEET_ASSISTANT_PRIVATE_CHAT_ENABLED)
+    const content = welcome === null && !fleetAssistant
       ? jsx(ChatView, props)
       : jsx(AgentFleetPrivateChat, {
           key: welcome?.sessionId ?? `fleet-assistant:${sessionId ?? ''}`,
@@ -7585,20 +7550,20 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
           loadImage: props.loadImage as (attachment: unknown) => Promise<string>,
           renderText: (text: string) => jsx(FleetMessageText, {
             text,
-            members: mailboxMembers,
+            members: mentionMembers,
             ...(fleetMarkdownRenderer === undefined ? {} : { markdownRenderer: fleetMarkdownRenderer }),
             ...(showMemberDetails === undefined ? {} : { showMemberDetails }),
             ...(showMemberContext === undefined ? {} : { showMemberContext }),
           }),
           renderContext: () => jsx(ChatView, props),
-          ...(welcome !== null || mailbox === undefined || sessionId === undefined ? {} : {
-            mailbox,
-            ...(mailboxTeamId === undefined ? {} : {
+          ...(welcome !== null || identity === undefined || sessionId === undefined ? {} : {
+            identity,
+            ...(conversationTeamId === undefined ? {} : {
               ...(showMemberDetails === undefined ? {} : {
-                openMemberDetails: () => { showMemberDetails(mailbox.assistant.id) },
+                openMemberDetails: () => { showMemberDetails(identity.assistant.id) },
               }),
               ...(showMemberContext === undefined ? {} : {
-                openMemberContext: () => { showMemberContext(mailbox.assistant.id) },
+                openMemberContext: () => { showMemberContext(identity.assistant.id) },
               }),
             }),
           }),
@@ -9210,6 +9175,7 @@ function TeamSettingsDialog({ sessionId, team, initialTab = 'general', loadSetti
     positioning: value.positioning,
     rules: value.rules,
     collaborationMethod: value.collaborationMethod,
+    visibilityReminderContextGrowthTokens: value.visibilityReminderContextGrowthTokens,
     updateDensity: value.updateDensity,
     notificationPolicy: value.notificationPolicy,
     contentPreference: value.contentPreference,
@@ -9371,6 +9337,7 @@ function TeamSettingsDialog({ sessionId, team, initialTab = 'general', loadSetti
                   jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('这些约定会作为团队长期指导，并发送给当前已加载的成员。', 'These agreements become durable Team guidance and are sent to currently loaded members.') }),
                   jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('规则与偏好', 'Rules and preferences') }), jsx('textarea', { value: settings.rules, rows: 6, onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setSettings({ ...settings, rules: event.currentTarget.value }) })] }),
                   jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('协作方式', 'Collaboration method') }), jsx('textarea', { value: settings.collaborationMethod, rows: 7, onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setSettings({ ...settings, collaborationMethod: event.currentTarget.value }) })] }),
+                  jsxs('label', { className: 'dsh-fleet-panel-settings-form-field', children: [jsx('span', { children: panelText('可见性提醒上下文增量（Token）', 'Visibility reminder context growth (tokens)') }), jsx('input', { type: 'number', min: 0, step: 1000, value: settings.visibilityReminderContextGrowthTokens, onChange: (event: ChangeEvent<HTMLInputElement>) => setSettings({ ...settings, visibilityReminderContextGrowthTokens: Number(event.currentTarget.value) }) }), jsx('small', { children: panelText('上下文每增长这么多 Token，下一次未共享的直接输出会触发提醒；0 表示关闭。上下文压缩后会立即进入待提醒状态。', 'After this much context growth, the next unshared direct output triggers a reminder; 0 disables it. Compaction makes a reminder immediately eligible.') })] }),
                 ] }) : tab === 'model' ? jsxs('section', { children: [
                   jsx('h3', { children: panelText('模型与推理', 'Model & reasoning') }),
                   jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('统一修改普通成员和团队助理；不会暂停或重启 Agent，从下一次模型调用开始生效。', 'Apply one configuration to members and Team assistants without pausing or restarting Agents. It takes effect on the next model call.') }),
@@ -10177,7 +10144,7 @@ function renderMessageText(
       entryKey: 'markdown',
       fallback: jsx(FleetPlainMessageText, {
         text,
-        members: owner.snapshot.members,
+        members: teamAgents(owner.snapshot),
         showMemberDetails: owner.showMemberDetails,
         showMemberContext: owner.showMemberContext,
       }),
@@ -10186,7 +10153,7 @@ function renderMessageText(
 }
 
 function renderMemberMention(owner: FleetPanelPaneOwner, mention: FleetChatMentionBlock): ReactNode | undefined {
-  const member = owner.snapshot.members.find(candidate => candidate.id === mention.memberId)
+  const member = teamAgents(owner.snapshot).find(candidate => candidate.id === mention.memberId)
   if (member === undefined) return undefined
   return jsx(FleetMemberMentionPopover, {
     member,
@@ -14496,7 +14463,7 @@ function AgentMain(owner: FleetPanelPaneOwner): ReactElement {
   if (context) return jsx(AgentContextMain, { owner, member })
   if (conversation === undefined) return jsx(PanelUnavailable, { label: panelText('这个 Agent 当前没有可见消息', 'This Agent currently has no visible messages') })
   const peer = agentConversationPeer(owner.snapshot, member, conversation)
-  const members = new Map(owner.snapshot.members.map(candidate => [candidate.id, candidate]))
+  const members = new Map(teamAgents(owner.snapshot).map(candidate => [candidate.id, candidate]))
   members.set(operator.id, operator)
   const messages = history.messages
   return jsxs('section', {
@@ -16242,7 +16209,7 @@ function FleetMessageText({
 function FleetRenderEngineMessageText({ panel, text, markdownRenderer }: FleetRenderEngineMessageTextProps): ReactElement {
   return jsx(FleetMessageText, {
     text,
-    members: panel.snapshot.members,
+    members: teamAgents(panel.snapshot),
     markdownRenderer,
     showMemberDetails: panel.showMemberDetails,
     showMemberContext: panel.showMemberContext,

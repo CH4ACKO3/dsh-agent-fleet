@@ -1582,6 +1582,7 @@ describe('FleetRunService', () => {
         positioning: 'Own the active runtime.',
         rules: 'Verify user-visible changes.',
         collaborationMethod: 'Coordinate through the main Channel.',
+        visibilityReminderContextGrowthTokens: 24_000,
         updateDensity: 'detailed',
         notificationPolicy: 'decisions',
         contentPreference: 'Lead with outcomes.',
@@ -1593,6 +1594,7 @@ describe('FleetRunService', () => {
       positioning: 'Own the active runtime.',
       rules: 'Verify user-visible changes.',
       collaborationMethod: 'Coordinate through the main Channel.',
+      visibilityReminderContextGrowthTokens: 24_000,
       updateDensity: 'detailed',
       notificationPolicy: 'decisions',
       contentPreference: 'Lead with outcomes.',
@@ -1604,6 +1606,7 @@ describe('FleetRunService', () => {
         'dsh-agent-fleet/message': {
           rules: 'Verify user-visible changes.',
           collaborationMethod: 'Coordinate through the main Channel.',
+          visibilityReminderContextGrowthTokens: 24_000,
         },
         'dsh-agent-fleet/ui': { userAccess: {
           updateDensity: 'detailed', notificationPolicy: 'decisions', contentPreference: 'Lead with outcomes.',
@@ -3638,16 +3641,23 @@ describe('FleetRunService', () => {
       }
       hook.memberTurnStopping(lead as unknown as Agent, turn)
     }
-    const emitSilentTurn = (turn: number, output: string): void => {
+    const emitSilentTurn = (turn: number, contextTokens: number, output: string): void => {
       lead.inbox.nextTurn.length = 0
       lead.inbox.nextStep.length = 0
       lead.session.events.push({
         type: 'turn/start', seq: turn * 10, time: Date.now(), data: { turn },
       })
-      lead.session.events.push({
+      const outputEvent = {
         type: 'assistant/message', seq: turn * 10 + 1, time: Date.now(),
-        data: { turn, interrupted: false, message: { content: [{ type: 'text', text: output }] } },
-      })
+        data: {
+          turn,
+          interrupted: false,
+          message: { content: [{ type: 'text', text: output }] },
+          usage: { inputTokens: contextTokens, outputTokens: 32 },
+        },
+      } as unknown as SessionEvent
+      lead.session.events.push(outputEvent)
+      service.recordMemberSessionEvent(lead.id, outputEvent)
       turnStopping(turn)
       lead.session.events.push({
         type: 'turn/end', seq: turn * 10 + 2, time: Date.now(),
@@ -3658,8 +3668,11 @@ describe('FleetRunService', () => {
     const initialReviewerMessages = reviewer.messages.length
     const initialCoordinationMessages = coordinationMessages()
 
-    emitSilentTurn(1, 'I finished the requested analysis.')
+    emitSilentTurn(1, 8_000, 'I finished the requested analysis.')
     turnStopping(1)
+
+    expect(lead.messages).toHaveLength(initialLeadMessages)
+    emitSilentTurn(2, 16_000, 'A larger unshared result.')
 
     expect(lead.messages).toHaveLength(initialLeadMessages + 1)
     expect(reviewer.messages).toHaveLength(initialReviewerMessages)
@@ -3675,12 +3688,17 @@ describe('FleetRunService', () => {
       data: expect.stringContaining('visibility_reminder'),
     }))
 
-    // A model that merely acknowledges the reminder must not wake itself forever.
-    emitSilentTurn(2, 'Understood.')
-    emitSilentTurn(3, 'Still understood.')
+    // Context growth below the configured threshold does not repeatedly wake the model.
+    emitSilentTurn(3, 20_000, 'Understood.')
     expect(lead.messages).toHaveLength(initialLeadMessages + 1)
-    emitSilentTurn(4, 'Another unshared result.')
+    emitSilentTurn(4, 32_000, 'Another unshared result.')
     expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Direct output remains private to this Session'),
+      }),
+    ])
 
     lead.inbox.nextTurn.length = 0
     lead.inbox.nextStep.length = 0
@@ -3690,19 +3708,58 @@ describe('FleetRunService', () => {
     service.messageHub(run.id).send(lead, {
       to: '#main', text: 'Shared result.', delivery: 'quiet',
     })
-    lead.session.events.push({
+    const sharedOutput = {
       type: 'assistant/message', seq: 51, time: Date.now(),
-      data: { turn: 5, interrupted: false, message: { content: [{ type: 'text', text: 'Shared result.' }] } },
-    })
+      data: {
+        turn: 5,
+        interrupted: false,
+        message: { content: [{ type: 'text', text: 'Shared result.' }] },
+        usage: { inputTokens: 40_000, outputTokens: 32 },
+      },
+    } as unknown as SessionEvent
+    lead.session.events.push(sharedOutput)
+    service.recordMemberSessionEvent(lead.id, sharedOutput)
     turnStopping(5)
     lead.session.events.push({
       type: 'turn/end', seq: 52, time: Date.now(), data: { turn: 5, reason: { kind: 'completed' } },
     })
     expect(lead.messages).toHaveLength(initialLeadMessages + 2)
 
-    // A successful Team-visible send resets the cooldown, so the next regression is caught immediately.
-    emitSilentTurn(6, 'A later result was not shared.')
+    // A successful Team-visible send establishes a fresh context-growth baseline.
+    emitSilentTurn(6, 48_000, 'A later result was not shared.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+
+    service.recordMemberSessionEvent(lead.id, {
+      type: 'compaction/summary',
+      seq: 65,
+      time: Date.now(),
+      data: {
+        compactionId: 'compact-1',
+        summary: [{ type: 'text', text: 'summary' }],
+        shadowedRange: { start: 1, end: 60 },
+        shadowedSeqs: [1, 60],
+        shadowedTokenCount: 44_000,
+        provider: 'test',
+        model: 'test',
+      },
+    } as unknown as SessionEvent)
+    emitSilentTurn(7, 2_000, 'First result after compaction.')
     expect(lead.messages).toHaveLength(initialLeadMessages + 3)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('This Session was compacted'),
+      }),
+    ])
+
+    emitSilentTurn(8, 18_000, 'Later result after compaction.')
+    expect(lead.messages).toHaveLength(initialLeadMessages + 4)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Direct output remains private to this Session'),
+      }),
+    ])
     disconnect()
   })
 

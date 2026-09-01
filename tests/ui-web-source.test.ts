@@ -75,6 +75,7 @@ describe('Fleet Web panel source', () => {
         if (request.view === 'settings') {
           return ok({
             name: 'Runtime Team', positioning: 'Runtime operations', rules: '', collaborationMethod: '',
+            visibilityReminderContextGrowthTokens: 16_000,
             updateDensity: 'balanced', notificationPolicy: 'milestones', contentPreference: '',
             projectRoot: '/workspace/fleet',
             budget: {
@@ -549,6 +550,7 @@ describe('Fleet Web panel source', () => {
     await expect(source.updateTeamSettings?.({
       sessionId: 'observer-session', teamId: 'team-1', settings: {
         name: 'Runtime Team', positioning: 'Runtime operations', rules: '', collaborationMethod: '',
+        visibilityReminderContextGrowthTokens: 16_000,
         updateDensity: 'detailed', notificationPolicy: 'decisions', contentPreference: 'Lead with outcomes.',
       },
     })).resolves.toMatchObject({ updateDensity: 'detailed', notificationPolicy: 'decisions' })

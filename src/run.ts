@@ -1110,6 +1110,7 @@ export interface FleetTeamSettings {
   readonly positioning: string
   readonly rules: string
   readonly collaborationMethod: string
+  readonly visibilityReminderContextGrowthTokens: number
   readonly updateDensity: 'concise' | 'balanced' | 'detailed'
   readonly notificationPolicy: 'decisions' | 'milestones' | 'continuous'
   readonly contentPreference: string
@@ -2148,6 +2149,22 @@ interface MemberToolActivity {
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
+interface VisibilityReminderState {
+  /** Largest model input context observed in the current compaction epoch. */
+  latestContextTokens: number
+  /** Context size at the last reminder or Team-visible share. */
+  baselineContextTokens: number
+  /** A successful compaction makes the next eligible reminder immediate. */
+  afterCompaction: boolean
+  /** The first reminder in each compaction epoch carries the full explanation. */
+  detailedReminderSent: boolean
+}
+
+function inputContextTokens(usage: TokenUsage | undefined): number | undefined {
+  if (usage === undefined) return undefined
+  return usage.inputTokens + (usage.cacheReadTokens ?? 0)
+}
+
 interface NetworkRecovery {
   readonly runId: string
   readonly member: string
@@ -2184,7 +2201,7 @@ export class FleetRunService {
   private readonly assistantDirectInputTurns = new Map<string, number>()
   private readonly memberLastSharedTurns = new Map<string, number>()
   private readonly memberVisibilityReviewedTurns = new Map<string, number>()
-  private readonly visibilityReminderCountdowns = new Map<string, number>()
+  private readonly visibilityReminderStates = new Map<string, VisibilityReminderState>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
@@ -3131,6 +3148,7 @@ export class FleetRunService {
       positioning: optionalText(core.positioning, 'core.positioning'),
       rules: message.rules,
       collaborationMethod: message.collaborationMethod,
+      visibilityReminderContextGrowthTokens: message.visibilityReminderContextGrowthTokens,
       updateDensity: ui.userAccess.updateDensity,
       notificationPolicy: ui.userAccess.notificationPolicy,
       contentPreference: ui.userAccess.contentPreference,
@@ -3334,6 +3352,10 @@ export class FleetRunService {
     const positioning = optionalText(input.settings.positioning, 'Fleet Team positioning')
     const rules = optionalText(input.settings.rules, 'Fleet Team rules')
     const collaborationMethod = optionalText(input.settings.collaborationMethod, 'Fleet Team collaboration method')
+    const visibilityReminderContextGrowthTokens = input.settings.visibilityReminderContextGrowthTokens
+    if (!Number.isSafeInteger(visibilityReminderContextGrowthTokens) || visibilityReminderContextGrowthTokens < 0) {
+      throw new Error('Fleet visibility reminder context growth must be a non-negative integer')
+    }
     const contentPreference = optionalText(input.settings.contentPreference, 'Fleet Team content preference')
     const updateDensity = choice(input.settings.updateDensity, 'Fleet Team update density', ['concise', 'balanced', 'detailed'] as const)
     const notificationPolicy = choice(input.settings.notificationPolicy, 'Fleet Team notification policy', ['decisions', 'milestones', 'continuous'] as const)
@@ -3348,7 +3370,12 @@ export class FleetRunService {
       core: { ...core, name, positioning },
       modules: {
         ...modules,
-        [FLEET_MESSAGE_MODULE]: { ...message, rules, collaborationMethod },
+        [FLEET_MESSAGE_MODULE]: {
+          ...message,
+          rules,
+          collaborationMethod,
+          visibilityReminderContextGrowthTokens,
+        },
         [FLEET_UI_MODULE]: {
           ...ui,
           userAccess: { ...userAccess, updateDensity, notificationPolicy, contentPreference },
@@ -5478,7 +5505,6 @@ export class FleetRunService {
       const turn = agent === undefined ? undefined : this.currentOpenTurn(agent)
       if (sender !== undefined && turn !== undefined) {
         this.memberLastSharedTurns.set(sender.sessionId, turn)
-        this.visibilityReminderCountdowns.delete(sender.sessionId)
       }
       const recipientIds = event.message.recipientIds ?? []
       queueMicrotask(() => {
@@ -5663,6 +5689,19 @@ export class FleetRunService {
     return false
   }
 
+  private visibilityReminderState(sessionId: string): VisibilityReminderState {
+    const existing = this.visibilityReminderStates.get(sessionId)
+    if (existing !== undefined) return existing
+    const created: VisibilityReminderState = {
+      latestContextTokens: 0,
+      baselineContextTokens: 0,
+      afterCompaction: false,
+      detailedReminderSent: false,
+    }
+    this.visibilityReminderStates.set(sessionId, created)
+    return created
+  }
+
   private memberTurnStopping(agent: Agent, turn: number): void {
     const sessionId = String(agent.id)
     if (this.memberVisibilityReviewedTurns.get(sessionId) === turn) return
@@ -5676,30 +5715,36 @@ export class FleetRunService {
       || !record.members.some(candidate => candidate.name === member)) return
     this.memberVisibilityReviewedTurns.set(sessionId, turn)
     if (!this.turnHasDirectOutput(agent, turn)) return
+    const reminder = this.visibilityReminderState(sessionId)
     if (this.memberLastSharedTurns.get(sessionId) === turn) {
-      this.visibilityReminderCountdowns.delete(sessionId)
+      reminder.baselineContextTokens = reminder.latestContextTokens
+      reminder.afterCompaction = false
       return
     }
     const message = parseFleetMessageConfiguration(this.moduleConfiguration(record.id, FLEET_MESSAGE_MODULE))
-    const interval = message.visibilityReminderIntervalTurns
-    if (interval === 0) return
-    const countdown = this.visibilityReminderCountdowns.get(sessionId) ?? 0
-    if (countdown > 0) {
-      this.visibilityReminderCountdowns.set(sessionId, countdown - 1)
-      return
-    }
+    const threshold = message.visibilityReminderContextGrowthTokens
+    if (threshold === 0) return
+    const growth = reminder.latestContextTokens - reminder.baselineContextTokens
+    if (!reminder.afterCompaction && growth < threshold) return
+    const detailed = !reminder.detailedReminderSent
     runtime.messages.sendSystemNotification(sessionId, {
       kind: 'visibility_reminder',
-      text: [
-        '[Fleet visibility reminder]',
-        'Your ordinary model output from the previous turn is visible only in this private Session; other Team members do not automatically see it.',
-        'If it contains a result, decision, question, or handoff another member needs, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest audience: send one-member or subset work privately to an accountable owner, and use a Channel only when its full audience needs the content. Do not resend user-only text or information already shared.',
-        'Do not acknowledge or report reading this reminder. If nothing needs sharing, end without commentary. This private reminder creates no Team message or Task.',
-      ].join('\n'),
+      text: detailed
+        ? [
+            '[Fleet visibility reminder]',
+            reminder.afterCompaction
+              ? 'This Session was compacted. Re-check the visibility boundary now: ordinary model output is visible only in this private Session; other Team members do not automatically see it.'
+              : 'Your ordinary model output from the previous turn is visible only in this private Session; other Team members do not automatically see it.',
+            'If it contains a result, decision, question, or handoff another member needs, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest audience: send one-member or subset work privately to an accountable owner, and use a Channel only when its full audience needs the content. Do not resend user-only text or information already shared.',
+            'Do not acknowledge or report reading this reminder. If nothing needs sharing, end without commentary. This private reminder creates no Team message or Task.',
+          ].join('\n')
+        : '[Fleet visibility reminder] Direct output remains private to this Session. Share only newly relevant content with the smallest necessary audience; otherwise end silently.',
       delivery: 'wakeup',
       coalesceKey: `visibility-reminder:${sessionId}`,
     })
-    this.visibilityReminderCountdowns.set(sessionId, interval - 1)
+    reminder.baselineContextTokens = reminder.latestContextTokens
+    reminder.afterCompaction = false
+    reminder.detailedReminderSent = true
   }
 
   recordMemberSessionEvent(sessionId: string, event: SessionEvent): void {
@@ -5721,6 +5766,20 @@ export class FleetRunService {
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     this.recordBudgetUsage(record, member, event)
+    if (event.type === 'assistant/message') {
+      const tokens = inputContextTokens(event.data.usage)
+      if (tokens !== undefined) {
+        const reminder = this.visibilityReminderState(sessionId)
+        reminder.latestContextTokens = Math.max(reminder.latestContextTokens, tokens)
+      }
+    }
+    if (event.type === 'compaction/summary' || event.type === 'compaction/prune') {
+      const reminder = this.visibilityReminderState(sessionId)
+      reminder.latestContextTokens = 0
+      reminder.baselineContextTokens = 0
+      reminder.afterCompaction = true
+      reminder.detailedReminderSent = false
+    }
     const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
     if (foregroundAssistant && event.type === 'turn/start') {
       this.assistantCurrentTurns.set(sessionId, event.data.turn)
@@ -6116,7 +6175,7 @@ export class FleetRunService {
     this.assistantDirectInputTurns.delete(agentId)
     this.memberLastSharedTurns.delete(agentId)
     this.memberVisibilityReviewedTurns.delete(agentId)
-    this.visibilityReminderCountdowns.delete(agentId)
+    this.visibilityReminderStates.delete(agentId)
     this.abnormalSessionIds.delete(agentId)
     for (const [runId, runtime] of this.collaboration.entries()) {
       if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
@@ -7337,7 +7396,7 @@ export class FleetRunService {
     this.assistantDirectInputTurns.clear()
     this.memberLastSharedTurns.clear()
     this.memberVisibilityReviewedTurns.clear()
-    this.visibilityReminderCountdowns.clear()
+    this.visibilityReminderStates.clear()
     this.collaboration.close()
     this.dormantRunIds.clear()
     this.manualWakeRequiredRunIds.clear()

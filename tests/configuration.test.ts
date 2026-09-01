@@ -26,11 +26,11 @@ function builtIns(): Record<string, unknown> {
 describe('Fleet configuration modules', () => {
   it('defaults visibility reminders to every third eligible turn and allows disabling them', () => {
     const base = builtIns()[FLEET_MESSAGE_MODULE] as Record<string, unknown>
-    expect(parseFleetMessageConfiguration(base).visibilityReminderIntervalTurns).toBe(3)
+    expect(parseFleetMessageConfiguration(base).visibilityReminderContextGrowthTokens).toBe(16_000)
     expect(parseFleetMessageConfiguration({
       ...base,
-      visibilityReminderIntervalTurns: 0,
-    }).visibilityReminderIntervalTurns).toBe(0)
+      visibilityReminderContextGrowthTokens: 0,
+    }).visibilityReminderContextGrowthTokens).toBe(0)
   })
 
   it('lets installed Host modules parse their own block while preserving unknown modules', () => {

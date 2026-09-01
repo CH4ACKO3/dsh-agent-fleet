@@ -290,6 +290,9 @@ function teamSettings(value: unknown): FleetPanelTeamSettings {
   const positioning = string(value.positioning)
   const rules = string(value.rules)
   const collaborationMethod = string(value.collaborationMethod)
+  const visibilityReminderContextGrowthTokens = typeof value.visibilityReminderContextGrowthTokens === 'number'
+    ? value.visibilityReminderContextGrowthTokens
+    : undefined
   const updateDensity = string(value.updateDensity)
   const notificationPolicy = string(value.notificationPolicy)
   const contentPreference = string(value.contentPreference)
@@ -298,6 +301,7 @@ function teamSettings(value: unknown): FleetPanelTeamSettings {
   const model = string(value.request.model)
   const reasoningEffort = string(value.request.reasoningEffort)
   if (name === undefined || positioning === undefined || rules === undefined || collaborationMethod === undefined
+    || visibilityReminderContextGrowthTokens === undefined
     || contentPreference === undefined || projectRoot === undefined
     || (updateDensity !== 'concise' && updateDensity !== 'balanced' && updateDensity !== 'detailed')
     || (notificationPolicy !== 'decisions' && notificationPolicy !== 'milestones' && notificationPolicy !== 'continuous')) {
@@ -308,6 +312,7 @@ function teamSettings(value: unknown): FleetPanelTeamSettings {
     positioning,
     rules,
     collaborationMethod,
+    visibilityReminderContextGrowthTokens,
     updateDensity,
     notificationPolicy,
     contentPreference,

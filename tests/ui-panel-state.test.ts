@@ -9,6 +9,7 @@ import {
   fleetActivityGroups,
   fleetActivityWindow,
   fleetAssistantMailboxMentions,
+  fleetPanelMentionMembers,
   fleetPanelSelectedMemberId,
   fleetTimelineTicks,
   fleetPanelMemberRunControls,
@@ -30,7 +31,6 @@ import {
 } from '../packages/ui/src/team-panel.js'
 import {
   projectAgentFleetPrivateMessages,
-  reconcileAgentFleetMailboxReadState,
 } from '../packages/ui/src/assistant-private-chat.js'
 import {
   fleetConversationAudienceLabel,
@@ -188,6 +188,26 @@ describe('Fleet assistant mailbox mentions', () => {
       .toEqual(['@team-assistant'])
     expect(fleetAssistantMailboxMentions('Send this to Albany.', 'team-assistant', 'Albany')).toEqual([])
     expect(fleetAssistantMailboxMentions('@AlbanySuffix is different.', 'team-assistant', 'Albany')).toEqual([])
+  })
+})
+
+describe('Fleet message mention rendering', () => {
+  it('recognizes a Team assistant mention at the beginning of message text', () => {
+    const members = fleetPanelMentionMembers({
+      members: [{
+        id: 'alivia', name: 'Alivia', role: 'Engineer', responsibility: 'Implementation', color: '#406080',
+      }],
+      assistants: [{
+        id: 'assistant-alen', name: 'Alen', role: 'Team assistant', responsibility: 'Coordination', color: '#506fa0',
+      }],
+    })
+
+    const mentions = splitFleetMemberMentions(
+      '@Alen 收到，已阅读对齐事项。@Alivia 你好。',
+      members,
+    ).flatMap(segment => segment.member?.name ?? [])
+
+    expect(mentions).toEqual(['Alen', 'Alivia'])
   })
 })
 
@@ -506,46 +526,6 @@ describe('Agent Fleet private-chat projection', () => {
       order: [user.key, streamingReasoning.key, toolCall.key],
       nodes: { get: key => nodes.get(key) },
     })[0]).toMatchObject({ sender: 'operator', read: true })
-  })
-
-  it('reconciles an assistant mailbox receipt with its consumed native context message', () => {
-    const assistant = { id: 'assistant', name: 'Hailey', role: 'Assistant' }
-    const operator = { id: 'operator', name: 'You', role: 'Operator', operator: true }
-    const unreadReceipt = {
-      readMembers: [],
-      unreadMembers: [assistant],
-      sources: [{ memberId: assistant.id, sessionId: 'assistant-session', contextMessageId: 'context-read' }],
-    }
-    const mailbox = {
-      assistant,
-      operator,
-      running: true,
-      state: 'open' as const,
-      messages: [
-        { id: 'fleet-read', sender: operator, sentAt: '', content: [], receipt: unreadReceipt },
-        {
-          id: 'fleet-queued', sender: operator, sentAt: '', content: [],
-          receipt: {
-            ...unreadReceipt,
-            sources: [{ memberId: assistant.id, sessionId: 'assistant-session', contextMessageId: 'context-queued' }],
-          },
-        },
-      ],
-    }
-
-    const reconciled = reconcileAgentFleetMailboxReadState(mailbox, [{
-      id: 'context-read', sender: 'operator', sentAt: '', content: [], imageAttachments: new Map(),
-      streaming: false, read: true,
-    }])
-
-    expect(reconciled[0]?.receipt).toMatchObject({
-      readMembers: [assistant],
-      unreadMembers: [],
-    })
-    expect(reconciled[1]?.receipt).toMatchObject({
-      readMembers: [],
-      unreadMembers: [assistant],
-    })
   })
 
   it('preserves a streaming assistant row without requiring an iterable node store', () => {

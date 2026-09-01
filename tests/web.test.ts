@@ -361,7 +361,7 @@ describe('FleetWebRemote', () => {
     const ctx = new Context()
     Object.defineProperty(ctx, 'agents', { value: { get: vi.fn(() => caller) } })
     const settings = {
-      name: 'Runtime Team', positioning: '', rules: '', collaborationMethod: '',
+      name: 'Runtime Team', positioning: '', rules: '', collaborationMethod: '', visibilityReminderContextGrowthTokens: 16_000,
       updateDensity: 'balanced' as const, notificationPolicy: 'milestones' as const, contentPreference: '',
     }
     const runs = {

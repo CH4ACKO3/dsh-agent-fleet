@@ -10,7 +10,6 @@ import {
   type FleetChatContentBlock,
   type FleetChatImageBlock,
   type FleetChatMember,
-  type FleetChatReadReceiptData,
 } from './runtime-chat.js'
 import { FleetMemberPopover, type FleetMemberPopoverTriggerProps } from './member-popover.js'
 import { fleetText } from './locale.js'
@@ -410,17 +409,34 @@ const styles = `
   overflow: visible;
 }
 
-[data-conversation-scroll] .dsh-fleet-assistant-private[data-mailbox="true"] {
+[data-conversation-scroll] .dsh-fleet-assistant-private[data-team-conversation="true"] {
   min-height: 0;
   height: 100%;
   flex: auto;
 }
 
-[data-conversation-scroll] .dsh-fleet-assistant-private[data-mailbox="true"]
+[data-conversation-scroll] .dsh-fleet-assistant-private[data-team-conversation="true"]
 > .dsh-fleet-assistant-private-scroll {
   min-height: 0;
   flex: auto;
   overflow-y: auto;
+}
+
+.dsh-fleet-assistant-private-scope {
+  color: var(--dsw-alias-label-secondary);
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+  padding: 0 2px 14px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-fleet-assistant-private-scope strong {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+
+.dsh-fleet-assistant-private-scope span {
+  margin-inline-start: 8px;
 }
 
 @keyframes dsh-fleet-assistant-private-caret {
@@ -483,63 +499,8 @@ export interface AgentFleetPrivateMessage {
   readonly read?: boolean
 }
 
-export interface AgentFleetMailboxMessage {
-  readonly id: string
-  readonly sender: FleetChatMember
-  readonly sentAt: string
-  readonly content: readonly FleetChatContentBlock[]
-  readonly receipt?: FleetChatReadReceiptData
-}
-
-export interface AgentFleetMailbox {
+export interface AgentFleetConversationIdentity {
   readonly assistant: FleetChatMember
-  readonly operator: FleetChatMember
-  readonly messages: readonly AgentFleetMailboxMessage[]
-  readonly running: boolean
-  readonly state: 'loading' | 'open' | 'error'
-}
-
-/**
- * Reconcile native assistant-DM reads through the delivered context-message id so the
- * Fleet projection updates immediately while the durable read event reaches the panel.
- */
-export function reconcileAgentFleetMailboxReadState(
-  mailbox: AgentFleetMailbox,
-  nativeMessages: readonly AgentFleetPrivateMessage[],
-): readonly AgentFleetMailboxMessage[] {
-  const readContextMessageIds = new Set(nativeMessages.flatMap(message =>
-    message.sender === 'operator' && message.read === true ? [message.id] : [],
-  ))
-  if (readContextMessageIds.size === 0) return mailbox.messages
-
-  let changed = false
-  const messages = mailbox.messages.map(message => {
-    const receipt = message.receipt
-    if (message.sender.operator !== true || receipt === undefined
-      || receipt.readMembers.some(member => member.id === mailbox.assistant.id)
-      || receipt.sources?.some(source => source.memberId === mailbox.assistant.id
-        && readContextMessageIds.has(source.contextMessageId)) !== true) {
-      return message
-    }
-    changed = true
-    return {
-      ...message,
-      receipt: {
-        ...receipt,
-        readMembers: [...receipt.readMembers, mailbox.assistant],
-        ...(receipt.unreadMembers === undefined ? {} : {
-          unreadMembers: receipt.unreadMembers.filter(member => member.id !== mailbox.assistant.id),
-        }),
-        ...(receipt.deliveredMembers === undefined ? {} : {
-          deliveredMembers: receipt.deliveredMembers.filter(member => member.id !== mailbox.assistant.id),
-        }),
-        ...(receipt.pendingDeliveries === undefined ? {} : {
-          pendingDeliveries: receipt.pendingDeliveries.filter(delivery => delivery.member.id !== mailbox.assistant.id),
-        }),
-      },
-    }
-  })
-  return changed ? messages : mailbox.messages
 }
 
 interface RecordLike {
@@ -691,8 +652,8 @@ interface AgentFleetPrivateChatProps {
   readonly loadImage: (attachment: unknown) => Promise<string>
   readonly renderText?: (text: string) => ReactNode
   readonly renderContext: () => ReactNode
-  /** Real Fleet mailbox projection. Native Session output remains available only through renderContext. */
-  readonly mailbox?: AgentFleetMailbox
+  /** Team identity decorating this native user-assistant Session. It never replaces Session history with Fleet messages. */
+  readonly identity?: AgentFleetConversationIdentity
   readonly openMemberDetails?: () => void
   readonly openMemberContext?: () => void
 }
@@ -894,7 +855,7 @@ export function AgentFleetPrivateChat({
   loadImage,
   renderText,
   renderContext,
-  mailbox,
+  identity,
   openMemberDetails,
   openMemberContext,
 }: AgentFleetPrivateChatProps): ReactElement {
@@ -907,11 +868,7 @@ export function AgentFleetPrivateChat({
   const nativeLoadingOlder = useSession(source => source.loadingOlder) as boolean
   const operatorProfile = useFleetOperatorProfile()
   const [surface, setSurface] = useState<'chat' | 'details' | 'context'>('chat')
-  const nativeMessages = useMemo(() => projectAgentFleetPrivateMessages({ order, nodes }), [nodes, order])
-  const messages = useMemo(
-    () => mailbox === undefined ? nativeMessages : reconcileAgentFleetMailboxReadState(mailbox, nativeMessages),
-    [mailbox, nativeMessages],
-  )
+  const messages = useMemo(() => projectAgentFleetPrivateMessages({ order, nodes }), [nodes, order])
   const pendingTimes = useRef(new Map<string, string>())
   const nativePending = useMemo<readonly PendingPrivateMessage[]>(() => queue.flatMap(candidate => {
     const item = record(candidate)
@@ -925,7 +882,7 @@ export function AgentFleetPrivateChat({
     }
     return [{ id: `pending:${item.id}`, content: visible.content, imageAttachments: visible.attachments, sentAt: time }]
   }), [queue])
-  const pending = mailbox === undefined ? nativePending : []
+  const pending = nativePending
 
   const defaultAssistant: FleetChatMember = {
     id: 'agent-fleet',
@@ -934,15 +891,15 @@ export function AgentFleetPrivateChat({
     color: '#4f76c7',
     presence: nativeRunning ? 'busy' : 'active',
   }
-  const assistant = mailbox?.assistant ?? defaultAssistant
+  const assistant = identity?.assistant ?? defaultAssistant
   const operator = operatorProfile
-  const running = mailbox?.running ?? nativeRunning
-  const openState = mailbox?.state ?? nativeOpenState
-  const hasMore = mailbox === undefined && nativeHasMore
-  const loadingOlder = mailbox === undefined ? nativeLoadingOlder : false
+  const running = nativeRunning
+  const openState = nativeOpenState
+  const hasMore = nativeHasMore
+  const loadingOlder = nativeLoadingOlder
   const globalEmpty = useFleetMetaText('assistant.empty')
   const teamEmpty = useFleetMetaText('assistant.empty.team')
-  const empty = mailbox === undefined ? globalEmpty : teamEmpty.replace('{name}', () => assistant.name)
+  const empty = identity === undefined ? globalEmpty : teamEmpty.replace('{name}', () => assistant.name)
   const responding = useFleetMetaText('assistant.responding')
   const loading = useFleetMetaText('assistant.loading')
   const loadOlderLabel = useFleetMetaText('assistant.loadOlder')
@@ -952,8 +909,7 @@ export function AgentFleetPrivateChat({
   const column = useFleetChatColumnWidth(root)
   const atBottom = useRef(true)
   const [showToBottom, setShowToBottom] = useState(false)
-  const visibleRunningMessage = mailbox === undefined
-    && nativeMessages.some(message => message.sender === 'assistant' && message.streaming)
+  const visibleRunningMessage = messages.some(message => message.sender === 'assistant' && message.streaming)
   const signature = `${messages.map(message => `${message.id}:${message.content.map(block => block.type === 'text' ? block.text.length : block.type).join(',')}:${'streaming' in message && message.streaming ? 1 : 0}`).join('|')}|${pending.map(message => message.id).join('|')}|${running ? 1 : 0}`
 
   const moveToBottom = (): void => {
@@ -985,7 +941,7 @@ export function AgentFleetPrivateChat({
     return () => { scroller.removeEventListener('scroll', onScroll) }
   }, [])
 
-  const renderImage = (message: AgentFleetPrivateMessage | PendingPrivateMessage | AgentFleetMailboxMessage) => (image: FleetChatImageBlock): ReactNode => {
+  const renderImage = (message: AgentFleetPrivateMessage | PendingPrivateMessage) => (image: FleetChatImageBlock): ReactNode => {
     const attachment = 'imageAttachments' in message
       ? message.imageAttachments.get(image.attachmentId)
       : undefined
@@ -1023,7 +979,7 @@ export function AgentFleetPrivateChat({
     className: 'dsh-fleet-assistant-private',
     'data-surface': 'chat',
     'data-agent-fleet-private-chat': '',
-    'data-mailbox': mailbox === undefined ? undefined : 'true',
+    'data-team-conversation': identity === undefined ? undefined : 'true',
     'data-column-resizing': column.resizing ? 'true' : undefined,
     style: { '--dsh-fleet-assistant-chat-column-width': `${column.width}px` },
     children: [
@@ -1042,6 +998,14 @@ export function AgentFleetPrivateChat({
           role: 'log',
           'aria-live': 'polite',
           children: [
+            identity !== undefined && jsxs('div', {
+              className: 'dsh-fleet-assistant-private-scope',
+              role: 'note',
+              children: [
+                jsx('strong', { children: fleetText(`对话 · 仅你和 ${assistant.name}`, `Conversation · only you and ${assistant.name}`) }),
+                jsx('span', { children: fleetText('这里的消息属于当前 Session，不会自动发布到团队频道；需要协作时，助理必须通过 Fleet 明确发送。', 'Messages here belong to this Session and are not posted to Team channels automatically; the assistant must send through Fleet explicitly when collaboration is needed.') }),
+              ],
+            }),
             openState === 'loading' && jsx('div', {
               className: 'dsh-fleet-assistant-private-history-state',
               children: loading,
@@ -1064,19 +1028,15 @@ export function AgentFleetPrivateChat({
               children: empty,
             }),
             ...messages.map(message => {
-              const projectedSender = 'sender' in message && typeof message.sender === 'object'
-                ? message.sender
-                : message.sender === 'assistant' ? assistant : operator
+              const projectedSender = message.sender === 'assistant' ? assistant : operator
               const sender = projectedSender.operator === true ? operator : projectedSender
               const self = sender.operator === true
-              const streaming = 'streaming' in message && message.streaming
-              const receipt = 'receipt' in message
-                ? message.receipt
-                : message.sender === 'operator'
-                  ? message.read === true
-                    ? { readMembers: [assistant], unreadMembers: [] }
-                    : { readMembers: [], unreadMembers: [assistant] }
-                  : undefined
+              const streaming = message.streaming
+              const receipt = message.sender === 'operator'
+                ? message.read === true
+                  ? { readMembers: [assistant], unreadMembers: [] }
+                  : { readMembers: [], unreadMembers: [assistant] }
+                : undefined
               return jsx('div', {
               className: 'dsh-fleet-assistant-private-message',
               'data-streaming': streaming ? 'true' : 'false',

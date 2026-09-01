@@ -2579,6 +2579,7 @@ interface FleetConfigurationDraft {
   readonly channelName: string
   readonly rules: string
   readonly collaborationMethod: string
+  readonly visibilityReminderContextGrowthTokens: number
   readonly sharedResources: readonly File[]
   readonly updateDensity: string
   readonly notificationPolicy: string
@@ -2881,6 +2882,7 @@ function emptyConfiguration(): FleetConfigurationDraft {
     channelName: 'Main',
     rules: '',
     collaborationMethod: '',
+    visibilityReminderContextGrowthTokens: 16_000,
     sharedResources: [],
     updateDensity: 'concise',
     notificationPolicy: 'decisions',
@@ -3189,6 +3191,11 @@ function configurationFromPreset(value: unknown): FleetConfigurationDraft {
     channelName: presetString(defaultChannel.name, 'channel name', 'Main'),
     rules: presetString(editor.rules ?? message.rules, 'rules'),
     collaborationMethod: presetString(editor.collaborationMethod ?? message.collaborationMethod, 'collaboration method'),
+    visibilityReminderContextGrowthTokens: typeof message.visibilityReminderContextGrowthTokens === 'number'
+      && Number.isSafeInteger(message.visibilityReminderContextGrowthTokens)
+      && message.visibilityReminderContextGrowthTokens >= 0
+      ? message.visibilityReminderContextGrowthTokens
+      : 16_000,
     sharedResources: [],
     updateDensity: presetString(userAccess.updateDensity, 'update density', 'concise'),
     notificationPolicy: presetString(userAccess.notificationPolicy, 'notification policy', 'decisions'),
@@ -3223,6 +3230,7 @@ function configurationPreset(draft: FleetConfigurationDraft, library: PresetLibr
         defaultChannel: { id: draft.channelId, name: draft.channelName },
         rules: resolvedPresetText(draft, 'rules', draft.rules, library, chinese),
         collaborationMethod: resolvedPresetText(draft, 'collaboration', draft.collaborationMethod, library, chinese),
+        visibilityReminderContextGrowthTokens: draft.visibilityReminderContextGrowthTokens,
       },
       [FLEET_RESOURCES_CONFIGURATION_MODULE]: {
         policy: resolvedPresetText(draft, 'resources', '', library, chinese),
@@ -3317,6 +3325,7 @@ function configurationDraftChanged(current: FleetConfigurationDraft, initial: Fl
     channelName: draft.channelName,
     rules: draft.rules,
     collaborationMethod: draft.collaborationMethod,
+    visibilityReminderContextGrowthTokens: draft.visibilityReminderContextGrowthTokens,
     sharedResources: draft.sharedResources.map(file => [file.name, file.size, file.lastModified, file.type]),
     updateDensity: draft.updateDensity,
     notificationPolicy: draft.notificationPolicy,
@@ -5072,6 +5081,18 @@ function FleetConfigurationDialog({ initial, initialTab = 'basics', sessionId, o
                             onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setDraft({ ...draft, positioning: event.target.value }),
                           }),
                         ],
+                      }),
+                      jsx(ConfigurationField, {
+                        label: text('可见性提醒上下文增量（Token）', 'Visibility reminder context growth (tokens)'),
+                        hint: text('0 表示关闭；上下文压缩后会立即进入待提醒状态。', '0 disables it; compaction makes a reminder immediately eligible.'),
+                        children: jsx('input', {
+                          className: 'dsh-fleet-config-input',
+                          type: 'number',
+                          min: 0,
+                          step: 1000,
+                          value: draft.visibilityReminderContextGrowthTokens,
+                          onChange: (event: ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, visibilityReminderContextGrowthTokens: Number(event.target.value) }),
+                        }),
                       }),
                       jsx(ConfigurationField, {
                         label: text('默认频道标识', 'Default channel id'),

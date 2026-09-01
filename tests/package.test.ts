@@ -30,12 +30,13 @@ test('passes native new-Session workspace readiness into the Fleet Hero entry', 
   expect(patch).toContain('renderSlot("conversation.hero.agentPreset", { sessionId, workspaceSelected: chipTitle !== void 0 })')
 })
 
-test('uses native assistant chat while retaining Fleet composer commands and cost usage', () => {
+test('presents the native assistant Session as a Fleet conversation without routing it through Team messages', () => {
   const panel = readFileSync(resolve('packages/ui/src/team-panel.ts'), 'utf8')
   const entry = readFileSync(resolve('packages/ui/src/index.ts'), 'utf8')
 
-  expect(panel).toContain('const FLEET_ASSISTANT_PRIVATE_CHAT_ENABLED = false')
-  expect(panel).toContain('(!fleetAssistant || !FLEET_ASSISTANT_PRIVATE_CHAT_ENABLED)')
+  expect(panel).not.toContain('FLEET_ASSISTANT_PRIVATE_CHAT_ENABLED')
+  expect(panel).toContain('welcome === null && !fleetAssistant')
+  expect(panel).toContain('fleetAssistantConversationIdentity')
   expect(entry).not.toContain('sendFleetAssistantMailboxMessage')
   expect(entry).not.toContain('assistantSending')
   expect(entry).not.toContain('setAssistantSending')
