@@ -311,18 +311,21 @@ describe('FleetTaskBoard v6', () => {
 
   it('separates Reply delivery receipt from Inbox consumption', () => {
     const board = new FleetTaskBoard(directory)
+    board.syncInbox('reviewer', 1, 42)
     const reply = board.ensureReplyTask({
       messageId: 'msg_42', conversation: '#main', replyTarget: '#main', createdBy: 'lead',
       assignee: 'reviewer', title: 'Reply to review request',
     })
     expect(reply).toMatchObject({ domain: { kind: 'reply', messageId: 'msg_42', assignee: 'reviewer' }, stableState: { kind: 'running' } })
     expect(board.pendingReply('reviewer')?.id).toBe(reply.id)
+    expect(board.ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
     expect(() => board.recordReply('agent-qa', reply.id, 'msg_wrong')).toThrow('belongs to reviewer')
     expect(board.recordReply('agent-reviewer', reply.id, 'msg_final')).toMatchObject({
       domain: { kind: 'reply', completionMessageId: 'msg_final' },
       stableState: { kind: 'completed', result: 'msg_final' },
     })
     expect(board.pendingReply('reviewer')).toBeUndefined()
+    expect(board.ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['inbox'])
   })
 
   it('derives a Goal result from every owner submission', () => {

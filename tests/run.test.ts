@@ -5109,7 +5109,7 @@ describe('FleetRunService', () => {
     const reply = service.taskBoard(run.id).pendingReply('reviewer')
     if (reply === undefined) throw new Error('expected Reply Task')
     expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind))
-      .toEqual(expect.arrayContaining(['inbox', 'reply']))
+      .toEqual(['reply'])
     service.messageHub(run.id).readInbox(reviewer)
     service.taskBoard(run.id).syncInbox('reviewer', 0, 0)
     const delivered = service.messageHub(run.id).send(reviewer, {

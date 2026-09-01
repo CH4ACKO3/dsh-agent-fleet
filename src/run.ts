@@ -5768,7 +5768,7 @@ export class FleetRunService {
     if (tasks.length === 0) return false
     const taskInstruction = (task: (typeof tasks)[number]): string => {
       if (task.domain.kind === 'inbox') return `- ${task.title} (${task.id}): call fleet_inbox action="read" to consume unread messages.`
-      if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): finish the requested work, then call fleet_reply with task_id="${task.id}" and content.`
+      if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): respond exactly once with fleet_reply and the actual answer. That reply is the visible conversation message; do not send the same answer first with fleet_send. Read the source with fleet_inbox only if needed.`
       if (task.domain.kind === 'goal') return `- ${task.title} (${task.id}): call fleet_goal action="complete" with the assignment result (including a reject recommendation), or "block" only for an external impediment.`
       if (task.domain.kind === 'interaction') {
         const delivery = task.domain.pendingDelivery

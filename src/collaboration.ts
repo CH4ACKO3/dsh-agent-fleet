@@ -561,7 +561,7 @@ export class FleetCollaborationService {
       const taskReference = task === undefined
         ? 'Read fleet_inbox to locate the Reply Task for this message.'
         : `The Reply Task for this exact message is ${task.id}. Use this exact id.`
-      return `Fleet records this obligation as a persistent Reply Task. ${taskReference} Perform the requested work, then call fleet_reply with the Reply Task id and the actual response content.`
+      return `Fleet records this obligation as a persistent Reply Task. ${taskReference} Respond exactly once with fleet_reply and the actual answer; it is the visible conversation message, so do not send the same answer first with fleet_send. Read the source with fleet_inbox only if needed.`
     }
     const hasPendingRequirement = (member: string): boolean => {
       const task = tasks.pendingReply(member)

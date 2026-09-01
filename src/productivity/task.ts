@@ -875,9 +875,15 @@ export class FleetTaskBoard {
 
   ownerTasks(reference: string): FleetProjectTask[] {
     const owner = this.resolve(reference)
-    return [...this.tasks.values()]
+    const owned = [...this.tasks.values()]
       .filter(task => task.stableState.kind === 'running')
       .filter(task => task.owners.some(candidate => candidate.member === owner) && this.pendingForOwner(task, owner))
+    const replyPending = owned.some(task => task.domain.kind === 'reply')
+    return owned
+      // A Reply Task already carries the action for its source Inbox message.
+      // Keep Inbox state durable, but do not expose it as a second obligation
+      // until every pending Reply has been completed.
+      .filter(task => !replyPending || task.domain.kind !== 'inbox')
       .sort((left, right) => {
         const priority = { high: 0, normal: 1, low: 2 } as const
         return priority[left.priority] - priority[right.priority] || left.createdAt.localeCompare(right.createdAt)
