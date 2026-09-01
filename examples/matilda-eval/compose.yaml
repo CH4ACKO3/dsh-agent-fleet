@@ -1,0 +1,36 @@
+name: ${COMPOSE_PROJECT_NAME:-matilda-eval}
+
+services:
+  dsh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/dsh-agent-fleet-matilda-eval:2026-09-02
+    pull_policy: never
+    restart: "no"
+    working_dir: /workspace
+    cpus: ${MATILDA_CPUS:-16}
+    mem_limit: ${MATILDA_MEMORY:-16g}
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:${DSH_HOST_PORT:-3093}:3081"
+    environment:
+      DSH_HOME: /data/.dsh
+      DSH_PORT: "3080"
+      DSH_PROXY_PORT: "3081"
+      DSH_TRUSTED_HOST: 127.0.0.1:${DSH_HOST_PORT:-3093}
+      DSH_TRUSTED_HOST_ALT: localhost:${DSH_HOST_PORT:-3093}
+      FLEET_SOURCE_COMMIT: ${FLEET_SOURCE_COMMIT:-61dcadf}
+      DEEPSEEK_FLASH_API_KEY: ${DEEPSEEK_FLASH_API_KEY:?DEEPSEEK_FLASH_API_KEY must be set}
+      MATILDA_Z3_TIMEOUT_SECONDS: ${MATILDA_Z3_TIMEOUT_SECONDS:-600}
+      MATILDA_CPSAT_TIMEOUT_SECONDS: ${MATILDA_CPSAT_TIMEOUT_SECONDS:-900}
+      MATILDA_SEED: ${MATILDA_SEED:-1}
+      PIP_NO_INDEX: "1"
+    volumes:
+      - dsh-data:/data
+      - type: bind
+        source: ${DSH_WORKSPACE:?DSH_WORKSPACE must be an absolute host directory for this evaluation run}
+        target: /workspace
+
+volumes:
+  dsh-data:
