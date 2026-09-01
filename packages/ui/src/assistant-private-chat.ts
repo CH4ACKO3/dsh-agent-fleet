@@ -494,6 +494,11 @@ export interface AgentFleetInteractionTurn {
   readonly messageId?: string
   readonly input: string
   readonly inputAt: string
+  readonly updates?: readonly {
+    readonly id: string
+    readonly text: string
+    readonly sentAt: string
+  }[]
   readonly output?: string
   readonly outputAt?: string
 }
@@ -607,9 +612,21 @@ export function projectAgentFleetPrivateMessages(
         streaming: false,
         read: true,
       }
+      const updates: AgentFleetPrivateMessage[] = (turn.updates ?? []).flatMap(update => {
+        const text = update.text.trim()
+        if (text.length === 0) return []
+        return [{
+          id: `interaction:${String(turn.revision)}:update:${update.id}`,
+          sender: 'assistant' as const,
+          sentAt: update.sentAt,
+          content: [{ type: 'text' as const, text }],
+          imageAttachments: new Map(),
+          streaming: false,
+        }]
+      })
       const output = turn.output?.trim()
-      if (output === undefined || output.length === 0) return [input]
-      return [input, {
+      if (output === undefined || output.length === 0) return [input, ...updates]
+      return [input, ...updates, {
         id: `interaction:${String(turn.revision)}:assistant`,
         sender: 'assistant' as const,
         sentAt: turn.outputAt ?? turn.inputAt,

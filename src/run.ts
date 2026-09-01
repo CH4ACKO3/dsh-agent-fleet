@@ -1042,6 +1042,11 @@ export interface ReportFleetInteractionInput {
   readonly report: string
 }
 
+export interface UpdateFleetInteractionInput {
+  readonly runId?: string
+  readonly message: string
+}
+
 export interface TakeOverFleetInteractionInput {
   readonly runId?: string
   readonly reason: string
@@ -2160,6 +2165,8 @@ interface VisibilityReminderState {
   detailedReminderSent: boolean
 }
 
+type AssistantUserFacingTurn = 'direct' | 'delivery' | 'explicit'
+
 function inputContextTokens(usage: TokenUsage | undefined): number | undefined {
   if (usage === undefined) return undefined
   return usage.inputTokens + (usage.cacheReadTokens ?? 0)
@@ -2198,7 +2205,7 @@ export class FleetRunService {
   private readonly assistantInputTeamLoads = new Map<string, Promise<void>>()
   private readonly assistantTurnOutputs = new Map<string, string>()
   private readonly assistantCurrentTurns = new Map<string, number>()
-  private readonly assistantDirectInputTurns = new Map<string, number>()
+  private readonly assistantUserFacingTurns = new Map<string, { readonly turn: number; readonly source: AssistantUserFacingTurn }>()
   private readonly memberLastSharedTurns = new Map<string, number>()
   private readonly memberVisibilityReviewedTurns = new Map<string, number>()
   private readonly visibilityReminderStates = new Map<string, VisibilityReminderState>()
@@ -3006,34 +3013,33 @@ export class FleetRunService {
     return this.requireRuntime(record.id).tasks.takeOverInteraction(String(caller.id), input.reason)
   }
 
-  reportAssistantInteraction(caller: Agent, input: ReportFleetInteractionInput) {
+  private markAssistantUserFacingTurn(caller: Agent, source: AssistantUserFacingTurn): void {
+    const sessionId = String(caller.id)
+    const turn = this.assistantCurrentTurns.get(sessionId) ?? this.currentOpenTurn(caller)
+    if (turn === undefined) return
+    const current = this.assistantUserFacingTurns.get(sessionId)
+    if (current?.turn === turn && (current.source === 'direct' || source === 'explicit')) return
+    this.assistantUserFacingTurns.set(sessionId, { turn, source })
+  }
+
+  updateAssistantInteraction(caller: Agent, input: UpdateFleetInteractionInput) {
     const record = this.requireCallerRecord(caller, input.runId)
     const assistant = this.requireAssistantConnection(caller, record.id)
-    const tasks = this.requireRuntime(record.id).tasks
-    const reported = tasks.submitInteractionReport(String(caller.id), {
+    const updated = this.requireRuntime(record.id).tasks.recordInteractionUpdate(assistant.view.id, input.message)
+    this.markAssistantUserFacingTurn(caller, 'explicit')
+    return updated
+  }
+
+  reportAssistantInteraction(caller: Agent, input: ReportFleetInteractionInput) {
+    const record = this.requireCallerRecord(caller, input.runId)
+    this.requireAssistantConnection(caller, record.id)
+    const reported = this.requireRuntime(record.id).tasks.submitInteractionReport(String(caller.id), {
       outcome: input.outcome,
       reason: input.reason,
       report: input.report,
     })
-    const sessionId = String(caller.id)
-    const output = this.assistantTurnOutputs.get(sessionId)
-    const committed = output === undefined
-      ? undefined
-      : tasks.commitInteractionOutput(assistant.view.id, output)
-    if (committed !== undefined && caller.status === 'running') {
-      const turn = this.assistantCurrentTurns.get(sessionId)
-      if (turn !== undefined) {
-        setTimeout(() => {
-          if (caller.status === 'running' && this.assistantCurrentTurns.get(sessionId) === turn) {
-            caller.cancel(
-              { kind: 'hook', reason: 'Fleet accepted the already-visible foreground response.' },
-              { keepInbox: true },
-            )
-          }
-        }, 0)
-      }
-    }
-    return committed ?? reported
+    this.markAssistantUserFacingTurn(caller, 'delivery')
+    return reported
   }
 
   private assistantExecutionBoundaryReason(
@@ -5030,6 +5036,9 @@ export class FleetRunService {
     const context = (agent as Agent & { readonly ctx?: Context }).ctx
     if (context === undefined) return
     this.assistantInputBindingAgents.add(agent)
+    context.on('agent/turn-stopping', ({ agent: stoppingAgent, turn }) => {
+      this.memberTurnStopping(stoppingAgent, turn)
+    })
     context.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
       const decision = await next()
       if (decision.kind === 'reject') return decision
@@ -5065,9 +5074,10 @@ export class FleetRunService {
         `Every direct foreground user input is already tracked in this Team's persistent Interaction Task. The foreground message is the current revision; do not call fleet_user_task status merely because direct input arrived. Use action="status" with run_id="${record.id}" after a Task Delivery, recovery wake, or when the current Interaction state is otherwise unclear.`,
         'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
         'A normal project imperative remains Team work: delegate before project execution, and take over only when explicitly requested, no formal member is available, or Team execution has failed.',
-        'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: one native response completes the direct Interaction when the turn ends normally.',
+        'Intermediate native output is retained in the Session trace but is not delivered to the user by default. Use fleet_user_task action="update" only for an intentional mid-turn user update; do not use it to duplicate the final answer.',
+        'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: the last non-empty native output completes the direct Interaction and is delivered to the user when the turn ends normally.',
         `Before emitting a native response that settles delegated Team work or a Delivery, or blocks the request, call fleet_user_task with action="report" or action="block" and run_id="${record.id}".`,
-        'Do not write any user-visible answer before that tool call. After it succeeds, emit the answer exactly once and end the turn. A delegated result or block is not complete without both the tool intent and non-empty native output.',
+        'Do not emit the final answer before that tool call. After it succeeds, emit the answer exactly once and end the turn. Fleet commits and delivers that last native output at turn end; a delegated result or block is not complete without both the tool intent and non-empty native output.',
       ].join('\n')
       return {
         ...assembly,
@@ -5711,8 +5721,10 @@ export class FleetRunService {
     const [runId, runtime] = entry
     const record = this.records.get(runId)
     const member = runtime.memberNamesById.get(sessionId)
-    if (record === undefined || member === undefined
-      || !record.members.some(candidate => candidate.name === member)) return
+    if (record === undefined || member === undefined) return
+    const formalMember = record.members.some(candidate => candidate.name === member)
+    const foregroundAssistant = record.assistants.some(candidate => candidate.view.id === member)
+    if (!formalMember && !foregroundAssistant) return
     this.memberVisibilityReviewedTurns.set(sessionId, turn)
     if (!this.turnHasDirectOutput(agent, turn)) return
     const reminder = this.visibilityReminderState(sessionId)
@@ -5727,9 +5739,24 @@ export class FleetRunService {
     const growth = reminder.latestContextTokens - reminder.baselineContextTokens
     if (!reminder.afterCompaction && growth < threshold) return
     const detailed = !reminder.detailedReminderSent
-    runtime.messages.sendSystemNotification(sessionId, {
-      kind: 'visibility_reminder',
-      text: detailed
+    const userFacingTurn = this.assistantUserFacingTurns.get(sessionId)?.turn === turn
+    const reminderText = foregroundAssistant
+      ? detailed
+        ? [
+            '[Fleet assistant visibility reminder]',
+            reminder.afterCompaction
+              ? 'This Session was compacted. Re-check both visibility boundaries before ending this turn.'
+              : 'Re-check both visibility boundaries before ending this turn.',
+            userFacingTurn
+              ? 'This is a user-facing turn: its last non-empty native output is delivered to the user automatically at normal turn end, but Team members do not see it.'
+              : 'This is a background turn: ordinary native output remains only in the Session trace and is delivered to neither the user nor Team members.',
+            'Use fleet_user_task action="update" only for an intentional mid-turn user update; do not repeat the automatic final delivery. If another Team member needs a result, decision, question, or handoff, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest necessary audience.',
+            'Do not acknowledge this reminder. If no user update or Team sharing is needed, end without extra commentary.',
+          ].join('\n')
+        : userFacingTurn
+          ? '[Fleet assistant visibility reminder] The last native output will reach the user, not the Team. Do not duplicate it; share only newly relevant Team content with the smallest audience.'
+          : '[Fleet assistant visibility reminder] Background native output reaches neither user nor Team. Send only an intentional user update or newly relevant Team content; otherwise end silently.'
+      : detailed
         ? [
             '[Fleet visibility reminder]',
             reminder.afterCompaction
@@ -5738,7 +5765,10 @@ export class FleetRunService {
             'If it contains a result, decision, question, or handoff another member needs, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest audience: send one-member or subset work privately to an accountable owner, and use a Channel only when its full audience needs the content. Do not resend user-only text or information already shared.',
             'Do not acknowledge or report reading this reminder. If nothing needs sharing, end without commentary. This private reminder creates no Team message or Task.',
           ].join('\n')
-        : '[Fleet visibility reminder] Direct output remains private to this Session. Share only newly relevant content with the smallest necessary audience; otherwise end silently.',
+        : '[Fleet visibility reminder] Direct output remains private to this Session. Share only newly relevant content with the smallest necessary audience; otherwise end silently.'
+    runtime.messages.sendSystemNotification(sessionId, {
+      kind: 'visibility_reminder',
+      text: reminderText,
       delivery: 'wakeup',
       coalesceKey: `visibility-reminder:${sessionId}`,
     })
@@ -5783,14 +5813,18 @@ export class FleetRunService {
     const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
     if (foregroundAssistant && event.type === 'turn/start') {
       this.assistantCurrentTurns.set(sessionId, event.data.turn)
-      this.assistantDirectInputTurns.delete(sessionId)
+      this.assistantUserFacingTurns.delete(sessionId)
       this.assistantTurnOutputs.delete(sessionId)
+      const interaction = runtime.tasks.interactionTask(member)
+      if (interaction?.domain.kind === 'interaction' && interaction.domain.pendingDelivery !== undefined) {
+        this.assistantUserFacingTurns.set(sessionId, { turn: event.data.turn, source: 'delivery' })
+      }
     }
     if (event.type === 'user/message' && event.data.source?.kind === 'user') {
       if (foregroundAssistant) {
         this.assistantTurnOutputs.delete(sessionId)
         const turn = this.assistantCurrentTurns.get(sessionId)
-        if (turn !== undefined) this.assistantDirectInputTurns.set(sessionId, turn)
+        if (turn !== undefined) this.assistantUserFacingTurns.set(sessionId, { turn, source: 'direct' })
         runtime.tasks.recordInteractionInput(member, {
           messageId: String(event.data.id),
           text: progressMessageText(event.data),
@@ -5800,7 +5834,6 @@ export class FleetRunService {
     if (foregroundAssistant && event.type === 'assistant/message' && event.data.interrupted !== true) {
       const output = progressMessageText(event.data)
       if (output.trim().length > 0) this.assistantTurnOutputs.set(sessionId, output)
-      runtime.tasks.commitInteractionOutput(member, output)
     }
     if (event.type === 'assistant/chunk') return
     for (const listener of [...this.traceChangeListeners]) listener(runId, member)
@@ -5808,13 +5841,24 @@ export class FleetRunService {
     const reason = event.data.reason
     if (foregroundAssistant
       && reason.kind === 'completed'
-      && this.assistantDirectInputTurns.get(sessionId) === event.data.turn) {
+      && this.assistantUserFacingTurns.get(sessionId)?.turn === event.data.turn) {
       const output = this.assistantTurnOutputs.get(sessionId)
-      if (output !== undefined) runtime.tasks.settleDirectInteractionOutput(member, output)
+      const source = this.assistantUserFacingTurns.get(sessionId)?.source
+      if (output !== undefined) {
+        const settled = runtime.tasks.commitInteractionOutput(member, output)
+          ?? (source === 'direct' ? runtime.tasks.settleDirectInteractionOutput(member, output) : undefined)
+        if (settled === undefined) {
+          const interaction = runtime.tasks.interactionTask(member)
+          if (interaction?.domain.kind === 'interaction'
+            && interaction.domain.settledRevision < interaction.domain.inputRevision) {
+            runtime.tasks.recordInteractionUpdate(member, output)
+          }
+        }
+      }
     }
     this.assistantTurnOutputs.delete(sessionId)
     this.assistantCurrentTurns.delete(sessionId)
-    this.assistantDirectInputTurns.delete(sessionId)
+    this.assistantUserFacingTurns.delete(sessionId)
     if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
       if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
       return
@@ -6172,7 +6216,7 @@ export class FleetRunService {
     this.clearMemberActivity(agentId)
     this.assistantTurnOutputs.delete(agentId)
     this.assistantCurrentTurns.delete(agentId)
-    this.assistantDirectInputTurns.delete(agentId)
+    this.assistantUserFacingTurns.delete(agentId)
     this.memberLastSharedTurns.delete(agentId)
     this.memberVisibilityReviewedTurns.delete(agentId)
     this.visibilityReminderStates.delete(agentId)
@@ -7393,7 +7437,7 @@ export class FleetRunService {
     this.abnormalSessionIds.clear()
     this.assistantTurnOutputs.clear()
     this.assistantCurrentTurns.clear()
-    this.assistantDirectInputTurns.clear()
+    this.assistantUserFacingTurns.clear()
     this.memberLastSharedTurns.clear()
     this.memberVisibilityReviewedTurns.clear()
     this.visibilityReminderStates.clear()
@@ -9174,7 +9218,7 @@ const USER_TASK_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', required: true, enum: ['status', 'continue', 'take_over', 'report', 'block'] },
+    action: { type: 'string', required: true, enum: ['status', 'update', 'continue', 'take_over', 'report', 'block'] },
     task: { ...FLEXIBLE_OBJECT_SCHEMA, required: true },
     goals: { type: 'array', items: FLEXIBLE_OBJECT_SCHEMA },
   },
@@ -9226,12 +9270,13 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_user_task',
-    description: 'Operate the calling assistant persistent foreground Interaction Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Call report/block before the user-visible answer, then emit that answer exactly once; Fleet commits only after native foreground output.',
+    description: 'Operate the calling assistant persistent foreground Interaction Task. Update intentionally delivers one mid-turn progress message without settling or waking the Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Call report/block before the final answer, then emit it exactly once; Fleet commits and delivers the last native output at turn end.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['status', 'continue', 'take_over', 'report', 'block'] },
+      action: { type: 'string', required: true, enum: ['status', 'update', 'continue', 'take_over', 'report', 'block'] },
       run_id: { type: 'string', description: 'Persistent Team id. Defaults to the Team containing the calling assistant.' },
       reason: { type: 'string', description: 'Required for continue, take_over, report, and block.' },
       report: { type: 'string', description: 'Exact foreground result recorded for bookkeeping. Required for report and block; do not emit it before this tool call.' },
+      message: { type: 'string', description: 'For update, the intentional mid-turn message delivered to the user. Do not repeat the final answer.' },
       task_ids: { type: 'array', items: { type: 'string' }, description: 'For continue, optional additional live Tasks owned by formal Team members. Omit to retain existing live waits.' },
       title: { type: 'string', description: 'For continue with instructions, title of the new Goal.' },
       instructions: { type: 'string', description: 'For continue, concrete work for a new formal-member Goal.' },
@@ -9243,6 +9288,22 @@ export function installRunTools(
       const caller = callingAgent(exec.agent, 'fleet_user_task')
       if (args.action === 'status') {
         return Promise.resolve({ action: 'status' as const, task: fleetTaskToolDetail(service.assistantInteraction(caller, args.run_id)) })
+      }
+      if (args.action === 'update') {
+        if (args.message === undefined) throw new Error('fleet_user_task update requires message')
+        const task = service.updateAssistantInteraction(caller, {
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+          message: args.message,
+        })
+        if (task.domain.kind !== 'interaction') throw new Error('fleet_user_task update returned a non-Interaction Task')
+        return Promise.resolve({
+          action: 'update' as const,
+          task: {
+            state: task.stableState.kind,
+            revision: task.domain.inputRevision,
+            delivered: true,
+          },
+        })
       }
       if (args.reason === undefined) throw new Error(`fleet_user_task ${args.action} requires reason`)
       if (args.action === 'continue') {

@@ -590,6 +590,11 @@ describe('Agent Fleet private-chat projection', () => {
         messageId: 'user-message-1',
         input: 'Inspect the Team.',
         inputAt: '2026-09-01T08:00:00.000Z',
+        updates: [{
+          id: 'update-1',
+          text: 'The Team check is underway.',
+          sentAt: '2026-09-01T08:00:30.000Z',
+        }],
         output: 'The Team is healthy.',
         outputAt: '2026-09-01T08:01:00.000Z',
       }],
@@ -597,6 +602,7 @@ describe('Agent Fleet private-chat projection', () => {
 
     expect(projected).toMatchObject([
       { id: 'interaction:1:user', sender: 'operator', content: [{ type: 'text', text: 'Inspect the Team.' }] },
+      { id: 'interaction:1:update:update-1', sender: 'assistant', content: [{ type: 'text', text: 'The Team check is underway.' }] },
       { id: 'interaction:1:assistant', sender: 'assistant', content: [{ type: 'text', text: 'The Team is healthy.' }] },
     ])
     expect(JSON.stringify(projected)).not.toContain('Background progress noise')

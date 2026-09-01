@@ -169,6 +169,20 @@ describe('FleetTaskBoard v6', () => {
     })
     expect(board.ownerTasks('assistant')).toEqual([])
     expect(board.ownerTasks('reviewer').map(task => task.id)).toEqual([deferred.goals[0]?.id])
+    const dormantVersion = deferred.task.stateVersion
+    const update = board.recordInteractionUpdate('assistant', 'The Team check is still running.')
+    expect(update).toMatchObject({
+      stateVersion: dormantVersion,
+      stableState: { kind: 'dormant' },
+      domain: { kind: 'interaction', waitingTaskIds: [deferred.goals[0]?.id] },
+      entries: expect.arrayContaining([
+        expect.objectContaining({
+          interactionRevision: 2,
+          interactionDelivery: 'update',
+          text: 'The Team check is still running.',
+        }),
+      ]),
+    })
 
     const resumed = board.signalInteractionDelivery('assistant', 'Every formal Team member is idle.')
     expect(resumed).toMatchObject({
@@ -213,7 +227,8 @@ describe('FleetTaskBoard v6', () => {
     expect(board.interactionTask('assistant')?.entries).toMatchObject([
       { author: 'User', interactionRevision: 1, interactionMessageId: 'user-1', text: 'Run the Team check.' },
       { author: 'User', interactionRevision: 2, interactionMessageId: 'user-2', text: 'Include the final status.' },
-      { author: 'assistant', interactionRevision: 2, text: 'The Team check passed.' },
+      { author: 'assistant', interactionRevision: 2, interactionDelivery: 'update', text: 'The Team check is still running.' },
+      { author: 'assistant', interactionRevision: 2, interactionDelivery: 'final', text: 'The Team check passed.' },
     ])
     expect(board.interactionTask('assistant')?.domain).not.toHaveProperty('pendingDelivery')
 
@@ -331,6 +346,22 @@ describe('FleetTaskBoard v6', () => {
     })
     expect(board.pendingReply('reviewer')).toBeUndefined()
     expect(board.ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['inbox'])
+  })
+
+  it('promotes an identical Interaction update to the final delivery without duplicating it', () => {
+    const board = new FleetTaskBoard(directory)
+    board.recordInteractionInput('assistant', { messageId: 'user-1', text: 'Give me the final status.' })
+    board.recordInteractionUpdate('assistant', 'Everything passed.')
+    board.submitInteractionReport('agent-assistant', {
+      outcome: 'complete',
+      reason: 'The status is final.',
+      report: 'Everything passed.',
+    })
+    const completed = board.commitInteractionOutput('assistant', 'Everything passed.')
+    expect(completed?.entries.filter(entry => entry.interactionRevision === 1)).toMatchObject([
+      { author: 'User', text: 'Give me the final status.' },
+      { author: 'assistant', interactionDelivery: 'final', text: 'Everything passed.' },
+    ])
   })
 
   it('derives a Goal result from every owner submission', () => {

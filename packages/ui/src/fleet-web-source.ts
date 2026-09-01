@@ -883,7 +883,19 @@ function assistantInteractions(events: readonly WireEvent[]): FleetPanelAssistan
       }
       if (explicitRevision === undefined) continue
       const turn = turns.get(explicitRevision)
-      if (turn !== undefined) turns.set(explicitRevision, { ...turn, output: text, outputAt: createdAt })
+      if (turn === undefined) continue
+      if (string(entry.interactionDelivery) === 'update') {
+        turns.set(explicitRevision, {
+          ...turn,
+          updates: [...(turn.updates ?? []), {
+            id: string(entry.id) ?? `${String(explicitRevision)}:${String(turn.updates?.length ?? 0)}`,
+            text,
+            sentAt: createdAt,
+          }],
+        })
+      } else {
+        turns.set(explicitRevision, { ...turn, output: text, outputAt: createdAt })
+      }
     }
     const legacyResult = stableState?.kind === 'completed' ? string(stableState.result) : undefined
     if (legacyResult !== undefined && settledRevision > 0) {

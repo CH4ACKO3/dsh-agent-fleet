@@ -312,8 +312,14 @@ describe('Fleet Web panel source', () => {
                     interactionMessageId: 'native-user-1',
                   },
                   {
+                    id: 'entry-update', kind: 'progress', author: 'assistant', text: 'Still checking.', resources: [],
+                    createdAt: '2026-08-21T10:10:50.000Z', interactionRevision: 1,
+                    interactionDelivery: 'update',
+                  },
+                  {
                     id: 'entry-output', kind: 'comment', author: 'assistant', text: 'Team status is healthy.', resources: [],
                     createdAt: '2026-08-21T10:11:00.000Z', interactionRevision: 1,
+                    interactionDelivery: 'final',
                   },
                 ],
                 updatedAt: '2026-08-21T10:11:00.000Z',
@@ -415,6 +421,7 @@ describe('Fleet Web panel source', () => {
         assistantInteractions: [{
           assistantId: 'assistant', pending: false, turns: [{
             revision: 1, messageId: 'native-user-1', input: 'Check Team status.',
+            updates: [{ id: 'entry-update', text: 'Still checking.', sentAt: '2026-08-21T10:10:50.000Z' }],
             inputAt: '2026-08-21T10:10:40.000Z', output: 'Team status is healthy.',
             outputAt: '2026-08-21T10:11:00.000Z',
           }],

@@ -5941,8 +5941,15 @@ export interface FleetPanelAssistantInteractionTurn {
   readonly messageId?: string
   readonly input: string
   readonly inputAt: string
+  readonly updates?: readonly FleetPanelAssistantInteractionUpdate[]
   readonly output?: string
   readonly outputAt?: string
+}
+
+export interface FleetPanelAssistantInteractionUpdate {
+  readonly id: string
+  readonly text: string
+  readonly sentAt: string
 }
 
 export interface FleetPanelAssistantInteraction {

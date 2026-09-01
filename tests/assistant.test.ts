@@ -91,7 +91,10 @@ describe('FleetAssistantRuntime', () => {
       'one persistent Interaction Task',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'Do not write any user-visible answer before that tool call',
+      'Do not emit the final answer before that tool call',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      '`fleet_user_task update` only for an intentional mid-turn user progress message',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'do not call `fleet_user_task report`',

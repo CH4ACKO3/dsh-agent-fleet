@@ -96,6 +96,7 @@ export interface FleetTaskEntry {
   /** Direct user/assistant exchange metadata for the persistent Interaction Task transcript. */
   readonly interactionRevision?: number
   readonly interactionMessageId?: string
+  readonly interactionDelivery?: 'update' | 'final'
 }
 
 export interface FleetTaskSignal {
@@ -613,6 +614,38 @@ export class FleetTaskBoard {
     this.replace(updated)
     this.emit({ action: 'domain_updated', task: updated, actor: SYSTEM_TARGET })
     this.evaluateDependents([updated.id])
+    return snapshot(updated)
+  }
+
+  recordInteractionUpdate(ownerReference: string, text: string): FleetProjectTask {
+    const owner = this.resolve(ownerReference)
+    const current = this.interactionTask(owner)
+    if (current === undefined || current.domain.kind !== 'interaction') {
+      throw new Error(`Fleet assistant ${owner} has no foreground Interaction Task`)
+    }
+    if (current.domain.settledRevision >= current.domain.inputRevision
+      || current.stableState.kind === 'completed' || current.stableState.kind === 'blocked'
+      || current.stableState.kind === 'cancelled') {
+      throw new Error(`Fleet Interaction ${current.id} has no unsettled user revision`)
+    }
+    const output = requiredText(text, 'interaction user update')
+    const latest = current.entries.at(-1)
+    if (latest?.interactionRevision === current.domain.inputRevision
+      && latest.interactionDelivery === 'update' && latest.text.trim() === output) return snapshot(current)
+    const now = new Date().toISOString()
+    const entry: FleetTaskEntry = {
+      id: `entry_${randomUUID()}`,
+      kind: 'progress',
+      author: owner,
+      text: output,
+      resources: [],
+      createdAt: now,
+      interactionRevision: current.domain.inputRevision,
+      interactionDelivery: 'update',
+    }
+    const updated = { ...current, entries: [...current.entries, entry], updatedAt: now }
+    this.replace(updated)
+    this.emit({ action: 'progressed', task: updated, actor: owner })
     return snapshot(updated)
   }
 
@@ -1805,21 +1838,30 @@ export class FleetTaskBoard {
     const now = new Date().toISOString()
     const next = this.normalizeState(nextInput, now, this.tasks, [], current.id)
     const { activeReconcile: _activeReconcile, ...base } = current
-    const output = interactionOutput === undefined ? undefined : {
-      id: `entry_${randomUUID()}`,
-      kind: 'comment' as const,
-      author: interactionOutput.author,
-      text: requiredText(interactionOutput.text, 'interaction output'),
-      resources: [],
-      createdAt: now,
-      interactionRevision: interactionOutput.interactionRevision,
+    let entries = current.entries
+    if (interactionOutput !== undefined) {
+      const text = requiredText(interactionOutput.text, 'interaction output')
+      const latest = entries.at(-1)
+      entries = latest?.interactionRevision === interactionOutput.interactionRevision
+        && latest.interactionDelivery === 'update' && latest.text.trim() === text
+        ? [...entries.slice(0, -1), { ...latest, kind: 'comment', text, createdAt: now, interactionDelivery: 'final' }]
+        : [...entries, {
+            id: `entry_${randomUUID()}`,
+            kind: 'comment' as const,
+            author: interactionOutput.author,
+            text,
+            resources: [],
+            createdAt: now,
+            interactionRevision: interactionOutput.interactionRevision,
+            interactionDelivery: 'final' as const,
+          }]
     }
     const updated: FleetProjectTask = {
       ...base,
       domain,
       stableState: next,
       stateVersion: current.stateVersion + 1,
-      ...(output === undefined ? {} : { entries: [...current.entries, output] }),
+      ...(interactionOutput === undefined ? {} : { entries }),
       updatedAt: now,
     }
     this.replace(updated)
