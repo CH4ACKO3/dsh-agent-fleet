@@ -51,6 +51,7 @@ export type FleetSystemNotificationKind =
   | 'calendar_notice'
 export type FleetMessageKind =
   | 'text'
+  | 'reply'
   | 'work_directive'
   | 'meeting_opened'
   | 'meeting_closed'
@@ -91,6 +92,12 @@ export interface SendMessageInput {
   readonly delivery: FleetDelivery
   /** Internal service classification; ordinary tool calls omit this. */
   readonly kind?: FleetMessageKind
+}
+
+export interface ReplyMessageInput {
+  readonly messageId: string
+  readonly text: string
+  readonly resources?: readonly string[]
 }
 
 export interface SendMessageResult {

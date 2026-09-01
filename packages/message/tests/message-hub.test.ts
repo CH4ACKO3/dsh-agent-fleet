@@ -125,6 +125,41 @@ describe('MessageHub', () => {
     expect(hub.getMessage(qa, sent.messageId)).toMatchObject({ id: sent.messageId })
   })
 
+  it('keeps a Channel reply visible while addressing only the source sender', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const source = hub.send(lead, {
+      to: '#general',
+      text: '@reviewer Inspect the release.',
+      mentions: ['@reviewer'],
+      delivery: 'quiet',
+    })
+    const qaNotices = qa.injected.length
+
+    const sent = hub.reply(reviewer, {
+      messageId: source.messageId,
+      text: '@lead Inspection complete.',
+    })
+
+    expect(sent).toMatchObject({ recipients: 1, delivered: 1, woken: 0 })
+    expect(hub.getMessage(qa, sent.messageId)).toMatchObject({
+      kind: 'reply',
+      conversation: '#general',
+      replyTo: source.messageId,
+      recipientIds: ['lead'],
+      mentions: [],
+      text: '@lead Inspection complete.',
+    })
+    expect(hub.receipt(sent.messageId).recipientIds).toEqual(['lead'])
+    expect(hub.pendingRequiredReply(lead.id)).toBeUndefined()
+    expect(hub.unreadSummary(lead.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: '@lead Inspection complete.'.length,
+    })
+    expect(hub.unreadSummary(qa.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+    expect(qa.injected).toHaveLength(qaNotices)
+    expect(hub.search(qa, { query: 'Inspection complete' })).toHaveLength(1)
+  })
+
   it('keeps ordinary quiet direct Agent messages non-blocking', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {

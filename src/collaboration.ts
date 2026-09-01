@@ -171,11 +171,9 @@ function installTaskMessageTools(
       const source = messages.getMessage(agent, domain.messageId)
       const existing = messages.search(agent, { conversation: domain.replyTarget as FleetTarget, limit: 100 })
         .find(message => message.from === domain.assignee && message.replyTo === source.id)
-      const messageId = existing?.id ?? messages.send(agent, {
-        to: domain.replyTarget as FleetTarget,
+      const messageId = existing?.id ?? messages.reply(agent, {
+        messageId: source.id,
         text: args.content,
-        replyTo: source.id,
-        delivery: 'quiet',
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }).messageId
       messages.completeRequiredReply(callerId, source.id)

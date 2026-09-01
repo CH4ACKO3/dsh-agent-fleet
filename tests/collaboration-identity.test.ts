@@ -106,9 +106,13 @@ describe('Fleet collaboration identities', () => {
     })
     const required = first.tasks.pendingReply('reviewer')
     if (required === undefined) throw new Error('expected required task')
-    const delivered = first.messages.send(agents.get('agent-reviewer') as never, {
-      to: '#general', text: 'Release inspection complete.', replyTo: sent.messageId, delivery: 'quiet',
+    const delivered = first.messages.reply(agents.get('agent-reviewer') as never, {
+      messageId: sent.messageId, text: '@lead Release inspection complete.',
     })
+    expect(first.messages.getMessage(agents.get('agent-lead') as never, delivered.messageId)).toMatchObject({
+      kind: 'reply', recipientIds: ['lead'], mentions: [], replyTo: sent.messageId,
+    })
+    expect(first.tasks.pendingReply('lead')).toBeUndefined()
     const completed = first.tasks.recordReply('agent-reviewer', required.id, delivered.messageId)
     expect(completed.domain).toMatchObject({ kind: 'reply', completionMessageId: delivered.messageId })
     const taskState = first.tasks.state()
