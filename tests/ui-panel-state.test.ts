@@ -17,6 +17,7 @@ import {
   fleetPermissionGroupCapabilities,
   fleetResourcePreviewKind,
   groupFleetActivity,
+  groupFleetMessageThreads,
   insertFleetMemberMention,
   nearestFleetActivityGroupIndex,
   releaseFleetNativeSessionWindow,
@@ -25,6 +26,7 @@ import {
   splitFleetMemberMentions,
   updateFleetPermissionAssignmentValues,
   type FleetPanelTeamSnapshot,
+  type FleetPanelMessage,
 } from '../packages/ui/src/team-panel.js'
 import {
   projectAgentFleetPrivateMessages,
@@ -178,6 +180,40 @@ describe('Fleet assistant mailbox mentions', () => {
       .toEqual(['@team-assistant'])
     expect(fleetAssistantMailboxMentions('Send this to Albany.', 'team-assistant', 'Albany')).toEqual([])
     expect(fleetAssistantMailboxMentions('@AlbanySuffix is different.', 'team-assistant', 'Albany')).toEqual([])
+  })
+})
+
+describe('Fleet message reply threads', () => {
+  const message = (id: string, replyTo?: string): FleetPanelMessage => ({
+    id,
+    sequence: Number(id.replace(/\D/g, '')),
+    conversationId: '#general',
+    senderId: `sender-${id}`,
+    sentAt: '2026-09-01T10:00:00.000Z',
+    content: [{ type: 'text', text: id }],
+    ...(replyTo === undefined ? {} : { kind: 'reply', replyTo }),
+  })
+
+  it('nests replies and reply chains under the original message without losing order', () => {
+    const threads = groupFleetMessageThreads([
+      message('message-1'),
+      message('message-2', 'message-1'),
+      message('message-3', 'message-2'),
+      message('message-4'),
+    ])
+
+    expect(threads.map(thread => ({
+      message: thread.message.id,
+      comments: thread.comments.map(comment => comment.id),
+    }))).toEqual([
+      { message: 'message-1', comments: ['message-2', 'message-3'] },
+      { message: 'message-4', comments: [] },
+    ])
+  })
+
+  it('keeps a reply visible as a normal message when its source is outside the loaded page', () => {
+    expect(groupFleetMessageThreads([message('message-5', 'older-message')]))
+      .toEqual([{ message: message('message-5', 'older-message'), comments: [] }])
   })
 })
 

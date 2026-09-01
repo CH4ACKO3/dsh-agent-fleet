@@ -196,7 +196,8 @@ describe('Fleet Web panel source', () => {
               type: 'message',
               message: {
                 id: 'message-reply', conversation: '@fleet-user:team-1', from: 'member-session',
-                text: 'Direct reply received.', mentions: [], resources: [], createdAt: '2026-08-21T10:05:00.000Z',
+                kind: 'reply', replyTo: 'message-user', text: 'Direct reply received.', mentions: [], resources: [],
+                createdAt: '2026-08-21T10:05:00.000Z',
               },
             },
           },
@@ -440,7 +441,10 @@ describe('Fleet Web panel source', () => {
           }],
         },
       }),
-      expect.objectContaining({ id: 'message-reply', conversationId: '@builder', senderId: 'builder' }),
+      expect.objectContaining({
+        id: 'message-reply', conversationId: '@builder', senderId: 'builder',
+        kind: 'reply', replyTo: 'message-user',
+      }),
     ]))
     expect(snapshot.team?.activity.filter(item => item.kind === 'decision')).toHaveLength(3)
     expect(snapshot.team?.activity.some(item => item.kind === 'resource')).toBe(true)

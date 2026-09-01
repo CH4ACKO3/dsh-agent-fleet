@@ -668,6 +668,121 @@ button.dsh-fleet-chat-content-resource:focus-visible {
   color: var(--dsw-alias-state-error-primary);
 }
 
+.dsh-fleet-chat-comments {
+  min-width: 0;
+  margin-top: 10px;
+  padding-top: 8px;
+  position: relative;
+}
+
+.dsh-fleet-chat-comments::before {
+  width: 100%;
+  height: 1px;
+  background: var(--dsw-alias-border-l3);
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+}
+
+.dsh-fleet-chat-comments-heading {
+  margin-bottom: 7px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-strong-13, var(--dsw-font-xs-13));
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.dsh-fleet-chat-comments-list {
+  min-width: 0;
+  flex-direction: column;
+  gap: 9px;
+  display: flex;
+}
+
+.dsh-fleet-chat-comment {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  grid-template-columns: 24px minmax(0, 1fr);
+  column-gap: 8px;
+  display: grid;
+}
+
+.dsh-fleet-chat-comment-main {
+  min-width: 0;
+}
+
+.dsh-fleet-chat-comment-meta {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 1px;
+  font-size: 11px;
+  line-height: 16px;
+  display: flex;
+}
+
+.dsh-fleet-chat-comment-name {
+  min-width: 0;
+  max-width: min(220px, 42vw);
+  color: var(--dsw-alias-label-primary);
+  flex: 0 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  overflow: hidden;
+}
+
+.dsh-fleet-chat-comment[data-operator="true"] .dsh-fleet-chat-comment-name::after {
+  color: var(--dsw-alias-state-business-primary);
+  content: attr(data-operator-label);
+  margin-left: 5px;
+  font-size: 10px;
+  font-weight: 560;
+}
+
+.dsh-fleet-chat-comment-role {
+  min-width: 0;
+  flex: 0 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.dsh-fleet-chat-comment-time {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-fleet-chat-comment-actions {
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease-out;
+  display: flex;
+}
+
+.dsh-fleet-chat-comment-actions:empty {
+  display: none;
+}
+
+.dsh-fleet-chat-comment:hover .dsh-fleet-chat-comment-actions,
+.dsh-fleet-chat-comment:focus-within .dsh-fleet-chat-comment-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dsh-fleet-chat-comment-body {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .dsh-fleet-chat-divider {
   color: var(--dsw-alias-label-secondary);
   align-items: center;
@@ -803,6 +918,24 @@ export interface FleetChatMessageProps {
   /** Integration uses the official MessageText primitive here. */
   readonly renderText?: (text: string) => ReactNode
   /** Integration uses the official conversation image slot here. */
+  readonly renderImage?: (image: FleetChatImageBlock) => ReactNode
+  readonly renderMention?: (mention: FleetChatMentionBlock) => ReactNode | undefined
+  readonly renderBlock?: (block: FleetChatContentBlock, index: number) => ReactNode | undefined
+  readonly onOpenResource?: (resource: FleetChatResourceBlock) => void
+  readonly receipt?: FleetChatReadReceiptData
+  readonly actions?: ReactNode
+  /** Replies or comments visually owned by this message. */
+  readonly comments?: ReactNode
+  readonly commentCount?: number
+}
+
+export interface FleetChatCommentProps {
+  readonly id: string
+  readonly sender: FleetChatMember
+  readonly sentAt: string
+  readonly content: readonly FleetChatContentBlock[]
+  readonly operatorLabel?: string
+  readonly renderText?: (text: string) => ReactNode
   readonly renderImage?: (image: FleetChatImageBlock) => ReactNode
   readonly renderMention?: (mention: FleetChatMentionBlock) => ReactNode | undefined
   readonly renderBlock?: (block: FleetChatContentBlock, index: number) => ReactNode | undefined
@@ -1485,6 +1618,8 @@ export function FleetChatMessage({
   onOpenResource,
   receipt,
   actions,
+  comments,
+  commentCount = 0,
 }: FleetChatMessageProps): ReactElement {
   const time = new Date(sentAt)
   const timeLabel = Number.isNaN(time.getTime())
@@ -1547,6 +1682,75 @@ export function FleetChatMessage({
             'data-state': deliveryState,
             role: deliveryState === 'failed' ? 'alert' : 'status',
             children: stateLabel,
+          }),
+          comments !== undefined && commentCount > 0 && jsxs('section', {
+            className: 'dsh-fleet-chat-comments',
+            'aria-label': fleetText(`${String(commentCount)} 条回复`, `${String(commentCount)} replies`),
+            children: [
+              jsx('div', {
+                className: 'dsh-fleet-chat-comments-heading',
+                children: fleetText(`${String(commentCount)} 条回复`, `${String(commentCount)} replies`),
+              }),
+              jsx('div', { className: 'dsh-fleet-chat-comments-list', children: comments }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+export function FleetChatComment({
+  id,
+  sender,
+  sentAt,
+  content,
+  operatorLabel = fleetText(' · 外部用户', ' · External user'),
+  renderText,
+  renderImage,
+  renderMention,
+  renderBlock,
+  onOpenResource,
+  receipt,
+  actions,
+}: FleetChatCommentProps): ReactElement {
+  const time = new Date(sentAt)
+  const timeLabel = Number.isNaN(time.getTime())
+    ? sentAt
+    : time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return jsxs('article', {
+    className: 'dsh-fleet-chat-comment',
+    'data-comment-id': id,
+    'data-operator': sender.operator ? 'true' : undefined,
+    'data-operator-label': sender.operator ? operatorLabel : undefined,
+    children: [
+      jsx(FleetChatAvatar, { member: sender, size: 24, showPresence: false }),
+      jsxs('div', {
+        className: 'dsh-fleet-chat-comment-main',
+        children: [
+          jsxs('div', {
+            className: 'dsh-fleet-chat-comment-meta',
+            children: [
+              jsx('span', { className: 'dsh-fleet-chat-comment-name', children: sender.name }),
+              jsx('span', { className: 'dsh-fleet-chat-comment-role', children: sender.role }),
+              jsx('time', { className: 'dsh-fleet-chat-comment-time', dateTime: sentAt, children: timeLabel }),
+              receipt !== undefined && jsx(FleetChatReadReceipt, receipt),
+              actions !== undefined && jsx('span', {
+                className: 'dsh-fleet-chat-comment-actions',
+                children: actions,
+              }),
+            ],
+          }),
+          jsx('div', {
+            className: 'dsh-fleet-chat-comment-body',
+            children: jsx(FleetChatContent, {
+              content,
+              renderText,
+              renderImage,
+              renderMention,
+              renderBlock,
+              onOpenResource,
+            }),
           }),
         ],
       }),

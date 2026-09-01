@@ -1285,6 +1285,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       const source = contextSourcesByMessage.get(id)?.get(participantId)
       return source === undefined ? [] : [source]
     })
+    const kind = string(message.kind)
+    const replyTo = string(message.replyTo)
     return [{
       id,
       sequence: event.sequence,
@@ -1293,6 +1295,8 @@ function projectTeam(cache: ProjectionCache): FleetPanelTeamSnapshot {
       sender,
       sentAt: string(message.createdAt) ?? event.createdAt,
       content: blocks,
+      ...(kind === undefined ? {} : { kind }),
+      ...(replyTo === undefined ? {} : { replyTo }),
       ...(visibleMemberIds.length === 0 ? {} : {
         receipt: {
           visibleMemberIds,

@@ -7269,6 +7269,7 @@ export type {
   FleetPanelHomeOwner,
   FleetPanelMember,
   FleetPanelMessage,
+  FleetPanelMessageThread,
   FleetPanelMessageBlockOwner,
   FleetPanelMessageOwner,
   FleetPanelMemberTrace,
@@ -7311,6 +7312,7 @@ export type { FleetAnchoredPopoverController, FleetPopoverPlacement } from './an
 
 export {
   FleetChatAvatar,
+  FleetChatComment,
   FleetChatDivider,
   FleetInfoHint,
   FleetChatMessage,
@@ -7337,6 +7339,7 @@ export type {
 } from './configuration-modules.js'
 export type {
   FleetChatAvatarProps,
+  FleetChatCommentProps,
   FleetChatContentBlock,
   FleetChatDividerProps,
   FleetChatExtensionBlock,
