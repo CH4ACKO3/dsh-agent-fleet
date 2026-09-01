@@ -4023,6 +4023,83 @@ describe('FleetRunService', () => {
     third.disconnect()
   })
 
+  it('preloads every unpaused formal member after the resident assistant starts without waking idle members', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, { launcherId: 'resident-assistant', persisted: first.persisted })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected persisted assistant')
+    await second.service.attachAssistant(second.launcher as unknown as Agent, {
+      runId: run.id,
+      assistantId,
+    })
+
+    const loaded = await second.service.loadTeamMembersAtStartup(second.launcher as unknown as Agent, run.id)
+    expect(second.runtime.resumes.map(input => input.id)).toEqual(
+      expect.arrayContaining(run.members.map(member => member.sessionId)),
+    )
+    expect(second.runtime.resumes).toHaveLength(run.members.length)
+    expect(loaded).toMatchObject({
+      runtimeState: 'active',
+      members: run.members.map(member => expect.objectContaining({ name: member.name, status: 'idle' })),
+    })
+    for (const member of loaded.members) {
+      const messages = second.runtime.get(member.sessionId)?.messages ?? []
+      expect(messages.flatMap(message => message.content)
+        .some(block => block.type === 'text' && block.text.includes('Team was explicitly woken'))).toBe(false)
+    }
+    expect(second.service.readTrace(run.id, 0, 300).events).toContainEqual(expect.objectContaining({
+      type: 'team_loaded_at_startup',
+      data: expect.stringContaining('"members":["lead","reviewer"]'),
+    }))
+
+    await second.service.loadTeamMembersAtStartup(second.launcher as unknown as Agent, run.id)
+    expect(second.runtime.resumes).toHaveLength(run.members.length)
+
+    second.disconnect()
+    await second.core.close()
+  })
+
+  it('does not preload formal members while the Team is paused', async () => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const paused = await first.service.pauseTeam(first.launcher as unknown as Agent, run.id)
+    expect(paused.status).toBe('paused')
+    for (const member of paused.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, { launcherId: 'resident-assistant', persisted: first.persisted })
+    const loaded = await second.service.loadTeamMembersAtStartup(second.launcher as unknown as Agent, run.id)
+    expect(loaded.status).toBe('paused')
+    expect(second.runtime.resumes).toEqual([])
+    expect(second.service.readTrace(run.id, 0, 300).events)
+      .not.toContainEqual(expect.objectContaining({ type: 'team_loaded_at_startup' }))
+
+    second.disconnect()
+    await second.core.close()
+  })
+
   it('loads only the selected member when resuming from a dormant Team', async () => {
     const { root, configPath } = fixture()
     const first = setup(root)

@@ -24,10 +24,10 @@ async function mountPersistedAgentPreset(ctx: Context): Promise<void> {
   await presets.mount(ctx, resolveSessionPreset(ctx.agent.session))
 }
 
-/** Keep every persisted Team assistant ready without resuming the formal member roster. */
+/** Restore persisted Team assistants, then preload each unpaused formal-member roster once. */
 export async function activateResidentFleetAssistants(
   ctx: Context,
-  runs: Pick<FleetRunService, 'list' | 'attachAssistant'> & {
+  runs: Pick<FleetRunService, 'list' | 'attachAssistant' | 'loadTeamMembersAtStartup'> & {
     agentSessionStarted?(agent: Agent): void
   },
   runtime: Pick<FleetAssistantRuntime, 'activate'>,
@@ -40,6 +40,7 @@ export async function activateResidentFleetAssistants(
   const handles = new Map<string, AgentHandle>()
   const restartTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const releasing = new Set<string>()
+  const preloadedRunIds = new Set<string>()
   let closed = false
   const activate = async (agent: Agent, run: FleetRunRecord, assistant: FleetRunAssistant): Promise<void> => {
     const attached = await runs.attachAssistant(agent, {
@@ -47,6 +48,16 @@ export async function activateResidentFleetAssistants(
       assistantId: assistant.view.id,
     })
     runtime.activate(agent, attached.run.id, attached.assistant.view)
+    if (preloadedRunIds.has(attached.run.id)) return
+    preloadedRunIds.add(attached.run.id)
+    try {
+      await runs.loadTeamMembersAtStartup(agent, attached.run.id)
+    } catch (error) {
+      preloadedRunIds.delete(attached.run.id)
+      ctx.logger('dsh-agent-fleet').warn(
+        `Could not preload formal members for Fleet Team ${attached.run.id}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
   }
 
   const restore = async (sessionId?: string): Promise<void> => {
@@ -125,6 +136,7 @@ export async function activateResidentFleetAssistants(
       for (const timer of restartTimers.values()) clearTimeout(timer)
       restartTimers.clear()
       releasing.clear()
+      preloadedRunIds.clear()
       const owned = [...handles.values()].reverse()
       handles.clear()
       await Promise.all(owned.map(handle => handle.dispose()))

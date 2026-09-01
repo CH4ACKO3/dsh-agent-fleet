@@ -78,6 +78,13 @@ only that concrete owner; unrelated members with empty Task lists remain
 offline. The same targeted loader handles Tasks created by internal Team
 activity.
 
+At DSH startup, Fleet first restores each unpaused resident Team assistant and
+then preloads that Team's unpaused formal-member Sessions. Preloading restores
+Session history, Agent scopes, and tool bindings, but does not inject a wake
+notification or start a model turn. Paused Teams and explicitly paused members
+remain unloaded. The targeted owner loader remains the fallback for a Session
+that is later disposed, unavailable during startup, or added after preload.
+
 A direct foreground input to an attached Team assistant is the one broader
 presence boundary: Fleet loads every unpaused formal-member Session before the
 assistant handles it. Loading does not broadcast a wake notification or start

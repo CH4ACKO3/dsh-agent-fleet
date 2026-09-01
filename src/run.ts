@@ -4231,6 +4231,22 @@ export class FleetRunService {
     return this.loadTeamMembersNow(caller, record)
   }
 
+  /** Restore idle formal-member Sessions after the resident assistant is ready. */
+  async loadTeamMembersAtStartup(caller: Agent, runId: string): Promise<FleetRunRecord> {
+    const record = this.requireMutableRecord(runId)
+    if (record.status === 'paused') return this.describeRecord(record)
+    const unloaded = record.members
+      .filter(member => member.status !== 'paused' && !this.memberCanReply(member))
+      .map(member => member.name)
+    if (unloaded.length === 0) return this.describeRecord(record)
+    const loaded = await this.loadTeamMembersNow(caller, record)
+    this.appendEvent(runId, 'team_loaded_at_startup', {
+      assistantSessionId: String(caller.id),
+      members: unloaded,
+    })
+    return loaded
+  }
+
   private async loadTeamMembersNow(caller: Agent, initial: FleetRunRecord): Promise<FleetRunRecord> {
     let record = initial
     const unloaded = record.members

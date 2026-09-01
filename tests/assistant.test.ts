@@ -330,10 +330,11 @@ describe('resident Fleet assistants', () => {
       }
     })
     const activate = vi.fn()
+    const loadTeamMembersAtStartup = vi.fn(() => Promise.resolve(run))
 
     const residents = await activateResidentFleetAssistants(
       ctx,
-      { list: () => [run], attachAssistant } as never,
+      { list: () => [run], attachAssistant, loadTeamMembersAtStartup } as never,
       { activate } as never,
     )
 
@@ -341,6 +342,8 @@ describe('resident Fleet assistants', () => {
     expect(resume).not.toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: 'session-paused' }))
     expect(activate).toHaveBeenCalledWith(live, 'team-one', assistants[0]?.view)
     expect(activate).toHaveBeenCalledWith(resumed, 'team-one', assistants[1]?.view)
+    expect(loadTeamMembersAtStartup).toHaveBeenCalledOnce()
+    expect(loadTeamMembersAtStartup).toHaveBeenCalledWith(live, 'team-one')
     expect(resume).toHaveBeenCalledWith(expect.objectContaining({
       resumeSessionId: 'session-resumed',
       agentOptions: { provider: 'provider-team', model: 'model-team', maxTokens: 2_048 },
@@ -383,15 +386,17 @@ describe('resident Fleet assistants', () => {
       run,
       assistant: assistants.find(assistant => assistant.view.id === input.assistantId)!,
     }))
+    const loadTeamMembersAtStartup = vi.fn(() => Promise.resolve(run))
 
     const residents = await activateResidentFleetAssistants(
       ctx,
-      { list: () => [run], attachAssistant } as never,
+      { list: () => [run], attachAssistant, loadTeamMembersAtStartup } as never,
       { activate } as never,
     )
 
     expect(activate).toHaveBeenCalledOnce()
     expect(activate).toHaveBeenCalledWith(available, 'team-one', assistants[1]?.view)
+    expect(loadTeamMembersAtStartup).toHaveBeenCalledOnce()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('assistant-missing'))
     await residents.dispose()
   })
