@@ -231,6 +231,45 @@ describe('MessageHub', () => {
       .toContainEqual(expect.objectContaining({ id: sent.messageId, delivery: 'fyi' }))
   })
 
+  it('keeps muted Channel activity unread without injecting a notice', () => {
+    const lead = new FakeAgent('lead')
+    const assistant = new FakeAgent('assistant')
+    const agents = new Map([lead, assistant].map(agent => [agent.id, agent]))
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    }, {
+      muteChannelNotice: participantId => participantId === assistant.id,
+    })
+
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: 'Routine Team context for later.',
+      delivery: 'quiet',
+    })
+
+    expect(sent).toMatchObject({ recipients: 1, delivered: 1, woken: 0 })
+    expect(assistant.injected).toEqual([])
+    expect(assistant.followedUp).toEqual([])
+    expect(hub.pendingWakeups(assistant.id)).toEqual([])
+    expect(hub.unreadSummary(assistant.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: 'Routine Team context for later.'.length,
+    })
+    expect(hub.taskUnreadSummary(assistant.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+    expect(hub.readInbox(assistant).messages).toContainEqual(expect.objectContaining({ id: sent.messageId }))
+
+    const mentioned = hub.send(lead, {
+      to: '#general',
+      text: '@assistant Please handle this explicit request.',
+      mentions: ['@assistant'],
+      delivery: 'wakeup',
+    })
+    expect(assistant.followedUp).toHaveLength(1)
+    expect(hub.pendingWakeups(assistant.id)).toContainEqual(expect.objectContaining({ id: mentioned.messageId }))
+  })
+
   it('preserves trusted direct-human delivery while requiring an explicit mention for replies', () => {
     const { hub, lead, reviewer } = setup()
 

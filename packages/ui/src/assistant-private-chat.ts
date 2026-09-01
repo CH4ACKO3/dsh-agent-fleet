@@ -416,8 +416,8 @@ const styles = `
 
 [data-conversation-scroll] .dsh-fleet-assistant-private[data-team-conversation="true"] {
   min-height: 0;
-  height: 100%;
-  flex: auto;
+  height: auto;
+  flex: 1 1 0;
 }
 
 [data-conversation-scroll] .dsh-fleet-assistant-private[data-team-conversation="true"]
@@ -425,6 +425,18 @@ const styles = `
   min-height: 0;
   flex: auto;
   overflow-y: auto;
+}
+
+[data-conversation-scroll]:has(.dsh-fleet-assistant-private[data-team-conversation="true"]) {
+  min-height: 0;
+  flex-direction: column;
+  display: flex;
+  overflow: hidden;
+}
+
+[data-conversation-scroll]:has(.dsh-fleet-assistant-private[data-team-conversation="true"])
+> [data-composer-seat] {
+  flex: none;
 }
 
 [data-composer-seat]:has(> .dsh-fleet-assistant-work-status) {
@@ -840,7 +852,9 @@ function FleetPrivateImage({ image, attachment, loadImage }: {
 }
 
 function scrollContainer(element: HTMLElement): HTMLElement {
-  return element.closest<HTMLElement>('[data-conversation-scroll]') ?? element
+  return element.querySelector<HTMLElement>(':scope > .dsh-fleet-assistant-private-scroll')
+    ?? element.closest<HTMLElement>('[data-conversation-scroll]')
+    ?? element
 }
 
 function DownChevron(): ReactElement {

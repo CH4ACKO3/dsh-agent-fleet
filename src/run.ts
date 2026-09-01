@@ -1258,7 +1258,13 @@ function replaceBudgetMember(
   identity?: Pick<FleetBudgetMemberAccount, 'name' | 'role' | 'color' | 'assistant'>,
 ): FleetBudgetMemberAccount[] {
   const current = members.find(candidate => candidate.memberId === memberId)
-  const next = { ...current, ...account, memberId, ...identity }
+  const previousIdentity = current === undefined ? {} : {
+    ...(current.name === undefined ? {} : { name: current.name }),
+    ...(current.role === undefined ? {} : { role: current.role }),
+    ...(current.color === undefined ? {} : { color: current.color }),
+    ...(current.assistant === undefined ? {} : { assistant: current.assistant }),
+  }
+  const next = { ...account, memberId, ...previousIdentity, ...identity }
   return current !== undefined
     ? members.map(candidate => candidate.memberId === memberId ? next : candidate)
     : [...members, next]
@@ -2055,6 +2061,7 @@ function traceEventData(value: unknown): string {
 
 const EXPLICIT_WAIT_DELAY_MS = 2_000
 const QUIET_TOOL_WAIT_DELAY_MS = 90_000
+const TEAM_QUIESCENCE_GRACE_MS = 3_000
 const DEFAULT_INTERACTION_CHECK_SECONDS = 300
 const FLEET_FOREGROUND_PROTOCOL_SECTION = 'fleet:foreground-task-request'
 const ASSISTANT_PROJECT_WRITE_TOOLS = new Set(['write', 'edit'])
@@ -2231,6 +2238,8 @@ export class FleetRunService {
   private readonly pausingMembers = new Map<string, Promise<FleetRunMember>>()
   private readonly ownerMemberResumes = new Map<string, Promise<void>>()
   private readonly pendingAssistantKickoffs = new Map<string, PendingAssistantKickoff>()
+  private readonly assistantQuiescenceTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly assistantQuiescenceArmed = new Set<string>()
   private residentAssistants: FleetResidentAssistantController | undefined
   private readonly changeListeners = new Set<() => void>()
   private readonly traceChangeListeners = new Set<(teamId: string, memberId: string) => void>()
@@ -5063,6 +5072,9 @@ export class FleetRunService {
       || previous.domain.latestMessageId !== String(input.data.id)
     const inputIsUnsettled = interaction.domain.kind === 'interaction'
       && interaction.domain.settledRevision < interaction.domain.inputRevision
+    if (inputIsNew || (inputIsUnsettled && interaction.stableState.kind === 'dormant')) {
+      this.armAssistantQuiescence(record.id, assistant.view.id)
+    }
     if (inputIsNew || inputIsUnsettled) {
       await this.loadTeamMembersForAssistantInput(agent, record.id)
     }
@@ -5090,10 +5102,15 @@ export class FleetRunService {
         if (message.source.kind !== 'user') continue
         hasDirectUserInput = true
         const originalText = progressMessageText(message)
+        const previous = tasks.interactionTask(assistant.view.id)
         tasks.recordInteractionInput(assistant.view.id, {
           messageId: String(message.id),
           text: originalText,
         })
+        if (previous?.domain.kind !== 'interaction'
+          || previous.domain.latestMessageId !== String(message.id)) {
+          this.armAssistantQuiescence(record.id, assistant.view.id)
+        }
       }
       if (hasDirectUserInput) await this.loadTeamMembersForAssistantInput(agent, record.id)
       return this.preStepReminderDecision(agent, decision)
@@ -6048,10 +6065,15 @@ export class FleetRunService {
         this.assistantTurnOutputs.delete(sessionId)
         const turn = this.assistantCurrentTurns.get(sessionId)
         if (turn !== undefined) this.assistantUserFacingTurns.set(sessionId, { turn, source: 'direct' })
+        const previous = runtime.tasks.interactionTask(member)
         runtime.tasks.recordInteractionInput(member, {
           messageId: String(event.data.id),
           text: progressMessageText(event.data),
         })
+        if (previous?.domain.kind !== 'interaction'
+          || previous.domain.latestMessageId !== String(event.data.id)) {
+          this.armAssistantQuiescence(runId, member)
+        }
       }
     }
     if (foregroundAssistant && event.type === 'assistant/message' && event.data.interrupted !== true) {
@@ -6068,14 +6090,9 @@ export class FleetRunService {
       const output = this.assistantTurnOutputs.get(sessionId)
       const source = this.assistantUserFacingTurns.get(sessionId)?.source
       if (output !== undefined) {
-        const settled = runtime.tasks.commitInteractionOutput(member, output)
-          ?? (source === 'direct' ? runtime.tasks.settleDirectInteractionOutput(member, output) : undefined)
-        if (settled === undefined) {
-          const interaction = runtime.tasks.interactionTask(member)
-          if (interaction?.domain.kind === 'interaction'
-            && interaction.domain.settledRevision < interaction.domain.inputRevision) {
-            runtime.tasks.recordInteractionUpdate(member, output)
-          }
+        const committed = runtime.tasks.commitInteractionOutput(member, output)
+        if (committed === undefined && source === 'direct') {
+          runtime.tasks.settleDirectInteractionOutput(member, output)
         }
       }
     }
@@ -6185,7 +6202,10 @@ export class FleetRunService {
         const deliveryText = delivery === undefined
           ? ''
           : ` Persistent completion Delivery ${delivery.id} (${delivery.cause}) for revision ${String(delivery.revision)}: ${delivery.summary} Linked results: ${delivery.tasks.map(item => `${item.title} (${item.id})=${item.state}: ${item.result ?? item.reason}`).join('; ') || 'none'}.`
-        return `- ${task.title} (${task.id}): inspect the latest user intent with fleet_user_task action="status".${deliveryText} If already-linked Team work remains live, call action="continue" with only a reason to reinstall that wait; add a live formal-member task id or concrete Goal handoff only for new work. If the foreground response settles the request, call action="report" or "block" before emitting that native response; the Delivery is consumed only after non-empty native output.`
+        const quiescentExit = delivery?.cause === 'team_quiescent'
+          ? ' If the Team cannot resume the live work, call action="block" now; this recovery path cancels only Goals created by this Interaction and detaches external linked Tasks. Do not call fleet_reconcile unless a ready ReconcileAttempt is explicitly present.'
+          : ''
+        return `- ${task.title} (${task.id}): inspect the latest user intent with fleet_user_task action="status".${deliveryText}${quiescentExit} If already-linked Team work remains live and can resume, call action="continue" with only a reason to reinstall that wait; add a live formal-member task id or concrete Goal handoff only for new work. If the foreground response settles the request, call action="report" or "block" before emitting that native response; the Delivery is consumed only after non-empty native output.`
       }
       if (task.domain.kind === 'vote') return `- ${task.title} (${task.id}): call fleet_vote action="cast" with this id, a decision, and a reason.`
       return `- ${task.title} (${task.id}): inspect it with fleet_task action="get".`
@@ -6290,16 +6310,14 @@ export class FleetRunService {
     this.ownerMemberResumes.set(key, operation)
   }
 
-  private teamIsQuiescent(record: FleetRunRecord, runtime: FleetCollaborationTeam): boolean {
+  private teamIsQuiescent(record: FleetRunRecord): boolean {
     if (record.status !== 'idle' && record.status !== 'running') return false
-    return record.members.every(member => {
-      if (member.status === 'paused' || this.networkRecoveries.has(member.sessionId)) return false
-      const agent = this.ctx.agents.get(SessionId(member.sessionId))
-      if (agent?.status === 'running') return false
-      return runtime.tasks.runningFor(member.name).length === 0
-        && runtime.tasks.readyTasks(member.name).length === 0
-        && runtime.tasks.ownerTasks(member.name).length === 0
-    })
+    return record.members.length > 0 && record.members.every(member =>
+      member.status !== 'paused'
+      && member.status !== 'offline'
+      && !this.networkRecoveries.has(member.sessionId)
+      && this.ctx.agents.get(SessionId(member.sessionId))?.status === 'idle',
+    )
   }
 
   private workRelatedTasks(runtime: FleetCollaborationTeam, rootTaskId: string): FleetProjectTask[] {
@@ -6369,18 +6387,80 @@ export class FleetRunService {
     )
   }
 
-  private signalAssistantInteractionDeliveries(runId: string): void {
+  private clearAssistantQuiescenceTimer(runId: string): void {
+    const timer = this.assistantQuiescenceTimers.get(runId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.assistantQuiescenceTimers.delete(runId)
+  }
+
+  private assistantQuiescenceKey(runId: string, assistantId: string): string {
+    return `${runId}\u0000${assistantId}`
+  }
+
+  private armAssistantQuiescence(runId: string, assistantId: string): void {
+    this.assistantQuiescenceArmed.add(this.assistantQuiescenceKey(runId, assistantId))
+    this.clearAssistantQuiescenceTimer(runId)
+  }
+
+  private disarmAssistantQuiescence(runId: string, assistantId: string): void {
+    this.assistantQuiescenceArmed.delete(this.assistantQuiescenceKey(runId, assistantId))
+  }
+
+  private clearAssistantQuiescenceArms(runId: string): void {
+    const prefix = `${runId}\u0000`
+    for (const key of [...this.assistantQuiescenceArmed]) {
+      if (key.startsWith(prefix)) this.assistantQuiescenceArmed.delete(key)
+    }
+  }
+
+  private armAssistantQuiescenceFromTask(
+    record: FleetRunRecord,
+    task: FleetProjectTask,
+    actor: string | undefined,
+    state: { readonly tasks: readonly FleetProjectTask[] },
+  ): void {
+    if (actor === undefined || !record.members.some(member => member.name === actor)) return
+    const byId = new Map(state.tasks.map(candidate => [candidate.id, candidate]))
+    for (const assistant of record.assistants) {
+      const interaction = this.collaboration.get(record.id)?.tasks.interactionTask(assistant.view.id)
+      if (interaction?.domain.kind !== 'interaction' || interaction.stableState.kind !== 'dormant') continue
+      const waiting = new Set(interaction.domain.waitingTaskIds)
+      let current: FleetProjectTask | undefined = task
+      const visited = new Set<string>()
+      while (current !== undefined && !visited.has(current.id)) {
+        if (waiting.has(current.id)) {
+          this.armAssistantQuiescence(record.id, assistant.view.id)
+          break
+        }
+        visited.add(current.id)
+        current = current.parentId === undefined ? undefined : byId.get(current.parentId)
+      }
+    }
+  }
+
+  private signalAssistantInteractionDeliveries(runId: string, quiescenceGraceElapsed = false): void {
     const record = this.records.get(runId)
     const runtime = this.collaboration.get(runId)
-    if (record === undefined || runtime === undefined) return
-    const teamQuiescent = this.teamIsQuiescent(record, runtime)
+    if (record === undefined || runtime === undefined) {
+      this.clearAssistantQuiescenceTimer(runId)
+      return
+    }
+    const teamQuiescent = this.teamIsQuiescent(record)
+    let quiescentInteraction = false
     const tasks = record.assistants.flatMap(assistant => {
       const interaction = runtime.tasks.interactionTask(assistant.view.id)
       if (interaction?.domain.kind !== 'interaction' || interaction.stableState.kind !== 'dormant') return []
       const linked = interaction.domain.waitingTaskIds.map(id => runtime.tasks.get(assistant.sessionId, id))
       const linkedSettled = linked.length > 0 && linked.every(task => task.stableState.kind === 'completed'
         || task.stableState.kind === 'blocked' || task.stableState.kind === 'cancelled')
-      if (!linkedSettled && !teamQuiescent) return []
+      if (!linkedSettled) {
+        const assistantIdle = this.ctx.agents.get(SessionId(assistant.sessionId))?.status === 'idle'
+        if (!teamQuiescent || !assistantIdle) return []
+        if (!this.assistantQuiescenceArmed.has(this.assistantQuiescenceKey(runId, assistant.view.id))) return []
+        quiescentInteraction = true
+        if (!quiescenceGraceElapsed) return []
+        this.disarmAssistantQuiescence(runId, assistant.view.id)
+      }
       const task = runtime.tasks.signalInteractionDelivery(
         assistant.view.id,
         linkedSettled
@@ -6390,6 +6470,16 @@ export class FleetRunService {
       return task === undefined ? [] : [task.id]
     })
     if (tasks.length > 0) this.appendEvent(record.id, 'interaction_delivery_ready', { tasks })
+    if (!quiescentInteraction || quiescenceGraceElapsed) {
+      this.clearAssistantQuiescenceTimer(runId)
+      return
+    }
+    if (this.assistantQuiescenceTimers.has(runId)) return
+    const timer = setTimeout(() => {
+      this.assistantQuiescenceTimers.delete(runId)
+      this.signalAssistantInteractionDeliveries(runId, true)
+    }, TEAM_QUIESCENCE_GRACE_MS)
+    this.assistantQuiescenceTimers.set(runId, timer)
   }
 
   agentIdle(agent: Agent): void {
@@ -6430,6 +6520,14 @@ export class FleetRunService {
           this.finishReadyWork(record.id)
           this.signalAssistantInteractionDeliveries(record.id)
         })
+      }
+    } else {
+      for (const record of records) {
+        const participant = record.members.find(member => member.sessionId === agentId)
+        if (participant !== undefined) {
+          for (const assistant of record.assistants) this.armAssistantQuiescence(record.id, assistant.view.id)
+        }
+        this.signalAssistantInteractionDeliveries(record.id)
       }
     }
   }
@@ -7711,6 +7809,9 @@ export class FleetRunService {
       if (recovery.timer !== undefined) clearTimeout(recovery.timer)
     }
     this.networkRecoveries.clear()
+    for (const timer of this.assistantQuiescenceTimers.values()) clearTimeout(timer)
+    this.assistantQuiescenceTimers.clear()
+    this.assistantQuiescenceArmed.clear()
     for (const sessionId of [...this.memberToolActivity.keys()]) this.clearMemberActivity(sessionId)
     this.waitingSessionIds.clear()
     this.abnormalSessionIds.clear()
@@ -8144,6 +8245,7 @@ export class FleetRunService {
       onTask: (event, state) => {
         this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
         if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
+        this.armAssistantQuiescenceFromTask(record, event.task, event.actor, state)
         if (event.action === 'created'
           || event.action === 'domain_updated'
           || event.action === 'reconcile_ready'
@@ -8891,6 +8993,8 @@ export class FleetRunService {
 
   private forgetTeam(runId: string): void {
     this.manualWakeRequiredRunIds.delete(runId)
+    this.clearAssistantQuiescenceTimer(runId)
+    this.clearAssistantQuiescenceArms(runId)
     const path = this.teamReferencePath(runId)
     if (existsSync(path)) unlinkSync(path)
   }

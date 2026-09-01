@@ -284,6 +284,39 @@ describe('FleetTaskBoard v6', () => {
     expect(board.commitInteractionOutput('assistant', 'The release is complete.')?.id).toBe(interaction.id)
   })
 
+  it('lets a quiescent Interaction block without mutating external linked work', () => {
+    const board = new FleetTaskBoard(directory)
+    board.recordInteractionInput('assistant', {
+      messageId: 'user-quiescent-block', text: 'Delegate this and report if the Team cannot proceed.',
+    })
+    const external = board.createGoal('agent-lead', {
+      title: 'External work', description: 'Owned outside the foreground Interaction.', owners: ['qa'],
+    })
+    const deferred = board.deferInteraction('agent-assistant', {
+      reason: 'Waiting for Team work.',
+      taskIds: [external.id],
+      goal: { title: 'Foreground work', description: 'Owned by this Interaction.', owners: ['reviewer'] },
+      checkAfterSeconds: 60,
+    })
+    const owned = deferred.goals[0]
+    if (owned === undefined) throw new Error('expected Interaction Goal')
+    expect(board.signalInteractionDelivery('assistant', 'Every formal Team member is idle.')?.domain)
+      .toMatchObject({ pendingDelivery: { cause: 'team_quiescent' } })
+
+    const reported = board.submitInteractionReport('agent-assistant', {
+      outcome: 'block',
+      reason: 'No formal member can resume the delegated work.',
+      report: 'The Team could not complete this request.',
+    })
+    expect(reported.domain).toMatchObject({ waitingTaskIds: [], reportIntent: { outcome: 'block' } })
+    expect(board.get('agent-reviewer', owned.id).stableState).toMatchObject({
+      kind: 'cancelled', reason: expect.stringContaining('Team quiescence'),
+    })
+    expect(board.get('agent-qa', external.id).stableState.kind).toBe('running')
+    expect(board.commitInteractionOutput('assistant', 'The Team could not complete this request.')?.stableState)
+      .toMatchObject({ kind: 'blocked', reason: 'No formal member can resume the delegated work.' })
+  })
+
   it('fences an assistant execution lease to one foreground input revision', () => {
     const board = new FleetTaskBoard(directory)
     board.recordInteractionInput('assistant', { messageId: 'user-execute-1', text: 'Handle this directly.' })
