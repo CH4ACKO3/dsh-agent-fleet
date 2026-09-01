@@ -422,23 +422,6 @@ const styles = `
   overflow-y: auto;
 }
 
-.dsh-fleet-assistant-private-scope {
-  color: var(--dsw-alias-label-secondary);
-  border-bottom: 1px solid var(--dsw-alias-border-l3);
-  padding: 0 2px 14px;
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.dsh-fleet-assistant-private-scope strong {
-  color: var(--dsw-alias-label-primary);
-  font-weight: 600;
-}
-
-.dsh-fleet-assistant-private-scope span {
-  margin-inline-start: 8px;
-}
-
 @keyframes dsh-fleet-assistant-private-caret {
   50% { opacity: 0; }
 }
@@ -1056,14 +1039,6 @@ export function AgentFleetPrivateChat({
           role: 'log',
           'aria-live': 'polite',
           children: [
-            identity !== undefined && jsxs('div', {
-              className: 'dsh-fleet-assistant-private-scope',
-              role: 'note',
-              children: [
-                jsx('strong', { children: fleetText(`对话 · 仅你和 ${assistant.name}`, `Conversation · only you and ${assistant.name}`) }),
-                jsx('span', { children: fleetText('这里的消息属于当前 Session，不会自动发布到团队频道；需要协作时，助理必须通过 Fleet 明确发送。', 'Messages here belong to this Session and are not posted to Team channels automatically; the assistant must send through Fleet explicitly when collaboration is needed.') }),
-              ],
-            }),
             openState === 'loading' && jsx('div', {
               className: 'dsh-fleet-assistant-private-history-state',
               children: loading,
