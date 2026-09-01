@@ -5936,6 +5936,21 @@ export interface FleetPanelActivity {
   readonly createdAt: string
 }
 
+export interface FleetPanelAssistantInteractionTurn {
+  readonly revision: number
+  readonly messageId?: string
+  readonly input: string
+  readonly inputAt: string
+  readonly output?: string
+  readonly outputAt?: string
+}
+
+export interface FleetPanelAssistantInteraction {
+  readonly assistantId: string
+  readonly pending: boolean
+  readonly turns: readonly FleetPanelAssistantInteractionTurn[]
+}
+
 export interface FleetPanelTeamSnapshot {
   readonly teamId: string
   readonly teamName: string
@@ -5948,6 +5963,8 @@ export interface FleetPanelTeamSnapshot {
   readonly members: readonly FleetPanelMember[]
   /** User-facing assistants attached to this Team; the global Fleet Help assistant is intentionally excluded. */
   readonly assistants?: readonly FleetPanelMember[]
+  /** Direct user exchanges only; background Session turns stay in the native context view. */
+  readonly assistantInteractions?: readonly FleetPanelAssistantInteraction[]
   readonly messages: readonly FleetPanelMessage[]
   readonly resources: readonly FleetPanelResource[]
   readonly workspaces?: readonly FleetPanelWorkspace[]
@@ -7037,8 +7054,11 @@ function fleetAssistantConversationIdentity(snapshot: FleetPanelSnapshot, sessio
     presence: 'active',
   }
   const visibleAssistant = assistant ?? fallbackAssistant
+  const interaction = team?.assistantInteractions?.find(candidate => candidate.assistantId === visibleAssistant.id)
   return {
     assistant: visibleAssistant,
+    interactions: interaction?.turns ?? [],
+    interactionPending: interaction?.pending === true,
   }
 }
 

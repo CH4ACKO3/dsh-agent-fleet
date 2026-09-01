@@ -93,6 +93,9 @@ export interface FleetTaskEntry {
   readonly text: string
   readonly resources: string[]
   readonly createdAt: string
+  /** Direct user/assistant exchange metadata for the persistent Interaction Task transcript. */
+  readonly interactionRevision?: number
+  readonly interactionMessageId?: string
 }
 
 export interface FleetTaskSignal {
@@ -564,6 +567,10 @@ export class FleetTaskBoard {
       text,
       resources: [],
       createdAt: now,
+      interactionRevision: existing === undefined ? 1 : existing.domain.kind === 'interaction'
+        ? existing.domain.inputRevision + 1
+        : 1,
+      interactionMessageId: messageId,
     }
     if (existing === undefined) {
       const task = this.buildTask(owner, {
@@ -784,7 +791,11 @@ export class FleetTaskBoard {
     }
     return this.reconcileDomain(current, domain, intent.outcome === 'complete'
       ? { kind: 'completed', reason: intent.reason, result: intent.report }
-      : { kind: 'blocked', reason: intent.reason }, owner)
+      : { kind: 'blocked', reason: intent.reason }, owner, {
+        author: owner,
+        text: output,
+        interactionRevision: intent.revision,
+      })
   }
 
   settleDirectInteractionOutput(ownerReference: string, output: string): FleetProjectTask | undefined {
@@ -806,7 +817,11 @@ export class FleetTaskBoard {
       kind: 'completed',
       reason: 'The native assistant response completed this direct foreground interaction.',
       result: output.trim(),
-    }, owner)
+    }, owner, {
+      author: owner,
+      text: output,
+      interactionRevision: current.domain.inputRevision,
+    })
   }
 
   signalInteractionDelivery(ownerReference: string, result: string): FleetProjectTask | undefined {
@@ -1781,15 +1796,30 @@ export class FleetTaskBoard {
     domain: FleetTaskDomain,
     nextInput: FleetTaskStableStateInput,
     actor = SYSTEM_TARGET,
+    interactionOutput?: {
+      readonly author: string
+      readonly text: string
+      readonly interactionRevision: number
+    },
   ): FleetProjectTask {
     const now = new Date().toISOString()
     const next = this.normalizeState(nextInput, now, this.tasks, [], current.id)
     const { activeReconcile: _activeReconcile, ...base } = current
+    const output = interactionOutput === undefined ? undefined : {
+      id: `entry_${randomUUID()}`,
+      kind: 'comment' as const,
+      author: interactionOutput.author,
+      text: requiredText(interactionOutput.text, 'interaction output'),
+      resources: [],
+      createdAt: now,
+      interactionRevision: interactionOutput.interactionRevision,
+    }
     const updated: FleetProjectTask = {
       ...base,
       domain,
       stableState: next,
       stateVersion: current.stateVersion + 1,
+      ...(output === undefined ? {} : { entries: [...current.entries, output] }),
       updatedAt: now,
     }
     this.replace(updated)

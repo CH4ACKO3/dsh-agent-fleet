@@ -487,6 +487,7 @@ interface ChatNodeStoreLike {
 export interface AgentFleetPrivateChatSnapshot {
   readonly order: readonly string[]
   readonly nodes: ChatNodeStoreLike
+  readonly interactions?: readonly AgentFleetInteractionTurn[]
 }
 
 export interface AgentFleetPrivateMessage {
@@ -501,6 +502,17 @@ export interface AgentFleetPrivateMessage {
 
 export interface AgentFleetConversationIdentity {
   readonly assistant: FleetChatMember
+  readonly interactions: readonly AgentFleetInteractionTurn[]
+  readonly interactionPending: boolean
+}
+
+export interface AgentFleetInteractionTurn {
+  readonly revision: number
+  readonly messageId?: string
+  readonly input: string
+  readonly inputAt: string
+  readonly output?: string
+  readonly outputAt?: string
 }
 
 interface RecordLike {
@@ -584,6 +596,46 @@ function visibleAssistantContent(value: unknown): {
 export function projectAgentFleetPrivateMessages(
   snapshot: AgentFleetPrivateChatSnapshot,
 ): readonly AgentFleetPrivateMessage[] {
+  if (snapshot.interactions !== undefined) {
+    const users = new Map<string, {
+      readonly content: readonly FleetChatContentBlock[]
+      readonly attachments: ReadonlyMap<string, unknown>
+    }>()
+    for (const key of snapshot.order) {
+      const node = record(snapshot.nodes.get(key))
+      if (node === undefined || node.visibility === 'hidden'
+        || (node.kind !== 'user' && node.kind !== 'steering')) continue
+      const data = record(node.data)
+      if (data === undefined) continue
+      const id = typeof node.id === 'string' ? node.id : key
+      users.set(id, visibleUserContent(data.content))
+    }
+    return snapshot.interactions.flatMap(turn => {
+      const native = turn.messageId === undefined ? undefined : users.get(turn.messageId)
+      const inputContent = native?.content.some(block => block.type !== 'text' || block.text.trim().length > 0) === true
+        ? native.content
+        : [{ type: 'text' as const, text: turn.input }]
+      const input: AgentFleetPrivateMessage = {
+        id: `interaction:${String(turn.revision)}:user`,
+        sender: 'operator',
+        sentAt: turn.inputAt,
+        content: inputContent,
+        imageAttachments: native?.attachments ?? new Map(),
+        streaming: false,
+        read: true,
+      }
+      const output = turn.output?.trim()
+      if (output === undefined || output.length === 0) return [input]
+      return [input, {
+        id: `interaction:${String(turn.revision)}:assistant`,
+        sender: 'assistant' as const,
+        sentAt: turn.outputAt ?? turn.inputAt,
+        content: [{ type: 'text' as const, text: output }],
+        imageAttachments: new Map(),
+        streaming: false,
+      }]
+    })
+  }
   const messages: AgentFleetPrivateMessage[] = []
   for (const key of snapshot.order) {
     const node = record(snapshot.nodes.get(key))
@@ -870,7 +922,11 @@ export function AgentFleetPrivateChat({
   const nativeLoadingOlder = useSession(source => source.loadingOlder) as boolean
   const operatorProfile = useFleetOperatorProfile()
   const [surface, setSurface] = useState<'chat' | 'details' | 'context'>('chat')
-  const messages = useMemo(() => projectAgentFleetPrivateMessages({ order, nodes }), [nodes, order])
+  const messages = useMemo(() => projectAgentFleetPrivateMessages({
+    order,
+    nodes,
+    ...(identity === undefined ? {} : { interactions: identity.interactions }),
+  }), [identity?.interactions, nodes, order])
   const pendingTimes = useRef(new Map<string, string>())
   const nativePending = useMemo<readonly PendingPrivateMessage[]>(() => queue.flatMap(candidate => {
     const item = record(candidate)
@@ -895,10 +951,10 @@ export function AgentFleetPrivateChat({
   }
   const assistant = identity?.assistant ?? defaultAssistant
   const operator = operatorProfile
-  const running = nativeRunning
+  const running = identity?.interactionPending ?? nativeRunning
   const openState = nativeOpenState
-  const hasMore = nativeHasMore
-  const loadingOlder = nativeLoadingOlder
+  const hasMore = identity === undefined && nativeHasMore
+  const loadingOlder = identity === undefined && nativeLoadingOlder
   const globalEmpty = useFleetMetaText('assistant.empty')
   const teamEmpty = useFleetMetaText('assistant.empty.team')
   const empty = identity === undefined ? globalEmpty : teamEmpty.replace('{name}', () => assistant.name)

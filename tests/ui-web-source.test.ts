@@ -291,6 +291,35 @@ describe('Fleet Web panel source', () => {
               blockedAt: '2026-08-21T10:10:31.000Z',
             },
           },
+          {
+            sequence: 16,
+            createdAt: '2026-08-21T10:11:00.000Z',
+            type: 'task.completed',
+            data: {
+              action: 'completed',
+              task: {
+                id: 'interaction-1',
+                title: 'assistant user interaction',
+                domain: {
+                  kind: 'interaction', owner: 'assistant', inputRevision: 1, settledRevision: 1,
+                  latestMessageId: 'native-user-1', waitingTaskIds: [],
+                },
+                stableState: { kind: 'completed', reason: 'Direct response completed.', result: 'Team status is healthy.' },
+                entries: [
+                  {
+                    id: 'entry-user', kind: 'comment', author: 'User', text: 'Check Team status.', resources: [],
+                    createdAt: '2026-08-21T10:10:40.000Z', interactionRevision: 1,
+                    interactionMessageId: 'native-user-1',
+                  },
+                  {
+                    id: 'entry-output', kind: 'comment', author: 'assistant', text: 'Team status is healthy.', resources: [],
+                    createdAt: '2026-08-21T10:11:00.000Z', interactionRevision: 1,
+                  },
+                ],
+                updatedAt: '2026-08-21T10:11:00.000Z',
+              },
+            },
+          },
         ],
           hasMore: false,
         })
@@ -383,6 +412,13 @@ describe('Fleet Web panel source', () => {
           id: 'assistant', name: 'You', role: '外部观察者', responsibility: '外部观察者',
           presence: 'active', runtimeStatus: 'idle', sessionId: 'observer-session',
         }],
+        assistantInteractions: [{
+          assistantId: 'assistant', pending: false, turns: [{
+            revision: 1, messageId: 'native-user-1', input: 'Check Team status.',
+            inputAt: '2026-08-21T10:10:40.000Z', output: 'Team status is healthy.',
+            outputAt: '2026-08-21T10:11:00.000Z',
+          }],
+        }],
         resources: [{ id: 'plan', name: 'plan.md', kind: 'plan', path: '/workspace/fleet/.fleet/plan.md' }],
         workspaces: [{ id: 'workspace:/workspace/fleet/src', name: 'source', path: '/workspace/fleet/src' }],
         messages: expect.arrayContaining([
@@ -448,6 +484,7 @@ describe('Fleet Web panel source', () => {
       }),
     ]))
     expect(snapshot.team?.activity.filter(item => item.kind === 'decision')).toHaveLength(3)
+    expect(snapshot.team?.activity.some(item => item.text.includes('user interaction'))).toBe(false)
     expect(snapshot.team?.activity.some(item => item.kind === 'resource')).toBe(true)
     const updatesAfterInitialProjection = snapshotUpdates
     await source.refresh()

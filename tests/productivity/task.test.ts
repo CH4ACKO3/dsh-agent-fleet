@@ -210,6 +210,11 @@ describe('FleetTaskBoard v6', () => {
     expect(board.commitInteractionOutput('assistant', 'The Team check passed.')?.stableState).toMatchObject({
       kind: 'completed', result: 'The Team check passed.',
     })
+    expect(board.interactionTask('assistant')?.entries).toMatchObject([
+      { author: 'User', interactionRevision: 1, interactionMessageId: 'user-1', text: 'Run the Team check.' },
+      { author: 'User', interactionRevision: 2, interactionMessageId: 'user-2', text: 'Include the final status.' },
+      { author: 'assistant', interactionRevision: 2, text: 'The Team check passed.' },
+    ])
     expect(board.interactionTask('assistant')?.domain).not.toHaveProperty('pendingDelivery')
 
     const reopened = board.recordInteractionInput('assistant', { messageId: 'user-3', text: 'One more check.' })

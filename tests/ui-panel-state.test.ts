@@ -561,6 +561,47 @@ describe('Agent Fleet private-chat projection', () => {
       nodes: { get: key => key === node.key ? node : undefined },
     })).toEqual([])
   })
+
+  it('projects only durable direct interactions for a Team assistant', () => {
+    const nodes = new Map<string, unknown>([
+      ['user:direct', {
+        id: 'user-message-1',
+        kind: 'user',
+        visibility: 'visible',
+        data: { time: 100, content: [{ type: 'text', text: 'Inspect the Team.' }] },
+      }],
+      ['assistant:progress', {
+        kind: 'assistant-step',
+        visibility: 'visible',
+        data: { time: 200, status: 'settled', blocks: [{ kind: 'text', text: 'Background progress noise.' }] },
+      }],
+      ['assistant:final', {
+        kind: 'assistant-step',
+        visibility: 'visible',
+        data: { time: 300, status: 'settled', blocks: [{ kind: 'text', text: 'A duplicate native final.' }] },
+      }],
+    ])
+
+    const projected = projectAgentFleetPrivateMessages({
+      order: [...nodes.keys()],
+      nodes: { get: key => nodes.get(key) },
+      interactions: [{
+        revision: 1,
+        messageId: 'user-message-1',
+        input: 'Inspect the Team.',
+        inputAt: '2026-09-01T08:00:00.000Z',
+        output: 'The Team is healthy.',
+        outputAt: '2026-09-01T08:01:00.000Z',
+      }],
+    })
+
+    expect(projected).toMatchObject([
+      { id: 'interaction:1:user', sender: 'operator', content: [{ type: 'text', text: 'Inspect the Team.' }] },
+      { id: 'interaction:1:assistant', sender: 'assistant', content: [{ type: 'text', text: 'The Team is healthy.' }] },
+    ])
+    expect(JSON.stringify(projected)).not.toContain('Background progress noise')
+    expect(JSON.stringify(projected)).not.toContain('duplicate native final')
+  })
 })
 
 const team: FleetPanelTeamSnapshot = {
