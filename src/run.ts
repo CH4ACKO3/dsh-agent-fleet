@@ -1980,8 +1980,17 @@ function materializeTeamConfiguration(value: unknown): Record<string, unknown> {
   }
 }
 
+function reachableRoster(participants: readonly FleetMemberView[], member: FleetMemberView): string {
+  const reachableIds = member.contacts.members === '*' ? undefined : new Set(member.contacts.members)
+  return participants
+    .filter(candidate => candidate.id !== member.id
+      && (reachableIds === undefined || reachableIds.has(candidate.id)))
+    .map(candidate => `@${candidate.name} [id=${candidate.id}; role=${candidate.role}]`)
+    .join('; ')
+}
+
 function persona(template: TeamTemplate, member: FleetMemberView): string {
-  const members = member.contacts.members === '*' ? 'all Team members' : member.contacts.members.map(id => `@${id}`).join(', ')
+  const members = reachableRoster([...template.members, template.assistant], member)
   const channels = member.contacts.channels === '*' ? 'all Team channels' : member.contacts.channels.map(id => `#${id}`).join(', ')
   return [
     template.operatingPrompt,
@@ -1996,7 +2005,7 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     'Configured groups cover Fleet capabilities only; host tools such as bash, read, and edit come from the Agent preset.',
     'Every granted Fleet capability with at least one authorized action stays directly available.',
     `Granted Fleet permissions: ${member.permissions.join(', ') || 'none'}.`,
-    `Reachable members: ${members || 'none'}.`,
+    `Current reachable roster (use these exact identities only): ${members || 'none'}.`,
     `Reachable Channels: ${channels || 'none'}.`,
     FLEET_COLLABORATION_CONTRACT,
     '## Role',
@@ -5135,9 +5144,14 @@ export class FleetRunService {
       if (record === undefined) return assembly
       const assistant = record.assistants.find(candidate => candidate.sessionId === String(agent.id))
       if (assistant === undefined) return assembly
+      const roster = reachableRoster([
+        ...this.effectiveMemberViews(record),
+        ...record.assistants.map(candidate => candidate.view),
+      ], assistant.view)
       const request = [
         '[Fleet Foreground Protocol]',
         `Current Team: ${record.id}`,
+        `Current reachable roster (use these exact identities only): ${roster || 'none'}.`,
         '',
         `Every direct foreground user input is already tracked in this Team's persistent Interaction Task. The foreground message is the current revision; do not call fleet_user_task status merely because direct input arrived. Use action="status" with run_id="${record.id}" after a Task Delivery, recovery wake, or when the current Interaction state is otherwise unclear.`,
         'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
@@ -9771,7 +9785,7 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send one quiet Fleet message to the smallest necessary audience. Routing a private message with to="@target" does not require a reply. A valid @target in the message text, or an equivalent structural mention, creates one Reply Task. Use a #channel only when its full audience needs the exact content. Unmentioned messages create no Reply Task.',
+    description: 'Send one quiet Fleet message to the smallest necessary audience. Use only an exact private recipient from the current roster. The private route alone does not require a reply; repeating that exact recipient identity in the message text, or using an equivalent structural mention, creates one Reply Task. Use a Channel only when its full audience needs the exact content. Unmentioned messages create no Reply Task.',
     parameters: {
       to: { type: 'string', required: true, description: 'Use @fleet-name or @agent-id to route a private message, #channel for Team-visible history, or meeting:id. Routing alone does not require a reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },

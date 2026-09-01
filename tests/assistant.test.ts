@@ -146,7 +146,7 @@ describe('FleetAssistantRuntime', () => {
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain('`fleet_goal split`')
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'A valid `@Name` or `@member-id` in the message text explicitly means "this member must answer"',
+      'only the recipient\'s exact identity from the current roster in the message text',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state',

@@ -806,6 +806,7 @@ describe('FleetRunService', () => {
     const request = assembly.sections.find(section => section.name === 'fleet:foreground-task-request')?.text ?? ''
     expect(request).toContain('[Fleet Foreground Protocol]')
     expect(request).toContain(`Current Team: ${run.id}`)
+    expect(request).toContain('Current reachable roster (use these exact identities only): @Lead [id=lead; role=lead]; @Reviewer [id=reviewer; role=reviewer]')
     expect(request).toContain('do not call fleet_user_task status merely because direct input arrived')
     expect(request).toContain(`Use action="status" with run_id="${run.id}" after a Task Delivery`)
     expect(request).toContain('Do not emit the final answer before that tool call')
@@ -1667,9 +1668,12 @@ describe('FleetRunService', () => {
       .toContainEqual(expect.objectContaining({ fromName: leadMember.displayName }))
     const leadPersona = runtime.creates.find(input => input.label === leadMember.displayName)?.persona
     expect(leadPersona).toContain(`You are @${leadMember.displayName}`)
+    expect(leadPersona).toContain(`Current reachable roster (use these exact identities only): @${reviewerMember.displayName} [id=reviewer; role=reviewer]`)
+    expect(leadPersona).toContain('@Assistant [id=team-assistant; role=Team assistant]')
+    expect(leadPersona).not.toContain('@Alivia')
     expect(leadPersona).toContain('Configured groups cover Fleet capabilities only')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
-    expect(leadPersona).toContain('A valid `@Name` or `@member-id` in the message text explicitly means "this member must answer"')
+    expect(leadPersona).toContain('Use only an exact display name or member id from the current reachable roster')
     expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state')
 
     service.end(launcher as unknown as Agent, 'Display name messaging test complete.', run.id)
