@@ -64,6 +64,8 @@ function settleDefaultCompositeWork(
   board.submitGoal(actorId, delivery.id, outcome === 'complete'
     ? { kind: 'complete', reason: result, result }
     : { kind: 'block', reason: result })
+  const settled = board.get(actorId, rootTaskId)
+  if (settled.stableState.kind === 'completed') return settled
   const claimed = board.claim(actorId, rootTaskId)
   const attemptId = claimed.activeReconcile?.attemptId
   if (attemptId === undefined) throw new Error('expected root ReconcileAttempt')
@@ -3254,15 +3256,9 @@ describe('FleetRunService', () => {
     const acceptedTaskPath = running.work?.acceptedTaskPath
     expect(acceptedTaskPath).toBeDefined()
     expect(readFileSync(acceptedTaskPath ?? '', 'utf8')).toContain('Hook-added acceptance criteria.')
-    const workStart = runtime.get(run.members[0]?.sessionId ?? '')?.messages.at(-1)?.content
-    expect(workStart)
-      .toEqual([expect.objectContaining({ text: expect.stringContaining('Hook-added acceptance criteria.') })])
-    expect(workStart).toEqual([expect.objectContaining({
-      text: expect.stringContaining('composite root Task'),
-    })])
-    expect(workStart).toEqual([expect.objectContaining({
-      text: expect.stringContaining('first formal cohort atomically'),
-    })])
+    const rootTaskId = running.work?.rootTaskId
+    expect(service.taskBoard(run.id).state().tasks.find(task => task.parentId === rootTaskId)?.description)
+      .toContain('Hook-added acceptance criteria.')
 
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
@@ -4888,9 +4884,6 @@ describe('FleetRunService', () => {
     const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     const rootTaskId = running.work?.rootTaskId
     if (rootTaskId === undefined) throw new Error('expected composite root Task')
-    expect(lead.messages.at(-1)?.content).toEqual([
-      expect.objectContaining({ type: 'text', text: expect.stringContaining(`[Fleet composite root Task ${rootTaskId}`) }),
-    ])
     expect(reviewer.messages).toHaveLength(0)
     expect(service.taskBoard(run.id).get(lead.id, rootTaskId).domain).toMatchObject({
       kind: 'composite', managedChildren: true, rootWorkId: running.work?.id,
@@ -4928,17 +4921,18 @@ describe('FleetRunService', () => {
         content: [{ type: 'text', text: 'Run the gated Team task.' }],
       },
     } as unknown as SessionEvent)
-    const kickoff = service.sendAssistantMessage(launcher as unknown as Agent, {
-      runId: run.id,
-      kind: 'directive',
-      text: 'Plan: lead implements the change, then reviewer independently verifies the evidence.',
-      recipients: ['reviewer'],
+    const running = service.start(launcher as unknown as Agent, {
+      runId: run.id, taskPath, projectRoot: root,
+      directive: 'Plan: lead implements the change, then reviewer independently verifies the evidence.',
+      resultStage: 'implementation',
       stages: [
         {
           key: 'implementation',
+          kind: 'goal',
           title: 'Implement the delegated change',
           description: 'Produce the requested change and implementation evidence.',
           owners: ['lead'],
+          dependencies: [],
         },
         {
           key: 'review',
@@ -4950,14 +4944,8 @@ describe('FleetRunService', () => {
         },
       ],
     })
-    expect(kickoff.recipients).toEqual(['lead'])
-    expect(kickoff.stages.map(stage => stage.key)).toEqual(['implementation', 'review'])
-    const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
     const rootTaskId = running.work?.rootTaskId
     if (rootTaskId === undefined) throw new Error('expected composite root Task')
-    expect(service.taskBoard(run.id).state().tasks.some(task =>
-      task.domain.kind === 'reply' && task.domain.messageId === kickoff.messageId,
-    )).toBe(false)
     const implementation = service.taskBoard(run.id).state().tasks.find(task =>
       task.parentId === rootTaskId && task.title === 'Implement the delegated change')
     const review = service.taskBoard(run.id).state().tasks.find(task =>

@@ -754,7 +754,7 @@ export class FleetCollaborationService {
         }
         if (entry.source === 'namespace') {
           if (entry.namespace !== undefined && (visibleNamespaces.has(entry.namespace)
-            || (entry.name === 'fleet_task' && authorizationNamespaces.has(entry.namespace)))) allowed.add(entry.name)
+            || entry.namespace === 'task')) allowed.add(entry.name)
           continue
         }
         if (entry.source === 'messages' && tools.has('messages')) allowed.add(entry.name)
@@ -785,7 +785,8 @@ export class FleetCollaborationService {
         if (!allowed.has(name) || residentTools.has(name)) return
         const entry = FLEET_TOOL_CATALOG.find(candidate => candidate.name === name)
         if (entry === undefined) return
-        const available = (entry.name === 'fleet_task' && hasPendingRequirement(member))
+        const available = entry.namespace === 'task'
+          || (entry.name === 'fleet_task' && hasPendingRequirement(member))
           || fleetToolHasAuthorizedAction(entry, permissions)
         if (!available) return
         let stop: (() => void) | void = undefined
@@ -831,7 +832,7 @@ export class FleetCollaborationService {
           })
         } else if (entry.source === 'namespace' && entry.namespace !== undefined) {
           const namespace = visibleNamespaces.get(entry.namespace)
-            ?? (entry.name === 'fleet_task' && hasPendingRequirement(member)
+            ?? (entry.namespace === 'task'
               ? authorizationNamespaces.get(entry.namespace)
               : undefined)
           if (namespace?.installTools === undefined) return

@@ -987,6 +987,9 @@ interface StartRunInput {
   readonly runId?: string
   readonly taskPath: string
   readonly projectRoot: string
+  readonly directive?: string
+  readonly stages?: readonly FleetAssistantStage[]
+  readonly resultStage?: string
 }
 
 interface ResumeRunInput {
@@ -2576,7 +2579,7 @@ export class FleetRunService {
     renameSync(temporaryTaskPath, acceptedTaskPath)
     const runtime = this.requireRuntime(record.id)
     const kickoffKey = `${record.id}:${String(launcher.id)}`
-    const kickoff = this.pendingAssistantKickoffs.get(kickoffKey)
+    const kickoff = input.stages === undefined ? this.pendingAssistantKickoffs.get(kickoffKey) : undefined
     this.pendingAssistantKickoffs.delete(kickoffKey)
     const kickoffReplyTaskIds = kickoff === undefined || kickoff.staged
       ? []
@@ -2584,11 +2587,23 @@ export class FleetRunService {
           .filter(candidate => candidate.domain.kind === 'reply'
             && candidate.domain.messageId === kickoff.messageId)
           .map(candidate => candidate.id)
-    const plannedRootOwner = kickoff?.recipients[0]
-    const rootOwner = available.find(member => member.name === plannedRootOwner) ?? available[0]!
-    const plannedStages: FleetAssistantStage[] = kickoff?.stages.length
+    const requestedStages: readonly FleetAssistantStage[] | undefined = input.stages?.length
+      ? input.stages.map(stage => ({
+          ...stage,
+          owners: stage.owners.map(reference => {
+            const member = available.find(candidate => candidate.name === reference || candidate.displayName === reference)
+            if (member === undefined) throw new Error(`Fleet stage owner ${reference} is not available`)
+            return member.name
+          }),
+        }))
+      : kickoff?.stages.length
       ? kickoff.stages
-      : [{
+      : undefined
+    const plannedRootOwner = requestedStages?.find(stage => stage.dependencies.length === 0)?.owners[0]
+      ?? kickoff?.recipients[0]
+    const rootOwner = available.find(member => member.name === plannedRootOwner || member.displayName === plannedRootOwner)
+      ?? available[0]!
+    const plannedStages: readonly FleetAssistantStage[] = requestedStages ?? [{
           key: 'delivery', kind: 'goal', title: 'Deliver the Fleet work item',
           description: acceptedTask, owners: [rootOwner.name], dependencies: [],
         }]
@@ -2607,6 +2622,7 @@ export class FleetRunService {
       })),
       dependencies: kickoffReplyTaskIds,
       rootWorkId: workId,
+      ...(input.resultStage === undefined ? {} : { resultStage: input.resultStage }),
     })
     const rootTask = plan.task
     const stageTasks = plan.stages
@@ -2635,6 +2651,7 @@ export class FleetRunService {
       childTaskIds: [...stageTasks.values()].map(task => task.id),
       taskPath,
       acceptedTaskPath,
+      directive: input.directive?.trim() || kickoff?.text || acceptedTask,
     })
     const launchingAssistant = running.assistants.find(assistant => assistant.sessionId === String(launcher.id))
     if (launchingAssistant !== undefined && runtime.tasks.interactionTask(launchingAssistant.view.id)?.stableState.kind === 'running') {
@@ -2645,29 +2662,6 @@ export class FleetRunService {
       })
     }
 
-    const roster = record.members
-      .map(member => `@${member.displayName ?? member.name}: ${member.role}`)
-      .join('\n')
-    const stagePlan = [...stageTasks.entries()].map(([key, task]) => {
-      const dependencies = task.dependencies.length === 0 ? 'none' : task.dependencies.join(', ')
-      return `- ${key}: ${task.title} (${task.id}); ${task.domain.kind === 'vote' ? 'voters' : 'owners'} ${task.owners.map(owner => `@${owner.member}`).join(', ')}; dependencies ${dependencies}`
-    }).join('\n')
-    if (this.memberCanReply(rootOwner)) {
-      runtime.messages.sendSystemNotification(rootOwner.sessionId, {
-        kind: 'work_start',
-        text: [
-          `[Fleet composite root Task ${rootTask.id} for work ${work.id}]`,
-          `Team: ${record.name}`,
-          `Your Fleet identity: @${rootOwner.displayName ?? rootOwner.name}`,
-          `Members:\n${roster}`,
-          `The assistant created the first formal cohort atomically; do not recreate it:\n${stagePlan}`,
-          'The root has no owner and will wake you through one ReconcileAttempt only when its current cohort settles. Inspect every Goal result and Vote outcome. A rejected review is a completed decision, not a blocked Task: atomically create a remediation Goal and install the next cohort before resolving. Complete the root only after required evidence is accepted; use blocked only when no deterministic continuation is available.',
-          `Work:\n${acceptedTask}`,
-        ].join('\n\n'),
-        delivery: 'wakeup',
-        coalesceKey: `work-start:${work.id}`,
-      })
-    }
     return this.describeRecord(running)
   }
 
@@ -9156,12 +9150,29 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_run',
-    description: 'Control the outer Fleet Team lifecycle. A started work item is owned by a zero-owner composite root Task whose ReconcileAttempts atomically continue or finish the work.',
+    description: 'Control the outer Fleet Team lifecycle. Start can atomically create a planned Goal/Vote DAG; successful plans complete their zero-owner root automatically.',
     parameters: {
       action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team where supported.' },
       team_config: { type: 'string', description: 'Team JSON path required for create.' },
       task: { type: 'string', description: 'Work Markdown path required for start.' },
+      directive: { type: 'string', description: 'Concise kickoff summary stored with the work.' },
+      result_stage: { type: 'string', description: 'Stage key whose Goal result becomes the successful root result. Defaults to the last Goal stage.' },
+      stages: {
+        type: 'array',
+        description: 'Complete initial Goal/Vote DAG created atomically with the work root.',
+        items: {
+          type: 'object', additionalProperties: false, properties: {
+            key: { type: 'string', required: true },
+            kind: { type: 'string', enum: ['goal', 'vote'] },
+            title: { type: 'string', required: true },
+            description: { type: 'string' },
+            owners: { type: 'array', required: true, items: { type: 'string' } },
+            dependencies: { type: 'array', items: { type: 'string' } },
+            timeout_at: { type: 'string' },
+          },
+        },
+      },
       cwd: { type: 'string', description: 'Team project root. Defaults to the calling session cwd, which remains the only workspace source.' },
       required_paths: { type: 'array', items: { type: 'string' }, description: 'Optional paths that must exist before Team creation.' },
       provider: { type: 'string', description: 'Optional default provider route for every member, used only by create.' },
@@ -9226,6 +9237,19 @@ export function installRunTools(
           ...(args.run_id === undefined ? {} : { runId: args.run_id }),
           taskPath: args.task,
           projectRoot,
+          ...(args.directive === undefined ? {} : { directive: args.directive }),
+          ...(args.result_stage === undefined ? {} : { resultStage: args.result_stage }),
+          ...(args.stages === undefined ? {} : {
+            stages: args.stages.map(stage => ({
+              key: stage.key,
+              kind: stage.kind ?? 'goal',
+              title: stage.title,
+              description: stage.description ?? '',
+              owners: stage.owners,
+              dependencies: stage.dependencies ?? [],
+              ...(stage.timeout_at === undefined ? {} : { timeoutAt: stage.timeout_at }),
+            })),
+          }),
         }),
       }
     },

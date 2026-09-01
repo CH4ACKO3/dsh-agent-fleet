@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { FleetMemberDirectory } from '@dsh-agent-fleet/core'
-import type { FleetTaskReconcilerSpec } from '../../src/productivity/task.js'
+import type { FleetProjectTask, FleetTaskReconcilerSpec } from '../../src/productivity/task.js'
 import {
   FleetTaskBoard, fleetTaskToolDetail, fleetTaskToolSummary,
   installGoalTools, installReconcileTools, installTaskTools, installVoteTools, parseFleetTaskState,
@@ -246,29 +246,16 @@ describe('FleetTaskBoard v6', () => {
     board.submitGoal('agent-qa', quality.id, {
       kind: 'complete', reason: 'Quality evidence is ready.', result: 'quality-report',
     })
-    board.signalInteractionDelivery('assistant', 'Quality settled while the root still needs reconciliation.')
-    expect(() => board.submitInteractionReport('agent-assistant', {
-      outcome: 'complete', reason: 'Too early.', report: 'Quality passed.',
-    })).toThrow(plan.task.id)
-    const rootWait = board.deferInteraction('agent-assistant', {
-      reason: 'The composite root still needs reconciliation.', taskIds: [plan.task.id], checkAfterSeconds: 60,
-    })
-    expect(rootWait.task.domain).toMatchObject({
-      kind: 'interaction', waitingTaskIds: [plan.task.id],
-    })
-
-    const claimed = board.claim('agent-lead', plan.task.id)
-    const attemptId = claimed.activeReconcile?.attemptId
-    if (attemptId === undefined) throw new Error('expected root reconciliation')
-    board.settle('agent-lead', plan.task.id, {
-      attemptId,
-      progress: 'The root accepted the quality result.',
-      next: { kind: 'completed', reason: 'The release root is complete.', result: 'release-result' },
+    expect(board.get('agent-lead', plan.task.id).stableState).toMatchObject({
+      kind: 'completed', result: 'quality-report',
     })
     expect(board.signalInteractionDelivery('assistant', 'Every linked Task settled.')?.domain).toMatchObject({
       pendingDelivery: expect.objectContaining({
         cause: 'linked_tasks_settled',
-        tasks: [expect.objectContaining({ id: plan.task.id, state: 'completed' })],
+        tasks: expect.arrayContaining([
+          expect.objectContaining({ id: plan.task.id, state: 'completed' }),
+          expect.objectContaining({ id: quality.id, state: 'completed' }),
+        ]),
       }),
     })
     board.submitInteractionReport('agent-assistant', {
@@ -475,6 +462,123 @@ describe('FleetTaskBoard v6', () => {
       progress: 'The repaired candidate passed independent acceptance.',
       next: { kind: 'completed', reason: 'Current acceptance Vote approved.', result: 'candidate-2' },
     }).stableState).toMatchObject({ kind: 'completed', result: 'candidate-2' })
+  })
+
+  it('completes a successful planned root without a coordinator turn', () => {
+    const board = new FleetTaskBoard(directory)
+    const plan = board.createCompositePlan('agent-lead', {
+      title: 'Automatic release', coordinator: 'lead', resultStage: 'implementation',
+      stages: [
+        { key: 'implementation', title: 'Implementation', owners: ['reviewer'] },
+        {
+          key: 'review', kind: 'vote', title: 'Review', description: 'Approve implementation.',
+          owners: ['qa'], dependencies: ['implementation'],
+        },
+      ],
+    })
+    const implementation = plan.stages.get('implementation')
+    const review = plan.stages.get('review')
+    if (implementation === undefined || review === undefined) throw new Error('expected planned stages')
+
+    board.submitGoal('agent-reviewer', implementation.id, {
+      kind: 'complete', reason: 'Implementation finished.', result: 'release-artifact',
+    })
+    expect(board.get('agent-lead', plan.task.id).stableState.kind).toBe('running')
+    board.castVote('agent-qa', review.id, 'approve', 'Review passed.')
+
+    expect(board.get('agent-lead', plan.task.id)).toMatchObject({
+      stableState: { kind: 'completed', result: 'release-artifact' },
+      domain: {
+        kind: 'composite',
+        plan: {
+          resultStageId: implementation.id,
+          acceptanceVoteIds: [review.id],
+        },
+      },
+    })
+    expect(board.readyTasks('lead')).toEqual([])
+  })
+
+  it('cancels failed dependency branches transitively', () => {
+    const board = new FleetTaskBoard(directory)
+    const implementation = board.createGoal('agent-lead', {
+      title: 'Implementation', owners: ['reviewer'],
+    })
+    const verification = board.createGoal('agent-lead', {
+      title: 'Verification', owners: ['qa'], dependencies: [implementation.id],
+    })
+    const release = board.createGoal('agent-lead', {
+      title: 'Release', owners: ['lead'], dependencies: [verification.id],
+    })
+
+    board.submitGoal('agent-reviewer', implementation.id, {
+      kind: 'block', reason: 'Required service is unavailable.',
+    })
+
+    expect(board.get('agent-lead', verification.id).stableState).toMatchObject({
+      kind: 'cancelled', reason: `dependency_not_completed:${implementation.id}`,
+    })
+    expect(board.get('agent-lead', release.id).stableState).toMatchObject({
+      kind: 'cancelled', reason: `dependency_not_completed:${verification.id}`,
+    })
+    expect(board.ownerTasks('qa')).toEqual([])
+  })
+
+  it('atomically splits an owned Goal and restores its join obligation', () => {
+    const board = new FleetTaskBoard(directory)
+    const parent = board.createGoal('agent-lead', {
+      title: 'Long implementation', owners: ['lead'], rootWorkId: 'work-long',
+    })
+    const split = board.splitGoal('agent-lead', parent.id, {
+      children: [
+        { key: 'a', title: 'Part A', owners: ['reviewer'] },
+        { key: 'b', title: 'Part B', owners: ['qa'] },
+        { key: 'merge', title: 'Merge', owners: ['reviewer'], dependencies: ['a', 'b'] },
+      ],
+    })
+    const a = split.children.get('a')
+    const b = split.children.get('b')
+    const merge = split.children.get('merge')
+    if (a === undefined || b === undefined || merge === undefined) throw new Error('expected split children')
+
+    expect(merge.dependencies).toEqual([a.id, b.id])
+    expect(board.ownerTasks('lead').map(task => task.id)).not.toContain(parent.id)
+    board.submitGoal('agent-reviewer', a.id, { kind: 'complete', reason: 'A done.', result: 'a' })
+    board.submitGoal('agent-qa', b.id, { kind: 'complete', reason: 'B done.', result: 'b' })
+    expect(board.ownerTasks('reviewer').map(task => task.id)).toContain(merge.id)
+    board.submitGoal('agent-reviewer', merge.id, { kind: 'complete', reason: 'Merged.', result: 'merged' })
+    expect(board.ownerTasks('lead').map(task => task.id)).toContain(parent.id)
+    expect(board.submitGoal('agent-lead', parent.id, {
+      kind: 'complete', reason: 'Joined child results.', result: 'merged',
+    }).stableState).toMatchObject({ kind: 'completed', result: 'merged' })
+  })
+
+  it('keeps a 100-level split chain joined from leaf to root', () => {
+    const board = new FleetTaskBoard(directory)
+    const parents: FleetProjectTask[] = []
+    let current = board.createGoal('agent-lead', {
+      title: 'Depth 0', owners: ['lead'], rootWorkId: 'work-deep',
+    })
+    for (let depth = 1; depth <= 100; depth += 1) {
+      parents.push(current)
+      const split = board.splitGoal('agent-lead', current.id, {
+        children: [{ key: 'next', title: `Depth ${String(depth)}`, owners: ['lead'] }],
+      })
+      current = split.children.get('next')!
+    }
+
+    board.submitGoal('agent-lead', current.id, {
+      kind: 'complete', reason: 'Deep leaf completed.', result: 'deep-result',
+    })
+    for (const parent of parents.reverse()) {
+      expect(board.ownerTasks('lead').map(task => task.id)).toContain(parent.id)
+      board.submitGoal('agent-lead', parent.id, {
+        kind: 'complete', reason: 'Joined the completed child.', result: 'deep-result',
+      })
+    }
+    expect(board.get('agent-lead', parents.at(-1)?.id ?? '').stableState).toMatchObject({
+      kind: 'completed', result: 'deep-result',
+    })
   })
 
   it('reconciles a composite when a linked kickoff obligation blocks', () => {
