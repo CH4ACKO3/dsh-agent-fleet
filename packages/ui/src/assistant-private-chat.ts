@@ -435,7 +435,7 @@ const styles = `
   z-index: 5;
   max-width: min(420px, calc(100% - 32px));
   position: absolute;
-  top: -22px;
+  top: -32px;
   left: clamp(
     12px,
     calc(50% - var(--dsh-fleet-assistant-composer-width, 760px) / 2 + 12px),
@@ -456,7 +456,7 @@ const styles = `
   text-overflow: ellipsis;
   white-space: nowrap;
   font: var(--dsw-font-xs-13, inherit);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 18px;
   overflow: hidden;
   display: block;
