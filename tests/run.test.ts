@@ -27,6 +27,7 @@ import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
 import { activateResidentFleetAssistants } from '../src/resident-assistants.js'
 import { normalizeFleetSetupConfiguration } from '../src/setup.js'
+import type { FleetTurnReminderLists } from '../src/turn-reminders.js'
 
 interface FakeEvent {
   readonly seq: number
@@ -389,6 +390,7 @@ function setup(root: string, options?: {
     readonly nextStep?: readonly UserMessage[]
   }>
   readonly resumedIds?: ReadonlyMap<string, string>
+  readonly turnReminders?: FleetTurnReminderLists
 }): {
   readonly service: FleetRunService
   readonly core: FleetCore
@@ -474,6 +476,7 @@ function setup(root: string, options?: {
     registryDirectory: join(root, '.fleet-registry'),
     ...(options?.archives === undefined ? {} : { archives: options.archives }),
     authorization,
+    ...(options?.turnReminders === undefined ? {} : { turnReminders: options.turnReminders }),
   })
   authorization.installBaseline(service.authorizationBaseline())
   return {
@@ -493,6 +496,63 @@ function setup(root: string, options?: {
 }
 
 describe('FleetRunService', () => {
+  it('injects turn-start and tool-result reminders with independent slot cooldowns', async () => {
+    const { root, configPath } = fixture()
+    const reminder = { default: 'Keep this slot-specific.' }
+    const turnReminders: FleetTurnReminderLists = {
+      'turn-start': [{ id: 'shared-id', text: reminder, cooldownTurns: 5 }],
+      'turn-end': [],
+      'tool-result': [{ id: 'shared-id', text: reminder, cooldownTurns: 5, tools: ['bash'] }],
+    }
+    const { service, runtime, launcher, disconnect } = setup(root, { turnReminders })
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected live Fleet lead')
+    const preStep = (messages: UserMessage[]): PreStepDecision => {
+      const hook = service as unknown as {
+        preStepReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision
+      }
+      return hook.preStepReminderDecision(lead as unknown as Agent, { kind: 'enter', messages })
+    }
+    lead.session.events.push({ type: 'turn/start', seq: 1, time: Date.now(), data: { turn: 1 } })
+    const input = createUserMessage({
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'Run the check.' }],
+    })
+
+    const atStart = preStep([input])
+    if (atStart.kind === 'reject') throw new Error('unexpected rejected pre-step')
+    expect(atStart.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: Keep this slot-specific.' }),
+    ])
+    expect(preStep([input])).toMatchObject({ messages: [input] })
+
+    lead.session.events.push(
+      { type: 'tool/call', seq: 2, time: Date.now(), data: { turn: 1, callId: 'call-1', name: 'bash', arguments: '{}' } },
+      {
+        type: 'tool/result', seq: 3, time: Date.now(),
+        data: {
+          turn: 1,
+          message: {
+            source: { kind: 'tool', callId: 'call-1' },
+            content: [{ type: 'text', text: 'ok' }],
+          },
+        },
+      },
+    )
+    const afterTool = preStep([])
+    if (afterTool.kind === 'reject') throw new Error('unexpected rejected pre-step')
+    expect(afterTool.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'System reminder, no reply: Keep this slot-specific.' }),
+    ])
+    expect(preStep([])).toMatchObject({ messages: [] })
+    disconnect()
+  })
+
   it('injects filesystem access before installing foreground assistant resource tools', async () => {
     const { root, configPath } = fixture()
     const configuration = JSON.parse(readFileSync(configPath, 'utf8')) as {

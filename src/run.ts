@@ -106,8 +106,10 @@ import type {
 import {
   DEFAULT_FLEET_TURN_REMINDERS,
   fleetTurnReminderText,
+  inferFleetReminderLocales,
   selectFleetTurnReminder,
-  type FleetTurnReminderRule,
+  type FleetTurnReminderLists,
+  type FleetTurnReminderSlot,
 } from './turn-reminders.js'
 
 export type FleetRunStatus = 'starting' | 'idle' | 'running' | 'paused' | 'finishing' | 'closed' | 'failed'
@@ -947,7 +949,7 @@ export interface FleetRunServiceOptions {
   readonly archives?: FleetArchiveRegistry
   readonly authorization?: FleetAuthorizationService
   readonly configuration?: FleetConfigurationRegistry
-  readonly turnReminders?: readonly FleetTurnReminderRule[]
+  readonly turnReminders?: FleetTurnReminderLists
 }
 
 export interface FleetResidentAssistantController {
@@ -2219,8 +2221,9 @@ export class FleetRunService {
   private readonly memberLastSharedTurns = new Map<string, number>()
   private readonly memberVisibilityReviewedTurns = new Map<string, number>()
   private readonly visibilityReminderStates = new Map<string, VisibilityReminderState>()
-  private readonly turnReminderLastShown = new Map<string, Map<string, number>>()
-  private readonly turnReminderInjectedTurns = new Map<string, number>()
+  private readonly turnReminderLastShown = new Map<string, Map<FleetTurnReminderSlot, Map<string, number>>>()
+  private readonly turnStartReminderTurns = new Map<string, number>()
+  private readonly toolResultReminderSequences = new Map<string, number>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
@@ -2235,7 +2238,7 @@ export class FleetRunService {
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
   private readonly configuration: FleetConfigurationRegistry
-  private readonly turnReminders: readonly FleetTurnReminderRule[]
+  private readonly turnReminders: FleetTurnReminderLists
 
   constructor(
     private readonly ctx: Context,
@@ -2272,7 +2275,7 @@ export class FleetRunService {
       this.memberTurnStopping(agent, turn)
     })
     childCtx.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
-      return this.turnReminderDecision(childCtx.agent!, await next())
+      return this.preStepReminderDecision(childCtx.agent!, await next())
     })
     await installMemberTools(childCtx, runtime, member, false, source)
   }
@@ -5087,7 +5090,7 @@ export class FleetRunService {
         })
       }
       if (hasDirectUserInput) await this.loadTeamMembersForAssistantInput(agent, record.id)
-      return this.turnReminderDecision(agent, decision)
+      return this.preStepReminderDecision(agent, decision)
     })
     context.on('system-prompt/assemble', async (_assembly, _assembleContext, next) => {
       const assembly = await next()
@@ -5726,46 +5729,74 @@ export class FleetRunService {
     return undefined
   }
 
-  private turnReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision {
-    if (decision.kind === 'reject' || this.turnReminders.length === 0) return decision
-    const sessionId = String(agent.id)
-    const turn = this.currentOpenTurn(agent)
-    if (turn === undefined || this.turnReminderInjectedTurns.get(sessionId) === turn) return decision
-    const entry = this.collaboration.entries().find(([runId, runtime]) =>
-      this.records.has(runId) && runtime.memberNamesById.has(sessionId))
-    if (entry === undefined) return decision
-    const [teamId, runtime] = entry
-    const participant = this.participants(this.records.get(teamId)!)
-      .find(candidate => candidate.sessionId === sessionId)
-    if (participant === undefined) return decision
-    const view = this.memberViewForAgent(teamId, sessionId)
-    if (view === undefined) return decision
-
-    const tools: string[] = []
-    for (let index = agent.session.events.length - 1; index >= 0 && tools.length < 8; index -= 1) {
-      const event = agent.session.events[index]
-      if (event?.type === 'turn/start' && event.data.turn < turn - 2) break
-      if (event?.type === 'tool/call' && !tools.includes(event.data.name)) tools.push(event.data.name)
+  private reminderHistory(sessionId: string, slot: FleetTurnReminderSlot): Map<string, number> {
+    let session = this.turnReminderLastShown.get(sessionId)
+    if (session === undefined) {
+      session = new Map()
+      this.turnReminderLastShown.set(sessionId, session)
     }
-    const taskKinds = [...new Set(runtime.tasks.ownerTasks(participant.name).map(task => task.domain.kind))]
-    const history = this.turnReminderLastShown.get(sessionId) ?? new Map<string, number>()
-    const selection = selectFleetTurnReminder(this.turnReminders, {
+    let history = session.get(slot)
+    if (history === undefined) {
+      history = new Map()
+      session.set(slot, history)
+    }
+    return history
+  }
+
+  private selectTurnReminderText(
+    agent: Agent,
+    slot: FleetTurnReminderSlot,
+    turn: number,
+    text: string,
+    tools: readonly string[],
+    tags: readonly string[],
+  ): string | undefined {
+    const rules = this.turnReminders[slot]
+    if (rules.length === 0) return undefined
+    const sessionId = String(agent.id)
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      this.records.has(runId) && !this.dormantRunIds.has(runId) && runtime.memberNamesById.has(sessionId))
+    if (entry === undefined) return undefined
+    const [teamId, runtime] = entry
+    const member = runtime.memberNamesById.get(sessionId)
+    const view = this.memberViewForAgent(teamId, sessionId)
+    if (member === undefined || view === undefined) return undefined
+    const locales = inferFleetReminderLocales(text)
+    const history = this.reminderHistory(sessionId, slot)
+    const selection = selectFleetTurnReminder(rules, {
+      slot,
       teamId,
       memberId: view.id,
       displayName: view.name,
       role: view.role,
       ...(view.responsibility === undefined ? {} : { responsibility: view.responsibility }),
       turn,
-      text: decision.messages.map(progressMessageText).join('\n'),
+      text,
       tools,
-      taskKinds,
+      taskKinds: [...new Set(runtime.tasks.ownerTasks(member).map(task => task.domain.kind))],
+      tags,
+      locales,
     }, history)
-    if (selection === undefined) return decision
-
-    const text = fleetTurnReminderText(selection.rule)
+    if (selection === undefined) return undefined
     history.set(selection.rule.id, turn)
-    this.turnReminderLastShown.set(sessionId, history)
-    this.turnReminderInjectedTurns.set(sessionId, turn)
+    return fleetTurnReminderText(selection.rule, locales)
+  }
+
+  private recentTurnReminderTools(agent: Agent, turn: number): string[] {
+    const tools: string[] = []
+    for (let index = agent.session.events.length - 1; index >= 0 && tools.length < 8; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start' && event.data.turn < turn - 2) break
+      if (event?.type === 'tool/call' && !tools.includes(event.data.name)) tools.push(event.data.name)
+    }
+    return tools
+  }
+
+  private appendTurnReminder(
+    decision: Exclude<PreStepDecision, { readonly kind: 'reject' }>,
+    slot: FleetTurnReminderSlot,
+    text: string,
+  ): PreStepDecision {
     return {
       ...decision,
       messages: [...decision.messages, createUserMessage({
@@ -5774,10 +5805,76 @@ export class FleetRunService {
           kind: 'plugin',
           plugin: 'dsh-agent-fleet',
           form: 'snapshot',
-          sections: [{ name: 'turn-reminder', text }],
+          sections: [{ name: `system-reminder:${slot}`, text }],
         },
       })],
     }
+  }
+
+  private turnStartReminderDecision(
+    agent: Agent,
+    decision: Exclude<PreStepDecision, { readonly kind: 'reject' }>,
+  ): PreStepDecision {
+    if (this.turnReminders['turn-start'].length === 0) return decision
+    const sessionId = String(agent.id)
+    const turn = this.currentOpenTurn(agent)
+    if (turn === undefined || this.turnStartReminderTurns.get(sessionId) === turn) return decision
+    this.turnStartReminderTurns.set(sessionId, turn)
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start') break
+      if (event?.type === 'tool/call' || event?.type === 'tool/result' || event?.type === 'assistant/message') {
+        return decision
+      }
+    }
+    const contextText = decision.messages.map(progressMessageText).join('\n')
+    const reminder = this.selectTurnReminderText(
+      agent, 'turn-start', turn, contextText, this.recentTurnReminderTools(agent, turn), [],
+    )
+    return reminder === undefined ? decision : this.appendTurnReminder(decision, 'turn-start', reminder)
+  }
+
+  private toolResultReminderDecision(
+    agent: Agent,
+    decision: Exclude<PreStepDecision, { readonly kind: 'reject' }>,
+  ): PreStepDecision {
+    if (this.turnReminders['tool-result'].length === 0) return decision
+    const sessionId = String(agent.id)
+    const turn = this.currentOpenTurn(agent)
+    if (turn === undefined) return decision
+    const previousSequence = this.toolResultReminderSequences.get(sessionId) ?? -1
+    const callNames = new Map<string, string>()
+    const results: Array<{ readonly sequence: number; readonly callId: string; readonly text: string }> = []
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start') break
+      if (event?.type === 'tool/call') callNames.set(String(event.data.callId), event.data.name)
+      if (event?.type !== 'tool/result' || event.seq <= previousSequence) continue
+      results.push({
+        sequence: event.seq,
+        callId: String(event.data.message.source.callId),
+        text: progressMessageText(event.data.message),
+      })
+    }
+    if (results.length === 0) return decision
+    this.toolResultReminderSequences.set(sessionId, Math.max(...results.map(result => result.sequence)))
+    const tools = [...new Set([
+      ...results.map(result => callNames.get(result.callId)).filter((name): name is string => name !== undefined),
+      ...this.recentTurnReminderTools(agent, turn),
+    ])]
+    const contextText = [
+      ...results.sort((left, right) => left.sequence - right.sequence).map(result => result.text),
+      ...decision.messages.map(progressMessageText),
+    ].join('\n')
+    const reminder = this.selectTurnReminderText(agent, 'tool-result', turn, contextText, tools, [])
+    return reminder === undefined ? decision : this.appendTurnReminder(decision, 'tool-result', reminder)
+  }
+
+  private preStepReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision {
+    if (decision.kind === 'reject') return decision
+    const withTurnStart = this.turnStartReminderDecision(agent, decision)
+    if (withTurnStart.kind === 'reject') return withTurnStart
+    return this.toolResultReminderDecision(agent, withTurnStart)
   }
 
   private turnHasDirectOutput(agent: Agent, turn: number): boolean {
@@ -5790,6 +5887,20 @@ export class FleetRunService {
       if (progressMessageText(event.data).trim().length > 0) return true
     }
     return false
+  }
+
+  private turnDirectOutputText(agent: Agent, turn: number): string {
+    const output: string[] = []
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event?.type === 'turn/start' && event.data.turn < turn) break
+      if (event?.type !== 'assistant/message'
+        || event.data.turn !== turn
+        || event.data.interrupted === true) continue
+      const text = progressMessageText(event.data).trim()
+      if (text.length > 0) output.unshift(text)
+    }
+    return output.join('\n')
   }
 
   private visibilityReminderState(sessionId: string): VisibilityReminderState {
@@ -5841,28 +5952,19 @@ export class FleetRunService {
     if (growth < interval) return
     const detailed = !reminder.detailedReminderSent
     const userFacingTurn = this.assistantUserFacingTurns.get(sessionId)?.turn === turn
-    const reminderText = foregroundAssistant
-      ? detailed
-        ? [
-            '[Fleet assistant visibility reminder]',
-            'Re-check both visibility boundaries before ending this turn.',
-            userFacingTurn
-              ? 'This is a user-facing turn: its last non-empty native output is delivered to the user automatically at normal turn end, but Team members do not see it.'
-              : 'This is a background turn: ordinary native output remains only in the Session trace and is delivered to neither the user nor Team members.',
-            'Use fleet_user_task action="update" only for an intentional mid-turn user update; do not repeat the automatic final delivery. If another Team member needs a result, decision, question, or handoff, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest necessary audience.',
-            'Do not acknowledge this reminder. If no user update or Team sharing is needed, end without extra commentary.',
-          ].join('\n')
-        : userFacingTurn
-          ? '[Fleet assistant visibility reminder] The last native output will reach the user, not the Team. Do not duplicate it; share only newly relevant Team content with the smallest audience.'
-          : '[Fleet assistant visibility reminder] Background native output reaches neither user nor Team. Send only an intentional user update or newly relevant Team content; otherwise end silently.'
-      : detailed
-        ? [
-            '[Fleet visibility reminder]',
-            'Your ordinary model output from the previous turn is visible only in this private Session; other Team members do not automatically see it.',
-            'If it contains a result, decision, question, or handoff another member needs, send only that relevant content with fleet_send or fleet_reply, or record it in the owning Fleet Task. Choose the smallest audience: send one-member or subset work privately to an accountable owner, and use a Channel only when its full audience needs the content. Do not resend user-only text or information already shared.',
-            'Do not acknowledge or report reading this reminder. If nothing needs sharing, end without commentary. This private reminder creates no Team message or Task.',
-          ].join('\n')
-        : '[Fleet visibility reminder] Direct output remains private to this Session. Share only newly relevant content with the smallest necessary audience; otherwise end silently.'
+    const reminderText = this.selectTurnReminderText(
+      agent,
+      'turn-end',
+      turn,
+      this.turnDirectOutputText(agent, turn),
+      this.recentTurnReminderTools(agent, turn),
+      [
+        foregroundAssistant ? 'foreground-assistant' : 'formal-member',
+        detailed ? 'detailed' : 'brief',
+        ...(foregroundAssistant ? [userFacingTurn ? 'user-facing' : 'background'] : []),
+      ],
+    )
+    if (reminderText === undefined) return
     runtime.messages.sendSystemNotification(sessionId, {
       kind: 'visibility_reminder',
       text: reminderText,
@@ -6326,7 +6428,8 @@ export class FleetRunService {
     this.memberVisibilityReviewedTurns.delete(agentId)
     this.visibilityReminderStates.delete(agentId)
     this.turnReminderLastShown.delete(agentId)
-    this.turnReminderInjectedTurns.delete(agentId)
+    this.turnStartReminderTurns.delete(agentId)
+    this.toolResultReminderSequences.delete(agentId)
     this.abnormalSessionIds.delete(agentId)
     for (const [runId, runtime] of this.collaboration.entries()) {
       if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
@@ -7602,7 +7705,8 @@ export class FleetRunService {
     this.memberVisibilityReviewedTurns.clear()
     this.visibilityReminderStates.clear()
     this.turnReminderLastShown.clear()
-    this.turnReminderInjectedTurns.clear()
+    this.turnStartReminderTurns.clear()
+    this.toolResultReminderSequences.clear()
     this.collaboration.close()
     this.dormantRunIds.clear()
     this.manualWakeRequiredRunIds.clear()
