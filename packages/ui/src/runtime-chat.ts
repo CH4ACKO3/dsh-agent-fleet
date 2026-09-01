@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement, ReactNode } from 'react'
+import type { CSSProperties, FocusEvent, MouseEvent, ReactElement, ReactNode } from 'react'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { HoverHint, type HoverHintProps, type HoverHintTriggerProps } from 'dsh-hover-hint'
@@ -406,8 +406,16 @@ const runtimeChatStyles = `
 
 .dsh-fleet-message-receipt-columns {
   min-width: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--dsh-fleet-status-column-count, 3), minmax(0, 1fr));
   display: grid;
+}
+
+.dsh-fleet-member-status-popover {
+  width: min(
+    calc(var(--dsh-fleet-status-column-count, 3) * 180px + 24px),
+    600px,
+    calc(100vw - 24px)
+  );
 }
 
 .dsh-fleet-channel-members-popover {
@@ -966,6 +974,37 @@ export interface FleetChatReadReceiptData {
   readonly onOpenSource?: (source: FleetChatReceiptSource) => void
 }
 
+export interface FleetChatMemberStatusGroup {
+  readonly id: string
+  readonly label: string
+  readonly members: readonly FleetChatMember[]
+  readonly details?: ReadonlyMap<string, string>
+}
+
+export interface FleetChatMemberStatusPopoverTriggerProps {
+  readonly 'aria-haspopup': 'dialog'
+  readonly 'aria-expanded': boolean
+  readonly 'aria-controls': string
+  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void
+  readonly onMouseEnter?: (event: MouseEvent<HTMLButtonElement>) => void
+  readonly onFocus?: (event: FocusEvent<HTMLButtonElement>) => void
+  readonly onBlur?: (event: FocusEvent<HTMLButtonElement>) => void
+}
+
+export interface FleetChatMemberStatusPopoverProps {
+  readonly groups: readonly FleetChatMemberStatusGroup[]
+  readonly ariaLabel: string
+  readonly mode?: 'click' | 'hover'
+  readonly hideEmptyGroups?: boolean
+  readonly placement?: 'below-start' | 'below-end' | 'right'
+  readonly className?: string
+  readonly style?: CSSProperties
+  readonly renderMember?: (member: FleetChatMember, source?: FleetChatReceiptSource) => ReactNode
+  readonly sources?: readonly FleetChatReceiptSource[]
+  readonly onOpenSource?: (source: FleetChatReceiptSource) => void
+  readonly trigger: (props: FleetChatMemberStatusPopoverTriggerProps) => ReactElement
+}
+
 export interface FleetChatPendingDelivery {
   readonly member: FleetChatMember
   readonly reason?: 'no_active_session' | 'inbox_delivery_failed' | 'participant_retired'
@@ -1350,6 +1389,95 @@ function FleetChatMemberList({ members, details, sources, renderMember, onOpenSo
   })
 }
 
+const MEMBER_STATUS_POPOVER_CLOSE_DELAY_MS = 180
+
+export function FleetChatMemberStatusPopover({
+  groups: inputGroups,
+  ariaLabel,
+  mode = 'click',
+  hideEmptyGroups = false,
+  placement = 'below-end',
+  className,
+  style,
+  renderMember,
+  sources,
+  onOpenSource,
+  trigger,
+}: FleetChatMemberStatusPopoverProps): ReactElement | null {
+  const groups = hideEmptyGroups ? inputGroups.filter(group => group.members.length > 0) : inputGroups
+  const controller = useFleetAnchoredPopover(placement, 7)
+  const closeTimer = useRef<number>()
+  const cancelClose = (): void => {
+    if (closeTimer.current === undefined) return
+    window.clearTimeout(closeTimer.current)
+    closeTimer.current = undefined
+  }
+  const closeSoon = (): void => {
+    cancelClose()
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = undefined
+      controller.close()
+    }, MEMBER_STATUS_POPOVER_CLOSE_DELAY_MS)
+  }
+  useEffect(() => cancelClose, [])
+  if (groups.length === 0) return null
+  const interaction: FleetChatMemberStatusPopoverTriggerProps = {
+    'aria-haspopup': 'dialog',
+    'aria-expanded': controller.open,
+    'aria-controls': controller.popoverId,
+    onClick: event => {
+      if (mode === 'hover') controller.openAt(event.currentTarget)
+      else controller.toggleAt(event.currentTarget)
+    },
+    ...(mode === 'hover' ? {
+      onMouseEnter: (event: MouseEvent<HTMLButtonElement>) => {
+        cancelClose()
+        controller.openAt(event.currentTarget)
+      },
+      onFocus: (event: FocusEvent<HTMLButtonElement>) => { controller.openAt(event.currentTarget) },
+      onBlur: (event: FocusEvent<HTMLButtonElement>) => {
+        if (event.relatedTarget instanceof Node && controller.popover.current?.contains(event.relatedTarget) === true) return
+        cancelClose()
+        controller.close()
+      },
+    } : {}),
+  }
+  return jsxs('span', {
+    className,
+    style,
+    ...(mode === 'hover' ? { onMouseLeave: closeSoon } : {}),
+    children: [
+      trigger(interaction),
+      controller.mounted && jsx('div', {
+        ref: controller.popover,
+        id: controller.popoverId,
+        popover: 'auto',
+        className: 'dsh-fleet-message-receipt-popover dsh-fleet-member-status-popover',
+        style: { '--dsh-fleet-status-column-count': String(groups.length) } as CSSProperties,
+        role: 'dialog',
+        'aria-label': ariaLabel,
+        ...(mode === 'hover' ? { onMouseEnter: cancelClose, onMouseLeave: closeSoon } : {}),
+        children: jsx('div', {
+          className: 'dsh-fleet-message-receipt-columns',
+          children: groups.map(group => jsxs('section', {
+            className: 'dsh-fleet-message-receipt-column',
+            children: [
+              jsx('h3', { className: 'dsh-fleet-message-receipt-heading', children: group.label }),
+              jsx(FleetChatMemberList, {
+                members: group.members,
+                details: group.details,
+                sources,
+                renderMember,
+                onOpenSource,
+              }),
+            ],
+          }, group.id)),
+        }),
+      }),
+    ],
+  })
+}
+
 export function FleetChatReadReceipt({
   readMembers,
   deliveredMembers: explicitDeliveredMembers,
@@ -1359,7 +1487,6 @@ export function FleetChatReadReceipt({
   renderMember,
   onOpenSource,
 }: FleetChatReadReceiptData): ReactElement | null {
-  const controller = useFleetAnchoredPopover('below-end', 7)
   const deliveredMembers = explicitDeliveredMembers ?? unreadMembers ?? []
   const pendingMembers = pendingDeliveries.map(delivery => delivery.member)
   const total = readMembers.length + deliveredMembers.length + pendingMembers.length
@@ -1372,11 +1499,32 @@ export function FleetChatReadReceipt({
     `${String(readMembers.length)}/${String(total)} read · ${String(deliveredMembers.length)} delivered · ${String(pendingMembers.length)} pending`,
   )
   const pendingDetails = new Map(pendingDeliveries.map(delivery => [delivery.member.id, pendingDeliveryDetail(delivery)]))
-  return jsxs('span', {
+  return jsx(FleetChatMemberStatusPopover, {
+    groups: [
+      {
+        id: 'read',
+        label: fleetText(`已读 · ${String(readMembers.length)}`, `Read · ${String(readMembers.length)}`),
+        members: readMembers,
+      },
+      {
+        id: 'delivered',
+        label: fleetText(`已送达 · ${String(deliveredMembers.length)}`, `Delivered · ${String(deliveredMembers.length)}`),
+        members: deliveredMembers,
+      },
+      {
+        id: 'pending',
+        label: fleetText(`待送达 · ${String(pendingMembers.length)}`, `Pending · ${String(pendingMembers.length)}`),
+        members: pendingMembers,
+        details: pendingDetails,
+      },
+    ],
+    ariaLabel: fleetText('消息送达与已读情况', 'Message delivery and read status'),
     className: 'dsh-fleet-message-receipt',
     style: { '--dsh-fleet-read-angle': angle } as CSSProperties,
-    children: [
-      jsx(FleetInfoHint, {
+    sources,
+    renderMember,
+    onOpenSource,
+    trigger: (interaction: FleetChatMemberStatusPopoverTriggerProps) => jsx(FleetInfoHint, {
         label: fleetText('查看消息回执说明', 'About message receipts'),
         title: fleetText('消息回执', 'Message receipts'),
         seenMarker: 'fleet.message.receipt',
@@ -1384,14 +1532,11 @@ export function FleetChatReadReceipt({
         footer: null,
         trigger: (hintProps: HoverHintTriggerProps) => jsx('button', {
           ...hintProps,
+          ...interaction,
           type: 'button',
           className: 'dsh-fleet-message-receipt-trigger',
           'data-summary': summary,
           'aria-label': fleetText(`${summary}，查看成员明细`, `${summary}; view member details`),
-          'aria-haspopup': 'dialog',
-          'aria-expanded': controller.open ? 'true' : 'false',
-          'aria-controls': controller.popoverId,
-          onClick: (event: { readonly currentTarget: HTMLElement }) => { controller.toggleAt(event.currentTarget) },
           children: jsx('span', {
             className: 'dsh-fleet-message-receipt-indicator',
             'data-complete': complete ? 'true' : 'false',
@@ -1424,54 +1569,6 @@ export function FleetChatReadReceipt({
           ],
         }),
       }),
-      controller.mounted && jsx('div', {
-        ref: controller.popover,
-        id: controller.popoverId,
-        popover: 'auto',
-        className: 'dsh-fleet-message-receipt-popover',
-        role: 'dialog',
-        'aria-label': fleetText('消息送达与已读情况', 'Message delivery and read status'),
-        children: jsxs('div', {
-          className: 'dsh-fleet-message-receipt-columns',
-          children: [
-            jsxs('section', {
-              className: 'dsh-fleet-message-receipt-column',
-              children: [
-                jsx('h3', {
-                  className: 'dsh-fleet-message-receipt-heading',
-                  children: fleetText(`已读 · ${String(readMembers.length)}`, `Read · ${String(readMembers.length)}`),
-                }),
-                jsx(FleetChatMemberList, { members: readMembers, sources, renderMember, onOpenSource }),
-              ],
-            }),
-            jsxs('section', {
-              className: 'dsh-fleet-message-receipt-column',
-              children: [
-                jsx('h3', {
-                  className: 'dsh-fleet-message-receipt-heading',
-                  children: fleetText(`已送达 · ${String(deliveredMembers.length)}`, `Delivered · ${String(deliveredMembers.length)}`),
-                }),
-                jsx(FleetChatMemberList, { members: deliveredMembers, sources, renderMember, onOpenSource }),
-              ],
-            }),
-            jsxs('section', {
-              className: 'dsh-fleet-message-receipt-column',
-              children: [
-                jsx('h3', {
-                  className: 'dsh-fleet-message-receipt-heading',
-                  children: fleetText(`待送达 · ${String(pendingMembers.length)}`, `Pending · ${String(pendingMembers.length)}`),
-                }),
-                jsx(FleetChatMemberList, {
-                  members: pendingMembers,
-                  details: pendingDetails,
-                  renderMember,
-                }),
-              ],
-            }),
-          ],
-        }),
-      }),
-    ],
   })
 }
 

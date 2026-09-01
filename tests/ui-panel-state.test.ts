@@ -31,6 +31,7 @@ import {
 } from '../packages/ui/src/team-panel.js'
 import {
   projectAgentFleetPrivateMessages,
+  projectAgentFleetWorkStatuses,
 } from '../packages/ui/src/assistant-private-chat.js'
 import {
   fleetConversationAudienceLabel,
@@ -430,6 +431,28 @@ describe('Fleet member permission groups', () => {
 })
 
 describe('Agent Fleet private-chat projection', () => {
+  it('groups only populated Team runtime states for the work-status popover', () => {
+    const statuses = projectAgentFleetWorkStatuses([
+      { id: 'assistant', name: 'Alen', role: '团队助理', color: '#5577aa', runtimeStatus: 'running' },
+      { id: 'engineer', name: 'Faisal', role: '核心工程师', color: '#337755', runtimeStatus: 'running' },
+      { id: 'quality', name: 'Alivia', role: '集成与质量工程师', color: '#995577', runtimeStatus: 'waiting' },
+      { id: 'lead', name: 'Harlan', role: '产品负责人', color: '#775533', runtimeStatus: 'idle' },
+      { id: 'paused', name: 'Robin', role: '评审', color: '#777777', runtimeStatus: 'paused' },
+      { id: 'unloaded', name: 'Mira', role: '平台工程师', color: '#667788', runtimeStatus: 'unknown' },
+    ])
+
+    expect(statuses.map(group => ({
+      id: group.id,
+      members: group.members.map(member => member.name),
+    }))).toEqual([
+      { id: 'working', members: ['Alen', 'Faisal'] },
+      { id: 'waiting', members: ['Alivia'] },
+      { id: 'idle', members: ['Harlan'] },
+      { id: 'paused', members: ['Robin'] },
+      { id: 'unloaded', members: ['Mira'] },
+    ])
+  })
+
   it('keeps human-visible text and images while excluding reasoning, tools, and context', () => {
     const nodes = new Map<string, unknown>([
       ['user:1', {

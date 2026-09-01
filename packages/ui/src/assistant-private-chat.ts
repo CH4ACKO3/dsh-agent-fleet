@@ -6,10 +6,13 @@ import { useFleetMetaText } from './meta-assistant.js'
 import { useFleetChatColumnWidth } from './chat-column-width.js'
 import {
   FleetChatAvatar,
+  FleetChatMemberStatusPopover,
   FleetChatMessage,
   type FleetChatContentBlock,
   type FleetChatImageBlock,
   type FleetChatMember,
+  type FleetChatMemberStatusPopoverTriggerProps,
+  type FleetRuntimeMember,
 } from './runtime-chat.js'
 import { FleetMemberPopover, type FleetMemberPopoverTriggerProps } from './member-popover.js'
 import { fleetText } from './locale.js'
@@ -422,6 +425,53 @@ const styles = `
   overflow-y: auto;
 }
 
+.dsh-fleet-assistant-private[data-team-conversation="true"] .dsh-fleet-assistant-private-column {
+  padding-bottom: 50px;
+}
+
+.dsh-fleet-assistant-work-status {
+  z-index: 5;
+  max-width: min(420px, calc(100% - 32px));
+  position: absolute;
+  bottom: 5px;
+  left: clamp(
+    12px,
+    calc(50% - var(--dsh-fleet-assistant-chat-column-width, 760px) / 2 + 12px),
+    calc(100% - 220px)
+  );
+}
+
+.dsh-fleet-assistant-work-status-trigger {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-height: 28px;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-xs-13, inherit);
+  font-size: 11px;
+  line-height: 18px;
+  overflow: hidden;
+  display: block;
+}
+
+.dsh-fleet-assistant-work-status-trigger:hover,
+.dsh-fleet-assistant-work-status-trigger[aria-expanded="true"] {
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
+.dsh-fleet-assistant-work-status-trigger:focus-visible {
+  color: var(--dsw-alias-label-secondary);
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
 @keyframes dsh-fleet-assistant-private-caret {
   50% { opacity: 0; }
 }
@@ -485,8 +535,43 @@ export interface AgentFleetPrivateMessage {
 
 export interface AgentFleetConversationIdentity {
   readonly assistant: FleetChatMember
+  readonly members?: readonly FleetRuntimeMember[]
   readonly interactions: readonly AgentFleetInteractionTurn[]
   readonly interactionPending: boolean
+}
+
+export type AgentFleetWorkStatusId = 'working' | 'waiting' | 'idle' | 'paused' | 'error' | 'unloaded'
+
+export interface AgentFleetWorkStatusGroup {
+  readonly id: AgentFleetWorkStatusId
+  readonly label: string
+  readonly members: readonly FleetRuntimeMember[]
+}
+
+function agentFleetMemberWorkStatus(member: FleetRuntimeMember): AgentFleetWorkStatusId {
+  if (member.runtimeStatus === 'running' || member.presence === 'busy') return 'working'
+  if (member.runtimeStatus === 'waiting' || member.presence === 'waiting') return 'waiting'
+  if (member.runtimeStatus === 'error' || member.presence === 'error') return 'error'
+  if (member.runtimeStatus === 'paused') return 'paused'
+  if (member.runtimeStatus === 'idle' || member.presence === 'active') return 'idle'
+  return 'unloaded'
+}
+
+export function projectAgentFleetWorkStatuses(
+  members: readonly FleetRuntimeMember[],
+): readonly AgentFleetWorkStatusGroup[] {
+  const statuses: readonly { readonly id: AgentFleetWorkStatusId; readonly label: string }[] = [
+    { id: 'working', label: fleetText('工作中', 'Working') },
+    { id: 'waiting', label: fleetText('等待中', 'Waiting') },
+    { id: 'idle', label: fleetText('空闲', 'Idle') },
+    { id: 'paused', label: fleetText('已暂停', 'Paused') },
+    { id: 'error', label: fleetText('异常', 'Error') },
+    { id: 'unloaded', label: fleetText('未加载', 'Not loaded') },
+  ]
+  return statuses.flatMap(status => {
+    const grouped = members.filter(member => agentFleetMemberWorkStatus(member) === status.id)
+    return grouped.length === 0 ? [] : [{ ...status, members: grouped }]
+  })
 }
 
 export interface AgentFleetInteractionTurn {
@@ -822,6 +907,39 @@ function AgentFleetAvatarPopover({ member, running, showDetails, showContext }: 
   })
 }
 
+function AgentFleetWorkStatus({ members }: { readonly members: readonly FleetRuntimeMember[] }): ReactElement | null {
+  const groups = projectAgentFleetWorkStatuses(members)
+  if (groups.length === 0) return null
+  const working = groups.find(group => group.id === 'working')?.members ?? []
+  const summary = working.length === 0
+    ? fleetText('当前没有成员工作', 'No members are working')
+    : working.length === 1
+      ? fleetText(`${working[0]?.name ?? ''} 正在工作`, `${working[0]?.name ?? ''} is working`)
+      : fleetText(
+          `${working[0]?.name ?? ''} 等 ${String(working.length)} 位成员正在工作`,
+          `${working[0]?.name ?? ''} and ${String(working.length - 1)} others are working`,
+        )
+  return jsx(FleetChatMemberStatusPopover, {
+    groups: groups.map(group => ({
+      id: group.id,
+      label: `${group.label} · ${String(group.members.length)}`,
+      members: group.members,
+    })),
+    ariaLabel: fleetText('团队成员运行状态', 'Team member runtime status'),
+    mode: 'hover',
+    placement: 'below-start',
+    hideEmptyGroups: true,
+    className: 'dsh-fleet-assistant-work-status',
+    trigger: (interaction: FleetChatMemberStatusPopoverTriggerProps) => jsx('button', {
+      ...interaction,
+      type: 'button',
+      className: 'dsh-fleet-assistant-work-status-trigger',
+      'aria-label': fleetText(`${summary}，查看成员状态`, `${summary}; view member status`),
+      children: summary,
+    }),
+  })
+}
+
 function OperatorAvatarPopover({ member }: { readonly member: FleetOperatorProfile }): ReactElement {
   return jsx(FleetMemberPopover, {
     member,
@@ -1049,6 +1167,7 @@ export function AgentFleetPrivateChat({
         title: resizeLabel,
         ...column.handle,
       }),
+      identity?.members !== undefined && jsx(AgentFleetWorkStatus, { members: identity.members }),
       jsx('div', {
         className: 'dsh-fleet-assistant-private-scroll',
         children: jsxs('div', {

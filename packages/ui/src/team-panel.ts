@@ -7064,6 +7064,7 @@ function fleetAssistantConversationIdentity(snapshot: FleetPanelSnapshot, sessio
   const interaction = team?.assistantInteractions?.find(candidate => candidate.assistantId === visibleAssistant.id)
   return {
     assistant: visibleAssistant,
+    ...(team === undefined ? {} : { members: [...team.members, ...(team.assistants ?? [])] }),
     interactions: interaction?.turns ?? [],
     interactionPending: interaction?.pending === true,
   }
