@@ -253,7 +253,7 @@ const styles = `
 
 interface MetaSessionListSnapshot {
   readonly current?: string
-  readonly byId: Readonly<Record<string, { readonly cwd?: string }>>
+  readonly byId: Readonly<Record<string, { readonly cwd?: string; readonly title?: string }>>
 }
 
 interface MetaSessionBinding {
@@ -293,6 +293,7 @@ let locale: FleetLocaleRuntime | undefined
 let translateFleet: ((key: FleetLocaleKey) => string) | undefined
 let removeSessionSubscription: (() => void) | undefined
 const listeners = new Set<() => void>()
+const EMPTY_SESSION_LIST: MetaSessionListSnapshot = { byId: {} }
 
 function storageGet(key: string): string | undefined {
   if (typeof localStorage === 'undefined') return undefined
@@ -340,6 +341,44 @@ export function configureFleetMetaAssistantClient(
   workspaces = nextWorkspaces
   removeSessionSubscription = sessions?.list.subscribe(syncCurrentSession)
   syncCurrentSession()
+}
+
+/** Stable native title for a Session acting as one Team's assistant. */
+export function fleetAssistantSessionTitle(
+  teamName: string | undefined,
+  assistantName: string | undefined,
+): string | undefined {
+  const team = teamName?.trim() ?? ''
+  const assistant = assistantName?.trim() ?? ''
+  return team === '' || assistant === '' ? undefined : `${team} · ${assistant}`
+}
+
+/** Keep native first-message title generation from replacing a Team assistant's identity. */
+export function useFleetAssistantSessionTitle(
+  sessionId: string | undefined,
+  teamName: string | undefined,
+  assistantName: string | undefined,
+): void {
+  const sessionList = useSyncExternalStore(
+    listener => sessions?.list.subscribe(listener) ?? (() => {}),
+    () => sessions?.list.getSnapshot() ?? EMPTY_SESSION_LIST,
+    () => EMPTY_SESSION_LIST,
+  )
+  const desiredTitle = fleetAssistantSessionTitle(teamName, assistantName)
+  const currentTitle = sessionId === undefined ? undefined : sessionList.byId[sessionId]?.title
+  const pendingRename = useRef<string>()
+
+  useEffect(() => {
+    if (sessionId === undefined || desiredTitle === undefined || currentTitle === desiredTitle) return
+    const requestKey = JSON.stringify([sessionId, desiredTitle])
+    if (pendingRename.current === requestKey) return
+    const binding = sessions?.binding(sessionId)
+    if (binding === undefined) return
+    pendingRename.current = requestKey
+    void binding.session.rename(desiredTitle).catch(() => undefined).finally(() => {
+      if (pendingRename.current === requestKey) pendingRename.current = undefined
+    })
+  }, [currentTitle, desiredTitle, sessionId])
 }
 
 export function configureFleetMetaAssistantLocale(nextLocale: FleetLocaleRuntime | undefined): void {

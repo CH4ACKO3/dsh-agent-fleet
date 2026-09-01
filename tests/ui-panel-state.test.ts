@@ -38,8 +38,23 @@ import {
 import {
   archiveFleetAssistantSession,
   archiveFleetAssistantTeam,
+  fleetAssistantSessionTitle,
   resolveFleetAssistantArchiveTarget,
 } from '../packages/ui/src/meta-assistant.js'
+
+describe('Fleet assistant Session titles', () => {
+  it('combines the normalized Team and assistant names', () => {
+    expect(fleetAssistantSessionTitle(' Small software Team ', ' Harriet '))
+      .toBe('Small software Team · Harriet')
+    expect(fleetAssistantSessionTitle('小型软件工程团队', '海伦'))
+      .toBe('小型软件工程团队 · 海伦')
+  })
+
+  it('waits until both identity parts are available', () => {
+    expect(fleetAssistantSessionTitle(undefined, 'Harriet')).toBeUndefined()
+    expect(fleetAssistantSessionTitle('Small Team', '   ')).toBeUndefined()
+  })
+})
 
 describe('Fleet assistant Session archive choices', () => {
   it('offers Team archive only for a live assistant Session and includes every current assistant connection', () => {

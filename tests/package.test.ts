@@ -44,6 +44,7 @@ test('uses native assistant chat while retaining Fleet composer commands and swi
   expect(entry).toContain('fleetPrivateConversationCommands(')
   expect(entry).toContain('usageMeter: jsx(FleetBudgetMeter')
   expect(entry).toContain('contextUsage: true')
+  expect(entry).toContain('useFleetAssistantSessionTitle(')
   expect(panel).toContain("contextUsage: conversation.kind === 'direct' && peer !== undefined")
   expect(panel).toContain("panelText('成本用量', 'Cost')")
   expect(panel).toContain("panelText('上下文用量', 'Context')")

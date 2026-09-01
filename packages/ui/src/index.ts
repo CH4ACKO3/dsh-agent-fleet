@@ -62,7 +62,10 @@ import {
   type FleetModelDirectoryState,
   type FleetPanelTeamSummary,
 } from './team-panel.js'
-import { useFleetMetaAssistantSession } from './meta-assistant.js'
+import {
+  useFleetAssistantSessionTitle,
+  useFleetMetaAssistantSession,
+} from './meta-assistant.js'
 import { uploadFleetSetupFile } from './web-client.js'
 
 const STYLE_ID = 'dsh-agent-fleet-team-entry'
@@ -6910,6 +6913,11 @@ export function withFleetComposerActivation(
     const meta = activation?.request.mode === 'meta'
     const teamAssistant = fleetAssistant && assistantTeam !== undefined
     const teamArchived = teamAssistant && assistantTeam.status === 'closed'
+    useFleetAssistantSessionTitle(
+      teamAssistant ? sessionId : undefined,
+      assistantTeam?.teamName,
+      assistantName,
+    )
     const inputActions = props.inputActions as NativeInputActions | undefined
     const keyboard = props.keyboard as NativeComposerKeyboard | undefined
     const [assistantError, setAssistantError] = useState<string>()
