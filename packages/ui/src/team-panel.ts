@@ -11802,7 +11802,11 @@ function FleetOfficialConversationComposer({ owner, conversation }: {
       onRequestWorkspace: undefined,
       placeholder: tutorial
         ? panelText('引导团队为只读演示', 'The guided Team is a read-only demo')
-        : panelText(`发送消息到 ${conversation.kind === 'channel' ? '#' : ''}${conversation.name}`, `Send a message to ${conversation.kind === 'channel' ? '#' : ''}${conversation.name}`),
+        : conversation.kind === 'channel'
+          ? panelText(`发送频道消息到 #${conversation.name}`, `Post to #${conversation.name}`)
+          : conversation.kind === 'direct'
+            ? panelText(`私聊 ${conversation.name}`, `Message ${conversation.name} privately`)
+            : panelText(`发送消息到 ${conversation.name}`, `Send a message to ${conversation.name}`),
       useInput,
       useSession,
       useNotices,

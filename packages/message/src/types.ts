@@ -106,6 +106,8 @@ export interface SendMessageResult {
   readonly recipients: number
   readonly delivered: number
   readonly woken: number
+  /** Non-blocking guidance when the selected audience is probably broader than necessary. */
+  readonly audienceHint?: string
 }
 
 export interface FleetSystemNotificationInput {

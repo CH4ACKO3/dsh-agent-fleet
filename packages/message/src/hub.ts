@@ -1661,9 +1661,12 @@ export class MessageHub {
     }
 
     this.clearPendingWakeups(sender.id, input.to)
-    const recipientIds = replyRecipient === undefined
-      ? this.visibleChannelParticipantIds(channel).filter(participantId => participantId !== sender.id)
-      : [replyRecipient]
+    const channelRecipientIds = this.visibleChannelParticipantIds(channel).filter(participantId => participantId !== sender.id)
+    const recipientIds = replyRecipient !== undefined
+      ? [replyRecipient]
+      : mentions.length > 0
+        ? mentions
+        : channelRecipientIds
     const message = this.appendMessage(sender.id, input, text, resources, mentions, recipientIds, input.kind ?? 'text', origin)
     this.acknowledgeInputsByReply(sender.id, input.to)
     this.removePendingSystemNotification(sender, this.requiredReplyNoticeKey(message))
@@ -1684,6 +1687,11 @@ export class MessageHub {
       recipients: recipientIds.length,
       delivered,
       woken,
+      ...(input.kind !== 'reply' && input.replyTo === undefined && mentions.length > 0 && mentions.length < channelRecipientIds.length
+        ? {
+            audienceHint: `This post notified ${String(mentions.length)}/${String(channelRecipientIds.length)} Channel peers and remains visible to the full Channel. Prefer a direct message or bounded Meeting for subset work.`,
+          }
+        : {}),
     }
   }
 

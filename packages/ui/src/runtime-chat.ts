@@ -946,6 +946,13 @@ export interface FleetChatCommentProps {
   readonly actions?: ReactNode
 }
 
+export function fleetConversationAudienceLabel(kind: FleetConversationKind): string {
+  if (kind === 'direct') return fleetText('私聊 · 仅会话双方', 'Direct · Participants only')
+  if (kind === 'channel') return fleetText('频道 · 全体成员可见', 'Channel · Visible to all members')
+  if (kind === 'context') return fleetText('Agent 上下文', 'Agent context')
+  return fleetText('跨团队', 'Cross-Team')
+}
+
 export interface FleetChatReadReceiptData {
   readonly readMembers: readonly FleetChatMember[]
   /** Delivered but not yet fully read. */
@@ -1548,7 +1555,6 @@ function FleetConversationMembersMeta({ members, onlineMembers, renderMember }: 
 
 export function FleetConversationHeader(props: FleetConversationHeaderProps): ReactElement {
   const direct = props.kind === 'direct'
-  const crossTeam = props.kind === 'cross-team'
   const context = props.kind === 'context'
   const presence = props.peer?.presence ?? 'offline'
   const active = props.onlineMembers?.length ?? props.activeCount ?? 0
@@ -1569,13 +1575,7 @@ export function FleetConversationHeader(props: FleetConversationHeaderProps): Re
               jsx('h2', { className: 'dsh-fleet-conversation-header-title', children: props.name }),
               jsx('span', {
                 className: 'dsh-fleet-conversation-header-kind',
-                children: direct
-                  ? fleetText('私聊', 'Direct message')
-                  : context
-                    ? fleetText('Agent 上下文', 'Agent context')
-                    : crossTeam
-                      ? fleetText('跨团队', 'Cross-Team')
-                      : fleetText('频道', 'Channel'),
+                children: fleetConversationAudienceLabel(props.kind),
               }),
             ],
           }),

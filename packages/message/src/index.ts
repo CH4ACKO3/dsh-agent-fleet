@@ -47,6 +47,7 @@ const SEND_SCHEMA = {
     recipients: { type: 'integer', required: true },
     delivered: { type: 'integer', required: true },
     woken: { type: 'integer', required: true },
+    audienceHint: { type: 'string' },
   },
 } as const
 
@@ -151,9 +152,9 @@ export function installMessageTools(
   if (options.messages !== false) {
     register(defineTool({
       name: 'fleet_send',
-      description: 'Send a quiet Fleet message. Ordinary messages only enter recipients\' Inbox Tasks. Each resolved @mention additionally creates a Reply Task for that member. Use fleet_reply, not fleet_send, to finish an existing Reply Task.',
+      description: 'Send one quiet Fleet message to the smallest necessary audience. Use a direct @target for one-member work and send subset work privately to one accountable owner, who can coordinate with peers. Use a #channel only when its full audience needs the exact content. A Channel post with mentions notifies only those members but remains visible to the full Channel. Each mention creates a Reply Task; use fleet_reply to finish an existing Reply Task.',
       parameters: {
-        to: { type: 'string', required: true, description: 'Routing target in @fleet-name, @agent-id, #channel, or meeting:id form. A direct @target alone does not create a Reply Task.' },
+        to: { type: 'string', required: true, description: 'Use @fleet-name or @agent-id for private one-member work, #channel for a Team-visible broadcast, or meeting:id. A direct @target delivers the full message but creates no Reply Task unless that recipient is also mentioned in the text or mentions parameter.' },
         message: { type: 'string', required: true, description: 'Self-contained message text.' },
         mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets, merged with valid @Name or @member-id mentions parsed from the text. A direct message may mention only its recipient.' },
         reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },

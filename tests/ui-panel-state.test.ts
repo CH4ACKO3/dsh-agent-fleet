@@ -33,6 +33,7 @@ import {
   reconcileAgentFleetMailboxReadState,
 } from '../packages/ui/src/assistant-private-chat.js'
 import {
+  fleetConversationAudienceLabel,
   fleetMemberPresence,
   fleetMemberPresenceLabel,
 } from '../packages/ui/src/runtime-chat.js'
@@ -41,6 +42,13 @@ import {
   archiveFleetAssistantTeam,
   resolveFleetAssistantArchiveTarget,
 } from '../packages/ui/src/meta-assistant.js'
+
+describe('Fleet conversation audience labels', () => {
+  it('makes private and broadcast scope explicit', () => {
+    expect(fleetConversationAudienceLabel('direct')).toBe('私聊 · 仅会话双方')
+    expect(fleetConversationAudienceLabel('channel')).toBe('频道 · 全体成员可见')
+  })
+})
 
 describe('Fleet assistant Session archive choices', () => {
   it('offers Team archive only for a live assistant Session and includes every current assistant connection', () => {

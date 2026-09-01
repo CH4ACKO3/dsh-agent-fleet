@@ -116,6 +116,9 @@ describe('MessageHub', () => {
       delivery: 'wakeup',
     })
 
+    expect(sent).toMatchObject({ recipients: 1 })
+    expect(sent.audienceHint).toBe('This post notified 1/3 Channel peers and remains visible to the full Channel. Prefer a direct message or bounded Meeting for subset work.')
+    expect(hub.receipt(sent.messageId).recipientIds).toEqual(['reviewer'])
     expect(hub.unreadSummary(reviewer.id)).toEqual({
       unreadMessages: 1,
       unreadChars: '@reviewer Start the first phase. QA follows later.'.length,
@@ -123,6 +126,28 @@ describe('MessageHub', () => {
     expect(hub.unreadSummary(qa.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
     expect(hub.readInbox(qa)).toMatchObject({ messages: [], remainingUnread: 0 })
     expect(hub.getMessage(qa, sent.messageId)).toMatchObject({ id: sent.messageId })
+  })
+
+  it('nudges any addressed Channel subset without warning on a channel-wide address', () => {
+    const { hub, lead } = setup()
+    const subset = hub.send(lead, {
+      to: '#general',
+      text: '@reviewer and @qa align privately.',
+      mentions: ['@reviewer', '@qa'],
+      delivery: 'quiet',
+    })
+    const wholeChannel = hub.send(lead, {
+      to: '#general',
+      text: '@reviewer @qa @observer this affects everyone.',
+      mentions: ['@reviewer', '@qa', '@observer'],
+      delivery: 'quiet',
+    })
+
+    expect(subset).toMatchObject({ recipients: 2 })
+    expect(subset.audienceHint).toBe('This post notified 2/3 Channel peers and remains visible to the full Channel. Prefer a direct message or bounded Meeting for subset work.')
+    expect(hub.receipt(subset.messageId).recipientIds).toEqual(['reviewer', 'qa'])
+    expect(wholeChannel).toMatchObject({ recipients: 3 })
+    expect(wholeChannel.audienceHint).toBeUndefined()
   })
 
   it('keeps a Channel reply visible while addressing only the source sender', () => {
@@ -141,6 +166,7 @@ describe('MessageHub', () => {
     })
 
     expect(sent).toMatchObject({ recipients: 1, delivered: 1, woken: 0 })
+    expect(sent.audienceHint).toBeUndefined()
     expect(hub.getMessage(qa, sent.messageId)).toMatchObject({
       kind: 'reply',
       conversation: '#general',
@@ -170,6 +196,7 @@ describe('MessageHub', () => {
     })
 
     expect(sent).toMatchObject({ recipients: 1, woken: 0 })
+    expect(sent.audienceHint).toBeUndefined()
     expect(reviewer.injected).toHaveLength(1)
     expect(reviewer.followedUp).toHaveLength(0)
     expect(reviewer.injected[0]).toContain('Please inspect the parser.')
@@ -302,7 +329,8 @@ describe('MessageHub', () => {
     expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: sent.messageId })
     expect(hub.pendingRequiredReply(qa.id)).toBeUndefined()
     expect(reviewer.injected.at(-1)).toContain('does not deliver the reply')
-    expect(qa.injected.at(-1)).not.toContain('does not deliver the reply')
+    expect(qa.injected).toHaveLength(0)
+    expect(hub.search(qa, { query: 'Please inspect this' })).toHaveLength(1)
 
     hub.send(reviewer, {
       to: '#general',
@@ -1113,7 +1141,7 @@ describe('MessageHub', () => {
     expect(reviewer.injected).toEqual([])
   })
 
-  it('interrupts only explicitly mentioned Channel members', () => {
+  it('interrupts and notifies only explicitly mentioned Channel members', () => {
     const { hub, lead, reviewer, qa } = setup()
     hub.send(lead, {
       to: '#general',
@@ -1126,7 +1154,7 @@ describe('MessageHub', () => {
     expect(reviewer.steered).toHaveLength(1)
     expect(qa.cancellations).toEqual([])
     expect(qa.steered).toEqual([])
-    expect(qa.injected[0]).toContain('Unread channel activity')
+    expect(qa.injected).toHaveLength(0)
   })
 
   it('restores unresolved wake-ups without redelivering them', () => {
@@ -1148,7 +1176,7 @@ describe('MessageHub', () => {
     expect(second.reviewer.followedUp).toEqual([])
   })
 
-  it('wakes only mentioned Channel members and sends notices to the rest', () => {
+  it('wakes and notifies only mentioned Channel members', () => {
     const { hub, lead, reviewer, qa } = setup()
     hub.send(lead, {
       to: '#general',
@@ -1158,7 +1186,7 @@ describe('MessageHub', () => {
     })
 
     expect(reviewer.followedUp[0]).toContain('please check this now')
-    expect(qa.injected[0]).toContain('Unread channel activity')
+    expect(qa.injected).toHaveLength(0)
     expect(qa.followedUp).toHaveLength(0)
   })
 
