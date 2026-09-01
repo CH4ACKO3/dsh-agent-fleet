@@ -231,7 +231,7 @@ describe('MessageHub', () => {
       .toContainEqual(expect.objectContaining({ id: sent.messageId, delivery: 'fyi' }))
   })
 
-  it('promotes trusted direct-human messages while leaving ordinary Agent relays optional', () => {
+  it('preserves trusted direct-human delivery while requiring an explicit mention for replies', () => {
     const { hub, lead, reviewer } = setup()
 
     const human = hub.sendHuman(lead, {
@@ -240,19 +240,28 @@ describe('MessageHub', () => {
       delivery: 'quiet',
     })
     expect(reviewer.injectedContext[0]?.source).toEqual({ kind: 'user' })
-    expect(reviewer.injected[0]).toContain('reply-task')
+    expect(reviewer.injected[0]).not.toContain('reply-task')
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: human.messageId,
       origin: 'user',
     })
-    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: human.messageId })
+    expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
+
+    const required = hub.sendHuman(lead, {
+      to: '@reviewer',
+      text: '@reviewer Please confirm this request.',
+      delivery: 'quiet',
+    })
+    expect(reviewer.injectedContext[1]?.source).toEqual({ kind: 'user' })
+    expect(reviewer.injected[1]).toContain('reply-task')
+    expect(hub.pendingRequiredReply(reviewer.id)).toMatchObject({ id: required.messageId })
 
     hub.send(lead, {
       to: '@reviewer',
       text: 'This remains an Agent relay.',
       delivery: 'quiet',
     })
-    expect(reviewer.injectedContext[1]?.source).toMatchObject({
+    expect(reviewer.injectedContext[2]?.source).toMatchObject({
       kind: 'plugin',
       plugin: 'dsh-agent-fleet',
       form: 'relay',

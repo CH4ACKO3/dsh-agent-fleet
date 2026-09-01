@@ -5339,18 +5339,13 @@ export class FleetRunService {
     const runtime = this.requireRuntime(record.id)
     // This service route is the foreground-assistant transport. Formal members
     // use the Message package tool bound inside their Team context.
-    const defaultDirectReply = input.to.startsWith('@')
-      && input.noReply !== true
-    const mentions = defaultDirectReply
-      ? [...new Set([input.to, ...(input.mentions ?? [])])]
-      : input.mentions
     const result = runtime.messages.send(caller, {
       to: input.to,
       text: input.text,
       delivery: input.delivery === 'quiet' && input.to.startsWith('#') ? 'fyi' : input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
-      ...(mentions === undefined ? {} : { mentions }),
+      ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
     })
     this.pendingAssistantKickoffs.delete(`${record.id}:${String(caller.id)}`)
     // Message events may be persisted before their listeners have reconciled
@@ -9342,24 +9337,26 @@ export function installRunTools(
 ): void {
   ctx.tools.register(defineTool({
     name: 'fleet_send',
-    description: 'Send one quiet Fleet message to the smallest necessary audience. A direct @target is a response request by default and creates one Reply Task; use reply_mode="optional" only for optional context that needs no answer. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is FYI history and wakes nobody. Channel mentions create targeted Reply Tasks.',
+    description: 'Send one quiet Fleet message to the smallest necessary audience. Routing a private message with to="@target" does not require a reply. A valid @target in the message text, or an equivalent structural mention, creates one Reply Task. Use a #channel only when its full audience needs the exact content. Unmentioned messages create no Reply Task.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Use @fleet-name or @agent-id for a private one-member response request, #channel for Team-visible history, or meeting:id.' },
+      to: { type: 'string', required: true, description: 'Use @fleet-name or @agent-id to route a private message, #channel for Team-visible history, or meeting:id. Routing alone does not require a reply.' },
       message: { type: 'string', required: true, description: 'Self-contained message text.' },
-      mentions: { type: 'array', items: { type: 'string' }, description: 'Additional structural Reply Task targets merged with parsed mentions. A direct @target already requires its recipient to reply.' },
-      reply_mode: { type: 'string', enum: ['required', 'optional'], description: 'Direct messages default to required. Set optional only when the recipient should not receive a Reply Task.' },
+      mentions: { type: 'array', items: { type: 'string' }, description: 'Structural Reply Task targets merged with valid @mentions parsed from the message text.' },
+      reply_mode: { type: 'string', enum: ['required', 'optional'], description: 'Compatibility shortcut for private messages. Optional is the default; required structurally mentions the routed recipient.' },
       reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
       resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },
     },
     output: jsonOutput(MESSAGE_SEND_RESULT_SCHEMA),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_send')
+      const mentions = args.reply_mode === 'required' && String(args.to).startsWith('@')
+        ? [...new Set([String(args.to), ...(args.mentions ?? [])])]
+        : args.mentions
       return Promise.resolve(service.sendConversationMessage(caller, {
         to: args.to as `@${string}` | `#${string}` | `meeting:${string}`,
         text: args.message,
         delivery: 'quiet',
-        ...(args.mentions === undefined ? {} : { mentions: args.mentions }),
-        ...(args.reply_mode === 'optional' ? { noReply: true } : {}),
+        ...(mentions === undefined ? {} : { mentions }),
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }))

@@ -1783,10 +1783,7 @@ export class MessageHub {
   private rememberMessage(message: FleetMessage): void {
     const conversationId = message.conversationId ?? message.conversation
     if (message.kind === 'text' && !message.conversation.startsWith('meeting:')) {
-      const requiredParticipants = message.origin === 'user' && message.conversation.startsWith('@')
-        ? message.recipientIds ?? []
-        : message.mentions
-      for (const participantId of requiredParticipants) {
+      for (const participantId of message.mentions) {
         const required = this.requiredRepliesByParticipant.get(participantId) ?? new Map<string, FleetMessage>()
         required.set(conversationId, message)
         this.requiredRepliesByParticipant.set(participantId, required)
@@ -2065,9 +2062,6 @@ export class MessageHub {
 
   private requiresReply(message: FleetMessage, participantId: string): boolean {
     if (message.kind !== 'text') return false
-    if (message.origin === 'user' && message.conversation.startsWith('@')) {
-      return message.recipientIds?.includes(participantId) ?? false
-    }
     return message.mentions.includes(participantId)
   }
 

@@ -662,6 +662,7 @@ describe('FleetRunService', () => {
       runId: run.id,
       to: `@${assistantId}`,
       text: 'Persist this required assistant task.',
+      mentions: [`@${assistantId}`],
       delivery: 'quiet',
     })
     first.disconnect()
@@ -1462,7 +1463,7 @@ describe('FleetRunService', () => {
     expect(leadPersona).toContain(`You are @${leadMember.displayName}`)
     expect(leadPersona).toContain('Configured groups cover Fleet capabilities only')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
-    expect(leadPersona).toContain('A valid `@Name` or `@member-id` in message text is parsed as a mention')
+    expect(leadPersona).toContain('A valid `@Name` or `@member-id` in the message text explicitly means "this member must answer"')
     expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state')
 
     service.end(launcher as unknown as Agent, 'Display name messaging test complete.', run.id)
@@ -2930,6 +2931,15 @@ describe('FleetRunService', () => {
       }))
     expect(service.taskBoard(run.id).state().tasks.some(task =>
       task.domain.kind === 'reply' && task.domain.messageId === userDirectMessage.messageId,
+    )).toBe(false)
+    const userMentionedDirectMessage = service.sendUserConversationMessage({
+      runId: run.id,
+      to: `@${reviewer.id}`,
+      text: '@reviewer Please confirm the latest result.',
+      delivery: 'quiet',
+    })
+    expect(service.taskBoard(run.id).state().tasks.some(task =>
+      task.domain.kind === 'reply' && task.domain.messageId === userMentionedDirectMessage.messageId,
     )).toBe(true)
     expect(service.messageHub(run.id).send(lead, {
       to: '@User',
@@ -5467,7 +5477,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('makes an assistant direct request one Reply Task without requiring an explicit mention', async () => {
+  it('makes private delivery optional until the assistant explicitly mentions its recipient', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -5480,32 +5490,34 @@ describe('FleetRunService', () => {
       text: 'Ask the reviewer for one direct response.',
     })
 
-    const sent = service.sendConversationMessage(launcher as unknown as Agent, {
+    const optional = service.sendConversationMessage(launcher as unknown as Agent, {
       runId: run.id,
       to: '@reviewer',
       text: 'Please return the bounded regression result.',
       delivery: 'quiet',
     })
 
-    expect(sent.replyTaskIds).toHaveLength(1)
-    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
+    expect(optional.replyTaskIds).toBeUndefined()
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
     expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
       unreadMessages: 0, unreadChars: 0,
     })
     expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
-      expect.objectContaining({ text: expect.stringContaining('reply-task') }),
+      expect.objectContaining({ text: expect.not.stringContaining('reply-task') }),
     ])
 
-    const optional = service.sendConversationMessage(launcher as unknown as Agent, {
+    const sent = service.sendConversationMessage(launcher as unknown as Agent, {
       runId: run.id,
       to: '@reviewer',
-      text: 'Optional context only.',
-      mentions: [],
-      noReply: true,
+      text: '@reviewer Please return the bounded regression result.',
       delivery: 'quiet',
     })
-    expect(optional.replyTaskIds).toBeUndefined()
+
+    expect(sent.replyTaskIds).toHaveLength(1)
     expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
+    expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining('reply-task') }),
+    ])
 
     const replyTaskId = sent.replyTaskIds?.[0]
     if (replyTaskId === undefined) throw new Error('expected direct Reply Task id')

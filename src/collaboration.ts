@@ -591,12 +591,8 @@ export class FleetCollaborationService {
       const task = tasks.pendingReply(member)
       return task !== undefined && task.stableState.kind !== 'cancelled'
     }
-    const requiredRecipients = (message: FleetMessage): string[] => {
-      if (message.origin === 'user' && message.conversation.startsWith('@')) {
-        return [...new Set(message.recipientIds ?? [])]
-      }
-      return [...new Set(message.mentions)]
-    }
+    const requiredRecipients = (message: FleetMessage): string[] =>
+      [...new Set(message.mentions)]
     const requiredTitle = (message: FleetMessage): string => message.origin === 'user'
       ? '对用户输入进行完整回复'
       : '对必答消息进行完整回复'
