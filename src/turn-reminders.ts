@@ -162,8 +162,8 @@ export const DEFAULT_FLEET_TURN_REMINDERS: FleetTurnReminderLists = {
     {
       id: 'reply-once', cooldownTurns: 4, tools: ['fleet_reply'],
       text: localized(
-        'fleet_reply is the actual answer; send it once and do not duplicate it with fleet_send or native output.',
-        'fleet_reply 就是实际答复；只发送一次，不要再用 fleet_send 或原生输出重复。',
+        'An @ Reply needs a prompt visible acknowledgement before long work; send later results as a threaded follow-up.',
+        '@ 回复应在长任务前尽快发出可见确认；后续结果用线程回复补充。',
       ),
     },
     {

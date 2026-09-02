@@ -149,7 +149,7 @@ function installTaskMessageTools(
   })))
   stops.push(ctx.tools.register(defineTool({
     name: 'fleet_reply',
-    description: 'Deliver the actual response for one owned Reply Task. Omit id when exactly one Reply Task is pending; Fleet binds it automatically. A successful delivery is recorded as the Task receipt and atomically reconciles the Reply Task to completed.',
+    description: 'Promptly answer or acknowledge one owned Reply Task before starting long work. Omit id when exactly one Reply Task is pending; Fleet binds it automatically. The first visible reply completes the response obligation; later progress or results may be posted with fleet_send and reply_to.',
     parameters: {
       id: { type: 'string', description: 'Owned Reply Task id. Optional when exactly one Reply Task is pending.' },
       content: { type: 'string', required: true, description: 'Actual response sent back to the source conversation.' },
@@ -175,13 +175,14 @@ function installTaskMessageTools(
       if (task.domain.kind !== 'reply') throw new Error(`Fleet task ${args.id} is not a Reply Task`)
       const domain = task.domain
       const completionInstruction = tasks.interactionTask(callerId) === undefined
-        ? 'Reply delivered and Reply Task completed. End this turn now; do not send, repeat, or narrate a delivery confirmation.'
+        ? `Reply delivered and Reply Task completed. If you accepted work, continue it now and later post the result with fleet_send reply_to="${domain.messageId}". End only when no work remains.`
         : 'Reply delivered and Reply Task completed. Do not repeat or narrate a delivery confirmation. Continue only if the current user Interaction still has unfinished work.'
       if (domain.completionMessageId !== undefined) {
         return Promise.resolve(taskMessageResult({
           action: 'reply',
           task: fleetTaskToolDetail(task),
           messageId: domain.completionMessageId,
+          sourceMessageId: domain.messageId,
           replayed: true,
           instruction: completionInstruction,
         }))
@@ -201,6 +202,7 @@ function installTaskMessageTools(
       const result = taskMessageResult({
         action: 'reply',
         messageId,
+        sourceMessageId: domain.messageId,
         replayed: existing !== undefined,
         task: fleetTaskToolDetail(tasks.recordReply(callerId, task.id, messageId)),
         instruction: completionInstruction,
@@ -530,7 +532,7 @@ export class FleetCollaborationService {
     let events: FleetTeamEventDispatch
     let teamScope: Scope
     let requiredActionInstruction = (_message: FleetMessage, _participantId: string): string =>
-      'Fleet records this obligation as a persistent Reply Task. Read the source through fleet_inbox, perform the requested work, then call fleet_reply with the Reply Task id and the actual response content.'
+      'Fleet records this obligation as a persistent Reply Task. Promptly acknowledge, decline, or ask a necessary question with fleet_reply before starting long work; post later results as a threaded follow-up.'
     const messages = new MessageHub(agentDirectory, {
       beforeSend: (sender, message) => events.waterfall(
         'fleet/message/pre-send',
@@ -589,7 +591,7 @@ export class FleetCollaborationService {
       const taskReference = task === undefined
         ? 'Read fleet_inbox to locate the Reply Task for this message.'
         : `The Reply Task for this exact message is ${task.id}. Use this exact id.`
-      return `Fleet records this obligation as a persistent Reply Task. ${taskReference} Respond exactly once with fleet_reply and the actual answer; it is the visible conversation message, so do not send the same answer first with fleet_send. Read the source with fleet_inbox only if needed.`
+      return `Fleet records this obligation as a persistent Reply Task. ${taskReference} Promptly acknowledge, decline, or ask a necessary question with fleet_reply before starting long work. That first reply is visible and completes the response obligation; later progress or results may use fleet_send with reply_to="${message.id}". Native text from this Reply turn may be committed as the acknowledgement. Read the source with fleet_inbox only if needed.`
     }
     const hasPendingRequirement = (member: string): boolean => {
       const task = tasks.pendingReply(member)

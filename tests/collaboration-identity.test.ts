@@ -182,7 +182,8 @@ describe('Fleet collaboration identities', () => {
     await expect(reply.execute({ content: 'Review complete.' }, { agent })).resolves.toMatchObject({
       action: 'reply',
       replayed: false,
-      instruction: expect.stringContaining('End this turn now'),
+      sourceMessageId: 'msg_1',
+      instruction: expect.stringContaining('continue it now'),
       task: { stableState: { kind: 'completed' } },
     })
     expect(agent.cancel).not.toHaveBeenCalled()

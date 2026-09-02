@@ -5709,6 +5709,100 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('commits native output from a Reply wake as the prompt visible acknowledgement', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath, projectRoot: root, requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    reviewer.status = 'idle'
+    const sent = service.messageHub(run.id).send(lead, {
+      to: '@reviewer',
+      text: '@reviewer run the long verification and report the result.',
+      mentions: ['@reviewer'],
+      delivery: 'quiet',
+    })
+    await vi.waitFor(() => expect(reviewer.messages.some(message =>
+      message.content.some(block => block.type === 'text' && block.text.includes('[Fleet owner task list]')),
+    )).toBe(true))
+
+    const start = { type: 'turn/start', seq: 100, time: Date.now(), data: { turn: 23 } } as unknown as SessionEvent
+    const output = {
+      type: 'assistant/message', seq: 101, time: Date.now(),
+      data: {
+        turn: 23,
+        interrupted: false,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '收到，我先启动长时间验证，完成后在这里补充结果。' }],
+        },
+      },
+    } as unknown as SessionEvent
+    const end = {
+      type: 'turn/end', seq: 102, time: Date.now(),
+      data: { turn: 23, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent
+    for (const event of [start, output]) {
+      reviewer.session.events.push(event)
+      service.recordMemberSessionEvent(reviewer.id, event)
+    }
+    expect(service.taskBoard(run.id).pendingReply('reviewer')).toBeUndefined()
+    reviewer.session.events.push(end)
+    service.recordMemberSessionEvent(reviewer.id, end)
+    expect(service.messageHub(run.id).search(lead).find(message => message.replyTo === sent.messageId)).toMatchObject({
+      from: 'reviewer',
+      text: '收到，我先启动长时间验证，完成后在这里补充结果。',
+    })
+    expect(service.readTrace(run.id, 0, 300).events).toContainEqual(expect.objectContaining({
+      type: 'reply_auto_committed',
+      data: expect.stringContaining('reviewer'),
+    }))
+    disconnect()
+  })
+
+  it('backs off an unchanged Reply owner wake instead of restarting every completed turn', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath, projectRoot: root, requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    reviewer.status = 'idle'
+    service.messageHub(run.id).send(lead, {
+      to: '@reviewer', text: '@reviewer please answer.', mentions: ['@reviewer'], delivery: 'quiet',
+    })
+    await vi.waitFor(() => expect(reviewer.messages.some(message =>
+      message.content.some(block => block.type === 'text' && block.text.includes('[Fleet owner task list]')),
+    )).toBe(true))
+    const ownerNotices = (): number => reviewer.messages.filter(message =>
+      message.content.some(block => block.type === 'text' && block.text.includes('[Fleet owner task list]')),
+    ).length
+    const before = ownerNotices()
+    reviewer.inbox.nextTurn.length = 0
+    reviewer.inbox.nextStep.length = 0
+    vi.useFakeTimers()
+    const start = { type: 'turn/start', seq: 110, time: Date.now(), data: { turn: 24 } } as unknown as SessionEvent
+    const end = {
+      type: 'turn/end', seq: 111, time: Date.now(),
+      data: { turn: 24, reason: { kind: 'completed' } },
+    } as unknown as SessionEvent
+    for (const event of [start, end]) {
+      reviewer.session.events.push(event)
+      service.recordMemberSessionEvent(reviewer.id, event)
+    }
+    expect(ownerNotices()).toBe(before)
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(ownerNotices()).toBe(before)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(ownerNotices()).toBe(before + 1)
+    disconnect()
+  })
+
   it('does not turn a complete native direct delivery into a duplicate Inbox owner task', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)

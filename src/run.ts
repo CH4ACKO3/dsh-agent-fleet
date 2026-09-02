@@ -2217,6 +2217,17 @@ interface ProtocolRecovery {
   pending: boolean
 }
 
+interface OwnerTaskWakeState {
+  readonly runId: string
+  readonly fingerprint: string
+  readonly replyWake: boolean
+  wakeups: number
+  active: boolean
+  nextEligibleAt: number
+}
+
+const REPLY_OWNER_RETRY_DELAYS_MS = [5_000, 15_000, 60_000, 5 * 60_000] as const
+
 function isRetriableProtocolFailure(error: { readonly code: string; readonly message: string }): boolean {
   return error.code === 'PI_AI_ERROR' && RETRIABLE_PROTOCOL_FAILURE.test(error.message)
 }
@@ -2260,6 +2271,8 @@ export class FleetRunService {
   private readonly pausingTeams = new Map<string, Promise<FleetRunRecord>>()
   private readonly pausingMembers = new Map<string, Promise<FleetRunMember>>()
   private readonly ownerMemberResumes = new Map<string, Promise<void>>()
+  private readonly ownerTaskWakeStates = new Map<string, OwnerTaskWakeState>()
+  private readonly ownerTaskWakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly pendingAssistantKickoffs = new Map<string, PendingAssistantKickoff>()
   private readonly assistantQuiescenceTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly assistantQuiescenceArmed = new Set<string>()
@@ -5991,6 +6004,7 @@ export class FleetRunService {
     const formalMember = record.members.some(candidate => candidate.name === member)
     const foregroundAssistant = record.assistants.some(candidate => candidate.view.id === member)
     if (!formalMember && !foregroundAssistant) return
+    if (formalMember) this.commitReplyTurnOutput(runId, runtime, member, agent, turn)
     this.memberVisibilityReviewedTurns.set(sessionId, turn)
     if (!this.turnHasDirectOutput(agent, turn)) return
     const reminder = this.visibilityReminderState(sessionId)
@@ -6078,6 +6092,7 @@ export class FleetRunService {
       reminder.reminderCount = 0
       reminder.detailedReminderSent = false
     }
+    const formalMember = record.members.some(candidate => candidate.name === member)
     const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
     if (foregroundAssistant && event.type === 'turn/start') {
       this.assistantCurrentTurns.set(sessionId, event.data.turn)
@@ -6109,10 +6124,18 @@ export class FleetRunService {
       const output = progressMessageText(event.data)
       if (output.trim().length > 0) this.assistantTurnOutputs.set(sessionId, output)
     }
+    if (formalMember && agent !== undefined
+      && event.type === 'assistant/message' && event.data.interrupted !== true) {
+      this.commitReplyTurnOutput(runId, runtime, member, agent, event.data.turn)
+    }
     if (event.type === 'assistant/chunk') return
     for (const listener of [...this.traceChangeListeners]) listener(runId, member)
     if (event.type !== 'turn/end') return
     const reason = event.data.reason
+    if (agent !== undefined && formalMember
+      && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
+      this.commitReplyTurnOutput(runId, runtime, member, agent, event.data.turn)
+    }
     if (foregroundAssistant
       && reason.kind === 'completed'
       && this.assistantUserFacingTurns.get(sessionId)?.turn === event.data.turn) {
@@ -6128,6 +6151,7 @@ export class FleetRunService {
     this.assistantTurnOutputs.delete(sessionId)
     this.assistantCurrentTurns.delete(sessionId)
     this.assistantUserFacingTurns.delete(sessionId)
+    this.finishOwnerTaskWakeTurn(sessionId)
     if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
       if (agent !== undefined) this.scheduleNetworkRecovery(runId, member, agent, reason.error.code)
       return
@@ -6228,10 +6252,35 @@ export class FleetRunService {
       || this.abnormalSessionIds.has(participant.sessionId)
       || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
     const tasks = runtime.tasks.ownerTasks(participant.name)
-    if (tasks.length === 0) return false
+    if (tasks.length === 0) {
+      this.clearOwnerTaskWake(participant.sessionId)
+      return false
+    }
+    const fingerprint = tasks.map(task => `${task.id}:${String(task.stateVersion)}`).join('|')
+    const replyWake = tasks[0]?.domain.kind === 'reply'
+    const previousWake = this.ownerTaskWakeStates.get(participant.sessionId)
+    let wakeState: OwnerTaskWakeState = previousWake?.fingerprint === fingerprint
+      ? previousWake
+      : {
+          runId,
+          fingerprint,
+          replyWake,
+          wakeups: 0,
+          active: false,
+          nextEligibleAt: 0,
+        }
+    if (previousWake?.fingerprint !== fingerprint) {
+      this.clearOwnerTaskWakeTimer(participant.sessionId)
+      this.ownerTaskWakeStates.set(participant.sessionId, wakeState)
+    }
+    if (wakeState.active) return false
+    if (replyWake && wakeState.nextEligibleAt > Date.now()) {
+      this.scheduleOwnerTaskWake(runId, participant.sessionId, wakeState.nextEligibleAt)
+      return false
+    }
     const taskInstruction = (task: (typeof tasks)[number]): string => {
       if (task.domain.kind === 'inbox') return `- ${task.title} (${task.id}): call fleet_inbox action="read" to consume unread messages.`
-      if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): respond exactly once with fleet_reply and the actual answer. That reply is the visible conversation message; do not send the same answer first with fleet_send. Read the source with fleet_inbox only if needed.`
+      if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): promptly acknowledge, decline, or ask a necessary question before starting long work. Use fleet_reply for an explicit acknowledgement; the first non-empty native text in this Reply turn may also be committed automatically. Later results may use fleet_send with reply_to. Read the source with fleet_inbox only if needed.`
       if (task.domain.kind === 'goal') return `- ${task.title} (${task.id}): call fleet_goal action="complete" with the assignment result (including a reject recommendation), or "block" only for an external impediment.`
       if (task.domain.kind === 'interaction') {
         const delivery = task.domain.pendingDelivery
@@ -6263,12 +6312,105 @@ export class FleetRunService {
       if (errorMessage(error).includes('is not available to Fleet')) return false
       throw error
     }
+    wakeState = {
+      ...wakeState,
+      replyWake,
+      wakeups: wakeState.wakeups + 1,
+      active: true,
+    }
+    this.ownerTaskWakeStates.set(participant.sessionId, wakeState)
+    this.clearOwnerTaskWakeTimer(participant.sessionId)
     this.appendEvent(runId, 'member_continued', {
       member: participant.name,
       reason: 'owner_task_list',
       tasks: tasks.map(task => task.id),
     })
     return true
+  }
+
+  private replyTurnOutput(text: string): string | undefined {
+    const marker = text.search(/<(?:parameter|tool_call)\b/iu)
+    const candidate = (marker < 0 ? text : text.slice(0, marker)).trim()
+    return candidate.length === 0 ? undefined : candidate
+  }
+
+  private commitReplyTurnOutput(
+    runId: string,
+    runtime: FleetCollaborationTeam,
+    member: string,
+    agent: Agent,
+    turn: number,
+  ): boolean {
+    const sessionId = String(agent.id)
+    const wake = this.ownerTaskWakeStates.get(sessionId)
+    if (wake?.active !== true || !wake.replyWake || wake.runId !== runId) return false
+    const output = this.replyTurnOutput(this.turnDirectOutputText(agent, turn))
+    if (output === undefined) return false
+    const replies = runtime.tasks.ownerTasks(member)
+      .filter(task => task.domain.kind === 'reply')
+    if (replies.length === 0) {
+      this.clearOwnerTaskWake(sessionId)
+      return false
+    }
+    const conversations = new Set(replies.map(task => task.domain.kind === 'reply' ? task.domain.conversation : ''))
+    if (conversations.size !== 1) return false
+    const target = replies.at(-1)
+    if (target?.domain.kind !== 'reply') return false
+    try {
+      const source = runtime.messages.getMessage(agent, target.domain.messageId)
+      const messageId = runtime.messages.reply(agent, { messageId: source.id, text: output }).messageId
+      for (const task of replies) {
+        if (task.domain.kind !== 'reply') continue
+        runtime.messages.completeRequiredReply(sessionId, task.domain.messageId)
+        runtime.tasks.recordReply(sessionId, task.id, messageId)
+      }
+      this.memberLastSharedTurns.set(sessionId, turn)
+      this.clearOwnerTaskWake(sessionId)
+      this.appendEvent(runId, 'reply_auto_committed', {
+        member,
+        turn,
+        messageId,
+        tasks: replies.map(task => task.id),
+      })
+      return true
+    } catch (error) {
+      this.ctx.logger('dsh-agent-fleet').warn(
+        `Could not commit Fleet Reply output for ${member}: ${errorMessage(error)}`,
+      )
+      return false
+    }
+  }
+
+  private finishOwnerTaskWakeTurn(sessionId: string): void {
+    const state = this.ownerTaskWakeStates.get(sessionId)
+    if (state?.active !== true) return
+    const delayIndex = Math.min(Math.max(0, state.wakeups - 1), REPLY_OWNER_RETRY_DELAYS_MS.length - 1)
+    state.active = false
+    state.nextEligibleAt = state.replyWake
+      ? Date.now() + REPLY_OWNER_RETRY_DELAYS_MS[delayIndex]!
+      : 0
+  }
+
+  private scheduleOwnerTaskWake(runId: string, sessionId: string, at: number): void {
+    if (this.ownerTaskWakeTimers.has(sessionId)) return
+    const timer = setTimeout(() => {
+      this.ownerTaskWakeTimers.delete(sessionId)
+      const state = this.ownerTaskWakeStates.get(sessionId)
+      if (state === undefined || state.runId !== runId || state.nextEligibleAt > Date.now()) return
+      this.reconcileOwnerTasks(runId)
+    }, Math.max(0, at - Date.now()))
+    this.ownerTaskWakeTimers.set(sessionId, timer)
+  }
+
+  private clearOwnerTaskWakeTimer(sessionId: string): void {
+    const timer = this.ownerTaskWakeTimers.get(sessionId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.ownerTaskWakeTimers.delete(sessionId)
+  }
+
+  private clearOwnerTaskWake(sessionId: string): void {
+    this.clearOwnerTaskWakeTimer(sessionId)
+    this.ownerTaskWakeStates.delete(sessionId)
   }
 
   private reconcileReadyTasks(runId: string): void {
@@ -6279,6 +6421,9 @@ export class FleetRunService {
     const runtime = this.collaboration.get(runId)
     if (runtime === undefined) return
     for (const participant of this.participants(record)) {
+      if (runtime.tasks.ownerTasks(participant.name).length === 0) {
+        this.clearOwnerTaskWake(participant.sessionId)
+      }
       if (this.autoContinuationPaused(record, participant.name)
         || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined
         || this.abnormalSessionIds.has(participant.sessionId)
@@ -6585,6 +6730,7 @@ export class FleetRunService {
     this.turnReminderLastShown.delete(agentId)
     this.turnStartReminderTurns.delete(agentId)
     this.toolResultReminderSequences.delete(agentId)
+    this.clearOwnerTaskWake(agentId)
     this.abnormalSessionIds.delete(agentId)
     for (const [runId, runtime] of this.collaboration.entries()) {
       if (this.dormantRunIds.has(runId) || !runtime.memberNamesById.has(agentId)) continue
@@ -7958,6 +8104,9 @@ export class FleetRunService {
     }
     this.networkRecoveries.clear()
     this.protocolRecoveries.clear()
+    for (const timer of this.ownerTaskWakeTimers.values()) clearTimeout(timer)
+    this.ownerTaskWakeTimers.clear()
+    this.ownerTaskWakeStates.clear()
     for (const timer of this.assistantQuiescenceTimers.values()) clearTimeout(timer)
     this.assistantQuiescenceTimers.clear()
     this.assistantQuiescenceArmed.clear()
