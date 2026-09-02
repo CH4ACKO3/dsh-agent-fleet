@@ -2,16 +2,16 @@
 
 This directory turns the attached Matilda 16 × 16 task into a blind, repeatable local Fleet evaluation. It contains a four-member Team template, an answer-free task statement, and a pinned solver container derived from the local Fleet baseline. The mathematical input and evidence standard match the source scenario; the collaboration design is intentionally Fleet-native so coordination quality and cost can be compared without copying the source system.
 
-The design starts with four parallel evidence lanes rather than a chat-heavy fixed sequence of research rounds:
+The Team exposes four complementary capabilities rather than a chat-heavy fixed sequence of research rounds:
 
 1. construction search and witness validation;
 2. mathematical lower-bound work;
-3. global exact-encoding readiness and adjacent-value decisions;
-4. adversarial small-instance checks and terminal reproduction.
+3. exact-model design and auditable feasibility or infeasibility evidence;
+4. independent reproduction, adversarial validation, and acceptance review.
 
-The foreground assistant stages the initial lanes, an adaptive-refinement Goal, result packaging, and an independent terminal Vote atomically, then waits. Each first pass is bounded reconnaissance: one checkable baseline is submitted immediately, while deeper work stays in the adaptive chain instead of becoming a private multi-step project. When a better incumbent appears, the refinement Goal creates a durable child DAG that tries a structurally different construction family, seeks an explanatory invariant, globally decides the adjacent objective value, and preserves a continuation path. Packaging and voting have different owners. This keeps ordinary acknowledgements and solver chatter out of the user conversation while preserving a formal Task chain through any long-running refinement.
+The foreground assistant reads the task and randomized roster, chooses which capabilities are relevant, and atomically creates a task-derived DAG. The template does not require all four members to receive equal work and does not prescribe construction, proof, exact solving, or audit as mandatory stages. It constrains only collaboration correctness: one owner per Goal, explicit dependencies and joins, durable continuation paths for long work, scoped handoffs, and independent acceptance when the task needs it. This keeps ordinary acknowledgements and solver chatter out of the user conversation without replacing the assistant's planning judgment with a benchmark-specific workflow.
 
-The template deliberately does not encode a known answer, a benchmark-specific permutation family, or a fixed round count. Its acceptance rule is evidence-based: a best-known value remains only an upper bound until an independent global route excludes every better value. A timeout, a selected set of fixed candidates, or agreement with a short numerical pattern cannot pass the terminal Vote.
+The template deliberately does not encode a known answer, a benchmark-specific permutation family, a required stage topology, or a fixed round count. The authoritative task defines the acceptance evidence. A timeout, a selected set of fixed candidates, or agreement with a short numerical pattern cannot be promoted beyond the claim it actually supports.
 
 ## Files
 

@@ -25,47 +25,46 @@ const config = JSON.parse(
 ) as MatildaTeamConfig
 
 describe('Matilda blind evaluation Team template', () => {
-  it('keeps adaptive refinement generic and durably linked', () => {
+  it('lets the assistant derive the topology while requiring durable links', () => {
     const prompt = config.core.assistant.prompt
 
-    expect(prompt).toContain('adaptive-refinement Goal')
-    expect(prompt).toContain('fleet_goal split')
     expect(prompt).toContain('Do not call `todo_write`')
     expect(prompt).toContain('your next tool call must be `fleet_run start`')
-    expect(prompt).toContain('Every Goal has exactly one owner')
-    expect(prompt).toContain('adaptive-refinement Goal with exactly one non-auditor owner')
-    expect(prompt).toContain('continue the refinement after a changed incumbent')
-    expect(prompt).toContain('globally decide the immediately adjacent value')
-    expect(prompt).toContain('every configured formal member exactly one independent zero-dependency first-pass Goal')
-    expect(prompt).toContain('The auditor needs this blind Goal')
-    expect(prompt).toContain('First-pass Goals are bounded reconnaissance')
+    expect(prompt).toContain('no mandatory stage names, lane count, algorithm, or round count')
+    expect(prompt).toContain('Activate a member only for a concrete deliverable')
+    expect(prompt).toContain('All required paths must join')
+    expect(prompt).toContain('long work retains a formal continuation or recovery path')
+    expect(prompt).not.toContain('adaptive-refinement Goal')
+    expect(prompt).not.toContain('globally decide the immediately adjacent value')
+    expect(prompt).not.toContain('every configured formal member exactly one independent zero-dependency first-pass Goal')
     expect(prompt).not.toMatch(/mod 17|LIS|LDS|\b21\b|\b22\b/)
   })
 
-  it('separates packaging from terminal acceptance and rejects open bounds', () => {
+  it('keeps packaging and independent acceptance separate without fixing their owners', () => {
     const assistantPrompt = config.core.assistant.prompt
     const auditor = config.core.members.find(member => member.id === 'adversarial-reproducer')
 
-    expect(assistantPrompt).toContain('`adversarial-reproducer` must not own packaging')
-    expect(assistantPrompt).toContain('one terminal Vote after packaging, owned only by `adversarial-reproducer`')
-    expect(auditor?.prompt).toContain('independent terminal voter rather than the owner of final packaging')
-    expect(auditor?.prompt).toContain('If the bundle says the lower bound is open')
-    expect(auditor?.prompt).toContain('REJECT')
+    expect(assistantPrompt).toContain('no member approves its own unchecked package')
+    expect(assistantPrompt).toContain('Choose their owners from the actual roster')
+    expect(auditor?.prompt).toContain('authoritative task\'s evidence standard')
+    expect(auditor?.prompt).toContain('APPROVE, REJECT, or INDETERMINATE')
+    expect(auditor?.prompt).toContain('Never silently repair a producer\'s artifact')
   })
 
-  it('requires each improved incumbent to reopen independent evidence work', () => {
+  it('keeps methods task-derived and members inside their assigned responsibility', () => {
     const collaboration = config.modules['dsh-agent-fleet/message'].collaborationMethod
     const exact = config.core.members.find(member => member.id === 'exact-solver-engineer')
     const construction = config.core.members.find(member => member.id === 'construction-searcher')
     const theory = config.core.members.find(member => member.id === 'lower-bound-theorist')
 
-    expect(collaboration).toContain('each improved incumbent')
-    expect(construction?.prompt).toContain('structurally different representation or candidate family')
-    expect(theory?.prompt).toContain('structural quantities distinguish it from earlier witnesses')
-    expect(exact?.prompt).toContain('first ask whether U-1 is feasible')
-    expect(exact?.prompt).toContain('UNKNOWN leaves the interval unchanged')
-    expect(exact?.prompt).toContain('Do not enumerate successively larger sizes')
-    expect(config.core.members.every(member => member.prompt.includes('do not create a native todo list'))).toBe(true)
+    expect(collaboration).toContain('does not prescribe stage names')
+    expect(collaboration).toContain('formal continuation or terminal handoff')
+    expect(construction?.prompt).toContain('Derive validity conditions from the authoritative task')
+    expect(theory?.prompt).toContain('Formalize the quantified domain from the authoritative task')
+    expect(exact?.prompt).toContain('Choose validation sizes, solver form, and decision sequence')
+    expect(exact?.prompt).not.toContain('U-1')
+    expect(config.core.members.every(member => member.prompt.includes('Own only'))).toBe(true)
+    expect(config.core.members.every(member => member.prompt.includes('optional private scratch state'))).toBe(true)
   })
 
   it('distinguishes outbound internet access from internal Fleet communication', () => {
