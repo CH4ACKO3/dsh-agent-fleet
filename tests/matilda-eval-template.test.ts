@@ -27,8 +27,10 @@ describe('Matilda blind evaluation Team template', () => {
 
     expect(prompt).toContain('adaptive-refinement Goal')
     expect(prompt).toContain('fleet_goal split')
-    expect(prompt).toContain('Never assign multiple owners to one Goal')
-    expect(prompt).toContain('adaptive-refinement Goal with exactly one owner')
+    expect(prompt).toContain('Do not call `todo_write`')
+    expect(prompt).toContain('your next tool call must be `fleet_run start`')
+    expect(prompt).toContain('Every Goal has exactly one owner')
+    expect(prompt).toContain('adaptive-refinement Goal with exactly one non-auditor owner')
     expect(prompt).toContain('include a new continuation Goal among the children')
     expect(prompt).toContain('globally decide the immediately adjacent objective value')
     expect(prompt).not.toMatch(/mod 17|LIS|LDS|\b21\b|\b22\b/)
@@ -38,8 +40,8 @@ describe('Matilda blind evaluation Team template', () => {
     const assistantPrompt = config.core.assistant.prompt
     const auditor = config.core.members.find(member => member.id === 'adversarial-reproducer')
 
-    expect(assistantPrompt).toContain('The `adversarial-reproducer` must not own packaging')
-    expect(assistantPrompt).toContain('one Vote owned only by `adversarial-reproducer`')
+    expect(assistantPrompt).toContain('`adversarial-reproducer` must not own packaging')
+    expect(assistantPrompt).toContain('one terminal Vote after packaging, owned only by `adversarial-reproducer`')
     expect(auditor?.prompt).toContain('independent terminal voter rather than the owner of final packaging')
     expect(auditor?.prompt).toContain('If the bundle says the lower bound is open')
     expect(auditor?.prompt).toContain('REJECT')
