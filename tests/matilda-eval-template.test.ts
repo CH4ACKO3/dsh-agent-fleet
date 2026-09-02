@@ -32,7 +32,7 @@ describe('Matilda blind evaluation Team template', () => {
     expect(prompt).toContain('Every Goal has exactly one owner')
     expect(prompt).toContain('adaptive-refinement Goal with exactly one non-auditor owner')
     expect(prompt).toContain('include a new continuation Goal among the children')
-    expect(prompt).toContain('globally decide the immediately adjacent objective value')
+    expect(prompt).toContain('globally decide the immediately adjacent value')
     expect(prompt).not.toMatch(/mod 17|LIS|LDS|\b21\b|\b22\b/)
   })
 
