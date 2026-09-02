@@ -23,6 +23,8 @@ The template deliberately does not encode a known answer, a benchmark-specific p
 
 All solver dependencies are baked into the image. At runtime, the business container shares a guarded network namespace whose IPv4 and IPv6 output policies drop every new external connection except TCP `221.194.152.171:443`, the configured model endpoint. The business container has neither `NET_ADMIN` nor raw-socket capability, so an Agent shell cannot remove the guard. Docker DNS and all other external destinations remain unreachable.
 
+The Compose profile also sets `FLEET_MEMBER_DENY_HOST_TOOLS=web_search`, so formal members do not see the unusable search tool in this offline evaluation. This only changes the model-facing tool surface; the container network boundary remains the security control.
+
 Lean and Mathlib are downloaded only while the image is built and remain fully local during a run. Use `lean` and `lake` for an ordinary Lean project, or compile a standalone file importing Mathlib from any workspace path with:
 
 ```sh

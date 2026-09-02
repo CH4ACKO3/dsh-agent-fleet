@@ -1648,6 +1648,39 @@ describe('MessageHub', () => {
     )).rejects.toThrow('not authorized for message.post')
   })
 
+  it('normalizes a unique bare member target before authorization and delivery', async () => {
+    const { hub, lead, reviewer } = setup()
+    const registered: Array<{
+      readonly name: string
+      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
+    }> = []
+    const conversations: string[] = []
+    installMessageTools({
+      get: (name: string) => name === 'fleetCore' ? {
+        resolveTarget: (value: string) => `@${value}`,
+        nameForAgent: () => undefined,
+      } : undefined,
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+    } as never, hub, {
+      coordination: false,
+      authorize: (_agentId, _action, resource) => {
+        if (resource !== undefined) conversations.push(resource.id)
+        return true
+      },
+    })
+    const send = registered.find(candidate => candidate.name === 'fleet_send')
+    if (send === undefined) throw new Error('expected fleet_send')
+
+    await expect(send.execute(
+      { to: 'reviewer', message: 'Please inspect the artifact.' },
+      { agent: lead },
+    )).resolves.toMatchObject({ recipients: 1, delivered: 1 })
+    expect(conversations).toEqual(['@reviewer'])
+    expect(hub.readInbox(reviewer).messages).toContainEqual(expect.objectContaining({
+      conversation: '@reviewer', text: 'Please inspect the artifact.',
+    }))
+  })
+
   it('excludes connected observers that are not default voters', () => {
     const { agents, lead, reviewer, qa, observer } = setup()
     const hub = new MessageHub({

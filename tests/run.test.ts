@@ -891,6 +891,15 @@ describe('FleetRunService', () => {
     } as unknown as Context, service, {} as never)
     const userTask = registered.find(tool => tool.name === 'fleet_user_task')
     if (userTask === undefined) throw new Error('expected fleet_user_task')
+    const userTaskSchema = (userTask as unknown as {
+      readonly output: { readonly schema: {
+        readonly properties: { readonly budget: { readonly properties: {
+          readonly team: { readonly properties: Record<string, unknown> }
+        } } }
+      } }
+    }).output.schema
+    expect(userTaskSchema.properties.budget.properties.team.properties.state).toBeDefined()
+    expect(userTaskSchema.properties.budget.properties.team.properties.remaining).toBeDefined()
 
     service.recordMemberSessionEvent(launcher.id, {
       seq: 0,
@@ -915,7 +924,10 @@ describe('FleetRunService', () => {
       action: 'status',
       budget: {
         mode: 'tokens',
-        team: { used: 0, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
+        team: {
+          state: 'unlimited', used: 0, calls: 0,
+          inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+        },
       },
     })
     const pendingReceipt = await userTask.execute({

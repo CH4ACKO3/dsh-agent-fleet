@@ -75,6 +75,8 @@ describe('Matilda blind evaluation Team template', () => {
     expect(theory?.prompt).toContain('Start from the authoritative quantified domain')
     expect(theory?.prompt).toContain('pinned local Mathlib installation through `lean-mathlib`')
     expect(theory?.prompt).toContain('an unproved axiom, `sorry`')
+    expect(theory?.prompt).toContain('exact statement and hypotheses are locally inspectable')
+    expect(theory?.prompt).toContain('immediate constructions, trivial bounds, and small instances')
     expect(exact?.prompt).toContain('Choose validation sizes, solver form, and decision sequence')
     expect(exact?.prompt).toContain('construction and formal-proof lanes feed this Goal')
     expect(exact?.prompt).not.toContain('U-1')
@@ -85,12 +87,24 @@ describe('Matilda blind evaluation Team template', () => {
       member.provider === 'memorax' && member.model === 'deepseek-v4-flash')).toBe(true)
   })
 
+  it('audits the claim actually proved instead of trusting labels or unavailable citations', () => {
+    const rules = config.modules['dsh-agent-fleet/message'].rules
+    const auditor = config.core.members.find(member => member.id === 'adversarial-reproducer')
+
+    expect(rules).toContain('external result is unverified unless its exact statement and hypotheses are locally inspectable')
+    expect(rules).toContain('formal compilation certifies only the theorem that was actually stated')
+    expect(auditor?.prompt).toContain('inspect the actual theorem statements, quantifiers, assumptions, and axioms')
+    expect(auditor?.prompt).toContain('Reject any citation-dependent step')
+    expect(auditor?.prompt).toContain('immediate constructions, trivial bounds, and small instances')
+  })
+
   it('relies on the container network boundary without disabling Fleet communication', () => {
     const rules = config.modules['dsh-agent-fleet/message'].rules
     const collaboration = config.modules['dsh-agent-fleet/message'].collaborationMethod
     const resourcePolicy = config.modules['dsh-agent-fleet/resources'].policy
     const editorRules = config.modules['dsh-agent-fleet/ui'].editor.rules
     const task = readFileSync(resolve('examples/matilda-eval/task.md'), 'utf8')
+    const compose = readFileSync(resolve('examples/matilda-eval/compose.yaml'), 'utf8')
 
     expect(rules).toContain('container network boundary permits only the configured model inference service')
     expect(rules).toContain('Fleet messaging and shared local artifacts remain available')
@@ -107,5 +121,6 @@ describe('Matilda blind evaluation Team template', () => {
     expect(task).toContain('Fleet 内部协作功能可正常使用')
     expect(task).toContain('团队工作语言使用中文')
     expect(task).toContain('至少继续一个由当前证据驱动的改进阶段')
+    expect(compose).toContain('FLEET_MEMBER_DENY_HOST_TOOLS: "web_search"')
   })
 })

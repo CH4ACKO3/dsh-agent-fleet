@@ -90,8 +90,8 @@ export interface FleetResourceToolOptions {
   readonly tools?: ReadonlySet<string>
   readonly projectRoot?: string
   readonly sharedDirectory?: string
-  readonly canRead?: (agentId: string, kind: 'shared' | 'resource' | 'work', id?: string) => boolean
-  readonly canWrite?: (agentId: string, kind: 'shared' | 'resource' | 'work', id?: string) => boolean
+  readonly canRead?: (agentId: string, kind: 'shared' | 'resource' | 'file' | 'work', id?: string) => boolean
+  readonly canWrite?: (agentId: string, kind: 'shared' | 'resource' | 'file' | 'work', id?: string) => boolean
   readonly resourceWrite?: boolean
   readonly deleteShared?: (relativePath: string) => void | Promise<void>
 }
@@ -112,7 +112,7 @@ export function installResourceTools(ctx: Context, resources: FleetResources, op
   if (ctx.fs.sandboxMode !== undefined && sandboxPolicy === undefined) {
     throw new Error('dsh-agent-fleet-resources: sandboxed filesystem requires ctx.sandboxPolicy')
   }
-  const requireAccess = (agent: Agent, write: boolean, kind: 'shared' | 'resource' | 'work', id?: string): void => {
+  const requireAccess = (agent: Agent, write: boolean, kind: 'shared' | 'resource' | 'file' | 'work', id?: string): void => {
     const allowed = write ? options.canWrite?.(String(agent.id), kind, id) : options.canRead?.(String(agent.id), kind, id)
     if (allowed === false) throw new Error(`Agent ${String(agent.id)} cannot ${write ? 'write' : 'read'} Fleet ${kind}${id === undefined ? '' : ` ${id}`}`)
   }
@@ -241,8 +241,8 @@ export function installResourceTools(ctx: Context, resources: FleetResources, op
         return { action: 'get' as const, resource: resources.getResource(args.id) }
       }
       if (args.path === undefined || args.path.trim().length === 0) throw new Error('fleet_resource add requires path')
-      requireAccess(agent, true, 'resource', args.path)
       const target = await ctx.fs.resolve(args.path, { cwd: workspace(agent), signal: exec.signal })
+      requireAccess(agent, true, 'file', target.displayPath)
       const info = await ctx.fs.stat(target, exec.signal)
       if (info === undefined) throw new Error(`Fleet resource file does not exist: ${target.displayPath}`)
       if (info.type !== 'file') throw new Error(`Fleet resource must be a regular file: ${target.displayPath}`)

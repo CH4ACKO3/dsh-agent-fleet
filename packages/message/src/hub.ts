@@ -565,7 +565,7 @@ export class MessageHub {
     if (input.to.startsWith('@')) {
       const recipient = this.resolveAgent(input.to)
       if (mentions.some(mention => mention !== recipient)) {
-        throw new Error('a direct message can only mention its recipient')
+        throw new Error('a direct message can only mention its recipient; remove other @mentions, send them separately, or use a Channel when everyone needs the content')
       }
       return this.sendDirect(sender, { ...input, to: `@${recipient}` }, text, resources, mentions, origin)
     }

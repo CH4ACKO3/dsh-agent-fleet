@@ -89,6 +89,14 @@ function fleetDirectory(ctx: Context): FleetDirectory | undefined {
   return ctx.get('fleetCore') as FleetDirectory | undefined
 }
 
+function toolTarget(ctx: Context, value: string): FleetTarget {
+  const target = value.trim()
+  if (target.startsWith('@') || target.startsWith('#') || target.startsWith('meeting:')) {
+    return target as FleetTarget
+  }
+  return fleetDirectory(ctx)?.resolveTarget(target) ?? target as FleetTarget
+}
+
 export function apply(ctx: Context): void {
   const hub = new MessageHub({
     get(id): MessageAgent | undefined {
@@ -161,7 +169,7 @@ export function installMessageTools(
         ? 'Send one quiet Fleet message to the smallest necessary audience. A direct @target creates one Reply Task by default; use reply_mode="optional" only for context that needs no answer. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is delivered quietly to the full Channel without waking anyone or creating Reply Tasks.'
         : 'Send one quiet Fleet message to the smallest necessary audience. Use a direct @target for one-member work and send subset work privately to one accountable owner, who can coordinate with peers. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is delivered quietly to the full Channel; a post with mentions notifies only those members while remaining visible to everyone. Each mention creates a Reply Task; use fleet_reply to finish an existing Reply Task.',
       parameters: {
-        to: { type: 'string', required: true, description: options.directReplyByDefault ? 'Use @fleet-name or @agent-id for a private response request, #channel for Team-visible history, or meeting:id.' : 'Use @fleet-name or @agent-id for private one-member work, #channel for a Team-visible broadcast, or meeting:id. A direct @target delivers the full message but creates no Reply Task unless that recipient is also mentioned in the text or mentions parameter.' },
+        to: { type: 'string', required: true, description: options.directReplyByDefault ? 'Use @fleet-name or @agent-id for a private response request, #channel for Team-visible history, or meeting:id. A unique bare member name or id is normalized to a private target.' : 'Use @fleet-name or @agent-id for private one-member work, #channel for a Team-visible broadcast, or meeting:id. A unique bare member name or id is normalized to a private target. A direct target delivers the full message but creates no Reply Task unless that recipient is also mentioned in the text or mentions parameter.' },
         message: { type: 'string', required: true, description: 'Self-contained message text.' },
         mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets, merged with valid @Name or @member-id mentions parsed from the text. A direct message may mention only its recipient.' },
         reply_mode: { type: 'string', enum: ['required', 'optional'], description: 'For foreground assistants, direct messages default to required. Set optional only when no response is wanted.' },
@@ -171,15 +179,16 @@ export function installMessageTools(
       output: jsonOutput(SEND_SCHEMA),
       execute(args, exec) {
         const caller = callingAgent(exec.agent, 'fleet_send')
-        requireAction(caller, 'message.post', { kind: 'conversation', id: args.to })
+        const to = toolTarget(ctx, args.to)
+        requireAction(caller, 'message.post', { kind: 'conversation', id: to })
         const directReply = options.directReplyByDefault === true
-          && String(args.to).startsWith('@')
+          && to.startsWith('@')
           && args.reply_mode !== 'optional'
         const mentions = directReply
-          ? [...new Set([args.to, ...(args.mentions ?? [])])]
+          ? [...new Set([to, ...(args.mentions ?? [])])]
           : args.mentions
         const result = hub.send(caller, {
-          to: args.to as FleetTarget,
+          to,
           text: args.message,
           delivery: 'quiet',
           ...(mentions === undefined ? {} : { mentions }),

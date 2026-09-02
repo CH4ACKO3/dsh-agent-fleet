@@ -2030,11 +2030,17 @@ async function installMemberTools(
     // host tool statically unavailable for the entire member Session instead
     // of allowing it and rejecting individual calls after the model has chosen
     // the route.
-    const removeNativeSubagent = scope.tools.restrict({ deny: ['subagent'] })
+    const configuredHostToolDeny = (process.env.FLEET_MEMBER_DENY_HOST_TOOLS ?? '')
+      .split(/[\s,]+/u)
+      .map(name => name.trim())
+      .filter(name => /^[a-z][a-z0-9_-]*$/u.test(name))
+    const removeNativeRestrictions = scope.tools.restrict({
+      deny: [...new Set(['subagent', ...configuredHostToolDeny])],
+    })
     const removeFleetTools = runtime.installTools(scope, member, { exposeHostFleetTools })
     return () => {
       removeFleetTools()
-      removeNativeSubagent()
+      removeNativeRestrictions()
     }
   })
   if (source !== undefined) {
@@ -9600,6 +9606,19 @@ const RUN_RESULT_SCHEMA = {
   },
 } as const
 
+const BUDGET_ACCOUNT_SNAPSHOT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ...BUDGET_ACCOUNT_SCHEMA.properties,
+    remaining: { type: 'integer' },
+    state: {
+      type: 'string', required: true,
+      enum: ['unlimited', 'normal', 'warning', 'danger', 'exhausted'],
+    },
+  },
+} as const
+
 const ARCHIVE_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -9848,7 +9867,7 @@ const USER_TASK_RESULT_SCHEMA = {
       additionalProperties: false,
       properties: {
         mode: { type: 'string', required: true, enum: ['tokens', 'cost'] },
-        team: { ...BUDGET_ACCOUNT_SCHEMA, required: true },
+        team: { ...BUDGET_ACCOUNT_SNAPSHOT_SCHEMA, required: true },
       },
     },
   },
