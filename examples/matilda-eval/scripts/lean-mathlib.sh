@@ -2,4 +2,4 @@
 set -eu
 
 cd "${MATHLIB_ROOT:-/opt/mathlib}"
-exec lake env lean "$@"
+exec /opt/elan/bin/lake env lean "$@"

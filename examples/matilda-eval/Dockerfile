@@ -90,6 +90,9 @@ RUN sed -i 's/\r$//' \
         /usr/local/bin/python \
         /usr/local/bin/python3
 
+RUN ln -sf /opt/elan/bin/lean /usr/local/bin/lean \
+    && ln -sf /opt/elan/bin/lake /usr/local/bin/lake
+
 ENV PATH="/opt/matilda-eval/venv/bin:${PATH}" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_INDEX=1 \

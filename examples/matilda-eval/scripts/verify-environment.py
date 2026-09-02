@@ -44,6 +44,15 @@ def main() -> None:
     assert login_python[0] == "/usr/local/bin/python3"
     assert login_python[1] == z3.get_version_string()
 
+    login_lean = subprocess.run(
+        ["sh", "-lc", "command -v lean && command -v lake && lean --version && lake --version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert login_lean[0] == "/usr/local/bin/lean"
+    assert login_lean[1] == "/usr/local/bin/lake"
+
     lean_version = subprocess.run(
         ["lean", "--version"], check=True, capture_output=True, text=True
     ).stdout.splitlines()[0]
@@ -74,6 +83,7 @@ def main() -> None:
         "cp_sat": "optimal",
         "highs_milp": "optimal",
         "login_shell_python": "venv",
+        "login_shell_lean": "available",
         "logical_cpus_visible": psutil.cpu_count(logical=True),
         "mathlib": "compiled",
         "z3": "sat",
