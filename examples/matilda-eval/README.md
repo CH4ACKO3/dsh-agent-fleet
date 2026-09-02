@@ -2,14 +2,16 @@
 
 This directory turns the attached Matilda 16 × 16 task into a blind, repeatable local Fleet evaluation. It contains a four-member Team template, an answer-free task statement, and a pinned solver container derived from the local Fleet baseline. The mathematical input and evidence standard match the source scenario; the collaboration design is intentionally Fleet-native so coordination quality and cost can be compared without copying the source system.
 
-The design uses four parallel evidence lanes rather than a chat-heavy sequence of research rounds:
+The design starts with four parallel evidence lanes rather than a chat-heavy fixed sequence of research rounds:
 
 1. construction search and witness validation;
 2. mathematical lower-bound work;
 3. two independent exact encodings;
-4. adversarial small-instance checks and final reproduction.
+4. adversarial small-instance checks and terminal reproduction.
 
-The foreground assistant stages all lanes atomically, then waits. The terminal auditor packages evidence and casts the acceptance Vote. This keeps ordinary acknowledgements and solver chatter out of the user conversation while preserving a formal Task chain from kickoff through acceptance.
+The foreground assistant stages the initial lanes, an adaptive-refinement Goal, result packaging, and an independent terminal Vote atomically, then waits. When a better incumbent appears, the refinement Goal creates a durable child DAG that tries a structurally different construction family, seeks an explanatory invariant, and globally decides the adjacent objective value. Packaging and voting have different owners. This keeps ordinary acknowledgements and solver chatter out of the user conversation while preserving a formal Task chain through any long-running refinement.
+
+The template deliberately does not encode a known answer, a benchmark-specific permutation family, or a fixed round count. Its acceptance rule is evidence-based: a best-known value remains only an upper bound until an independent global route excludes every better value. A timeout, a selected set of fixed candidates, or agreement with a short numerical pattern cannot pass the terminal Vote.
 
 ## Files
 
