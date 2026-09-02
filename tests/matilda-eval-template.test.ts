@@ -5,11 +5,13 @@ import { describe, expect, it } from 'vitest'
 interface TeamMember {
   id: string
   prompt: string
+  provider: string
+  model: string
 }
 
 interface MatildaTeamConfig {
   core: {
-    assistant: { prompt: string }
+    assistant: { prompt: string; provider: string; model: string }
     members: TeamMember[]
   }
   modules: {
@@ -69,6 +71,8 @@ describe('Matilda blind evaluation Team template', () => {
     expect(config.core.members.every(member => member.prompt.includes('Own only'))).toBe(true)
     expect(config.core.members.every(member => member.prompt.includes('optional private scratch state'))).toBe(true)
     expect(config.core.members.every(member => member.prompt.includes('`fleet_resource add`'))).toBe(true)
+    expect([config.core.assistant, ...config.core.members].every(member =>
+      member.provider === 'memorax' && member.model === 'deepseek-v4-flash')).toBe(true)
   })
 
   it('relies on the container network boundary without disabling Fleet communication', () => {

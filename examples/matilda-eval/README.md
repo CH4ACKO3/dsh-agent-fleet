@@ -15,7 +15,7 @@ The template deliberately does not encode a known answer, a benchmark-specific p
 
 ## Files
 
-- `team.local.json`: importable local Team preset; names and model routes remain launcher-selected.
+- `team.local.json`: importable local Team preset; names remain randomized while the evaluation route is pinned to `memorax/deepseek-v4-flash` for reproducible cost and behavior comparisons.
 - `task.md`: authoritative blind benchmark containing only the problem, expected evidence, and run isolation. It intentionally contains no known optimum, prior construction, timing policy, or prescribed collaboration plan.
 - `Dockerfile` and `requirements.txt`: Python, Z3, OR-Tools CP-SAT, SciPy/HiGHS, and process instrumentation.
 - `compose.yaml`: isolated DSH state volume, bind-mounted run workspace, configurable CPU/memory limits, a loopback-only UI port, and a kernel-enforced model-only egress guard.
