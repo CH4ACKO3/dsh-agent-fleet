@@ -5162,7 +5162,80 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('retries malformed tool protocol twice, then escalates to one assistant without a storm', async () => {
+  it('resets malformed tool protocol retries after valid output', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected live lead member')
+    const malformedTurn = (seq: number): SessionEvent => ({
+      seq,
+      time: Date.now(),
+      type: 'turn/end',
+      data: {
+        turn: seq,
+        reason: {
+          kind: 'error',
+          error: {
+            code: 'PI_AI_ERROR',
+            message: 'malformed_tool_protocol: Inference backend returned malformed tool-call protocol.',
+          },
+        },
+      },
+    })
+
+    service.recordMemberSessionEvent(lead.id, malformedTurn(10))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 11,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Recovered useful result.' }] },
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(12))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 13,
+      time: Date.now(),
+      type: 'tool/call',
+      data: { turn: 11, callId: 'valid-call', name: 'fleet_task', arguments: '{"action":"owner_list"}' },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(14))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    const recoveryEvents = service.readTrace(run.id, 0, 300).events.filter(event =>
+      event.type === 'member_protocol_recovery_scheduled')
+    expect(recoveryEvents).toHaveLength(3)
+    expect(recoveryEvents.every(event => event.data.includes('"attempt":1'))).toBe(true)
+    expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'member_protocol_recovery_reset',
+        data: expect.stringContaining('valid_assistant_output'),
+      }),
+      expect.objectContaining({
+        type: 'member_protocol_recovery_reset',
+        data: expect.stringContaining('valid_tool_call'),
+      }),
+    ]))
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_protocol_recovery_exhausted')).toBe(false)
+    disconnect()
+  })
+
+  it('retries consecutive malformed tool protocol twice, then escalates to one assistant without a storm', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {

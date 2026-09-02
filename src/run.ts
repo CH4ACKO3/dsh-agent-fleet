@@ -6105,6 +6105,22 @@ export class FleetRunService {
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     this.recordBudgetUsage(record, member, event)
+    const validProtocolOutput = (event.type === 'assistant/message'
+      && event.data.interrupted !== true
+      && progressMessageText(event.data).trim().length > 0)
+      || event.type === 'tool/call'
+    if (validProtocolOutput) {
+      const recovery = this.protocolRecoveries.get(sessionId)
+      if (recovery !== undefined) {
+        this.protocolRecoveries.delete(sessionId)
+        this.appendEvent(runId, 'member_protocol_recovery_reset', {
+          member,
+          sessionId,
+          previousAttempts: recovery.attempt,
+          reason: event.type === 'tool/call' ? 'valid_tool_call' : 'valid_assistant_output',
+        })
+      }
+    }
     if (event.type === 'assistant/message') {
       const tokens = inputContextTokens(event.data.usage)
       if (tokens !== undefined) {
