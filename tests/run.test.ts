@@ -1277,6 +1277,13 @@ describe('FleetRunService', () => {
       domain: { kind: 'interaction', waitingTaskIds: [rootGoalId] },
     })
     expect(service.taskBoard(run.id).ownerTasks(assistantId)).toEqual([])
+    expect(service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'The atomic Fleet start already installed the wait.',
+    })).toMatchObject({
+      task: { id: interaction.id, stableState: { kind: 'dormant' } },
+      goals: [],
+    })
 
     settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, rootGoalId, 'complete', 'Verified result.')
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
@@ -1344,6 +1351,48 @@ describe('FleetRunService', () => {
       stableState: { kind: 'running' },
       domain: { kind: 'interaction', inputRevision: 2, settledRevision: 1 },
     })
+    disconnect()
+  })
+
+  it('tells the assistant to end its turn after an atomic Fleet start', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-start-tool', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Start the Team work.' }],
+      },
+    } as unknown as SessionEvent)
+
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: { readonly agent: Agent }): Promise<unknown>
+    }> = []
+    installRunTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} } },
+    } as unknown as Context, service, {} as never)
+    const fleetRun = registered.find(tool => tool.name === 'fleet_run')
+    if (fleetRun === undefined) throw new Error('expected fleet_run')
+
+    await expect(fleetRun.execute({
+      action: 'start',
+      run_id: run.id,
+      task: taskPath,
+    }, { agent: launcher as unknown as Agent })).resolves.toMatchObject({
+      action: 'start',
+      next: 'end_turn_without_fleet_user_task_continue_or_status',
+    })
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('dormant')
     disconnect()
   })
 

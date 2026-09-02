@@ -3072,6 +3072,12 @@ export class FleetRunService {
       if (task === undefined) throw new Error(`Fleet assistant ${assistant.view.id} has no foreground Interaction Task`)
       return { task, goals: [] }
     }
+    const current = runtime.tasks.interactionTask(assistant.view.id)
+    if (current?.stableState.kind === 'dormant'
+      && input.taskIds === undefined
+      && input.goal === undefined) {
+      return { task: current, goals: [] }
+    }
     return runtime.tasks.deferInteraction(String(caller.id), {
       reason: input.reason,
       ...(input.taskIds === undefined ? {} : { taskIds: liveTaskIds }),
@@ -5164,6 +5170,7 @@ export class FleetRunService {
         `Every direct foreground user input is already tracked in this Team's persistent Interaction Task. The foreground message is the current revision; do not call fleet_user_task status merely because direct input arrived. Use action="status" with run_id="${record.id}" after a Task Delivery, recovery wake, or when the current Interaction state is otherwise unclear.`,
         'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
         'A normal project imperative remains Team work: delegate before project execution, and take over only when explicitly requested, no formal member is available, or Team execution has failed.',
+        'A successful fleet_run start already links the new root Task and makes this Interaction dormant. Its result says to end the turn; do not follow it with fleet_user_task continue or status.',
         'When fleet_send returns replyTaskIds for delegated work, do not poll members. After all needed requests have been sent, call fleet_user_task action="continue" once with those task_ids and end the turn. Fleet wakes this assistant from durable Task settlement or its bounded progress deadline.',
         'Intermediate native output is retained in the Session trace but is not delivered to the user by default. Use fleet_user_task action="update" only for an intentional mid-turn user update; do not use it to duplicate the final answer.',
         'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: the last non-empty native output completes the direct Interaction and is delivered to the user when the turn ends normally.',
@@ -9554,6 +9561,7 @@ const RUN_RESULT_SCHEMA = {
     action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
     runs: { type: 'array', items: RUN_SCHEMA },
     run: RUN_SCHEMA,
+    next: { type: 'string' },
   },
 } as const
 
@@ -9944,7 +9952,7 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_run',
-    description: 'Control the outer Fleet Team lifecycle. Start can atomically create a planned Goal/Vote DAG; successful plans complete their zero-owner root automatically.',
+    description: 'Control the outer Fleet Team lifecycle. Start atomically creates a planned Goal/Vote DAG, links its root to the foreground Interaction, and makes that Interaction dormant; after a successful start, end the turn without fleet_user_task continue/status. Successful plans complete their zero-owner root automatically.',
     parameters: {
       action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team where supported.' },
@@ -10045,6 +10053,7 @@ export function installRunTools(
             })),
           }),
         }),
+        next: 'end_turn_without_fleet_user_task_continue_or_status',
       }
     },
   }))
