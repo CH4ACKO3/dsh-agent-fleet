@@ -6,10 +6,10 @@ The design starts with four parallel evidence lanes rather than a chat-heavy fix
 
 1. construction search and witness validation;
 2. mathematical lower-bound work;
-3. two independent exact encodings;
+3. global exact-encoding readiness and adjacent-value decisions;
 4. adversarial small-instance checks and terminal reproduction.
 
-The foreground assistant stages the initial lanes, an adaptive-refinement Goal, result packaging, and an independent terminal Vote atomically, then waits. When a better incumbent appears, the refinement Goal creates a durable child DAG that tries a structurally different construction family, seeks an explanatory invariant, and globally decides the adjacent objective value. Packaging and voting have different owners. This keeps ordinary acknowledgements and solver chatter out of the user conversation while preserving a formal Task chain through any long-running refinement.
+The foreground assistant stages the initial lanes, an adaptive-refinement Goal, result packaging, and an independent terminal Vote atomically, then waits. Each first pass is bounded reconnaissance: one checkable baseline is submitted immediately, while deeper work stays in the adaptive chain instead of becoming a private multi-step project. When a better incumbent appears, the refinement Goal creates a durable child DAG that tries a structurally different construction family, seeks an explanatory invariant, globally decides the adjacent objective value, and preserves a continuation path. Packaging and voting have different owners. This keeps ordinary acknowledgements and solver chatter out of the user conversation while preserving a formal Task chain through any long-running refinement.
 
 The template deliberately does not encode a known answer, a benchmark-specific permutation family, or a fixed round count. Its acceptance rule is evidence-based: a best-known value remains only an upper bound until an independent global route excludes every better value. A timeout, a selected set of fixed candidates, or agreement with a short numerical pattern cannot pass the terminal Vote.
 
@@ -39,15 +39,14 @@ docker compose --project-directory examples/matilda-eval run --rm --entrypoint p
 docker compose --project-directory examples/matilda-eval run --rm --entrypoint python dsh /opt/matilda-eval/verify-network-isolation.py
 ```
 
-Prepare each empty run workspace by copying only the benchmark inputs:
+Prepare each empty run workspace by copying only the authoritative benchmark task. Keep the Team template outside `/workspace` and import it from this source directory so formal members cannot waste context rereading their own configuration:
 
 ```powershell
-Copy-Item examples/matilda-eval/team.local.json $env:DSH_WORKSPACE/team.local.json
 Copy-Item examples/matilda-eval/task.md $env:DSH_WORKSPACE/task.md
 docker compose --project-directory examples/matilda-eval up -d
 ```
 
-Open `http://127.0.0.1:3093/`. The two benchmark inputs are now available at stable container paths without exposing the source report or an earlier run's evidence.
+Open `http://127.0.0.1:3093/`, choose `/workspace`, and import `examples/matilda-eval/team.local.json` from the host. The authoritative task is available at a stable container path without exposing the Team configuration, source report, or an earlier run's evidence to members.
 
 Then tell the foreground assistant:
 
