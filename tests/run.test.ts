@@ -567,18 +567,27 @@ describe('FleetRunService', () => {
     const { service, launcher, context, disconnect } = setup(root)
     const registered = new Map<string, unknown>()
     const guards: Array<(execution: { readonly name: string; readonly arguments: unknown }) => string | undefined> = []
-    context.provide('tools', {
+    const nativeTools = new Set(['bash', 'write', 'edit', 'todo_write', 'read'])
+    const activeRestrictions: Array<{ readonly deny: readonly string[] }> = []
+    const toolService = {
+      nativeTools,
       register: (tool: { readonly name: string }) => {
         registered.set(tool.name, tool)
         return () => { registered.delete(tool.name) }
       },
-      restrict: () => () => {},
+      restrict: (filter: { readonly deny: readonly string[] }) => {
+        activeRestrictions.push(filter)
+        return () => { activeRestrictions.splice(activeRestrictions.indexOf(filter), 1) }
+      },
       guard: (guard: (execution: { readonly name: string; readonly arguments: unknown }) => string | undefined) => {
         guards.push(guard)
         return () => { guards.splice(guards.indexOf(guard), 1) }
       },
-      get: (name: string) => registered.get(name),
-    })
+      get(name: string) {
+        return registered.get(name) ?? (this.nativeTools.has(name) ? { name } : undefined)
+      },
+    }
+    context.provide('tools', toolService)
     await context.plugin((scope) => {
       launcher.ctx = scope
     })
@@ -598,6 +607,7 @@ describe('FleetRunService', () => {
     expect(registered.has('fleet_reply')).toBe(true)
     expect(registered.has('fleet_messages')).toBe(false)
     expect(registered.has('fleet_tools')).toBe(false)
+    expect(activeRestrictions).toContainEqual({ deny: ['bash', 'write', 'edit', 'todo_write'] })
 
     service.recordMemberSessionEvent(launcher.id, {
       seq: 1,
@@ -620,6 +630,7 @@ describe('FleetRunService', () => {
       runId: run.id,
       reason: 'The user explicitly requested direct execution.',
     })
+    expect(activeRestrictions).not.toContainEqual({ deny: ['bash', 'write', 'edit', 'todo_write'] })
     expect(guardReason('write', { path: 'result.txt', content: 'done' })).toBeUndefined()
 
     service.recordMemberSessionEvent(launcher.id, {
@@ -631,6 +642,7 @@ describe('FleetRunService', () => {
         content: [{ type: 'text', text: 'A separate request.' }],
       },
     } as unknown as SessionEvent)
+    expect(activeRestrictions).toContainEqual({ deny: ['bash', 'write', 'edit', 'todo_write'] })
     expect(guardReason('write', { path: 'result.txt', content: 'again' })).toContain('not routed')
     disconnect()
   })

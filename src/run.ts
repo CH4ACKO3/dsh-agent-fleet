@@ -2073,6 +2073,7 @@ const QUIET_TOOL_WAIT_DELAY_MS = 90_000
 const TEAM_QUIESCENCE_GRACE_MS = 3_000
 const DEFAULT_INTERACTION_CHECK_SECONDS = 300
 const FLEET_FOREGROUND_PROTOCOL_SECTION = 'fleet:foreground-task-request'
+const ASSISTANT_DELEGATION_ONLY_NATIVE_TOOLS = ['bash', 'write', 'edit', 'todo_write'] as const
 const ASSISTANT_PROJECT_WRITE_TOOLS = new Set(['write', 'edit'])
 const ASSISTANT_READ_ONLY_SHELL_TOOLS = new Set([
   'pwd', 'ls', 'rg', 'grep', 'cat', 'head', 'tail', 'wc', 'stat', 'file', 'du', 'df',
@@ -2255,6 +2256,10 @@ export class FleetRunService {
   private readonly turnStartReminderTurns = new Map<string, number>()
   private readonly toolResultReminderSequences = new Map<string, number>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
+  private readonly assistantNativeToolRestrictions = new WeakMap<Agent, {
+    tighten(): void
+    release(): void
+  }>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
   private readonly pausingTeams = new Map<string, Promise<FleetRunRecord>>()
@@ -3078,7 +3083,9 @@ export class FleetRunService {
   takeOverAssistantInteraction(caller: Agent, input: TakeOverFleetInteractionInput) {
     const record = this.requireCallerRecord(caller, input.runId)
     const assistant = this.requireAssistantConnection(caller, record.id)
-    return this.requireRuntime(record.id).tasks.takeOverInteraction(String(caller.id), input.reason)
+    const task = this.requireRuntime(record.id).tasks.takeOverInteraction(String(caller.id), input.reason)
+    this.assistantNativeToolRestrictions.get(caller)?.release()
+    return task
   }
 
   private markAssistantUserFacingTurn(caller: Agent, source: AssistantUserFacingTurn): void {
@@ -5132,6 +5139,7 @@ export class FleetRunService {
         })
         if (previous?.domain.kind !== 'interaction'
           || previous.domain.latestMessageId !== String(message.id)) {
+          this.assistantNativeToolRestrictions.get(agent)?.tighten()
           this.armAssistantQuiescence(record.id, assistant.view.id)
         }
       }
@@ -5185,6 +5193,7 @@ export class FleetRunService {
       readonly tools?: {
         readonly register?: unknown
         get?(name: string, agent?: Agent): unknown
+        restrict?(filter: { readonly deny: readonly string[] }): () => void
         guard?(guard: (execution: { readonly name: string; readonly arguments: unknown }) => string | undefined): () => void
       }
       readonly inject?: unknown
@@ -5199,6 +5208,7 @@ export class FleetRunService {
     const directTools = Object.hasOwn(ready, 'tools') ? ready.tools : undefined
     const directFs = Object.hasOwn(ready, 'fs')
     if (typeof directTools?.register === 'function') {
+      const nativeRestriction = this.installAssistantNativeToolRestriction(caller, directTools)
       const stopBoundary = directTools.guard?.(execution =>
         this.assistantExecutionBoundaryReason(caller, execution))
       const hostHasProgress = typeof directTools.get === 'function'
@@ -5215,6 +5225,7 @@ export class FleetRunService {
           || directTools.get('fleet_reply', caller) === undefined)) {
         stop()
         stopBoundary?.()
+        nativeRestriction.release()
         throw new Error('Fleet assistant Inbox/Reply tools were not visible in the Agent scope after installation')
       }
       this.assistantToolAgents.add(caller)
@@ -5227,6 +5238,7 @@ export class FleetRunService {
     // "cannot get property ... without inject". Always create the durable tool
     // binding from a scope that explicitly injects both services.
     await callerCtx.inject(['fs', 'tools'], (scope) => {
+      const nativeRestriction = this.installAssistantNativeToolRestriction(caller, scope.tools)
       const stopBoundary = scope.tools.guard(execution =>
         this.assistantExecutionBoundaryReason(caller, execution))
       const hostHasProgress = scope.tools.get('fleet_progress') !== undefined
@@ -5240,11 +5252,38 @@ export class FleetRunService {
           || scope.tools.get('fleet_reply', caller) === undefined) {
         stop()
         stopBoundary()
+        nativeRestriction.release()
         throw new Error('Fleet assistant Inbox/Reply tools were not visible in the Agent scope after installation')
       }
       this.assistantToolAgents.add(caller)
-      return () => { stopBoundary(); stop() }
+      return () => { nativeRestriction.release(); stopBoundary(); stop() }
     })
+  }
+
+  private installAssistantNativeToolRestriction(
+    caller: Agent,
+    tools: {
+      get?(name: string, agent?: Agent): unknown
+      restrict?(filter: { readonly deny: readonly string[] }): () => void
+    },
+  ): { tighten(): void; release(): void } {
+    let stop: (() => void) | undefined
+    const controller = {
+      tighten: () => {
+        if (stop !== undefined || tools.restrict === undefined || tools.get === undefined) return
+        const get = tools.get.bind(tools)
+        const deny = ASSISTANT_DELEGATION_ONLY_NATIVE_TOOLS.filter(name =>
+          get(name, caller) !== undefined)
+        if (deny.length > 0) stop = tools.restrict({ deny })
+      },
+      release: () => {
+        stop?.()
+        stop = undefined
+      },
+    }
+    this.assistantNativeToolRestrictions.set(caller, controller)
+    controller.tighten()
+    return controller
   }
 
   detachAssistant(caller: Agent, runId?: string): FleetRunRecord {
@@ -6091,6 +6130,7 @@ export class FleetRunService {
     if (event.type === 'user/message' && event.data.source?.kind === 'user') {
       this.protocolRecoveries.delete(sessionId)
       if (foregroundAssistant) {
+        if (agent !== undefined) this.assistantNativeToolRestrictions.get(agent)?.tighten()
         this.assistantTurnOutputs.delete(sessionId)
         const turn = this.assistantCurrentTurns.get(sessionId)
         if (turn !== undefined) this.assistantUserFacingTurns.set(sessionId, { turn, source: 'direct' })
