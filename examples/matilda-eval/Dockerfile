@@ -73,15 +73,22 @@ COPY requirements.txt /opt/matilda-eval/requirements.txt
 RUN python3 -m venv /opt/matilda-eval/venv \
     && /opt/matilda-eval/venv/bin/pip install --no-cache-dir --requirement /opt/matilda-eval/requirements.txt
 
-RUN ln -sf /opt/matilda-eval/venv/bin/python /usr/local/bin/python \
-    && ln -sf /opt/matilda-eval/venv/bin/python3 /usr/local/bin/python3
-
 COPY scripts/verify-environment.py /opt/matilda-eval/verify-environment.py
 COPY scripts/verify-network-isolation.py /opt/matilda-eval/verify-network-isolation.py
 COPY scripts/lean-mathlib.sh /usr/local/bin/lean-mathlib
+COPY scripts/python-venv.sh /usr/local/bin/python
+COPY scripts/python-venv.sh /usr/local/bin/python3
 COPY scripts/network-guard.sh /opt/matilda-eval/network-guard.sh
-RUN sed -i 's/\r$//' /opt/matilda-eval/network-guard.sh /usr/local/bin/lean-mathlib \
-    && chmod 0555 /opt/matilda-eval/network-guard.sh /usr/local/bin/lean-mathlib
+RUN sed -i 's/\r$//' \
+        /opt/matilda-eval/network-guard.sh \
+        /usr/local/bin/lean-mathlib \
+        /usr/local/bin/python \
+        /usr/local/bin/python3 \
+    && chmod 0555 \
+        /opt/matilda-eval/network-guard.sh \
+        /usr/local/bin/lean-mathlib \
+        /usr/local/bin/python \
+        /usr/local/bin/python3
 
 ENV PATH="/opt/matilda-eval/venv/bin:${PATH}" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
