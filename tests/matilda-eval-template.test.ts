@@ -67,14 +67,19 @@ describe('Matilda blind evaluation Team template', () => {
     expect(config.core.members.every(member => member.prompt.includes('optional private scratch state'))).toBe(true)
   })
 
-  it('distinguishes outbound internet access from internal Fleet communication', () => {
+  it('relies on the container network boundary without disabling Fleet communication', () => {
     const rules = config.modules['dsh-agent-fleet/message'].rules
+    const collaboration = config.modules['dsh-agent-fleet/message'].collaborationMethod
     const editorRules = config.modules['dsh-agent-fleet/ui'].editor.rules
     const task = readFileSync(resolve('examples/matilda-eval/task.md'), 'utf8')
 
-    expect(rules).toContain('applies only to outbound container network connections')
-    expect(rules).toContain('internal Team communication, not internet access')
-    expect(editorRules).toContain('Fleet Channels, direct messages, @ mentions, Reply Tasks')
-    expect(task).toContain('Fleet 频道、私聊、@、Reply Task 和共享本地工件属于团队内部通信，不属于联网')
+    expect(rules).toContain('container network boundary permits only the configured model inference service')
+    expect(rules).toContain('Fleet messaging and shared local artifacts remain available')
+    expect(rules).toContain("Use Chinese as the Team's working language")
+    expect(collaboration).toContain('send that owner a focused message instead of waiting for a milestone')
+    expect(editorRules).toContain('Fleet messaging and shared local artifacts remain available')
+    expect(task).toContain('容器网络边界仅允许访问已经配置的模型推理服务')
+    expect(task).toContain('Fleet 内部协作功能可正常使用')
+    expect(task).toContain('团队工作语言使用中文')
   })
 })

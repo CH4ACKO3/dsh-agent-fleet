@@ -237,6 +237,7 @@ describe('FleetAssistantRuntime', () => {
       'fleet_send',
       'fleet_inbox',
       'fleet_reply',
+      'fleet_channel',
       'fleet_vote',
     ]))
     expect(fixture.restrict).not.toHaveBeenCalled()
@@ -262,6 +263,7 @@ describe('FleetAssistantRuntime', () => {
     })
 
     expect(mode.tools).toContain('fleet_send')
+    expect(mode.tools).toContain('fleet_channel')
     expect(mode.tools).not.toContain('external_service')
   })
 

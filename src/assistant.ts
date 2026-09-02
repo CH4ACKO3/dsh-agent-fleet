@@ -19,8 +19,8 @@ export const FLEET_GUIDE_TOOL_NAMES = [
 export type FleetAssistantView = FleetMemberView
 
 const FLEET_MEMBER_TOOL_NAMES = {
-  messages: ['fleet_send', 'fleet_inbox', 'fleet_reply'],
-  coordination: ['fleet_channel', 'fleet_vote'],
+  messages: ['fleet_send', 'fleet_inbox', 'fleet_reply', 'fleet_channel'],
+  coordination: ['fleet_vote'],
   resources: ['fleet_shared', 'fleet_resource', 'fleet_workspace'],
   status: ['fleet_progress'],
 } as const
