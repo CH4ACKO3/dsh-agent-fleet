@@ -1733,6 +1733,7 @@ describe('FleetRunService', () => {
     expect(leadPersona).toContain('@Assistant [id=team-assistant; role=Team assistant]')
     expect(leadPersona).not.toContain('@Alivia')
     expect(leadPersona).toContain('Configured groups cover Fleet capabilities only')
+    expect(leadPersona).toContain('Native subagent spawning is unavailable inside a formal Fleet member')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
     expect(leadPersona).toContain('Use only an exact display name or member id from the current reachable roster')
     expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state')

@@ -2003,6 +2003,7 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     '## Member view',
     `Configured Fleet tool groups: ${member.toolGroups.join(', ') || 'none'}. Optional groups are available only when their sub-plugin is installed.`,
     'Configured groups cover Fleet capabilities only; host tools such as bash, read, and edit come from the Agent preset.',
+    'Native subagent spawning is unavailable inside a formal Fleet member. Keep execution in your assigned Fleet Task; route any necessary handoff through durable Fleet Tasks and the visible Team roster.',
     'Every granted Fleet capability with at least one authorized action stays directly available.',
     `Granted Fleet permissions: ${member.permissions.join(', ') || 'none'}.`,
     `Current reachable roster (use these exact identities only): ${members || 'none'}.`,
@@ -2023,7 +2024,18 @@ async function installMemberTools(
   source?: 'create' | 'resume',
 ): Promise<void> {
   await childCtx.inject(['fs', 'tools'], (scope) => {
-    return runtime.installTools(scope, member, { exposeHostFleetTools })
+    // Formal Fleet members are already the durable parallelism boundary. A
+    // native subagent would create an untracked execution branch whose work,
+    // lifecycle, and model cost are absent from the Team Task graph. Keep the
+    // host tool statically unavailable for the entire member Session instead
+    // of allowing it and rejecting individual calls after the model has chosen
+    // the route.
+    const removeNativeSubagent = scope.tools.restrict({ deny: ['subagent'] })
+    const removeFleetTools = runtime.installTools(scope, member, { exposeHostFleetTools })
+    return () => {
+      removeFleetTools()
+      removeNativeSubagent()
+    }
   })
   if (source !== undefined) {
     if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
