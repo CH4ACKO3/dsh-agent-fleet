@@ -8012,6 +8012,7 @@ export function FleetTeamPanel({
   )
   const effectiveSnapshot = snapshot
   const activeTeam = effectiveSnapshot.team
+  const activeTeamId = activeTeam?.teamId
   const tutorial = activeTeam?.teamId === FLEET_TUTORIAL_TEAM_ID || activeTeam?.tutorial === true
   const itemKey = activeTeam === undefined ? '' : `${activeTeam.teamId}:${activeTool}`
   const activeItem = activeTeam === undefined ? '' : resolveFleetPanelItem(activeTeam, activeTool, items[itemKey])
@@ -8020,6 +8021,12 @@ export function FleetTeamPanel({
     : `${activeTeam.teamId}:${activeItem}`
   const composeState = composeStates[composeKey] ?? EMPTY_COMPOSE_STATE
   const visibleTool = activeTeam === undefined ? 'home' : activeTool
+  const loadMemberAccess = useCallback((memberId: string, signal?: AbortSignal) => {
+    if (source?.loadMemberAccess === undefined || activeTeamId === undefined) {
+      return Promise.reject(new Error(panelText('Fleet 成员资源访问接口不可用', 'Fleet member resource access API is unavailable')))
+    }
+    return source.loadMemberAccess({ sessionId, teamId: activeTeamId, memberId }, signal)
+  }, [activeTeamId, sessionId, source])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -8620,11 +8627,7 @@ export function FleetTeamPanel({
         }) ?? Promise.reject(new Error(panelText('Fleet 成员权限接口不可用', 'Fleet member permissions API is unavailable'))),
     }),
     ...(tutorial || source?.loadMemberAccess === undefined ? {} : {
-      loadMemberAccess: (memberId: string, signal?: AbortSignal) => source.loadMemberAccess?.({
-        sessionId,
-        teamId: activeTeam.teamId,
-        memberId,
-      }, signal) ?? Promise.reject(new Error(panelText('Fleet 成员资源访问接口不可用', 'Fleet member resource access API is unavailable'))),
+      loadMemberAccess,
     }),
     ...(tutorial || source?.updateMemberAccess === undefined ? {} : {
       updateMemberAccess: (memberId: string, change: FleetPanelMemberAccessChange) =>
