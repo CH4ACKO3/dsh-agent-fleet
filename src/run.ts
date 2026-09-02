@@ -3104,6 +3104,13 @@ export class FleetRunService {
     return task
   }
 
+  assistantInteractionBudget(caller: Agent, runId?: string) {
+    const record = this.requireCallerRecord(caller, runId)
+    this.requireAssistantConnection(caller, record.id)
+    const budget = this.teamBudget(record.id)
+    return { mode: budget.mode, team: budget.team }
+  }
+
   private markAssistantUserFacingTurn(caller: Agent, source: AssistantUserFacingTurn): void {
     const sessionId = String(caller.id)
     const turn = this.assistantCurrentTurns.get(sessionId) ?? this.currentOpenTurn(caller)
@@ -5181,10 +5188,12 @@ export class FleetRunService {
         'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
         'A normal project imperative remains Team work: delegate before project execution, and take over only when explicitly requested, no formal member is available, or Team execution has failed.',
         'A successful fleet_run start already links the new root Task and makes this Interaction dormant. Its result says to end the turn; do not follow it with fleet_user_task continue or status.',
+        'A linked Task reaching a terminal state proves only workflow settlement. Before reporting completion, compare its certified claim with the original user request, including every required quantifier, case, and evidence class. Continue the smallest viable formal follow-up for any material gap; if none remains viable, report or block with the exact partial result instead of narrowing the request.',
         'When fleet_send returns replyTaskIds for delegated work, do not poll members. After all needed requests have been sent, call fleet_user_task action="continue" once with those task_ids and end the turn. Fleet wakes this assistant from durable Task settlement or its bounded progress deadline.',
         'Intermediate native output is retained in the Session trace but is not delivered to the user by default. Use fleet_user_task action="update" only for an intentional mid-turn user update; do not use it to duplicate the final answer.',
         'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: the last non-empty native output completes the direct Interaction and is delivered to the user when the turn ends normally.',
         `Before emitting a native response that settles delegated Team work or a Delivery, or blocks the request, call fleet_user_task with action="report" or action="block" and run_id="${record.id}".`,
+        'After a Delivery, fleet_user_task status includes the authoritative Team-wide budget. Use its budget.team counters for cost reporting; never replace them with the current assistant Session usage.',
         'Do not emit the final answer before that tool call. After it succeeds, emit the answer exactly once and end the turn. Fleet commits and delivers that last native output at turn end; a delegated result or block is not complete without both the tool intent and non-empty native output.',
       ].join('\n')
       return {
@@ -9834,6 +9843,14 @@ const USER_TASK_RESULT_SCHEMA = {
     action: { type: 'string', required: true, enum: ['status', 'update', 'continue', 'take_over', 'report', 'block'] },
     task: { ...FLEXIBLE_OBJECT_SCHEMA, required: true },
     goals: { type: 'array', items: FLEXIBLE_OBJECT_SCHEMA },
+    budget: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        mode: { type: 'string', required: true, enum: ['tokens', 'cost'] },
+        team: { ...BUDGET_ACCOUNT_SCHEMA, required: true },
+      },
+    },
   },
 } as const
 
@@ -9904,7 +9921,11 @@ export function installRunTools(
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_user_task')
       if (args.action === 'status') {
-        return Promise.resolve({ action: 'status' as const, task: fleetTaskToolDetail(service.assistantInteraction(caller, args.run_id)) })
+        return Promise.resolve({
+          action: 'status' as const,
+          task: fleetTaskToolDetail(service.assistantInteraction(caller, args.run_id)),
+          budget: service.assistantInteractionBudget(caller, args.run_id),
+        })
       }
       if (args.action === 'update') {
         if (args.message === undefined) throw new Error('fleet_user_task update requires message')

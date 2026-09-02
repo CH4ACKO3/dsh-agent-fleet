@@ -5,8 +5,8 @@ This directory turns the attached Matilda 16 × 16 task into a blind, repeatable
 The Team exposes four complementary capabilities rather than a chat-heavy fixed sequence of research rounds:
 
 1. construction search and witness validation;
-2. mathematical lower-bound work;
-3. exact-model design and auditable feasibility or infeasibility evidence;
+2. structural lower-bound work with Lean 4 machine-checking;
+3. integration, exact-model validation, and auditable gap analysis;
 4. independent reproduction, adversarial validation, and acceptance review.
 
 The foreground assistant reads the task and randomized roster, chooses which capabilities are relevant, and atomically creates a task-derived DAG. The template does not require all four members to receive equal work and does not prescribe construction, proof, exact solving, or audit as mandatory stages. It constrains only collaboration correctness: one owner per Goal, explicit dependencies and joins, durable continuation paths for long work, scoped handoffs, and independent acceptance when the task needs it. This keeps ordinary acknowledgements and solver chatter out of the user conversation without replacing the assistant's planning judgment with a benchmark-specific workflow.

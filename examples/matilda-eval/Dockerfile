@@ -73,6 +73,9 @@ COPY requirements.txt /opt/matilda-eval/requirements.txt
 RUN python3 -m venv /opt/matilda-eval/venv \
     && /opt/matilda-eval/venv/bin/pip install --no-cache-dir --requirement /opt/matilda-eval/requirements.txt
 
+RUN ln -sf /opt/matilda-eval/venv/bin/python /usr/local/bin/python \
+    && ln -sf /opt/matilda-eval/venv/bin/python3 /usr/local/bin/python3
+
 COPY scripts/verify-environment.py /opt/matilda-eval/verify-environment.py
 COPY scripts/verify-network-isolation.py /opt/matilda-eval/verify-network-isolation.py
 COPY scripts/lean-mathlib.sh /usr/local/bin/lean-mathlib

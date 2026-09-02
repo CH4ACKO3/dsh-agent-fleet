@@ -35,6 +35,15 @@ def main() -> None:
     assert highs_result.success and highs_result.x is not None
     assert numpy.allclose(highs_result.x, numpy.array([1.0]))
 
+    login_python = subprocess.run(
+        ["sh", "-lc", "command -v python3 && python3 -c 'import z3; print(z3.get_version_string())'"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert login_python[0] == "/usr/local/bin/python3"
+    assert login_python[1] == z3.get_version_string()
+
     lean_version = subprocess.run(
         ["lean", "--version"], check=True, capture_output=True, text=True
     ).stdout.splitlines()[0]
@@ -64,6 +73,7 @@ def main() -> None:
     checks = {
         "cp_sat": "optimal",
         "highs_milp": "optimal",
+        "login_shell_python": "venv",
         "logical_cpus_visible": psutil.cpu_count(logical=True),
         "mathlib": "compiled",
         "z3": "sat",

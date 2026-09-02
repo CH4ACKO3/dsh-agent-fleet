@@ -827,6 +827,9 @@ describe('FleetRunService', () => {
     expect(request).toContain('action="update" only for an intentional mid-turn user update')
     expect(request).toContain('last non-empty native output')
     expect(request).toContain('normal project imperative remains Team work')
+    expect(request).toContain('terminal state proves only workflow settlement')
+    expect(request).toContain('including every required quantifier, case, and evidence class')
+    expect(request).toContain('budget.team counters for cost reporting')
     expect(request).not.toContain('Build and review the requested change.')
 
     const decision = await scoped.preStep([incoming])
@@ -904,6 +907,17 @@ describe('FleetRunService', () => {
         content: [{ type: 'text', text: 'First request.' }],
       },
     } as unknown as SessionEvent)
+    const statusReceipt = await userTask.execute({
+      action: 'status',
+      run_id: run.id,
+    }, { agent: launcher as unknown as Agent })
+    expect(statusReceipt).toMatchObject({
+      action: 'status',
+      budget: {
+        mode: 'tokens',
+        team: { used: 0, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
+      },
+    })
     const pendingReceipt = await userTask.execute({
       action: 'report',
       run_id: run.id,
