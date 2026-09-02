@@ -1392,7 +1392,10 @@ describe('FleetRunService', () => {
       action: 'start',
       next: 'end_turn_without_fleet_user_task_continue_or_status',
     })
-    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState.kind).toBe('dormant')
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState).toMatchObject({
+      kind: 'dormant',
+      reconcilers: [expect.objectContaining({ id: 'interaction-team-quiescent' })],
+    })
     disconnect()
   })
 

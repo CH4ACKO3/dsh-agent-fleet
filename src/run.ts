@@ -2083,7 +2083,6 @@ function traceEventData(value: unknown): string {
 const EXPLICIT_WAIT_DELAY_MS = 2_000
 const QUIET_TOOL_WAIT_DELAY_MS = 90_000
 const TEAM_QUIESCENCE_GRACE_MS = 3_000
-const DEFAULT_INTERACTION_CHECK_SECONDS = 300
 const FLEET_FOREGROUND_PROTOCOL_SECTION = 'fleet:foreground-task-request'
 const ASSISTANT_DELEGATION_ONLY_NATIVE_TOOLS = ['bash', 'write', 'edit', 'todo_write'] as const
 const ASSISTANT_PROJECT_WRITE_TOOLS = new Set(['write', 'edit'])
@@ -2771,9 +2770,8 @@ export class FleetRunService {
     const launchingAssistant = running.assistants.find(assistant => assistant.sessionId === String(launcher.id))
     if (launchingAssistant !== undefined && runtime.tasks.interactionTask(launchingAssistant.view.id)?.stableState.kind === 'running') {
       runtime.tasks.deferInteraction(String(launcher.id), {
-        reason: `Waiting for Fleet work ${work.id} to settle, reach a Team quiescence point, or reach its progress deadline.`,
+        reason: `Waiting for Fleet work ${work.id} to settle or for the Team to reach a quiescence point.`,
         taskIds: [rootTask.id],
-        checkAfterSeconds: DEFAULT_INTERACTION_CHECK_SECONDS,
       })
     }
 
@@ -3094,7 +3092,7 @@ export class FleetRunService {
       reason: input.reason,
       ...(input.taskIds === undefined ? {} : { taskIds: liveTaskIds }),
       ...(input.goal === undefined ? {} : { goal: input.goal }),
-      checkAfterSeconds: input.checkAfterSeconds ?? DEFAULT_INTERACTION_CHECK_SECONDS,
+      ...(input.checkAfterSeconds === undefined ? {} : { checkAfterSeconds: input.checkAfterSeconds }),
     })
   }
 
@@ -9900,7 +9898,7 @@ export function installRunTools(
       title: { type: 'string', description: 'For continue with instructions, title of the new Goal.' },
       instructions: { type: 'string', description: 'For continue, concrete work for a new formal-member Goal.' },
       owners: { type: 'array', items: { type: 'string' }, description: 'For continue with instructions, one or more formal Team members.' },
-      check_after_seconds: { type: 'integer', description: 'For continue, deterministic progress-check deadline. Defaults to 300 seconds.' },
+      check_after_seconds: { type: 'integer', description: 'For continue, optional deterministic progress-check deadline. Omit for event-driven waiting on linked Task settlement or full-Team quiescence.' },
     },
     output: jsonOutput(USER_TASK_RESULT_SCHEMA),
     execute(args, exec) {
