@@ -14,6 +14,7 @@ interface MatildaTeamConfig {
   }
   modules: {
     'dsh-agent-fleet/message': { collaborationMethod: string; rules: string }
+    'dsh-agent-fleet/resources': { policy: string }
     'dsh-agent-fleet/ui': {
       editor: { rules: string }
     }
@@ -34,6 +35,8 @@ describe('Matilda blind evaluation Team template', () => {
     expect(prompt).toContain('Activate a member only for a concrete deliverable')
     expect(prompt).toContain('All required paths must join')
     expect(prompt).toContain('long work retains a formal continuation or recovery path')
+    expect(prompt).toContain('keep at least one evidence-driven continuation')
+    expect(prompt).toContain('registration with `fleet_resource add`')
     expect(prompt).not.toContain('adaptive-refinement Goal')
     expect(prompt).not.toContain('globally decide the immediately adjacent value')
     expect(prompt).not.toContain('every configured formal member exactly one independent zero-dependency first-pass Goal')
@@ -65,21 +68,27 @@ describe('Matilda blind evaluation Team template', () => {
     expect(exact?.prompt).not.toContain('U-1')
     expect(config.core.members.every(member => member.prompt.includes('Own only'))).toBe(true)
     expect(config.core.members.every(member => member.prompt.includes('optional private scratch state'))).toBe(true)
+    expect(config.core.members.every(member => member.prompt.includes('`fleet_resource add`'))).toBe(true)
   })
 
   it('relies on the container network boundary without disabling Fleet communication', () => {
     const rules = config.modules['dsh-agent-fleet/message'].rules
     const collaboration = config.modules['dsh-agent-fleet/message'].collaborationMethod
+    const resourcePolicy = config.modules['dsh-agent-fleet/resources'].policy
     const editorRules = config.modules['dsh-agent-fleet/ui'].editor.rules
     const task = readFileSync(resolve('examples/matilda-eval/task.md'), 'utf8')
 
     expect(rules).toContain('container network boundary permits only the configured model inference service')
     expect(rules).toContain('Fleet messaging and shared local artifacts remain available')
     expect(rules).toContain("Use Chinese as the Team's working language")
-    expect(collaboration).toContain('send that owner a focused message instead of waiting for a milestone')
+    expect(collaboration).toContain('send that owner one focused message instead of waiting for a milestone')
+    expect(collaboration).toContain('at least one evidence-driven continuation before packaging')
+    expect(rules).toContain('at most one concise message per distinct evidence change')
+    expect(resourcePolicy).toContain('register that existing path with `fleet_resource add`')
     expect(editorRules).toContain('Fleet messaging and shared local artifacts remain available')
     expect(task).toContain('容器网络边界仅允许访问已经配置的模型推理服务')
     expect(task).toContain('Fleet 内部协作功能可正常使用')
     expect(task).toContain('团队工作语言使用中文')
+    expect(task).toContain('至少继续一个由当前证据驱动的改进阶段')
   })
 })
