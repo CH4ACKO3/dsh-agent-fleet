@@ -13,7 +13,10 @@ interface MatildaTeamConfig {
     members: TeamMember[]
   }
   modules: {
-    'dsh-agent-fleet/message': { collaborationMethod: string }
+    'dsh-agent-fleet/message': { collaborationMethod: string; rules: string }
+    'dsh-agent-fleet/ui': {
+      editor: { rules: string }
+    }
   }
 }
 
@@ -63,5 +66,16 @@ describe('Matilda blind evaluation Team template', () => {
     expect(exact?.prompt).toContain('UNKNOWN leaves the interval unchanged')
     expect(exact?.prompt).toContain('Do not enumerate successively larger sizes')
     expect(config.core.members.every(member => member.prompt.includes('do not create a native todo list'))).toBe(true)
+  })
+
+  it('distinguishes outbound internet access from internal Fleet communication', () => {
+    const rules = config.modules['dsh-agent-fleet/message'].rules
+    const editorRules = config.modules['dsh-agent-fleet/ui'].editor.rules
+    const task = readFileSync(resolve('examples/matilda-eval/task.md'), 'utf8')
+
+    expect(rules).toContain('applies only to outbound container network connections')
+    expect(rules).toContain('internal Team communication, not internet access')
+    expect(editorRules).toContain('Fleet Channels, direct messages, @ mentions, Reply Tasks')
+    expect(task).toContain('Fleet 频道、私聊、@、Reply Task 和共享本地工件属于团队内部通信，不属于联网')
   })
 })
