@@ -3174,7 +3174,11 @@ describe('FleetRunService', () => {
       text: 'The foreground assistant is checking in directly.',
       delivery: 'quiet',
     })
-    expect(sent).toMatchObject({ recipients: 0, delivered: 0, woken: 0 })
+    expect(sent).toMatchObject({ recipients: 2, delivered: 2, woken: 0 })
+    expect(service.messageHub(run.id).receipt(sent.messageId)).toMatchObject({
+      recipientIds: expect.arrayContaining(['lead', 'reviewer']),
+      pendingParticipantIds: [],
+    })
     expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages)
       .toContainEqual(expect.objectContaining({
         id: sent.messageId,

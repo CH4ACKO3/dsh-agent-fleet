@@ -5468,7 +5468,7 @@ export class FleetRunService {
     const result = runtime.messages.send(caller, {
       to: input.to,
       text: input.text,
-      delivery: input.delivery === 'quiet' && input.to.startsWith('#') ? 'fyi' : input.delivery,
+      delivery: input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),

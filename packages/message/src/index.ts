@@ -158,8 +158,8 @@ export function installMessageTools(
     register(defineTool({
       name: 'fleet_send',
       description: options.directReplyByDefault
-        ? 'Send one quiet Fleet message to the smallest necessary audience. A direct @target creates one Reply Task by default; use reply_mode="optional" only for context that needs no answer. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is FYI history and wakes nobody.'
-        : 'Send one quiet Fleet message to the smallest necessary audience. Use a direct @target for one-member work and send subset work privately to one accountable owner, who can coordinate with peers. Use a #channel only when its full audience needs the exact content. A Channel post with mentions notifies only those members but remains visible to the full Channel. Each mention creates a Reply Task; use fleet_reply to finish an existing Reply Task.',
+        ? 'Send one quiet Fleet message to the smallest necessary audience. A direct @target creates one Reply Task by default; use reply_mode="optional" only for context that needs no answer. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is delivered quietly to the full Channel without waking anyone or creating Reply Tasks.'
+        : 'Send one quiet Fleet message to the smallest necessary audience. Use a direct @target for one-member work and send subset work privately to one accountable owner, who can coordinate with peers. Use a #channel only when its full audience needs the exact content. An unmentioned Channel post is delivered quietly to the full Channel; a post with mentions notifies only those members while remaining visible to everyone. Each mention creates a Reply Task; use fleet_reply to finish an existing Reply Task.',
       parameters: {
         to: { type: 'string', required: true, description: options.directReplyByDefault ? 'Use @fleet-name or @agent-id for a private response request, #channel for Team-visible history, or meeting:id.' : 'Use @fleet-name or @agent-id for private one-member work, #channel for a Team-visible broadcast, or meeting:id. A direct @target delivers the full message but creates no Reply Task unless that recipient is also mentioned in the text or mentions parameter.' },
         message: { type: 'string', required: true, description: 'Self-contained message text.' },
@@ -181,7 +181,7 @@ export function installMessageTools(
         const result = hub.send(caller, {
           to: args.to as FleetTarget,
           text: args.message,
-          delivery: String(args.to).startsWith('#') ? 'fyi' : 'quiet',
+          delivery: 'quiet',
           ...(mentions === undefined ? {} : { mentions }),
           ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
           ...(args.resources === undefined ? {} : { resources: args.resources }),

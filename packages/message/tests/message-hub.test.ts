@@ -1628,8 +1628,15 @@ describe('MessageHub', () => {
     const send = registered.find(candidate => candidate.name === 'fleet_send')
     if (send === undefined) throw new Error('expected fleet_send')
 
-    await expect(send.execute({ to: '#general', message: 'Allowed once.' }, { agent: lead }))
-      .resolves.toMatchObject({ recipients: expect.any(Number) })
+    const posted = await send.execute(
+      { to: '#general', message: 'Allowed once.' },
+      { agent: lead },
+    ) as { readonly messageId: string; readonly recipients: number; readonly delivered: number; readonly woken: number }
+    expect(posted).toMatchObject({ recipients: 3, delivered: 3, woken: 0 })
+    expect(hub.receipt(posted.messageId)).toMatchObject({
+      recipientIds: expect.arrayContaining(['reviewer', 'qa', 'observer']),
+      pendingParticipantIds: [],
+    })
     allowed.delete('message.post')
     await expect(async () => send.execute(
       { to: '#general', message: 'Must now be denied.' },
