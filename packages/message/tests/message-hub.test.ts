@@ -186,7 +186,7 @@ describe('MessageHub', () => {
     expect(hub.search(qa, { query: 'Inspection complete' })).toHaveLength(1)
   })
 
-  it('keeps ordinary quiet direct Agent messages non-blocking', () => {
+  it('keeps ordinary quiet direct Agent messages optional while tracking unread work', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {
       to: '@reviewer',
@@ -206,12 +206,16 @@ describe('MessageHub', () => {
       unreadMessages: 1,
       unreadChars: 'Please inspect the parser.'.length,
     })
-    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: 'Please inspect the parser.'.length,
+    })
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
       from: 'lead',
       resources: ['res_parser'],
     })
+    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
   })
 

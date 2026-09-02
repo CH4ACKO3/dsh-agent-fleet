@@ -542,6 +542,10 @@ export class FleetCollaborationService {
       // Inbox without injecting a mid-turn notice. Explicit @mentions still
       // create Reply Tasks and wake through the Task notification path.
       muteChannelNotice: participantId => assistantNames.has(participantId),
+      // Native foreground input already has one durable Interaction Task.
+      // Its Fleet conversation mirror must not create a competing Inbox Task.
+      excludeInboxTask: (participantId, message) =>
+        assistantNames.has(participantId) && message.origin === 'user',
     })
     const canManage = (agentId: string, namespace: string): boolean => {
       const member = memberNamesById.get(agentId)

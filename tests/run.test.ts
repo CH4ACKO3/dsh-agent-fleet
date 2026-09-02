@@ -5851,7 +5851,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('does not turn a complete native direct delivery into a duplicate Inbox owner task', async () => {
+  it('keeps a complete native direct delivery as Inbox work until its context is claimed', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -5860,7 +5860,9 @@ describe('FleetRunService', () => {
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
     if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    reviewer.status = 'idle'
     const pendingContext = reviewer.inbox.nextStep.length
+    const beforeWakeup = reviewer.messages.length
 
     service.messageHub(run.id).send(lead, {
       to: '@reviewer', text: 'This complete direct context needs no second fetch.', delivery: 'quiet',
@@ -5868,10 +5870,20 @@ describe('FleetRunService', () => {
 
     expect(service.messageHub(run.id).unreadSummary('reviewer').unreadMessages).toBe(1)
     expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
+      unreadMessages: 1, unreadChars: 'This complete direct context needs no second fetch.'.length,
+    })
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['inbox'])
+    expect(reviewer.inbox.nextStep).toHaveLength(pendingContext + 1)
+    await vi.waitFor(() => expect(reviewer.messages.length).toBeGreaterThan(beforeWakeup))
+    expect(reviewer.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining('process unread messages already delivered') }),
+    ])
+    const deliveredContext = reviewer.inbox.nextStep[pendingContext]
+    expect(service.messageHub(run.id).markDeliveredContextRead('reviewer', String(deliveredContext?.id))).toBe(true)
+    expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
       unreadMessages: 0, unreadChars: 0,
     })
     expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
-    expect(reviewer.inbox.nextStep).toHaveLength(pendingContext + 1)
     disconnect()
   })
 
@@ -5896,13 +5908,16 @@ describe('FleetRunService', () => {
     })
 
     expect(optional.replyTaskIds).toBeUndefined()
-    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['inbox'])
     expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
-      unreadMessages: 0, unreadChars: 0,
+      unreadMessages: 1, unreadChars: 'Please return the bounded regression result.'.length,
     })
-    expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
+    const optionalContext = reviewer.inbox.nextStep.at(-1)
+    expect(optionalContext?.content).toEqual([
       expect.objectContaining({ text: expect.not.stringContaining('reply-task') }),
     ])
+    expect(service.messageHub(run.id).markDeliveredContextRead('reviewer', String(optionalContext?.id))).toBe(true)
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
 
     const sent = service.sendConversationMessage(launcher as unknown as Agent, {
       runId: run.id,
@@ -5913,9 +5928,15 @@ describe('FleetRunService', () => {
 
     expect(sent.replyTaskIds).toHaveLength(1)
     expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
-    expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
+    const requiredContext = reviewer.inbox.nextStep.at(-1)
+    expect(requiredContext?.content).toEqual([
       expect.objectContaining({ text: expect.stringContaining('reply-task') }),
     ])
+    expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
+      unreadMessages: 1, unreadChars: '@reviewer Please return the bounded regression result.'.length,
+    })
+    expect(service.messageHub(run.id).markDeliveredContextRead('reviewer', String(requiredContext?.id))).toBe(true)
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
 
     const replyTaskId = sent.replyTaskIds?.[0]
     if (replyTaskId === undefined) throw new Error('expected direct Reply Task id')
