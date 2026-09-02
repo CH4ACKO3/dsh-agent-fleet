@@ -2217,6 +2217,10 @@ interface ProtocolRecovery {
   pending: boolean
 }
 
+interface TeamActiveParticipantState {
+  readonly sessionIds: ReadonlySet<string>
+}
+
 interface OwnerTaskWakeState {
   readonly runId: string
   readonly fingerprint: string
@@ -2262,6 +2266,7 @@ export class FleetRunService {
   private readonly memberLastSharedTurns = new Map<string, number>()
   private readonly memberVisibilityReviewedTurns = new Map<string, number>()
   private readonly visibilityReminderStates = new Map<string, VisibilityReminderState>()
+  private readonly activeParticipantStates = new Map<string, TeamActiveParticipantState>()
   private readonly turnReminderLastShown = new Map<string, Map<FleetTurnReminderSlot, Map<string, number>>>()
   private readonly turnStartReminderTurns = new Map<string, number>()
   private readonly toolResultReminderSequences = new Map<string, number>()
@@ -6697,6 +6702,7 @@ export class FleetRunService {
       this.participants(record).some(member => member.sessionId === agentId))
     if (records.length > 0) {
       this.emitChange()
+      for (const record of records) this.remindSoleActiveParticipant(record)
     }
     if (agent.status === 'idle') {
       this.agentIdle(agent)
@@ -6715,6 +6721,27 @@ export class FleetRunService {
         this.signalAssistantInteractionDeliveries(record.id)
       }
     }
+  }
+
+  private remindSoleActiveParticipant(record: FleetRunRecord): void {
+    const active = new Set(this.participants(record)
+      .filter(participant => this.ctx.agents.get(SessionId(participant.sessionId))?.status === 'running')
+      .map(participant => participant.sessionId))
+    const previous = this.activeParticipantStates.get(record.id)
+    this.activeParticipantStates.set(record.id, { sessionIds: active })
+    if (previous === undefined || previous.sessionIds.size <= 1 || active.size !== 1) return
+    const [sessionId] = active
+    if (sessionId === undefined || !previous.sessionIds.has(sessionId)) return
+    const runtime = this.collaboration.get(record.id)
+    if (runtime === undefined || runtime.memberNamesById.get(sessionId) === undefined) return
+    runtime.messages.sendSystemNotification(sessionId, {
+      kind: 'sole_active_fyi',
+      text: this.userLocale === 'zh-CN'
+        ? 'FYI，无需回复：当前团队只剩你仍在工作，其他成员均未处于活跃状态。'
+        : 'FYI, no reply: You are now the only Team Agent still working; no other member is currently active.',
+      // This is context for the already-running turn, never a reason to start another one.
+      delivery: 'quiet',
+    })
   }
 
   agentDisconnected(agentId: string): void {
@@ -8119,6 +8146,7 @@ export class FleetRunService {
     this.memberLastSharedTurns.clear()
     this.memberVisibilityReviewedTurns.clear()
     this.visibilityReminderStates.clear()
+    this.activeParticipantStates.clear()
     this.turnReminderLastShown.clear()
     this.turnStartReminderTurns.clear()
     this.toolResultReminderSequences.clear()

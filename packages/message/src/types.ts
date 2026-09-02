@@ -48,6 +48,7 @@ export type FleetSystemNotificationKind =
   | 'network_recovery'
   | 'task_notice'
   | 'visibility_reminder'
+  | 'sole_active_fyi'
   | 'schedule_notice'
   | 'calendar_notice'
 export type FleetMessageKind =

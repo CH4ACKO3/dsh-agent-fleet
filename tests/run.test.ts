@@ -5709,6 +5709,55 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('quietly reminds the sole remaining active participant once per transition', async () => {
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    service.setUserLocale('zh-CN')
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    const initialLeadMessages = lead.messages.length
+
+    lead.status = 'running'
+    service.agentStatusChanged(lead as unknown as Agent)
+    expect(lead.messages).toHaveLength(initialLeadMessages)
+
+    reviewer.status = 'running'
+    service.agentStatusChanged(reviewer as unknown as Agent)
+    expect(lead.messages).toHaveLength(initialLeadMessages)
+
+    reviewer.completeTurn()
+    service.agentStatusChanged(reviewer as unknown as Agent)
+    expect(lead.status).toBe('running')
+    expect(lead.inbox.nextTurn).toHaveLength(0)
+    expect(lead.inbox.nextStep.at(-1)?.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: 'FYI，无需回复：当前团队只剩你仍在工作，其他成员均未处于活跃状态。',
+      }),
+    ])
+    expect(lead.messages).toHaveLength(initialLeadMessages + 1)
+
+    service.agentStatusChanged(reviewer as unknown as Agent)
+    expect(lead.messages).toHaveLength(initialLeadMessages + 1)
+
+    reviewer.status = 'running'
+    service.agentStatusChanged(reviewer as unknown as Agent)
+    reviewer.completeTurn()
+    service.agentStatusChanged(reviewer as unknown as Agent)
+    expect(lead.messages).toHaveLength(initialLeadMessages + 2)
+
+    expect(service.readTrace(run.id, 0, 300).events.filter(event =>
+      event.type === 'coordination.system_notification'
+        && event.data.includes('sole_active_fyi'))).toHaveLength(2)
+    disconnect()
+  })
+
   it('commits native output from a Reply wake as the prompt visible acknowledgement', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
