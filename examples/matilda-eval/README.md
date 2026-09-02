@@ -17,11 +17,19 @@ The template deliberately does not encode a known answer, a benchmark-specific p
 
 - `team.local.json`: importable local Team preset; names remain randomized while the evaluation route is pinned to `memorax/deepseek-v4-flash` for reproducible cost and behavior comparisons.
 - `task.md`: authoritative blind benchmark containing only the problem, expected evidence, and run isolation. It intentionally contains no known optimum, prior construction, timing policy, or prescribed collaboration plan.
-- `Dockerfile` and `requirements.txt`: Python, Z3, OR-Tools CP-SAT, SciPy/HiGHS, and process instrumentation.
+- `Dockerfile` and `requirements.txt`: Python, Z3, OR-Tools CP-SAT, SciPy/HiGHS, Lean 4.32.1, Mathlib 4.32.1, and process instrumentation.
 - `compose.yaml`: isolated DSH state volume, bind-mounted run workspace, configurable CPU/memory limits, a loopback-only UI port, and a kernel-enforced model-only egress guard.
 - `compose.source.yaml`: optional override for testing a freshly packed Fleet source tree.
 
 All solver dependencies are baked into the image. At runtime, the business container shares a guarded network namespace whose IPv4 and IPv6 output policies drop every new external connection except TCP `221.194.152.171:443`, the configured model endpoint. The business container has neither `NET_ADMIN` nor raw-socket capability, so an Agent shell cannot remove the guard. Docker DNS and all other external destinations remain unreachable.
+
+Lean and Mathlib are downloaded only while the image is built and remain fully local during a run. Use `lean` and `lake` for an ordinary Lean project, or compile a standalone file importing Mathlib from any workspace path with:
+
+```sh
+lean-mathlib /workspace/path/to/Proof.lean
+```
+
+The wrapper runs `lake env lean` against the pinned `/opt/mathlib` installation. Formalization is optional evidence tooling, not a mandatory benchmark stage or solution method.
 
 ## Start a clean run on Windows PowerShell
 

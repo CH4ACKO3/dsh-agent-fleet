@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/dsh-agent-fleet-matilda-eval:2026-09-02
+    image: local/dsh-agent-fleet-matilda-eval:lean4-v4.32.1
     pull_policy: never
     entrypoint: ["/opt/matilda-eval/network-guard.sh"]
     restart: "no"
@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/dsh-agent-fleet-matilda-eval:2026-09-02
+    image: local/dsh-agent-fleet-matilda-eval:lean4-v4.32.1
     pull_policy: never
     restart: "no"
     working_dir: /workspace

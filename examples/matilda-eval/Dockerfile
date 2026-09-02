@@ -1,9 +1,18 @@
 FROM local/deepseek-harness-fleet:dev-baseline-db42baa
 
+ARG ELAN_VERSION=4.2.3
+ARG ELAN_SHA256=df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2
+ARG LEAN_VERSION=v4.32.1
+ARG MATHLIB_VERSION=v4.32.1
+ARG MATHLIB_REV=520045ab14e26149ee970e2e617ca04b09bde5d6
+
 USER root
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
         jq \
         iptables \
         procps \
@@ -11,7 +20,31 @@ RUN apt-get update \
         python3-pip \
         python3-venv \
         time \
+        zstd \
     && rm -rf /var/lib/apt/lists/*
+
+ENV ELAN_HOME=/opt/elan \
+    ELAN_NO_OVERRIDE_NOTICE=1 \
+    ELAN_NO_UPDATE_CHECK=1 \
+    MATHLIB_ROOT=/opt/mathlib \
+    PATH="/opt/elan/bin:${PATH}"
+
+RUN curl --fail --location --retry 3 \
+        --output /tmp/elan.tar.gz \
+        "https://github.com/leanprover/elan/releases/download/v${ELAN_VERSION}/elan-x86_64-unknown-linux-gnu.tar.gz" \
+    && echo "${ELAN_SHA256}  /tmp/elan.tar.gz" | sha256sum --check --strict \
+    && tar -xzf /tmp/elan.tar.gz -C /tmp \
+    && /tmp/elan-init -y --no-modify-path --default-toolchain "leanprover/lean4:${LEAN_VERSION}" \
+    && rm -f /tmp/elan.tar.gz /tmp/elan-init \
+    && lean --version \
+    && lake --version
+
+RUN git clone --branch "${MATHLIB_VERSION}" --depth 1 \
+        https://github.com/leanprover-community/mathlib4.git "${MATHLIB_ROOT}" \
+    && test "$(git -C "${MATHLIB_ROOT}" rev-parse HEAD)" = "${MATHLIB_REV}" \
+    && cd "${MATHLIB_ROOT}" \
+    && lake exe cache get \
+    && rm -rf "${MATHLIB_ROOT}/.git"
 
 RUN mkdir -p /opt/matilda-eval/pnpm-seed \
     && pnpm --dir /opt/matilda-eval/pnpm-seed init \
@@ -42,9 +75,10 @@ RUN python3 -m venv /opt/matilda-eval/venv \
 
 COPY scripts/verify-environment.py /opt/matilda-eval/verify-environment.py
 COPY scripts/verify-network-isolation.py /opt/matilda-eval/verify-network-isolation.py
+COPY scripts/lean-mathlib.sh /usr/local/bin/lean-mathlib
 COPY scripts/network-guard.sh /opt/matilda-eval/network-guard.sh
-RUN sed -i 's/\r$//' /opt/matilda-eval/network-guard.sh \
-    && chmod 0555 /opt/matilda-eval/network-guard.sh
+RUN sed -i 's/\r$//' /opt/matilda-eval/network-guard.sh /usr/local/bin/lean-mathlib \
+    && chmod 0555 /opt/matilda-eval/network-guard.sh /usr/local/bin/lean-mathlib
 
 ENV PATH="/opt/matilda-eval/venv/bin:${PATH}" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
