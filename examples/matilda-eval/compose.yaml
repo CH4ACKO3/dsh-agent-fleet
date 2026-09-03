@@ -40,8 +40,8 @@ services:
       - NET_RAW
     security_opt:
       - no-new-privileges:true
-    cpus: ${MATILDA_CPUS:-16}
-    mem_limit: ${MATILDA_MEMORY:-16g}
+    cpus: ${MATILDA_CPUS:-8}
+    mem_limit: ${MATILDA_MEMORY:-12g}
     stop_grace_period: 30s
     environment:
       DSH_HOME: /data/.dsh
