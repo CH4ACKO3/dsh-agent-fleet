@@ -6857,9 +6857,20 @@ export class FleetRunService {
     return `${agent.options.provider ?? ''}\u0000${agent.options.model ?? ''}`
   }
 
+  private hasRecoverableMemberTask(record: FleetRunRecord, member: string): boolean {
+    if (record.status === 'paused' || record.status === 'starting' || record.status === 'finishing'
+      || record.status === 'closed' || record.status === 'failed' || this.dormantRunIds.has(record.id)
+      || this.autoContinuationPaused(record, member)) return false
+    const runtime = this.collaboration.get(record.id)
+    if (runtime === undefined) return false
+    return runtime.tasks.runningFor(member).length > 0
+      || runtime.tasks.readyTasks(member).length > 0
+      || runtime.tasks.ownerTasks(member).length > 0
+  }
+
   private scheduleProtocolRecovery(runId: string, member: string, agent: Agent, message: string): boolean {
     const record = this.records.get(runId)
-    if (record?.status !== 'running' || record.work?.status !== 'running') return false
+    if (record === undefined || !this.hasRecoverableMemberTask(record, member)) return false
     const sessionId = String(agent.id)
     const attempt = (this.protocolRecoveries.get(sessionId)?.attempt ?? 0) + 1
     if (attempt > PROTOCOL_RECOVERY_MAX_ATTEMPTS) {
@@ -6892,7 +6903,7 @@ export class FleetRunService {
     const recovery = this.protocolRecoveries.get(sessionId)
     if (recovery?.pending !== true) return
     const record = this.records.get(recovery.runId)
-    if (record?.status !== 'running' || record.work?.status !== 'running') {
+    if (record === undefined || !this.hasRecoverableMemberTask(record, recovery.member)) {
       this.protocolRecoveries.delete(sessionId)
       return
     }
@@ -6913,18 +6924,19 @@ export class FleetRunService {
     }
     if (agent.status !== 'idle') return
     recovery.pending = false
+    const recoveryScope = record.work?.id ?? record.id
     const retryGuidance = recovery.attempt === 1
       ? 'Re-check durable Task state and artifacts, assume an earlier external action may already have completed, and continue from the smallest safe next step without blindly replaying irreversible actions.'
       : `Retry ${recovery.attempt}/${PROTOCOL_RECOVERY_MAX_ATTEMPTS}: continue from durable state and do not replay irreversible actions.`
     this.requireRuntime(record.id).messages.sendSystemNotification(sessionId, {
       kind: 'task_notice',
       text: [
-        `[Fleet work ${record.work.id} protocol recovery]`,
+        `[Fleet work ${recoveryScope} protocol recovery]`,
         'The previous turn ended because the inference backend returned malformed tool-call protocol.',
         retryGuidance,
       ].join('\n\n'),
       delivery: 'wakeup',
-      coalesceKey: `protocol-recovery:${record.work.id}:${recovery.member}:${recovery.attempt}`,
+      coalesceKey: `protocol-recovery:${recoveryScope}:${recovery.member}:${recovery.attempt}`,
     })
     this.appendEvent(record.id, 'member_protocol_recovery_woken', {
       member: recovery.member,
