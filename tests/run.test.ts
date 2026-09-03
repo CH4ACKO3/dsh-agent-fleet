@@ -3209,17 +3209,20 @@ describe('FleetRunService', () => {
     writeFileSync(resultPath, '# Result\n\nVerified.\n')
     mkdirSync(join(root, '.cache'), { recursive: true })
     writeFileSync(join(root, '.cache', 'solver.bin'), 'cache payload\n')
-
-    await vi.waitFor(() => {
-      expect(service.readWebTeamProjection(run.id, initialSequence, 1_000).events).toContainEqual(
-        expect.objectContaining({
-          type: 'resource.resource_added',
-          data: expect.objectContaining({
-            resource: expect.objectContaining({ id: 'workspace:e2e-output/proof/result.md' }),
-          }),
+    const fileSyncInternals = service as unknown as {
+      readonly sharedFileLastScans: Map<string, number>
+      stopSharedFileWatcher(teamId: string): void
+    }
+    fileSyncInternals.stopSharedFileWatcher(run.id)
+    fileSyncInternals.sharedFileLastScans.delete(run.id)
+    expect(service.readWebTeamProjection(run.id, initialSequence, 1_000).events).toContainEqual(
+      expect.objectContaining({
+        type: 'resource.resource_added',
+        data: expect.objectContaining({
+          resource: expect.objectContaining({ id: 'workspace:e2e-output/proof/result.md' }),
         }),
-      )
-    }, { timeout: 2_000, interval: 20 })
+      }),
+    )
     expect(service.resourceStore(run.id).listResources()).toContainEqual(expect.objectContaining({
       id: 'workspace:e2e-output/proof/result.md',
       label: 'e2e-output/proof/result.md',
@@ -3234,11 +3237,11 @@ describe('FleetRunService', () => {
     }))
 
     unlinkSync(resultPath)
-    await vi.waitFor(() => {
-      expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
-        id: 'workspace:e2e-output/proof/result.md',
-      }))
-    }, { timeout: 2_000, interval: 20 })
+    fileSyncInternals.sharedFileLastScans.delete(run.id)
+    service.readWebTeamProjection(run.id, initialSequence, 1_000)
+    expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
+      id: 'workspace:e2e-output/proof/result.md',
+    }))
     disconnect()
   })
 

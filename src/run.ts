@@ -2174,6 +2174,7 @@ const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_HISTORY_LIMIT = 500
 const SHARED_FILE_WATCH_DEBOUNCE_MS = 150
+const SHARED_FILE_UI_REFRESH_MS = 5_000
 
 function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kind'] | undefined {
   const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
@@ -2277,6 +2278,7 @@ export class FleetRunService {
   private readonly abnormalSessionIds = new Set<string>()
   private readonly sharedFileVersions = new Map<string, Map<string, string>>()
   private readonly sharedFileScanErrors = new Map<string, string>()
+  private readonly sharedFileLastScans = new Map<string, number>()
   private readonly sharedFileWatchers = new Map<string, FSWatcher>()
   private readonly sharedFileSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly assistantRequestConfigs = new WeakMap<Agent, AssistantRequestConfigRef>()
@@ -7233,6 +7235,10 @@ export class FleetRunService {
 
   readWebTeamProjection(runId: string, afterSequence: number, limit: number): FleetTeamProjection {
     const record = this.requireRecord(runId)
+    const lastSharedFileScan = this.sharedFileLastScans.get(record.id) ?? 0
+    if (!isTerminal(record.status) && Date.now() - lastSharedFileScan >= SHARED_FILE_UI_REFRESH_MS) {
+      this.syncSharedFiles(record)
+    }
     let projection = this.teamProjectionEvents.get(record.id)
     let identities = this.teamProjectionIdentities.get(record.id)
     if (projection === undefined) {
@@ -8279,6 +8285,7 @@ export class FleetRunService {
     this.memberViewSnapshots.clear()
     this.sharedFileVersions.clear()
     this.sharedFileScanErrors.clear()
+    this.sharedFileLastScans.clear()
     this.changeListeners.clear()
     this.traceChangeListeners.clear()
   }
@@ -8319,6 +8326,7 @@ export class FleetRunService {
   private syncSharedFiles(record: FleetRunRecord): void {
     try {
       this.synchronizeSharedFiles(record)
+      this.sharedFileLastScans.set(record.id, Date.now())
       this.sharedFileScanErrors.delete(record.id)
     } catch (error) {
       this.reportSharedFileSyncError(record.id, error)
