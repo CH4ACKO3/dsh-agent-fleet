@@ -32,10 +32,11 @@ describe('Matilda blind evaluation Team template', () => {
     const prompt = config.core.assistant.prompt
 
     expect(prompt).toContain('Do not call `todo_write`')
-    expect(prompt).toContain('your next tool call must be `fleet_run start`')
+    expect(prompt).toContain('call `fleet_run start` immediately without visible narration')
     expect(prompt).toContain('no mandatory stage names, lane count, algorithm, or round count')
     expect(prompt).toContain('Activate a member only for a concrete deliverable')
-    expect(prompt).toContain('All required paths must join')
+    expect(prompt).toContain('Set `result_stage` to a dedicated packaging Goal')
+    expect(prompt).toContain('never use an independent evidence lane as `result_stage`')
     expect(prompt).toContain('long work retains a formal continuation or recovery path')
     expect(prompt).toContain('keep at least one evidence-driven continuation')
     expect(prompt).toContain('Files created or changed during the run appear automatically in Team files')
