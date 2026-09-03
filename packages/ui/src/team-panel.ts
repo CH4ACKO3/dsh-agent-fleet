@@ -9619,9 +9619,13 @@ function TeamSettingsDialog({ sessionId, team, initialTab = 'general', loadSetti
                   jsxs('div', { className: 'dsh-fleet-panel-settings-action-row', children: [jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-export', disabled: exportTeam === undefined || configurationExporting, onClick: () => { void downloadConfiguration() }, children: [jsx(PanelIcon, { name: 'download', size: 16 }), configurationExporting ? panelText('正在导出…', 'Exporting…') : panelText('导出团队配置', 'Export Team configuration')] })] }),
                   jsx('hr', {}),
                   jsx('h4', { children: panelText('完整团队存档', 'Complete Team archive') }),
-                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: team.status === 'paused' ? panelText('团队已暂停，可以生成一致的完整存档。', 'The Team is paused and ready for a consistent archive.') : panelText('请先在团队概况中暂停团队，再导出完整存档。', 'Pause the Team from its overview before exporting a complete archive.') }),
+                  jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: team.status === 'paused'
+                    ? panelText('团队已暂停，可以生成一致的完整存档。', 'The Team is paused and ready for a consistent archive.')
+                    : team.status === 'closed'
+                      ? panelText('团队已终结，仍可保存完整运行记录；导入后会以暂停状态打开。', 'The Team is finished, but its complete run record can still be archived and will import as paused.')
+                      : panelText('请先在团队概况中暂停或终结团队，再导出完整存档。', 'Pause or finish the Team from its overview before exporting a complete archive.') }),
                   jsxs('label', { className: 'dsh-fleet-panel-settings-check', children: [jsx('input', { type: 'checkbox', checked: includeWorkspace, disabled: archiveExporting, onChange: (event: ChangeEvent<HTMLInputElement>) => { setIncludeWorkspace(event.currentTarget.checked) } }), jsx('span', { children: panelText('同时打包工作区文件', 'Include Workspace files') })] }),
-                  jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-export', disabled: team.status !== 'paused' || exportArchive === undefined || archiveExporting, title: team.status === 'paused' ? undefined : panelText('请先暂停团队', 'Pause the Team first'), onClick: () => { void downloadArchive() }, children: [jsx(PanelIcon, { name: 'download', size: 16 }), archiveExporting ? panelText('正在生成存档…', 'Creating archive…') : panelText('导出完整存档', 'Export complete archive')] }),
+                  jsx('button', { type: 'button', className: 'dsh-fleet-panel-settings-export', disabled: (team.status !== 'paused' && team.status !== 'closed') || exportArchive === undefined || archiveExporting, title: team.status === 'paused' || team.status === 'closed' ? undefined : panelText('请先暂停或终结团队', 'Pause or finish the Team first'), onClick: () => { void downloadArchive() }, children: [jsx(PanelIcon, { name: 'download', size: 16 }), archiveExporting ? panelText('正在生成存档…', 'Creating archive…') : panelText('导出完整存档', 'Export complete archive')] }),
                 ] }) : jsxs('section', { className: 'dsh-fleet-panel-settings-danger', children: [
                   jsx('h3', { children: panelText('危险操作', 'Danger zone') }),
                   jsx('p', { className: 'dsh-fleet-panel-settings-section-copy', children: panelText('终结后团队进入归档，成员会话和历史记录仍会保留，但不能继续运行。', 'Finishing archives the Team. Member Sessions and history remain, but the Team can no longer run.') }),
@@ -15463,7 +15467,7 @@ function ResourcesMain(owner: FleetPanelPaneOwner): ReactElement {
         className: 'dsh-fleet-panel-overview',
         children: [
           jsx('h3', { className: 'dsh-fleet-panel-overview-title', children: panelText('工作区文件', 'Workspace files') }),
-          jsx('p', { className: 'dsh-fleet-panel-overview-copy', children: panelText('普通文件按需通过 DSH 工作区浏览，不会自动加入团队共享。', 'Browse ordinary files through the DSH Workspace as needed; they are not automatically shared with the Team.') }),
+          jsx('p', { className: 'dsh-fleet-panel-overview-copy', children: panelText('团队运行期间新建或修改的工作区文件会自动出现在“团队文件”中；隐藏目录与依赖缓存不会收录。', 'Workspace files created or changed while the Team runs appear automatically in Team files; hidden directories and dependency caches are excluded.') }),
           jsxs('div', {
             className: 'dsh-fleet-panel-facts',
             children: [

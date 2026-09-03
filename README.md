@@ -115,7 +115,7 @@ The root bundle adds lifecycle, archive, and trace tools:
   retires the Team and releases its member Sessions. `resume` restores an idle or running Team after
   process restart.
 - `fleet_trace` reads the durable Team coordination timeline or a member's native DSH Session events.
-- `fleet_archive export` writes a complete archive for a paused Team. Member Sessions, messages,
+- `fleet_archive export` writes a complete archive for a paused or closed Team. Member Sessions, messages,
   traces and Team resource files are always included; workspace files are opt-in.
   `fleet_archive import` creates a paused copy with new Team and Session ids by default; use
   `import_mode: "restore"` to preserve the archive identities for disaster recovery. Either mode can

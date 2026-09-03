@@ -120,6 +120,13 @@ export const DEFAULT_FLEET_TURN_REMINDERS: FleetTurnReminderLists = {
         '若已有你负责的 Fleet Task，先推进或更新它，不要为相同工作另建任务。',
       ),
     },
+    {
+      id: 'workspace-artifact-visibility', cooldownTurns: 8,
+      text: localized(
+        'Files created or changed in the active Team workspace appear automatically in Team files; use stable paths and do not duplicate their contents in chat.',
+        '当前团队运行期间新建或修改的工作区文件会自动出现在团队文件中；请使用稳定路径，不要在聊天里重复文件内容。',
+      ),
+    },
   ],
   'tool-result': [
     {
@@ -172,6 +179,14 @@ export const DEFAULT_FLEET_TURN_REMINDERS: FleetTurnReminderLists = {
       text: localized(
         'Record completed work in its Fleet Task; do not leave the result only in private model output.',
         '完成工作后把结果写入对应 Fleet Task，不要只留在私有模型输出中。',
+      ),
+    },
+    {
+      id: 'background-process-result', cooldownTurns: 3,
+      tools: ['bash'], keywords: ['background', 'nohup', 'pid', 'still running', '后台', '仍在运行', '进程'],
+      text: localized(
+        'A still-running process is not a completed result; keep its Goal active and record the command, process id, log path, completion signal, and next bounded check.',
+        '仍在运行的进程不等于已完成结果；请保持所属 Goal 活跃，并记录命令、进程号、日志路径、完成信号和下一次有界检查。',
       ),
     },
     {

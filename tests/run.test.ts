@@ -2573,6 +2573,48 @@ describe('FleetRunService', () => {
     second.disconnect()
   }, 15_000)
 
+  it('exports a settled closed Team and imports it as paused', async () => {
+    const source = fixture()
+    const archivedTeamStatuses: string[] = []
+    const archives = new FleetArchiveRegistry()
+    archives.register({
+      id: 'status-recorder',
+      save: ({ team }) => { archivedTeamStatuses.push(team.status) },
+      restore: () => {},
+    })
+    const first = setup(source.root, { archives })
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath: source.configPath,
+      projectRoot: source.root,
+      requiredPaths: [],
+    })
+    first.service.start(first.launcher as unknown as Agent, {
+      runId: run.id,
+      taskPath: source.taskPath,
+      projectRoot: source.root,
+    })
+    first.service.end(first.launcher as unknown as Agent, 'Finished before archival.', run.id)
+    await first.service.wait(run.id, 1_000)
+
+    const archivePath = join(source.root, 'closed-team.fleet.tar.gz')
+    await expect(first.service.exportArchive(first.launcher as unknown as Agent, {
+      runId: run.id,
+      destination: archivePath,
+      includeWorkspace: true,
+    })).resolves.toMatchObject({ teamId: run.id, includesWorkspace: true })
+    expect(archivedTeamStatuses).toEqual(['paused'])
+    first.disconnect()
+
+    const target = fixture()
+    const second = setup(target.root, { launcherId: 'closed-team-restorer' })
+    const imported = await second.service.importArchive(second.launcher as unknown as Agent, {
+      archivePath,
+      projectRoot: join(target.root, 'restored-closed-team'),
+    })
+    expect(imported.run).toMatchObject({ id: run.id, status: 'paused', runtimeState: 'dormant' })
+    second.disconnect()
+  })
+
   it('does not report active members as offline from a separate Web process', async () => {
     const { root, configPath, taskPath } = fixture()
     const owner = setup(root, { launcherId: 'runtime-owner' })
@@ -3143,6 +3185,60 @@ describe('FleetRunService', () => {
     await expect(service.readResourcePreview(run.id, 'shared:notes/progress.md'))
       .rejects.toThrow('Unknown Fleet resource')
 
+    disconnect()
+  })
+
+  it('discovers files created or changed in the active Team workspace', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, {
+      runId: run.id,
+      taskPath,
+      projectRoot: root,
+    })
+    const initial = service.readWebTeamProjection(run.id, 0, 1_000)
+    const initialSequence = initial.events.at(-1)?.sequence ?? 0
+    const outputDirectory = join(root, 'e2e-output', 'proof')
+    const resultPath = join(outputDirectory, 'result.md')
+    mkdirSync(outputDirectory, { recursive: true })
+    writeFileSync(resultPath, '# Result\n\nVerified.\n')
+    mkdirSync(join(root, '.cache'), { recursive: true })
+    writeFileSync(join(root, '.cache', 'solver.bin'), 'cache payload\n')
+
+    await vi.waitFor(() => {
+      expect(service.readWebTeamProjection(run.id, initialSequence, 1_000).events).toContainEqual(
+        expect.objectContaining({
+          type: 'resource.resource_added',
+          data: expect.objectContaining({
+            resource: expect.objectContaining({ id: 'workspace:e2e-output/proof/result.md' }),
+          }),
+        }),
+      )
+    }, { timeout: 2_000, interval: 20 })
+    expect(service.resourceStore(run.id).listResources()).toContainEqual(expect.objectContaining({
+      id: 'workspace:e2e-output/proof/result.md',
+      label: 'e2e-output/proof/result.md',
+      path: resultPath,
+      createdBy: 'fleet-filesystem',
+    }))
+    expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
+      path: join(root, '.cache', 'solver.bin'),
+    }))
+    expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
+      path: configPath,
+    }))
+
+    unlinkSync(resultPath)
+    await vi.waitFor(() => {
+      expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
+        id: 'workspace:e2e-output/proof/result.md',
+      }))
+    }, { timeout: 2_000, interval: 20 })
     disconnect()
   })
 

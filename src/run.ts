@@ -1214,6 +1214,10 @@ const TEAM_PROJECTION_ACTIVITY_LIMIT = 250
 const TEAM_PROJECTION_CACHE_LIMIT = 16
 const FLEET_ARCHIVE_FORMAT = 'dsh-agent-fleet-archive'
 const FLEET_ARCHIVE_VERSION = 1
+const WORKSPACE_DISCOVERY_IGNORED_DIRECTORIES = new Set([
+  '.fleet', '.git', '.hg', '.svn', '.cache', '.lake', '.venv',
+  '__pycache__', 'node_modules', 'venv',
+])
 
 function emptyBudgetAccount(startedAt: string, limit?: number): FleetBudgetAccount {
   return {
@@ -3583,8 +3587,10 @@ export class FleetRunService {
 
   async exportArchive(caller: Agent, input: ExportFleetArchiveInput): Promise<FleetArchiveExportResult> {
     const record = this.requireRecord(input.runId, caller.session.header.cwd)
-    this.requireFleetPermission(record, caller, 'team.manage')
-    if (record.status !== 'paused') throw new Error('pause the Fleet Team before exporting a complete archive')
+    this.requireFleetPermission(record, caller, 'team.manage', record.status !== 'closed')
+    if (record.status !== 'paused' && record.status !== 'closed') {
+      throw new Error('pause or close the Fleet Team before exporting a complete archive')
+    }
     if (record.members.some(member => this.memberCanReply(member))) {
       throw new Error('Fleet archive export requires every Team member runtime to be paused')
     }
@@ -3645,11 +3651,14 @@ export class FleetRunService {
         })
       }
 
+      // Imports always reopen archives as paused Teams. Preserve the original
+      // terminal state in fleet/run/run.json while exposing the normalized
+      // resumable state to archive contributors and the manifest.
       const team: FleetArchiveTeam = {
         id: record.id,
         name: record.name,
         projectRoot: record.projectRoot,
-        status: record.status,
+        status: 'paused',
       }
       const extensionsRoot = join(stagedRun, 'extensions')
       mkdirSync(extensionsRoot, { recursive: true })
@@ -4971,11 +4980,16 @@ export class FleetRunService {
     })
   }
 
-  private requireFleetPermission(record: FleetRunRecord, caller: Agent, permission: FleetMemberPermission): FleetMemberView {
+  private requireFleetPermission(
+    record: FleetRunRecord,
+    caller: Agent,
+    permission: FleetMemberPermission,
+    requireAssistantConnection = true,
+  ): FleetMemberView {
     const participant = this.participants(record).find(member => member.sessionId === String(caller.id))
     if (participant === undefined) throw new Error(`Agent ${String(caller.id)} is not a Fleet participant`)
     const assistant = record.assistants.find(candidate => candidate.sessionId === String(caller.id))
-    if (assistant !== undefined) this.requireAssistantConnection(caller, record.id)
+    if (assistant !== undefined && requireAssistantConnection) this.requireAssistantConnection(caller, record.id)
     const view = this.memberViews(record.id).find(candidate => candidate.id === participant.name)
     if (view === undefined) throw new Error(`Fleet member ${participant.name} is not configured`)
     if (this.authorization === undefined) {
@@ -5579,7 +5593,7 @@ export class FleetRunService {
     const resourcePath = resolve(resource.path)
     if (pathInside(sharedDirectory, resourcePath)) {
       if (existsSync(resourcePath)) unlinkSync(resourcePath)
-      this.sharedFileVersions.get(record.id)?.delete(relative(sharedDirectory, resourcePath).split(sep).join('/'))
+      this.sharedFileVersions.get(record.id)?.delete(`shared:${relative(sharedDirectory, resourcePath).split(sep).join('/')}`)
     }
     return resources.removeResource(String(caller.id), resource.id) ?? resource
   }
@@ -8271,10 +8285,10 @@ export class FleetRunService {
 
   private watchSharedFiles(record: FleetRunRecord): void {
     if (this.sharedFileWatchers.has(record.id) || isTerminal(record.status)) return
-    const directory = join(record.projectRoot, '.fleet', record.id)
+    const sharedDirectory = join(record.projectRoot, '.fleet', record.id)
     try {
-      mkdirSync(directory, { recursive: true })
-      const watcher = watch(directory, { recursive: true }, () => {
+      mkdirSync(sharedDirectory, { recursive: true })
+      const watcher = watch(record.projectRoot, { recursive: true }, () => {
         this.scheduleSharedFileSync(record.id)
       })
       watcher.on('error', error => {
@@ -8327,7 +8341,8 @@ export class FleetRunService {
   }
 
   private synchronizeSharedFiles(record: FleetRunRecord): void {
-    const directory = join(record.projectRoot, '.fleet', record.id)
+    const workspaceDirectory = resolve(record.projectRoot)
+    const sharedDirectory = join(workspaceDirectory, '.fleet', record.id)
     const runtime = this.collaboration.get(record.id)
     if (runtime === undefined) return
     const registered = runtime.resources.listResources()
@@ -8336,14 +8351,22 @@ export class FleetRunService {
     this.sharedFileVersions.set(record.id, versions)
     const seen = new Set<string>()
 
-    const visit = (parent: string): void => {
+    const visit = (
+      parent: string,
+      root: string,
+      namespace: 'shared' | 'workspace',
+      workStartedAt?: number,
+    ): void => {
       for (const entry of readdirSync(parent, { withFileTypes: true })) {
         const path = join(parent, entry.name)
         if (entry.isDirectory()) {
-          visit(path)
+          if (namespace === 'workspace'
+            && (entry.name.startsWith('.') || WORKSPACE_DISCOVERY_IGNORED_DIRECTORIES.has(entry.name))) continue
+          visit(path, root, namespace, workStartedAt)
           continue
         }
         if (!entry.isFile()) continue
+        if (namespace === 'workspace' && entry.name.startsWith('.')) continue
         let info: ReturnType<typeof statSync>
         try {
           info = statSync(path)
@@ -8352,17 +8375,22 @@ export class FleetRunService {
           throw error
         }
         const absolutePath = resolve(path)
-        seen.add(absolutePath)
-        const name = relative(directory, path).split(sep).join('/')
-        const version = `${String(info.mtimeMs)}:${String(info.size)}`
-        const previous = versions.get(name)
+        const name = relative(root, path).split(sep).join('/')
         const existing = byPath.get(absolutePath)
-        versions.set(name, version)
+        const autoWorkspaceResource = existing?.id.startsWith('workspace:') === true
+        if (namespace === 'workspace'
+          && !autoWorkspaceResource
+          && (workStartedAt === undefined || info.mtimeMs < workStartedAt)) continue
+        seen.add(absolutePath)
+        const version = `${String(info.mtimeMs)}:${String(info.size)}`
+        const versionKey = `${namespace}:${name}`
+        const previous = versions.get(versionKey)
+        versions.set(versionKey, version)
         if (previous === version || (previous === undefined && existing !== undefined
           && (existing.size === undefined || existing.size === info.size))) continue
 
         runtime.resources.addResource('fleet-filesystem', {
-          id: existing?.id ?? `shared:${name}`,
+          id: existing?.id ?? `${namespace}:${name}`,
           path,
           label: name,
           ...(existing?.mediaType === undefined ? {} : { mediaType: existing.mediaType }),
@@ -8370,11 +8398,19 @@ export class FleetRunService {
         })
       }
     }
-    if (existsSync(directory)) visit(directory)
+    if (existsSync(sharedDirectory)) visit(sharedDirectory, sharedDirectory, 'shared')
+    const workStartedAt = record.work === undefined ? undefined : Date.parse(record.work.startedAt)
+    if (existsSync(workspaceDirectory)) visit(workspaceDirectory, workspaceDirectory, 'workspace', workStartedAt)
     for (const resource of registered) {
       const path = resolve(resource.path)
-      if (!pathInside(directory, path) || seen.has(path)) continue
-      versions.delete(relative(directory, path).split(sep).join('/'))
+      const namespace = pathInside(sharedDirectory, path)
+        ? 'shared'
+        : resource.id.startsWith('workspace:') && pathInside(workspaceDirectory, path)
+          ? 'workspace'
+          : undefined
+      if (namespace === undefined || seen.has(path)) continue
+      const root = namespace === 'shared' ? sharedDirectory : workspaceDirectory
+      versions.delete(`${namespace}:${relative(root, path).split(sep).join('/')}`)
       runtime.resources.removeResource('fleet-filesystem', resource.id)
     }
   }
@@ -8419,6 +8455,7 @@ export class FleetRunService {
     for (const [sessionId, recovery] of [...this.protocolRecoveries]) {
       if (recovery.runId === runId) this.protocolRecoveries.delete(sessionId)
     }
+    this.syncSharedFiles(current)
     const runtime = this.collaboration.get(runId)
     runtime?.tasks.settleForTeamClose(terminalSummary)
     runtime?.pauseProductivity()
@@ -10324,10 +10361,10 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_archive',
-    description: 'Export or import a complete paused Fleet Team archive. Shared documents and member Sessions are always included; workspace files are optional.',
+    description: 'Export a complete paused or closed Fleet Team archive, or import one as a paused Team. Shared documents and member Sessions are always included; workspace files are optional.',
     parameters: {
       action: { type: 'string', required: true, enum: ['export', 'import'] },
-      run_id: { type: 'string', description: 'Paused Team id required for export.' },
+      run_id: { type: 'string', description: 'Paused or closed Team id required for export.' },
       path: { type: 'string', required: true, description: 'Archive file path to write or read.' },
       cwd: { type: 'string', description: 'Target project root required for import. Relative paths resolve from the calling Session cwd.' },
       include_workspace: { type: 'boolean', description: 'For export, include the project workspace. Defaults to false.' },

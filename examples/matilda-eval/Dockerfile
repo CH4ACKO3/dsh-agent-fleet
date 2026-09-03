@@ -46,13 +46,14 @@ RUN git clone --branch "${MATHLIB_VERSION}" --depth 1 \
     && lake exe cache get \
     && rm -rf "${MATHLIB_ROOT}/.git"
 
-ARG DSH_TURN_FOLD_VERSION=0.5.1
+ARG DSH_HARMONY_VERSION=0.8.10
+ARG DSH_TURN_FOLD_VERSION=0.6.0
 
 RUN mkdir -p /opt/matilda-eval/pnpm-seed \
     && pnpm --dir /opt/matilda-eval/pnpm-seed init \
     && pnpm --dir /opt/matilda-eval/pnpm-seed config set auto-install-peers false --location project \
     && pnpm --dir /opt/matilda-eval/pnpm-seed add --ignore-scripts \
-        "dsh-harmony@0.8.8" \
+        "dsh-harmony@${DSH_HARMONY_VERSION}" \
         "the-binding-of-dsh@0.1.7" \
         "/opt/dsh/plugins/dsh-agent-fleet.tgz" \
         "/opt/dsh/plugins/dsh-llm-memorax-0.1.0.tgz" \
@@ -72,9 +73,12 @@ RUN mkdir -p /opt/matilda-eval/pnpm-seed \
     && rm -rf /opt/matilda-eval/pnpm-seed
 
 RUN sed -i \
+        -e "s|dsh-harmony@0.8.8|dsh-harmony@${DSH_HARMONY_VERSION}|g" \
         -e "s|@ch4acko3/dsh-turn-fold@0.4.4|@ch4acko3/dsh-turn-fold@${DSH_TURN_FOLD_VERSION}|g" \
+        -e "s|@ch4acko3/dsh-turn-fold@0.5.1|@ch4acko3/dsh-turn-fold@${DSH_TURN_FOLD_VERSION}|g" \
         -e "s|memorax-render-v1|memorax-render-v1-turn-fold-${DSH_TURN_FOLD_VERSION}|g" \
         /usr/local/bin/dsh-container-entrypoint \
+    && grep -F "dsh-harmony@${DSH_HARMONY_VERSION}" /usr/local/bin/dsh-container-entrypoint \
     && grep -F "@ch4acko3/dsh-turn-fold@${DSH_TURN_FOLD_VERSION}" /usr/local/bin/dsh-container-entrypoint \
     && grep -F "memorax-render-v1-turn-fold-${DSH_TURN_FOLD_VERSION}" /usr/local/bin/dsh-container-entrypoint
 
