@@ -6287,20 +6287,29 @@ export class FleetRunService {
     return record.assistants.find(candidate => candidate.view.id === participant)?.status === 'paused'
   }
 
+  private canAutoContinueTeam(record: FleetRunRecord): boolean {
+    return record.status === 'idle' || record.status === 'running'
+  }
+
+  private canAutoContinueParticipant(
+    record: FleetRunRecord,
+    participant: { readonly name: string; readonly sessionId: string },
+  ): boolean {
+    return this.canAutoContinueTeam(record)
+      && !this.autoContinuationPaused(record, participant.name)
+      && !this.abnormalSessionIds.has(participant.sessionId)
+      && this.budgetRemaining(record, participant.name).exhaustedScope === undefined
+  }
+
   private continueAssignedTask(
     runId: string,
     runtime: FleetCollaborationTeam,
     record: FleetRunRecord,
     agent: Agent,
   ): boolean {
-    if (record.status === 'paused' || record.status === 'starting' || record.status === 'finishing'
-      || record.status === 'closed' || record.status === 'failed') return false
     const participant = this.participants(record)
       .find(candidate => candidate.sessionId === String(agent.id))
-    if (participant === undefined
-      || this.autoContinuationPaused(record, participant.name)
-      || this.abnormalSessionIds.has(participant.sessionId)
-      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
+    if (participant === undefined || !this.canAutoContinueParticipant(record, participant)) return false
     if (runtime.tasks.runningFor(participant.name).length > 0) return false
     const pending = runtime.tasks.readyTasks(participant.name)[0]
     if (pending === undefined) return false
@@ -6336,14 +6345,9 @@ export class FleetRunService {
     record: FleetRunRecord,
     agent: Agent,
   ): boolean {
-    if (record.status === 'paused' || record.status === 'starting' || record.status === 'finishing'
-      || record.status === 'closed' || record.status === 'failed') return false
     const participant = this.participants(record)
       .find(candidate => candidate.sessionId === String(agent.id))
-    if (participant === undefined
-      || this.autoContinuationPaused(record, participant.name)
-      || this.abnormalSessionIds.has(participant.sessionId)
-      || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined) return false
+    if (participant === undefined || !this.canAutoContinueParticipant(record, participant)) return false
     const tasks = runtime.tasks.ownerTasks(participant.name)
     if (tasks.length === 0) {
       this.clearOwnerTaskWake(participant.sessionId)
@@ -6508,8 +6512,7 @@ export class FleetRunService {
 
   private reconcileReadyTasks(runId: string): void {
     const record = this.records.get(runId)
-    if (record === undefined || record.status === 'paused' || record.status === 'starting'
-      || record.status === 'finishing' || record.status === 'closed' || record.status === 'failed'
+    if (record === undefined || !this.canAutoContinueTeam(record)
       || this.dormantRunIds.has(runId)) return
     const runtime = this.collaboration.get(runId)
     if (runtime === undefined) return
@@ -6517,9 +6520,7 @@ export class FleetRunService {
       if (runtime.tasks.ownerTasks(participant.name).length === 0) {
         this.clearOwnerTaskWake(participant.sessionId)
       }
-      if (this.autoContinuationPaused(record, participant.name)
-        || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined
-        || this.abnormalSessionIds.has(participant.sessionId)
+      if (!this.canAutoContinueParticipant(record, participant)
         || this.networkRecoveries.has(participant.sessionId)
         || runtime.tasks.runningFor(participant.name).length > 0
         || runtime.tasks.readyTasks(participant.name).length === 0) continue
@@ -6531,14 +6532,11 @@ export class FleetRunService {
 
   private reconcileOwnerTasks(runId: string, preferredCaller?: Agent): void {
     const record = this.records.get(runId)
-    if (record === undefined || record.status === 'paused' || record.status === 'starting'
-      || record.status === 'finishing' || record.status === 'closed' || record.status === 'failed') return
+    if (record === undefined || !this.canAutoContinueTeam(record)) return
     const runtime = this.collaboration.get(runId)
     if (runtime === undefined) return
     for (const participant of this.participants(record)) {
-      if (this.autoContinuationPaused(record, participant.name)
-        || this.budgetRemaining(record, participant.name).exhaustedScope !== undefined
-        || this.abnormalSessionIds.has(participant.sessionId)
+      if (!this.canAutoContinueParticipant(record, participant)
         || this.networkRecoveries.has(participant.sessionId)
         || runtime.tasks.runningFor(participant.name).length > 0
         || runtime.tasks.readyTasks(participant.name).length > 0
@@ -6858,8 +6856,7 @@ export class FleetRunService {
   }
 
   private hasRecoverableMemberTask(record: FleetRunRecord, member: string): boolean {
-    if (record.status === 'paused' || record.status === 'starting' || record.status === 'finishing'
-      || record.status === 'closed' || record.status === 'failed' || this.dormantRunIds.has(record.id)
+    if (!this.canAutoContinueTeam(record) || this.dormantRunIds.has(record.id)
       || this.autoContinuationPaused(record, member)) return false
     const runtime = this.collaboration.get(record.id)
     if (runtime === undefined) return false
