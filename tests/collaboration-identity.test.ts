@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { isAbsolute, resolve } from 'node:path'
+
 import type { FleetMemberView } from '../src/member-view.js'
 import type { FleetCoordinationEvent } from '@dsh-agent-fleet/message'
 import { FleetAuthorizationService } from '../src/authorization.js'
@@ -187,6 +189,80 @@ describe('Fleet collaboration identities', () => {
       task: { stableState: { kind: 'completed' } },
     })
     expect(agent.cancel).not.toHaveBeenCalled()
+    collaboration.close()
+  })
+
+  it('authorizes new resource files by path and resource listing at Team scope', async () => {
+    const projectRoot = resolve('workspace')
+    const publisher = {
+      ...view('publisher', ['resource.write']),
+      toolGroups: ['resources'],
+    }
+    const agent = {
+      id: 'agent-publisher',
+      session: { header: { cwd: projectRoot } },
+      inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(),
+    }
+    const seen: Array<{ readonly action: string; readonly kind?: string; readonly id?: string }> = []
+    const authorization = new FleetAuthorizationService()
+    authorization.installBaseline({
+      resolveSubject: (_teamId, subject) => subject.id === publisher.id ? publisher : undefined,
+      authorizeResource: input => {
+        seen.push({
+          action: input.action,
+          ...(input.resource?.kind === undefined ? {} : { kind: input.resource.kind }),
+          ...(input.resource?.id === undefined ? {} : { id: input.resource.id }),
+        })
+        return input.resource?.kind === 'file'
+          ? input.resource.id.startsWith(projectRoot)
+          : input.resource?.kind === 'team' && input.resource.id === 'team-resources'
+      },
+    })
+    const collaboration = new FleetCollaborationService({
+      agents: { get: (id: string) => id === agent.id ? agent : undefined },
+      fs: { contains: () => true },
+      on: () => () => {},
+    } as never, authorization)
+    const team = collaboration.open({
+      id: 'team-resources', memberViews: [publisher], defaultVoters: [publisher.id],
+      projectRoot, sharedDirectory: resolve(projectRoot, '.fleet/team-resources'),
+      onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
+    })
+    team.attachMember(agent.id, publisher)
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: unknown): Promise<unknown>
+    }> = []
+    team.installTools({
+      fs: {
+        contains: () => true,
+        resolve: async (path: string, options?: { readonly cwd?: string }) => {
+          const displayPath = isAbsolute(path) ? path : resolve(options?.cwd ?? projectRoot, path)
+          return { targetKey: displayPath, displayPath }
+        },
+        stat: async () => ({ version: 'v1', type: 'file', size: 7 }),
+        processPath: (target: { readonly displayPath: string }) => target.displayPath,
+      },
+      on: () => () => {},
+      tools: {
+        register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} },
+        restrict: () => () => {}, guard: () => () => {}, get: () => undefined,
+      },
+    } as never, publisher.id)
+    const resource = registered.find(candidate => candidate.name === 'fleet_resource')
+    if (resource === undefined) throw new Error('expected fleet_resource')
+
+    await expect(resource.execute(
+      { action: 'add', path: 'artifacts/result.md' }, { agent, signal: new AbortController().signal },
+    )).resolves.toMatchObject({ action: 'add', resource: { createdBy: agent.id } })
+    await expect(resource.execute(
+      { action: 'list' }, { agent, signal: new AbortController().signal },
+    )).resolves.toMatchObject({ action: 'list', resources: [expect.objectContaining({ createdBy: agent.id })] })
+    expect(seen).toContainEqual({
+      action: 'resource.write', kind: 'file', id: resolve(projectRoot, 'artifacts/result.md'),
+    })
+    expect(seen).toContainEqual({ action: 'resource.read', kind: 'team', id: 'team-resources' })
+    expect(seen).not.toContainEqual(expect.objectContaining({ kind: 'resource', id: '*' }))
     collaboration.close()
   })
 })

@@ -301,7 +301,7 @@ export interface DeferFleetInteractionInput {
     readonly description: string
     readonly owners: readonly string[]
   }
-  readonly checkAfterSeconds: number
+  readonly checkAfterSeconds?: number
 }
 
 export type FleetTaskChildOperation =
@@ -674,7 +674,8 @@ export class FleetTaskBoard {
     if (current.stableState.kind !== 'running') {
       throw new Error(`Fleet Interaction ${current.id} is ${current.stableState.kind}`)
     }
-    if (!Number.isSafeInteger(input.checkAfterSeconds) || input.checkAfterSeconds < 1) {
+    if (input.checkAfterSeconds !== undefined
+      && (!Number.isSafeInteger(input.checkAfterSeconds) || input.checkAfterSeconds < 1)) {
       throw new Error('interaction checkAfterSeconds must be a positive integer')
     }
     const reason = requiredText(input.reason, 'interaction continuation reason')
@@ -720,7 +721,6 @@ export class FleetTaskBoard {
     }
     const nextVersion = current.stateVersion + 1
     const waitingEventKey = `interaction-quiescent:${current.id}:${String(current.domain.inputRevision)}:${String(nextVersion)}`
-    const checkAt = new Date(Date.now() + input.checkAfterSeconds * 1_000).toISOString()
     const systemFallback: FleetTaskTimeoutState = {
       kind: 'blocked', reason: `Interaction ${current.id} system reconciliation failed.`,
     }
@@ -732,6 +732,13 @@ export class FleetTaskBoard {
       id, when, target: SYSTEM_TARGET, priority, retryAfterSeconds: 0, maxWakeups: 1,
       onTimeout: systemFallback,
     })
+    const progressReconciler = input.checkAfterSeconds === undefined
+      ? []
+      : [reconciler(
+          'interaction-stall-check',
+          { kind: 'at', at: new Date(Date.now() + input.checkAfterSeconds * 1_000).toISOString() },
+          0,
+        )]
     const {
       pendingDelivery: _pendingDelivery,
       reportIntent: _reportIntent,
@@ -752,7 +759,7 @@ export class FleetTaskBoard {
         reason,
         reconcilers: [
           reconciler('interaction-team-quiescent', { kind: 'event', eventKey: waitingEventKey }, 10),
-          reconciler('interaction-stall-check', { kind: 'at', at: checkAt }, 0),
+          ...progressReconciler,
         ],
       }, now, staged, [], current.id),
       stateVersion: nextVersion,

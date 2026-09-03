@@ -567,18 +567,27 @@ describe('FleetRunService', () => {
     const { service, launcher, context, disconnect } = setup(root)
     const registered = new Map<string, unknown>()
     const guards: Array<(execution: { readonly name: string; readonly arguments: unknown }) => string | undefined> = []
-    context.provide('tools', {
+    const nativeTools = new Set(['bash', 'write', 'edit', 'todo_write', 'read'])
+    const activeRestrictions: Array<{ readonly deny: readonly string[] }> = []
+    const toolService = {
+      nativeTools,
       register: (tool: { readonly name: string }) => {
         registered.set(tool.name, tool)
         return () => { registered.delete(tool.name) }
       },
-      restrict: () => () => {},
+      restrict: (filter: { readonly deny: readonly string[] }) => {
+        activeRestrictions.push(filter)
+        return () => { activeRestrictions.splice(activeRestrictions.indexOf(filter), 1) }
+      },
       guard: (guard: (execution: { readonly name: string; readonly arguments: unknown }) => string | undefined) => {
         guards.push(guard)
         return () => { guards.splice(guards.indexOf(guard), 1) }
       },
-      get: (name: string) => registered.get(name),
-    })
+      get(name: string) {
+        return registered.get(name) ?? (this.nativeTools.has(name) ? { name } : undefined)
+      },
+    }
+    context.provide('tools', toolService)
     await context.plugin((scope) => {
       launcher.ctx = scope
     })
@@ -598,6 +607,7 @@ describe('FleetRunService', () => {
     expect(registered.has('fleet_reply')).toBe(true)
     expect(registered.has('fleet_messages')).toBe(false)
     expect(registered.has('fleet_tools')).toBe(false)
+    expect(activeRestrictions).toContainEqual({ deny: ['bash', 'write', 'edit', 'todo_write'] })
 
     service.recordMemberSessionEvent(launcher.id, {
       seq: 1,
@@ -620,6 +630,7 @@ describe('FleetRunService', () => {
       runId: run.id,
       reason: 'The user explicitly requested direct execution.',
     })
+    expect(activeRestrictions).not.toContainEqual({ deny: ['bash', 'write', 'edit', 'todo_write'] })
     expect(guardReason('write', { path: 'result.txt', content: 'done' })).toBeUndefined()
 
     service.recordMemberSessionEvent(launcher.id, {
@@ -631,6 +642,7 @@ describe('FleetRunService', () => {
         content: [{ type: 'text', text: 'A separate request.' }],
       },
     } as unknown as SessionEvent)
+    expect(activeRestrictions).toContainEqual({ deny: ['bash', 'write', 'edit', 'todo_write'] })
     expect(guardReason('write', { path: 'result.txt', content: 'again' })).toContain('not routed')
     disconnect()
   })
@@ -815,6 +827,9 @@ describe('FleetRunService', () => {
     expect(request).toContain('action="update" only for an intentional mid-turn user update')
     expect(request).toContain('last non-empty native output')
     expect(request).toContain('normal project imperative remains Team work')
+    expect(request).toContain('terminal state proves only workflow settlement')
+    expect(request).toContain('including every required quantifier, case, and evidence class')
+    expect(request).toContain('budget.team counters for cost reporting')
     expect(request).not.toContain('Build and review the requested change.')
 
     const decision = await scoped.preStep([incoming])
@@ -876,6 +891,15 @@ describe('FleetRunService', () => {
     } as unknown as Context, service, {} as never)
     const userTask = registered.find(tool => tool.name === 'fleet_user_task')
     if (userTask === undefined) throw new Error('expected fleet_user_task')
+    const userTaskSchema = (userTask as unknown as {
+      readonly output: { readonly schema: {
+        readonly properties: { readonly budget: { readonly properties: {
+          readonly team: { readonly properties: Record<string, unknown> }
+        } } }
+      } }
+    }).output.schema
+    expect(userTaskSchema.properties.budget.properties.team.properties.state).toBeDefined()
+    expect(userTaskSchema.properties.budget.properties.team.properties.remaining).toBeDefined()
 
     service.recordMemberSessionEvent(launcher.id, {
       seq: 0,
@@ -892,6 +916,20 @@ describe('FleetRunService', () => {
         content: [{ type: 'text', text: 'First request.' }],
       },
     } as unknown as SessionEvent)
+    const statusReceipt = await userTask.execute({
+      action: 'status',
+      run_id: run.id,
+    }, { agent: launcher as unknown as Agent })
+    expect(statusReceipt).toMatchObject({
+      action: 'status',
+      budget: {
+        mode: 'tokens',
+        team: {
+          state: 'unlimited', used: 0, calls: 0,
+          inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+        },
+      },
+    })
     const pendingReceipt = await userTask.execute({
       action: 'report',
       run_id: run.id,
@@ -1265,6 +1303,13 @@ describe('FleetRunService', () => {
       domain: { kind: 'interaction', waitingTaskIds: [rootGoalId] },
     })
     expect(service.taskBoard(run.id).ownerTasks(assistantId)).toEqual([])
+    expect(service.continueAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id,
+      reason: 'The atomic Fleet start already installed the wait.',
+    })).toMatchObject({
+      task: { id: interaction.id, stableState: { kind: 'dormant' } },
+      goals: [],
+    })
 
     settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, rootGoalId, 'complete', 'Verified result.')
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
@@ -1331,6 +1376,51 @@ describe('FleetRunService', () => {
       id: interaction.id,
       stableState: { kind: 'running' },
       domain: { kind: 'interaction', inputRevision: 2, settledRevision: 1 },
+    })
+    disconnect()
+  })
+
+  it('tells the assistant to end its turn after an atomic Fleet start', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const assistantId = run.assistants[0]?.view.id
+    if (assistantId === undefined) throw new Error('expected Team assistant')
+    service.recordMemberSessionEvent(launcher.id, {
+      seq: 1,
+      time: Date.now(),
+      type: 'user/message',
+      data: {
+        id: 'foreground-start-tool', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Start the Team work.' }],
+      },
+    } as unknown as SessionEvent)
+
+    const registered: Array<{
+      readonly name: string
+      execute(args: unknown, context: { readonly agent: Agent }): Promise<unknown>
+    }> = []
+    installRunTools({
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool); return () => {} } },
+    } as unknown as Context, service, {} as never)
+    const fleetRun = registered.find(tool => tool.name === 'fleet_run')
+    if (fleetRun === undefined) throw new Error('expected fleet_run')
+
+    await expect(fleetRun.execute({
+      action: 'start',
+      run_id: run.id,
+      task: taskPath,
+    }, { agent: launcher as unknown as Agent })).resolves.toMatchObject({
+      action: 'start',
+      next: 'end_turn_without_fleet_user_task_continue_or_status',
+    })
+    expect(service.taskBoard(run.id).interactionTask(assistantId)?.stableState).toMatchObject({
+      kind: 'dormant',
+      reconcilers: [expect.objectContaining({ id: 'interaction-team-quiescent' })],
     })
     disconnect()
   })
@@ -1672,6 +1762,7 @@ describe('FleetRunService', () => {
     expect(leadPersona).toContain('@Assistant [id=team-assistant; role=Team assistant]')
     expect(leadPersona).not.toContain('@Alivia')
     expect(leadPersona).toContain('Configured groups cover Fleet capabilities only')
+    expect(leadPersona).toContain('Native subagent spawning is unavailable inside a formal Fleet member')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
     expect(leadPersona).toContain('Use only an exact display name or member id from the current reachable roster')
     expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state')
@@ -3112,7 +3203,11 @@ describe('FleetRunService', () => {
       text: 'The foreground assistant is checking in directly.',
       delivery: 'quiet',
     })
-    expect(sent).toMatchObject({ recipients: 0, delivered: 0, woken: 0 })
+    expect(sent).toMatchObject({ recipients: 2, delivered: 2, woken: 0 })
+    expect(service.messageHub(run.id).receipt(sent.messageId)).toMatchObject({
+      recipientIds: expect.arrayContaining(['lead', 'reviewer']),
+      pendingParticipantIds: [],
+    })
     expect(service.messageHub(run.id).read(lead, { conversation: '#main' }).messages)
       .toContainEqual(expect.objectContaining({
         id: sent.messageId,
@@ -5101,7 +5196,80 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('retries malformed tool protocol twice, then escalates to one assistant without a storm', async () => {
+  it('resets malformed tool protocol retries after valid output', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected live lead member')
+    const malformedTurn = (seq: number): SessionEvent => ({
+      seq,
+      time: Date.now(),
+      type: 'turn/end',
+      data: {
+        turn: seq,
+        reason: {
+          kind: 'error',
+          error: {
+            code: 'PI_AI_ERROR',
+            message: 'malformed_tool_protocol: Inference backend returned malformed tool-call protocol.',
+          },
+        },
+      },
+    })
+
+    service.recordMemberSessionEvent(lead.id, malformedTurn(10))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 11,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Recovered useful result.' }] },
+      },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(12))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 13,
+      time: Date.now(),
+      type: 'tool/call',
+      data: { turn: 11, callId: 'valid-call', name: 'fleet_task', arguments: '{"action":"owner_list"}' },
+    } as unknown as SessionEvent)
+    service.recordMemberSessionEvent(lead.id, malformedTurn(14))
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    const recoveryEvents = service.readTrace(run.id, 0, 300).events.filter(event =>
+      event.type === 'member_protocol_recovery_scheduled')
+    expect(recoveryEvents).toHaveLength(3)
+    expect(recoveryEvents.every(event => event.data.includes('"attempt":1'))).toBe(true)
+    expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'member_protocol_recovery_reset',
+        data: expect.stringContaining('valid_assistant_output'),
+      }),
+      expect.objectContaining({
+        type: 'member_protocol_recovery_reset',
+        data: expect.stringContaining('valid_tool_call'),
+      }),
+    ]))
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_protocol_recovery_exhausted')).toBe(false)
+    disconnect()
+  })
+
+  it('retries consecutive malformed tool protocol twice, then escalates to one assistant without a storm', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -5852,7 +6020,7 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
-  it('does not turn a complete native direct delivery into a duplicate Inbox owner task', async () => {
+  it('keeps a complete native direct delivery as Inbox work until its context is claimed', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
@@ -5861,7 +6029,9 @@ describe('FleetRunService', () => {
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
     if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+    reviewer.status = 'idle'
     const pendingContext = reviewer.inbox.nextStep.length
+    const beforeWakeup = reviewer.messages.length
 
     service.messageHub(run.id).send(lead, {
       to: '@reviewer', text: 'This complete direct context needs no second fetch.', delivery: 'quiet',
@@ -5869,10 +6039,20 @@ describe('FleetRunService', () => {
 
     expect(service.messageHub(run.id).unreadSummary('reviewer').unreadMessages).toBe(1)
     expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
+      unreadMessages: 1, unreadChars: 'This complete direct context needs no second fetch.'.length,
+    })
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['inbox'])
+    expect(reviewer.inbox.nextStep).toHaveLength(pendingContext + 1)
+    await vi.waitFor(() => expect(reviewer.messages.length).toBeGreaterThan(beforeWakeup))
+    expect(reviewer.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining('process unread messages already delivered') }),
+    ])
+    const deliveredContext = reviewer.inbox.nextStep[pendingContext]
+    expect(service.messageHub(run.id).markDeliveredContextRead('reviewer', String(deliveredContext?.id))).toBe(true)
+    expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
       unreadMessages: 0, unreadChars: 0,
     })
     expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
-    expect(reviewer.inbox.nextStep).toHaveLength(pendingContext + 1)
     disconnect()
   })
 
@@ -5897,13 +6077,16 @@ describe('FleetRunService', () => {
     })
 
     expect(optional.replyTaskIds).toBeUndefined()
-    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['inbox'])
     expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
-      unreadMessages: 0, unreadChars: 0,
+      unreadMessages: 1, unreadChars: 'Please return the bounded regression result.'.length,
     })
-    expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
+    const optionalContext = reviewer.inbox.nextStep.at(-1)
+    expect(optionalContext?.content).toEqual([
       expect.objectContaining({ text: expect.not.stringContaining('reply-task') }),
     ])
+    expect(service.messageHub(run.id).markDeliveredContextRead('reviewer', String(optionalContext?.id))).toBe(true)
+    expect(service.taskBoard(run.id).ownerTasks('reviewer')).toEqual([])
 
     const sent = service.sendConversationMessage(launcher as unknown as Agent, {
       runId: run.id,
@@ -5914,9 +6097,15 @@ describe('FleetRunService', () => {
 
     expect(sent.replyTaskIds).toHaveLength(1)
     expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
-    expect(reviewer.inbox.nextStep.at(-1)?.content).toEqual([
+    const requiredContext = reviewer.inbox.nextStep.at(-1)
+    expect(requiredContext?.content).toEqual([
       expect.objectContaining({ text: expect.stringContaining('reply-task') }),
     ])
+    expect(service.messageHub(run.id).taskUnreadSummary('reviewer')).toEqual({
+      unreadMessages: 1, unreadChars: '@reviewer Please return the bounded regression result.'.length,
+    })
+    expect(service.messageHub(run.id).markDeliveredContextRead('reviewer', String(requiredContext?.id))).toBe(true)
+    expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.domain.kind)).toEqual(['reply'])
 
     const replyTaskId = sent.replyTaskIds?.[0]
     if (replyTaskId === undefined) throw new Error('expected direct Reply Task id')

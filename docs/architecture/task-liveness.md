@@ -26,8 +26,9 @@ The public write surface is intentionally higher-level:
   from `dormant` to `running`; `fleet_inbox read` consumes an aggregate bounded
   batch across visible conversations and the domain reconciles it automatically.
   A complete message already queued in the member's native Session remains
-  unread for UI receipts but is excluded from Inbox owner work, so the model is
-  never asked to fetch the same body twice.
+  Inbox owner work until the Agent loop claims that context. Claiming the native
+  body marks it read and reconciles the Inbox automatically, so the Task wakes
+  an idle member without requiring a duplicate `fleet_inbox read` call.
 - Reply: every resolved `@mention` creates one Reply Task per target.
   `fleet_reply` sends the response, records the delivery message id, and
   atomically completes the Task.

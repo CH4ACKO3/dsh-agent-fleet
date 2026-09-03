@@ -122,6 +122,7 @@ export interface MessageHubOptions {
   readonly beforeSend?: (sender: MessageAgent, input: SendMessageInput) => SendMessageDecision
   readonly requiredActionInstruction?: (message: FleetMessage, participantId: string) => string
   readonly muteChannelNotice?: (participantId: string, message: FleetMessage) => boolean
+  readonly excludeInboxTask?: (participantId: string, message: FleetMessage) => boolean
 }
 
 export class MessageHub {
@@ -564,7 +565,7 @@ export class MessageHub {
     if (input.to.startsWith('@')) {
       const recipient = this.resolveAgent(input.to)
       if (mentions.some(mention => mention !== recipient)) {
-        throw new Error('a direct message can only mention its recipient')
+        throw new Error('a direct message can only mention its recipient; remove other @mentions, send them separately, or use a Channel when everyone needs the content')
       }
       return this.sendDirect(sender, { ...input, to: `@${recipient}` }, text, resources, mentions, origin)
     }
@@ -1700,23 +1701,17 @@ export class MessageHub {
     }
   }
 
-  /** Unread work that still needs an Inbox tool call rather than native context consumption. */
+  /** Unread work that must be claimed by the member, whether delivered as native context or a notice. */
   taskUnreadSummary(reference: string): { readonly unreadMessages: number; readonly unreadChars: number } {
     this.assertOpen()
     const participantId = this.resolveAgent(reference)
-    const deliveredInFull = new Set([...this.contextDeliveries.values()].flatMap(delivery =>
-      delivery.participantId === participantId
-        && delivery.content === 'full'
-        && delivery.state === 'pending'
-        ? [delivery.messageId]
-        : []))
     const unread = this.history.filter(message => message.from !== participantId
       && this.canSeeMessage(participantId, message)
       && this.isInboxRelevant(participantId, message)
       && !(message.conversation.startsWith('#')
         && this.options.muteChannelNotice?.(participantId, snapshot(message)) === true)
-      && !this.isFullyRead(participantId, message)
-      && !deliveredInFull.has(message.id))
+      && this.options.excludeInboxTask?.(participantId, snapshot(message)) !== true
+      && !this.isFullyRead(participantId, message))
     return {
       unreadMessages: unread.length,
       unreadChars: unread.reduce((total, message) =>

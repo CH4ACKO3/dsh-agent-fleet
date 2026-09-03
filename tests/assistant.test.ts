@@ -136,6 +136,21 @@ describe('FleetAssistantRuntime', () => {
       'the complete initial `stages` DAG',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'Preserve the authoritative task\'s quantifiers and acceptance scope',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'one fixed instance, or a narrowed claim may support a scoped sub-result',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'terminal Vote whose statement requires the complete requested claim',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'terminal proves only that its workflow settled',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'copy `budget.team` fields when reporting cost',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'atomically creates the zero-owner root and all initial Goal/Vote stages',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
@@ -237,6 +252,7 @@ describe('FleetAssistantRuntime', () => {
       'fleet_send',
       'fleet_inbox',
       'fleet_reply',
+      'fleet_channel',
       'fleet_vote',
     ]))
     expect(fixture.restrict).not.toHaveBeenCalled()
@@ -262,6 +278,7 @@ describe('FleetAssistantRuntime', () => {
     })
 
     expect(mode.tools).toContain('fleet_send')
+    expect(mode.tools).toContain('fleet_channel')
     expect(mode.tools).not.toContain('external_service')
   })
 

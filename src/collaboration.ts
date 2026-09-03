@@ -169,7 +169,7 @@ function installTaskMessageTools(
       }
       if (task === undefined && pending.length === 1) task = pending[0]
       if (task === undefined) {
-        if (pending.length === 0) throw new Error('No owned Reply Task is pending')
+        if (pending.length === 0) throw new Error('No owned Reply Task is pending; use fleet_send for a new or optional message')
         throw new Error(`Multiple Reply Tasks are pending; choose one of: ${pending.map(candidate => candidate.id).join(', ')}`)
       }
       if (task.domain.kind !== 'reply') throw new Error(`Fleet task ${args.id} is not a Reply Task`)
@@ -544,6 +544,10 @@ export class FleetCollaborationService {
       // Inbox without injecting a mid-turn notice. Explicit @mentions still
       // create Reply Tasks and wake through the Task notification path.
       muteChannelNotice: participantId => assistantNames.has(participantId),
+      // Native foreground input already has one durable Interaction Task.
+      // Its Fleet conversation mirror must not create a competing Inbox Task.
+      excludeInboxTask: (participantId, message) =>
+        assistantNames.has(participantId) && message.origin === 'user',
     })
     const canManage = (agentId: string, namespace: string): boolean => {
       const member = memberNamesById.get(agentId)
@@ -769,6 +773,13 @@ export class FleetCollaborationService {
           resource: resource ?? { kind: 'team', id: input.id },
         })
       }
+      const resourceTarget = (
+        kind: 'shared' | 'resource' | 'file' | 'work',
+        id?: string,
+      ): { readonly kind: string; readonly id: string } | undefined => {
+        if (kind === 'work' || (kind === 'resource' && id === undefined)) return undefined
+        return { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' }
+      }
       const messagePermissions = new Set<FleetMessagePermission>(
         effective.actions.filter((permission): permission is FleetMessagePermission =>
           permission === 'channel.manage' || permission === 'meeting.manage' || permission === 'vote.create'),
@@ -846,16 +857,12 @@ export class FleetCollaborationService {
             canRead: (agentId, kind, id) => authorize(
               agentId,
               kind === 'work' ? 'work.read' : 'resource.read',
-              kind === 'work'
-                ? undefined
-                : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
+              resourceTarget(kind, id),
             ),
             canWrite: (agentId, kind, id) => authorize(
               agentId,
               kind === 'work' ? 'work.claim' : 'resource.write',
-              kind === 'work'
-                ? undefined
-                : { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' },
+              resourceTarget(kind, id),
             ),
             resourceWrite: permissions.has('resource.write'),
             deleteShared: path => {

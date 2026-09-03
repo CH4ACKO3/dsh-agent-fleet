@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/dsh-agent-fleet-matilda-eval:2026-09-02
+    image: local/dsh-agent-fleet-matilda-eval:lean4-v4.32.1
     pull_policy: never
     entrypoint: ["/opt/matilda-eval/network-guard.sh"]
     restart: "no"
@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/dsh-agent-fleet-matilda-eval:2026-09-02
+    image: local/dsh-agent-fleet-matilda-eval:lean4-v4.32.1
     pull_policy: never
     restart: "no"
     working_dir: /workspace
@@ -55,6 +55,7 @@ services:
       PNPM_CONFIG_OFFLINE: "true"
       PNPM_CONFIG_STORE_DIR: /root/.local/share/pnpm/store
       PIP_NO_INDEX: "1"
+      FLEET_MEMBER_DENY_HOST_TOOLS: "web_search"
     volumes:
       - dsh-data:/data
       - type: bind

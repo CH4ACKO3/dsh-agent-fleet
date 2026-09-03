@@ -172,6 +172,49 @@ describe('FleetResources', () => {
     expect(resources.listResources().filter(resource => resource.id === 'shared:plan')).toEqual([updatedShared])
   })
 
+  it('authorizes resource registration against the resolved file before creating the resource id', async () => {
+    const registered: Array<{
+      readonly name: string
+      execute(args: { readonly action: string; readonly path?: string }, exec: {
+        readonly agent?: Agent
+        readonly signal: AbortSignal
+      }): Promise<unknown>
+    }> = []
+    const checks: Array<{ readonly kind: string; readonly id?: string }> = []
+    const expectedPath = join('/workspace', 'artifacts/result.md')
+    const resources = new FleetResources(containment)
+    installResourceTools({
+      fs: {
+        ...containment,
+        resolve: async (path: string, options?: { readonly cwd?: string }) => target(
+          isAbsolute(path) ? path : join(options?.cwd ?? '/workspace', path),
+        ),
+        stat: async () => ({ version: 'v1', type: 'file', size: 12 }),
+        processPath: (value: FsTarget) => value.displayPath,
+      },
+      on: () => {},
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+    } as unknown as Context, resources, {
+      resourceWrite: true,
+      canWrite: (_agentId, kind, id) => {
+        checks.push({ kind, ...(id === undefined ? {} : { id }) })
+        return kind === 'file' && id === expectedPath
+      },
+    })
+    const tool = registered.find(candidate => candidate.name === 'fleet_resource')
+    if (tool === undefined) throw new Error('expected fleet_resource tool')
+
+    await expect(tool.execute(
+      { action: 'add', path: 'artifacts/result.md' },
+      { agent: { id: 'builder', session: { header: { cwd: '/workspace' } } } as Agent, signal: new AbortController().signal },
+    )).resolves.toMatchObject({
+      action: 'add',
+      resource: { path: expectedPath, createdBy: 'builder' },
+    })
+    expect(checks).toEqual([{ kind: 'file', id: expectedPath }])
+    expect(resources.listResources()).toHaveLength(1)
+  })
+
   it('removes a registered resource with attributable history', () => {
     const resources = new FleetResources(containment)
     const events: unknown[] = []

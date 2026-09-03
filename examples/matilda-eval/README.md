@@ -2,24 +2,36 @@
 
 This directory turns the attached Matilda 16 × 16 task into a blind, repeatable local Fleet evaluation. It contains a four-member Team template, an answer-free task statement, and a pinned solver container derived from the local Fleet baseline. The mathematical input and evidence standard match the source scenario; the collaboration design is intentionally Fleet-native so coordination quality and cost can be compared without copying the source system.
 
-The design uses four parallel evidence lanes rather than a chat-heavy sequence of research rounds:
+The Team exposes four complementary capabilities rather than a chat-heavy fixed sequence of research rounds:
 
 1. construction search and witness validation;
-2. mathematical lower-bound work;
-3. two independent exact encodings;
-4. adversarial small-instance checks and final reproduction.
+2. structural lower-bound work with Lean 4 machine-checking;
+3. integration, exact-model validation, and auditable gap analysis;
+4. independent reproduction, adversarial validation, and acceptance review.
 
-The foreground assistant stages all lanes atomically, then waits. The terminal auditor packages evidence and casts the acceptance Vote. This keeps ordinary acknowledgements and solver chatter out of the user conversation while preserving a formal Task chain from kickoff through acceptance.
+The foreground assistant reads the task and randomized roster, chooses which capabilities are relevant, and atomically creates a task-derived DAG. The template does not require all four members to receive equal work and does not prescribe construction, proof, exact solving, or audit as mandatory stages. It constrains only collaboration correctness: one owner per Goal, explicit dependencies and joins, durable continuation paths for long work, scoped handoffs, and independent acceptance when the task needs it. This keeps ordinary acknowledgements and solver chatter out of the user conversation without replacing the assistant's planning judgment with a benchmark-specific workflow.
+
+The template deliberately does not encode a known answer, a benchmark-specific permutation family, a required stage topology, or a fixed round count. The authoritative task defines the acceptance evidence. A timeout, a selected set of fixed candidates, or agreement with a short numerical pattern cannot be promoted beyond the claim it actually supports.
 
 ## Files
 
-- `team.local.json`: importable local Team preset; names and model routes remain launcher-selected.
+- `team.local.json`: importable local Team preset; names remain randomized while the evaluation route is pinned to `memorax/deepseek-v4-flash` for reproducible cost and behavior comparisons.
 - `task.md`: authoritative blind benchmark containing only the problem, expected evidence, and run isolation. It intentionally contains no known optimum, prior construction, timing policy, or prescribed collaboration plan.
-- `Dockerfile` and `requirements.txt`: Python, Z3, OR-Tools CP-SAT, SciPy/HiGHS, and process instrumentation.
+- `Dockerfile` and `requirements.txt`: Python, Z3, OR-Tools CP-SAT, SciPy/HiGHS, Lean 4.32.1, Mathlib 4.32.1, and process instrumentation.
 - `compose.yaml`: isolated DSH state volume, bind-mounted run workspace, configurable CPU/memory limits, a loopback-only UI port, and a kernel-enforced model-only egress guard.
 - `compose.source.yaml`: optional override for testing a freshly packed Fleet source tree.
 
 All solver dependencies are baked into the image. At runtime, the business container shares a guarded network namespace whose IPv4 and IPv6 output policies drop every new external connection except TCP `221.194.152.171:443`, the configured model endpoint. The business container has neither `NET_ADMIN` nor raw-socket capability, so an Agent shell cannot remove the guard. Docker DNS and all other external destinations remain unreachable.
+
+The Compose profile also sets `FLEET_MEMBER_DENY_HOST_TOOLS=web_search`, so formal members do not see the unusable search tool in this offline evaluation. This only changes the model-facing tool surface; the container network boundary remains the security control.
+
+Lean and Mathlib are downloaded only while the image is built and remain fully local during a run. Use `lean` and `lake` for an ordinary Lean project, or compile a standalone file importing Mathlib from any workspace path with:
+
+```sh
+lean-mathlib /workspace/path/to/Proof.lean
+```
+
+The wrapper runs `lake env lean` against the pinned `/opt/mathlib` installation. Formalization is optional evidence tooling, not a mandatory benchmark stage or solution method.
 
 ## Start a clean run on Windows PowerShell
 
@@ -37,15 +49,14 @@ docker compose --project-directory examples/matilda-eval run --rm --entrypoint p
 docker compose --project-directory examples/matilda-eval run --rm --entrypoint python dsh /opt/matilda-eval/verify-network-isolation.py
 ```
 
-Prepare each empty run workspace by copying only the benchmark inputs:
+Prepare each empty run workspace by copying only the authoritative benchmark task. Keep the Team template outside `/workspace` and import it from this source directory so formal members cannot waste context rereading their own configuration:
 
 ```powershell
-Copy-Item examples/matilda-eval/team.local.json $env:DSH_WORKSPACE/team.local.json
 Copy-Item examples/matilda-eval/task.md $env:DSH_WORKSPACE/task.md
 docker compose --project-directory examples/matilda-eval up -d
 ```
 
-Open `http://127.0.0.1:3093/`. The two benchmark inputs are now available at stable container paths without exposing the source report or an earlier run's evidence.
+Open `http://127.0.0.1:3093/`, choose `/workspace`, and import `examples/matilda-eval/team.local.json` from the host. The authoritative task is available at a stable container path without exposing the Team configuration, source report, or an earlier run's evidence to members.
 
 Then tell the foreground assistant:
 

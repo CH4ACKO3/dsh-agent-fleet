@@ -398,6 +398,29 @@ describe('FleetTaskBoard v6', () => {
     board.close()
   })
 
+  it('does not poll a dormant Interaction unless a progress check is explicit', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-31T00:00:00.000Z'))
+    const board = new FleetTaskBoard(directory)
+    board.activate()
+    board.recordInteractionInput('assistant', { messageId: 'user-event-wait', text: 'Wait for the Team result.' })
+    const deferred = board.deferInteraction('agent-assistant', {
+      reason: 'Waiting for event-driven Team completion.',
+      goal: { title: 'Long check', description: 'Run until evidence is ready.', owners: ['qa'] },
+    })
+
+    expect(deferred.task.stableState).toMatchObject({
+      kind: 'dormant',
+      reconcilers: [expect.objectContaining({ id: 'interaction-team-quiescent' })],
+    })
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000)
+    expect(board.interactionTask('assistant')?.stableState.kind).toBe('dormant')
+
+    expect(board.signalInteractionDelivery('assistant', 'Every formal Team member is idle.')?.domain)
+      .toMatchObject({ pendingDelivery: { cause: 'team_quiescent' } })
+    board.close()
+  })
+
   it('separates Reply delivery receipt from Inbox consumption', () => {
     const board = new FleetTaskBoard(directory)
     board.syncInbox('reviewer', 1, 42)

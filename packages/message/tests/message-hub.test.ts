@@ -186,7 +186,7 @@ describe('MessageHub', () => {
     expect(hub.search(qa, { query: 'Inspection complete' })).toHaveLength(1)
   })
 
-  it('keeps ordinary quiet direct Agent messages non-blocking', () => {
+  it('keeps ordinary quiet direct Agent messages optional while tracking unread work', () => {
     const { hub, lead, reviewer } = setup()
     const sent = hub.send(lead, {
       to: '@reviewer',
@@ -206,12 +206,16 @@ describe('MessageHub', () => {
       unreadMessages: 1,
       unreadChars: 'Please inspect the parser.'.length,
     })
-    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: 'Please inspect the parser.'.length,
+    })
     expect(hub.read(reviewer, { conversation: '@lead' }).messages[0]).toMatchObject({
       id: sent.messageId,
       from: 'lead',
       resources: ['res_parser'],
     })
+    expect(hub.taskUnreadSummary(reviewer.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
     expect(hub.pendingRequiredReply(reviewer.id)).toBeUndefined()
   })
 
@@ -1628,13 +1632,53 @@ describe('MessageHub', () => {
     const send = registered.find(candidate => candidate.name === 'fleet_send')
     if (send === undefined) throw new Error('expected fleet_send')
 
-    await expect(send.execute({ to: '#general', message: 'Allowed once.' }, { agent: lead }))
-      .resolves.toMatchObject({ recipients: expect.any(Number) })
+    const posted = await send.execute(
+      { to: '#general', message: 'Allowed once.' },
+      { agent: lead },
+    ) as { readonly messageId: string; readonly recipients: number; readonly delivered: number; readonly woken: number }
+    expect(posted).toMatchObject({ recipients: 3, delivered: 3, woken: 0 })
+    expect(hub.receipt(posted.messageId)).toMatchObject({
+      recipientIds: expect.arrayContaining(['reviewer', 'qa', 'observer']),
+      pendingParticipantIds: [],
+    })
     allowed.delete('message.post')
     await expect(async () => send.execute(
       { to: '#general', message: 'Must now be denied.' },
       { agent: lead },
     )).rejects.toThrow('not authorized for message.post')
+  })
+
+  it('normalizes a unique bare member target before authorization and delivery', async () => {
+    const { hub, lead, reviewer } = setup()
+    const registered: Array<{
+      readonly name: string
+      readonly execute: (args: Record<string, unknown>, exec: unknown) => unknown
+    }> = []
+    const conversations: string[] = []
+    installMessageTools({
+      get: (name: string) => name === 'fleetCore' ? {
+        resolveTarget: (value: string) => `@${value}`,
+        nameForAgent: () => undefined,
+      } : undefined,
+      tools: { register: (tool: typeof registered[number]) => { registered.push(tool) } },
+    } as never, hub, {
+      coordination: false,
+      authorize: (_agentId, _action, resource) => {
+        if (resource !== undefined) conversations.push(resource.id)
+        return true
+      },
+    })
+    const send = registered.find(candidate => candidate.name === 'fleet_send')
+    if (send === undefined) throw new Error('expected fleet_send')
+
+    await expect(send.execute(
+      { to: 'reviewer', message: 'Please inspect the artifact.' },
+      { agent: lead },
+    )).resolves.toMatchObject({ recipients: 1, delivered: 1 })
+    expect(conversations).toEqual(['@reviewer'])
+    expect(hub.readInbox(reviewer).messages).toContainEqual(expect.objectContaining({
+      conversation: '@reviewer', text: 'Please inspect the artifact.',
+    }))
   })
 
   it('excludes connected observers that are not default voters', () => {

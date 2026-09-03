@@ -2003,6 +2003,7 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
     '## Member view',
     `Configured Fleet tool groups: ${member.toolGroups.join(', ') || 'none'}. Optional groups are available only when their sub-plugin is installed.`,
     'Configured groups cover Fleet capabilities only; host tools such as bash, read, and edit come from the Agent preset.',
+    'Native subagent spawning is unavailable inside a formal Fleet member. Keep execution in your assigned Fleet Task; route any necessary handoff through durable Fleet Tasks and the visible Team roster.',
     'Every granted Fleet capability with at least one authorized action stays directly available.',
     `Granted Fleet permissions: ${member.permissions.join(', ') || 'none'}.`,
     `Current reachable roster (use these exact identities only): ${members || 'none'}.`,
@@ -2023,7 +2024,24 @@ async function installMemberTools(
   source?: 'create' | 'resume',
 ): Promise<void> {
   await childCtx.inject(['fs', 'tools'], (scope) => {
-    return runtime.installTools(scope, member, { exposeHostFleetTools })
+    // Formal Fleet members are already the durable parallelism boundary. A
+    // native subagent would create an untracked execution branch whose work,
+    // lifecycle, and model cost are absent from the Team Task graph. Keep the
+    // host tool statically unavailable for the entire member Session instead
+    // of allowing it and rejecting individual calls after the model has chosen
+    // the route.
+    const configuredHostToolDeny = (process.env.FLEET_MEMBER_DENY_HOST_TOOLS ?? '')
+      .split(/[\s,]+/u)
+      .map(name => name.trim())
+      .filter(name => /^[a-z][a-z0-9_-]*$/u.test(name))
+    const removeNativeRestrictions = scope.tools.restrict({
+      deny: [...new Set(['subagent', ...configuredHostToolDeny])],
+    })
+    const removeFleetTools = runtime.installTools(scope, member, { exposeHostFleetTools })
+    return () => {
+      removeFleetTools()
+      removeNativeRestrictions()
+    }
   })
   if (source !== undefined) {
     if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
@@ -2071,8 +2089,8 @@ function traceEventData(value: unknown): string {
 const EXPLICIT_WAIT_DELAY_MS = 2_000
 const QUIET_TOOL_WAIT_DELAY_MS = 90_000
 const TEAM_QUIESCENCE_GRACE_MS = 3_000
-const DEFAULT_INTERACTION_CHECK_SECONDS = 300
 const FLEET_FOREGROUND_PROTOCOL_SECTION = 'fleet:foreground-task-request'
+const ASSISTANT_DELEGATION_ONLY_NATIVE_TOOLS = ['bash', 'write', 'edit', 'todo_write'] as const
 const ASSISTANT_PROJECT_WRITE_TOOLS = new Set(['write', 'edit'])
 const ASSISTANT_READ_ONLY_SHELL_TOOLS = new Set([
   'pwd', 'ls', 'rg', 'grep', 'cat', 'head', 'tail', 'wc', 'stat', 'file', 'du', 'df',
@@ -2271,6 +2289,10 @@ export class FleetRunService {
   private readonly turnStartReminderTurns = new Map<string, number>()
   private readonly toolResultReminderSequences = new Map<string, number>()
   private readonly assistantToolAgents = new WeakSet<Agent>()
+  private readonly assistantNativeToolRestrictions = new WeakMap<Agent, {
+    tighten(): void
+    release(): void
+  }>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly budgetGuardAgents = new WeakSet<Agent>()
   private readonly pausingTeams = new Map<string, Promise<FleetRunRecord>>()
@@ -2772,9 +2794,8 @@ export class FleetRunService {
     const launchingAssistant = running.assistants.find(assistant => assistant.sessionId === String(launcher.id))
     if (launchingAssistant !== undefined && runtime.tasks.interactionTask(launchingAssistant.view.id)?.stableState.kind === 'running') {
       runtime.tasks.deferInteraction(String(launcher.id), {
-        reason: `Waiting for Fleet work ${work.id} to settle, reach a Team quiescence point, or reach its progress deadline.`,
+        reason: `Waiting for Fleet work ${work.id} to settle or for the Team to reach a quiescence point.`,
         taskIds: [rootTask.id],
-        checkAfterSeconds: DEFAULT_INTERACTION_CHECK_SECONDS,
       })
     }
 
@@ -3085,18 +3106,33 @@ export class FleetRunService {
       if (task === undefined) throw new Error(`Fleet assistant ${assistant.view.id} has no foreground Interaction Task`)
       return { task, goals: [] }
     }
+    const current = runtime.tasks.interactionTask(assistant.view.id)
+    if (current?.stableState.kind === 'dormant'
+      && input.taskIds === undefined
+      && input.goal === undefined) {
+      return { task: current, goals: [] }
+    }
     return runtime.tasks.deferInteraction(String(caller.id), {
       reason: input.reason,
       ...(input.taskIds === undefined ? {} : { taskIds: liveTaskIds }),
       ...(input.goal === undefined ? {} : { goal: input.goal }),
-      checkAfterSeconds: input.checkAfterSeconds ?? DEFAULT_INTERACTION_CHECK_SECONDS,
+      ...(input.checkAfterSeconds === undefined ? {} : { checkAfterSeconds: input.checkAfterSeconds }),
     })
   }
 
   takeOverAssistantInteraction(caller: Agent, input: TakeOverFleetInteractionInput) {
     const record = this.requireCallerRecord(caller, input.runId)
     const assistant = this.requireAssistantConnection(caller, record.id)
-    return this.requireRuntime(record.id).tasks.takeOverInteraction(String(caller.id), input.reason)
+    const task = this.requireRuntime(record.id).tasks.takeOverInteraction(String(caller.id), input.reason)
+    this.assistantNativeToolRestrictions.get(caller)?.release()
+    return task
+  }
+
+  assistantInteractionBudget(caller: Agent, runId?: string) {
+    const record = this.requireCallerRecord(caller, runId)
+    this.requireAssistantConnection(caller, record.id)
+    const budget = this.teamBudget(record.id)
+    return { mode: budget.mode, team: budget.team }
   }
 
   private markAssistantUserFacingTurn(caller: Agent, source: AssistantUserFacingTurn): void {
@@ -5150,6 +5186,7 @@ export class FleetRunService {
         })
         if (previous?.domain.kind !== 'interaction'
           || previous.domain.latestMessageId !== String(message.id)) {
+          this.assistantNativeToolRestrictions.get(agent)?.tighten()
           this.armAssistantQuiescence(record.id, assistant.view.id)
         }
       }
@@ -5174,10 +5211,13 @@ export class FleetRunService {
         `Every direct foreground user input is already tracked in this Team's persistent Interaction Task. The foreground message is the current revision; do not call fleet_user_task status merely because direct input arrived. Use action="status" with run_id="${record.id}" after a Task Delivery, recovery wake, or when the current Interaction state is otherwise unclear.`,
         'Conversation, clarification, status checks, coordination, and read-only inspection remain direct and natural.',
         'A normal project imperative remains Team work: delegate before project execution, and take over only when explicitly requested, no formal member is available, or Team execution has failed.',
+        'A successful fleet_run start already links the new root Task and makes this Interaction dormant. Its result says to end the turn; do not follow it with fleet_user_task continue or status.',
+        'A linked Task reaching a terminal state proves only workflow settlement. Before reporting completion, compare its certified claim with the original user request, including every required quantifier, case, and evidence class. Continue the smallest viable formal follow-up for any material gap; if none remains viable, report or block with the exact partial result instead of narrowing the request.',
         'When fleet_send returns replyTaskIds for delegated work, do not poll members. After all needed requests have been sent, call fleet_user_task action="continue" once with those task_ids and end the turn. Fleet wakes this assistant from durable Task settlement or its bounded progress deadline.',
         'Intermediate native output is retained in the Session trace but is not delivered to the user by default. Use fleet_user_task action="update" only for an intentional mid-turn user update; do not use it to duplicate the final answer.',
         'For ordinary conversation, clarification, status, or read-only answers with no linked Team work, pending Delivery, or take-over lease, do not call fleet_user_task report: the last non-empty native output completes the direct Interaction and is delivered to the user when the turn ends normally.',
         `Before emitting a native response that settles delegated Team work or a Delivery, or blocks the request, call fleet_user_task with action="report" or action="block" and run_id="${record.id}".`,
+        'After a Delivery, fleet_user_task status includes the authoritative Team-wide budget. Use its budget.team counters for cost reporting; never replace them with the current assistant Session usage.',
         'Do not emit the final answer before that tool call. After it succeeds, emit the answer exactly once and end the turn. Fleet commits and delivers that last native output at turn end; a delegated result or block is not complete without both the tool intent and non-empty native output.',
       ].join('\n')
       return {
@@ -5203,6 +5243,7 @@ export class FleetRunService {
       readonly tools?: {
         readonly register?: unknown
         get?(name: string, agent?: Agent): unknown
+        restrict?(filter: { readonly deny: readonly string[] }): () => void
         guard?(guard: (execution: { readonly name: string; readonly arguments: unknown }) => string | undefined): () => void
       }
       readonly inject?: unknown
@@ -5217,6 +5258,7 @@ export class FleetRunService {
     const directTools = Object.hasOwn(ready, 'tools') ? ready.tools : undefined
     const directFs = Object.hasOwn(ready, 'fs')
     if (typeof directTools?.register === 'function') {
+      const nativeRestriction = this.installAssistantNativeToolRestriction(caller, directTools)
       const stopBoundary = directTools.guard?.(execution =>
         this.assistantExecutionBoundaryReason(caller, execution))
       const hostHasProgress = typeof directTools.get === 'function'
@@ -5233,6 +5275,7 @@ export class FleetRunService {
           || directTools.get('fleet_reply', caller) === undefined)) {
         stop()
         stopBoundary?.()
+        nativeRestriction.release()
         throw new Error('Fleet assistant Inbox/Reply tools were not visible in the Agent scope after installation')
       }
       this.assistantToolAgents.add(caller)
@@ -5245,6 +5288,7 @@ export class FleetRunService {
     // "cannot get property ... without inject". Always create the durable tool
     // binding from a scope that explicitly injects both services.
     await callerCtx.inject(['fs', 'tools'], (scope) => {
+      const nativeRestriction = this.installAssistantNativeToolRestriction(caller, scope.tools)
       const stopBoundary = scope.tools.guard(execution =>
         this.assistantExecutionBoundaryReason(caller, execution))
       const hostHasProgress = scope.tools.get('fleet_progress') !== undefined
@@ -5258,11 +5302,38 @@ export class FleetRunService {
           || scope.tools.get('fleet_reply', caller) === undefined) {
         stop()
         stopBoundary()
+        nativeRestriction.release()
         throw new Error('Fleet assistant Inbox/Reply tools were not visible in the Agent scope after installation')
       }
       this.assistantToolAgents.add(caller)
-      return () => { stopBoundary(); stop() }
+      return () => { nativeRestriction.release(); stopBoundary(); stop() }
     })
+  }
+
+  private installAssistantNativeToolRestriction(
+    caller: Agent,
+    tools: {
+      get?(name: string, agent?: Agent): unknown
+      restrict?(filter: { readonly deny: readonly string[] }): () => void
+    },
+  ): { tighten(): void; release(): void } {
+    let stop: (() => void) | undefined
+    const controller = {
+      tighten: () => {
+        if (stop !== undefined || tools.restrict === undefined || tools.get === undefined) return
+        const get = tools.get.bind(tools)
+        const deny = ASSISTANT_DELEGATION_ONLY_NATIVE_TOOLS.filter(name =>
+          get(name, caller) !== undefined)
+        if (deny.length > 0) stop = tools.restrict({ deny })
+      },
+      release: () => {
+        stop?.()
+        stop = undefined
+      },
+    }
+    this.assistantNativeToolRestrictions.set(caller, controller)
+    controller.tighten()
+    return controller
   }
 
   detachAssistant(caller: Agent, runId?: string): FleetRunRecord {
@@ -5428,7 +5499,7 @@ export class FleetRunService {
     const result = runtime.messages.send(caller, {
       to: input.to,
       text: input.text,
-      delivery: input.delivery === 'quiet' && input.to.startsWith('#') ? 'fyi' : input.delivery,
+      delivery: input.delivery,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
@@ -6078,6 +6149,22 @@ export class FleetRunService {
     this.recordMemberActivity(sessionId, event)
     this.recordMemberHealth(sessionId, event)
     this.recordBudgetUsage(record, member, event)
+    const validProtocolOutput = (event.type === 'assistant/message'
+      && event.data.interrupted !== true
+      && progressMessageText(event.data).trim().length > 0)
+      || event.type === 'tool/call'
+    if (validProtocolOutput) {
+      const recovery = this.protocolRecoveries.get(sessionId)
+      if (recovery !== undefined) {
+        this.protocolRecoveries.delete(sessionId)
+        this.appendEvent(runId, 'member_protocol_recovery_reset', {
+          member,
+          sessionId,
+          previousAttempts: recovery.attempt,
+          reason: event.type === 'tool/call' ? 'valid_tool_call' : 'valid_assistant_output',
+        })
+      }
+    }
     if (event.type === 'assistant/message') {
       const tokens = inputContextTokens(event.data.usage)
       if (tokens !== undefined) {
@@ -6111,6 +6198,7 @@ export class FleetRunService {
     if (event.type === 'user/message' && event.data.source?.kind === 'user') {
       this.protocolRecoveries.delete(sessionId)
       if (foregroundAssistant) {
+        if (agent !== undefined) this.assistantNativeToolRestrictions.get(agent)?.tighten()
         this.assistantTurnOutputs.delete(sessionId)
         const turn = this.assistantCurrentTurns.get(sessionId)
         if (turn !== undefined) this.assistantUserFacingTurns.set(sessionId, { turn, source: 'direct' })
@@ -6284,7 +6372,7 @@ export class FleetRunService {
       return false
     }
     const taskInstruction = (task: (typeof tasks)[number]): string => {
-      if (task.domain.kind === 'inbox') return `- ${task.title} (${task.id}): call fleet_inbox action="read" to consume unread messages.`
+      if (task.domain.kind === 'inbox') return `- ${task.title} (${task.id}): process unread messages already delivered in this turn; call fleet_inbox action="read" only if their full body is not present in native context.`
       if (task.domain.kind === 'reply') return `- ${task.title} (${task.id}): promptly acknowledge, decline, or ask a necessary question before starting long work. Use fleet_reply for an explicit acknowledgement; the first non-empty native text in this Reply turn may also be committed automatically. Later results may use fleet_send with reply_to. Read the source with fleet_inbox only if needed.`
       if (task.domain.kind === 'goal') return `- ${task.title} (${task.id}): call fleet_goal action="complete" with the assignment result (including a reject recommendation), or "block" only for an external impediment.`
       if (task.domain.kind === 'interaction') {
@@ -9691,6 +9779,20 @@ const RUN_RESULT_SCHEMA = {
     action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
     runs: { type: 'array', items: RUN_SCHEMA },
     run: RUN_SCHEMA,
+    next: { type: 'string' },
+  },
+} as const
+
+const BUDGET_ACCOUNT_SNAPSHOT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ...BUDGET_ACCOUNT_SCHEMA.properties,
+    remaining: { type: 'integer' },
+    state: {
+      type: 'string', required: true,
+      enum: ['unlimited', 'normal', 'warning', 'danger', 'exhausted'],
+    },
   },
 } as const
 
@@ -9937,6 +10039,14 @@ const USER_TASK_RESULT_SCHEMA = {
     action: { type: 'string', required: true, enum: ['status', 'update', 'continue', 'take_over', 'report', 'block'] },
     task: { ...FLEXIBLE_OBJECT_SCHEMA, required: true },
     goals: { type: 'array', items: FLEXIBLE_OBJECT_SCHEMA },
+    budget: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        mode: { type: 'string', required: true, enum: ['tokens', 'cost'] },
+        team: { ...BUDGET_ACCOUNT_SNAPSHOT_SCHEMA, required: true },
+      },
+    },
   },
 } as const
 
@@ -10001,13 +10111,17 @@ export function installRunTools(
       title: { type: 'string', description: 'For continue with instructions, title of the new Goal.' },
       instructions: { type: 'string', description: 'For continue, concrete work for a new formal-member Goal.' },
       owners: { type: 'array', items: { type: 'string' }, description: 'For continue with instructions, one or more formal Team members.' },
-      check_after_seconds: { type: 'integer', description: 'For continue, deterministic progress-check deadline. Defaults to 300 seconds.' },
+      check_after_seconds: { type: 'integer', description: 'For continue, optional deterministic progress-check deadline. Omit for event-driven waiting on linked Task settlement or full-Team quiescence.' },
     },
     output: jsonOutput(USER_TASK_RESULT_SCHEMA),
     execute(args, exec) {
       const caller = callingAgent(exec.agent, 'fleet_user_task')
       if (args.action === 'status') {
-        return Promise.resolve({ action: 'status' as const, task: fleetTaskToolDetail(service.assistantInteraction(caller, args.run_id)) })
+        return Promise.resolve({
+          action: 'status' as const,
+          task: fleetTaskToolDetail(service.assistantInteraction(caller, args.run_id)),
+          budget: service.assistantInteractionBudget(caller, args.run_id),
+        })
       }
       if (args.action === 'update') {
         if (args.message === undefined) throw new Error('fleet_user_task update requires message')
@@ -10081,7 +10195,7 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_run',
-    description: 'Control the outer Fleet Team lifecycle. Start can atomically create a planned Goal/Vote DAG; successful plans complete their zero-owner root automatically.',
+    description: 'Control the outer Fleet Team lifecycle. Start atomically creates a planned Goal/Vote DAG, links its root to the foreground Interaction, and makes that Interaction dormant; after a successful start, end the turn without fleet_user_task continue/status. Successful plans complete their zero-owner root automatically.',
     parameters: {
       action: { type: 'string', required: true, enum: ['create', 'start', 'pause', 'resume', 'list', 'status', 'close'] },
       run_id: { type: 'string', description: 'Persistent Team workflow id. Defaults to the active Team where supported.' },
@@ -10182,6 +10296,7 @@ export function installRunTools(
             })),
           }),
         }),
+        next: 'end_turn_without_fleet_user_task_continue_or_status',
       }
     },
   }))
