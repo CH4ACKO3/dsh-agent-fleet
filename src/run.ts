@@ -6883,7 +6883,16 @@ export class FleetRunService {
         attempts: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
         reason: clippedProgressText(message, 1_000),
       })
-      return this.escalateProtocolRecovery(record, member, sessionId, message)
+      const failedTasks = this.requireRuntime(runId).tasks.failMemberTasks(
+        member,
+        `Member ${member} exhausted ${PROTOCOL_RECOVERY_MAX_ATTEMPTS} automatic retries after malformed inference tool protocol.`,
+      )
+      this.appendEvent(runId, 'member_protocol_recovery_tasks_settled', {
+        member,
+        sessionId,
+        tasks: failedTasks.map(task => task.id),
+      })
+      return this.escalateProtocolRecovery(record, member, sessionId, message, failedTasks.map(task => task.id))
     }
     this.protocolRecoveries.set(sessionId, { runId, member, attempt, pending: true })
     this.appendEvent(runId, 'member_protocol_recovery_scheduled', {
@@ -6947,6 +6956,7 @@ export class FleetRunService {
     member: string,
     failedSessionId: string,
     message: string,
+    failedTaskIds: readonly string[],
   ): boolean {
     const assistant = record.assistants.find(candidate =>
       candidate.sessionId !== failedSessionId
@@ -6956,8 +6966,8 @@ export class FleetRunService {
       kind: 'task_notice',
       text: [
         `[Fleet work ${record.work?.id ?? 'unknown'} protocol recovery required]`,
-        `Member ${member} exhausted ${PROTOCOL_RECOVERY_MAX_ATTEMPTS} automatic retries after malformed inference tool protocol. Its durable Tasks remain unsettled.`,
-        'Inspect only the affected Task and its latest artifacts, then resume the member with a narrow next step or reassign the remaining work. Do not replay irreversible actions without verifying their durable result.',
+        `Member ${member} exhausted ${PROTOCOL_RECOVERY_MAX_ATTEMPTS} automatic retries after malformed inference tool protocol. Its pending Tasks were moved to terminal states: ${failedTaskIds.join(', ') || 'none'}.`,
+        'Inspect only the affected work and its latest artifacts, then create a replacement Goal if the original acceptance criteria still require it. Do not replay irreversible actions without verifying their durable result.',
       ].join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `protocol-recovery-escalation:${record.work?.id ?? record.id}:${member}`,
@@ -8409,7 +8419,9 @@ export class FleetRunService {
     for (const [sessionId, recovery] of [...this.protocolRecoveries]) {
       if (recovery.runId === runId) this.protocolRecoveries.delete(sessionId)
     }
-    this.collaboration.get(runId)?.pauseProductivity()
+    const runtime = this.collaboration.get(runId)
+    runtime?.tasks.settleForTeamClose(terminalSummary)
+    runtime?.pauseProductivity()
     const endedAt = new Date().toISOString()
     const record = this.replaceRecord(runId, {
       status: 'closed',
@@ -10109,7 +10121,7 @@ export function installRunTools(
 
   ctx.tools.register(defineTool({
     name: 'fleet_user_task',
-    description: 'Operate the calling assistant persistent foreground Interaction Task. Update intentionally delivers one mid-turn progress message without settling or waking the Task. Continue retains existing live waits and may add formal Team-owned Tasks. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Call report/block before the final answer, then emit it exactly once; Fleet commits and delivers the last native output at turn end.',
+    description: 'Operate the calling assistant persistent foreground Interaction Task. Update intentionally delivers one mid-turn progress message without settling or waking the Task. Continue retains existing live waits and may add formal Team-owned Tasks. Block may explicitly terminate a dormant Interaction and detach failed waits. Take_over grants this assistant a revision-fenced project-execution lease for an explicit direct-execution exception. Call report/block before the final answer, then emit it exactly once; Fleet commits and delivers the last native output at turn end.',
     parameters: {
       action: { type: 'string', required: true, enum: ['status', 'update', 'continue', 'take_over', 'report', 'block'] },
       run_id: { type: 'string', description: 'Persistent Team id. Defaults to the Team containing the calling assistant.' },

@@ -3595,11 +3595,24 @@ describe('FleetRunService', () => {
       service.taskBoard(run.id), lead.id, secondRootGoalId, 'block', 'Second work cancelled for this test.',
     )
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle', work: { status: 'blocked' } })
+    const dangling = service.taskBoard(run.id).createGoal(lead.id, {
+      title: 'Unfinished follow-up', owners: ['reviewer'],
+    })
+    const reviewerInbox = service.taskBoard(run.id).syncInbox('reviewer', 1, 32)
     service.end(launcher as unknown as Agent, 'Team retired after test.')
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'closed', settled: true })
     expect(persisted.size).toBe(2)
     expect(core.list()).toEqual([])
     expect(readFileSync(join(root, '.fleet-registry', run.id, 'run.json'), 'utf8')).toContain('"status": "closed"')
+    const closedTasks = JSON.parse(readFileSync(
+      join(root, '.fleet-registry', run.id, 'extensions', 'productivity-tasks.json'),
+      'utf8',
+    )) as { tasks: Array<{ id: string; stableState: { kind: string }; domain: { kind: string; unreadMessages?: number } }> }
+    expect(closedTasks.tasks.find(task => task.id === dangling.id)?.stableState.kind).toBe('cancelled')
+    expect(closedTasks.tasks.find(task => task.id === reviewerInbox.id)).toMatchObject({
+      stableState: { kind: 'dormant' }, domain: { kind: 'inbox', unreadMessages: 0 },
+    })
+    expect(closedTasks.tasks.some(task => task.stableState.kind === 'running')).toBe(false)
     disconnect()
   })
 
@@ -5376,7 +5389,8 @@ describe('FleetRunService', () => {
     service.agentIdle(lead as unknown as Agent)
     await Promise.resolve()
 
-    expect(lead.messages).toHaveLength(messagesBeforeFailure + 2)
+    expect(lead.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('protocol recovery]')))).toHaveLength(2)
     expect(lead.messages.at(-1)?.content).toEqual([
       expect.objectContaining({ type: 'text', text: expect.stringContaining('Retry 2/2') }),
     ])
@@ -5394,7 +5408,8 @@ describe('FleetRunService', () => {
     service.agentIdle(lead as unknown as Agent)
     await Promise.resolve()
 
-    expect(lead.messages).toHaveLength(messagesBeforeFailure + 2)
+    expect(lead.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('protocol recovery]')))).toHaveLength(2)
     expect(launcher.messages).toHaveLength(assistantMessagesBeforeEscalation + 1)
     expect(launcher.messages.at(-1)?.content).toEqual([
       expect.objectContaining({ type: 'text', text: expect.stringContaining('protocol recovery required') }),
@@ -5402,7 +5417,9 @@ describe('FleetRunService', () => {
     expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'member_protocol_recovery_exhausted' }),
       expect.objectContaining({ type: 'member_protocol_recovery_escalated' }),
+      expect.objectContaining({ type: 'member_protocol_recovery_tasks_settled' }),
     ]))
+    expect(service.taskBoard(run.id).ownerTasks('lead')).toEqual([])
     expect(service.readTrace(run.id, 0, 300).events.some(event =>
       event.type === 'member_auto_continuation_paused')).toBe(false)
     disconnect()

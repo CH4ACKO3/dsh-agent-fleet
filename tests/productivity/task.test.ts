@@ -421,6 +421,75 @@ describe('FleetTaskBoard v6', () => {
     board.close()
   })
 
+  it('lets an explicit block detach live waits from a dormant Interaction', () => {
+    const board = new FleetTaskBoard(directory)
+    board.recordInteractionInput('assistant', { messageId: 'user-block', text: 'Run the bounded check.' })
+    const external = board.createGoal('agent-lead', { title: 'External check', owners: ['reviewer'] })
+    board.deferInteraction('agent-assistant', {
+      reason: 'Waiting for the external check.',
+      taskIds: [external.id],
+    })
+
+    const reported = board.submitInteractionReport('agent-assistant', {
+      outcome: 'block',
+      reason: 'The assigned member is unavailable.',
+      report: 'The check could not be completed.',
+    })
+    expect(reported).toMatchObject({
+      stableState: { kind: 'running' },
+      domain: { kind: 'interaction', waitingTaskIds: [], reportIntent: { outcome: 'block' } },
+    })
+    expect(board.get('agent-reviewer', external.id).stableState.kind).toBe('running')
+    expect(board.commitInteractionOutput('assistant', 'The check could not be completed.')?.stableState)
+      .toMatchObject({ kind: 'blocked', reason: 'The assigned member is unavailable.' })
+  })
+
+  it('settles a failed member obligations without leaving owner Tasks live', () => {
+    const board = new FleetTaskBoard(directory)
+    const goal = board.createGoal('agent-lead', { title: 'Exact check', owners: ['reviewer'] })
+    const reply = board.ensureReplyTask({
+      messageId: 'msg_failure', conversation: '@reviewer', replyTarget: '@lead', createdBy: 'lead',
+      assignee: 'reviewer', title: 'Reply to recovery request',
+    })
+    const inbox = board.syncInbox('reviewer', 2, 80)
+
+    const settled = board.failMemberTasks('reviewer', 'Protocol recovery exhausted.')
+    expect(settled.map(task => task.id)).toEqual(expect.arrayContaining([goal.id, reply.id, inbox.id]))
+    expect(board.get('agent-reviewer', goal.id)).toMatchObject({
+      stableState: { kind: 'blocked' },
+      domain: { kind: 'goal', submissions: { reviewer: { kind: 'block' } } },
+    })
+    expect(board.get('agent-reviewer', reply.id).stableState.kind).toBe('cancelled')
+    expect(board.get('agent-reviewer', inbox.id)).toMatchObject({
+      stableState: { kind: 'dormant' },
+      domain: { kind: 'inbox', unreadMessages: 0, unreadChars: 0 },
+    })
+    expect(board.ownerTasks('reviewer')).toEqual([])
+  })
+
+  it('normalizes every outstanding Task before Team close', () => {
+    const board = new FleetTaskBoard(directory)
+    const interaction = board.recordInteractionInput('assistant', { messageId: 'user-close', text: 'Run the Team.' })
+    const deferred = board.deferInteraction('agent-assistant', {
+      reason: 'Waiting for work.',
+      goal: { title: 'Long work', description: 'Still active.', owners: ['reviewer'] },
+    })
+    const inbox = board.syncInbox('reviewer', 1, 40)
+
+    board.settleForTeamClose('Operator ended the Team.')
+    expect(board.interactionTask('assistant')).toMatchObject({
+      id: interaction.id,
+      stableState: { kind: 'blocked' },
+      domain: { kind: 'interaction', settledRevision: 1, waitingTaskIds: [] },
+    })
+    expect(board.get('agent-reviewer', deferred.goals[0]!.id).stableState.kind).toBe('cancelled')
+    expect(board.get('agent-reviewer', inbox.id)).toMatchObject({
+      stableState: { kind: 'dormant' },
+      domain: { kind: 'inbox', unreadMessages: 0 },
+    })
+    expect(board.state().tasks.some(task => task.stableState.kind === 'running')).toBe(false)
+  })
+
   it('separates Reply delivery receipt from Inbox consumption', () => {
     const board = new FleetTaskBoard(directory)
     board.syncInbox('reviewer', 1, 42)

@@ -805,7 +805,8 @@ export class FleetTaskBoard {
     if (current === undefined || current.domain.kind !== 'interaction') {
       throw new Error(`Fleet assistant ${owner} has no foreground Interaction Task`)
     }
-    if (current.stableState.kind !== 'running') {
+    const dormantBlock = current.stableState.kind === 'dormant' && input.outcome === 'block'
+    if (current.stableState.kind !== 'running' && !dormantBlock) {
       throw new Error(`Fleet Interaction ${current.id} is ${current.stableState.kind}`)
     }
     const reason = requiredText(input.reason, 'interaction report reason')
@@ -814,7 +815,7 @@ export class FleetTaskBoard {
       .map(id => this.requireTask(id))
       .filter(task => !this.settled(task))
     const quiescentBlock = input.outcome === 'block'
-      && current.domain.pendingDelivery?.cause === 'team_quiescent'
+      && (dormantBlock || current.domain.pendingDelivery?.cause === 'team_quiescent')
     if (liveTasks.length > 0 && !quiescentBlock) {
       throw new Error(`Fleet Interaction ${current.id} still waits for live Tasks: ${liveTasks.map(task => task.id).join(', ')}; continue the Interaction instead of reporting it`)
     }
@@ -1795,6 +1796,146 @@ export class FleetTaskBoard {
   onEvent(listener: (event: FleetProjectTaskEvent) => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
+  }
+
+  failMemberTasks(memberReference: string, reason: string): FleetProjectTask[] {
+    this.assertOpen()
+    const member = this.resolve(memberReference)
+    const detail = requiredText(reason, 'member failure reason')
+    const now = new Date().toISOString()
+    const staged = new Map(this.tasks)
+    const changed: Array<{ readonly action: 'domain_updated' | 'cancelled'; readonly task: FleetProjectTask }> = []
+
+    for (const current of this.tasks.values()) {
+      if (!this.pendingForOwner(current, member)) continue
+      const { activeReconcile: _activeReconcile, ...base } = current
+      let updated: FleetProjectTask
+      let action: 'domain_updated' | 'cancelled'
+      if (current.domain.kind === 'inbox') {
+        updated = {
+          ...base,
+          domain: { ...current.domain, unreadMessages: 0, unreadChars: 0 },
+          stableState: { kind: 'dormant', since: now, reason: `Inbox suspended after member failure: ${detail}`, reconcilers: [] },
+          stateVersion: current.stateVersion + 1,
+          updatedAt: now,
+        }
+        action = 'domain_updated'
+      } else if (current.domain.kind === 'goal') {
+        updated = {
+          ...base,
+          domain: {
+            ...current.domain,
+            submissions: {
+              ...current.domain.submissions,
+              [member]: { kind: 'block', reason: detail, submittedAt: now },
+            },
+          },
+          stableState: { kind: 'blocked', since: now, reason: `${member}: ${detail}` },
+          stateVersion: current.stateVersion + 1,
+          updatedAt: now,
+        }
+        action = 'domain_updated'
+      } else if (current.domain.kind === 'interaction') {
+        const {
+          waitingEventKey: _waitingEventKey,
+          pendingDelivery: _pendingDelivery,
+          reportIntent: _reportIntent,
+          executionLease: _executionLease,
+          ...interaction
+        } = current.domain
+        updated = {
+          ...base,
+          domain: {
+            ...interaction,
+            settledRevision: current.domain.inputRevision,
+            waitingTaskIds: [],
+          },
+          stableState: { kind: 'blocked', since: now, reason: detail },
+          stateVersion: current.stateVersion + 1,
+          updatedAt: now,
+        }
+        action = 'domain_updated'
+      } else {
+        updated = {
+          ...base,
+          stableState: { kind: 'cancelled', cancelledAt: now, reason: detail },
+          stateVersion: current.stateVersion + 1,
+          updatedAt: now,
+        }
+        action = 'cancelled'
+      }
+      staged.set(updated.id, updated)
+      changed.push({ action, task: updated })
+    }
+
+    if (changed.length === 0) return []
+    this.commit(staged, changed.map(item => item.task))
+    for (const item of changed) this.emit({ action: item.action, task: item.task, actor: member })
+    this.evaluateDependents(changed.map(item => item.task.id))
+    return changed.map(item => snapshot(item.task))
+  }
+
+  settleForTeamClose(reason: string): FleetProjectTask[] {
+    this.assertOpen()
+    const detail = requiredText(reason, 'Team close reason')
+    const now = new Date().toISOString()
+    const staged = new Map(this.tasks)
+    const changed: Array<{ readonly action: 'domain_updated' | 'cancelled'; readonly task: FleetProjectTask }> = []
+
+    for (const current of this.tasks.values()) {
+      if (current.domain.kind === 'inbox') {
+        if (current.domain.unreadMessages === 0 && current.stableState.kind === 'dormant') continue
+        const { activeReconcile: _activeReconcile, ...base } = current
+        const updated: FleetProjectTask = {
+          ...base,
+          domain: { ...current.domain, unreadMessages: 0, unreadChars: 0 },
+          stableState: { kind: 'dormant', since: now, reason: `Team closed: ${detail}`, reconcilers: [] },
+          stateVersion: current.stateVersion + 1,
+          updatedAt: now,
+        }
+        staged.set(updated.id, updated)
+        changed.push({ action: 'domain_updated', task: updated })
+        continue
+      }
+      if (this.settled(current)) continue
+      const { activeReconcile: _activeReconcile, ...base } = current
+      if (current.domain.kind === 'interaction') {
+        const {
+          waitingEventKey: _waitingEventKey,
+          pendingDelivery: _pendingDelivery,
+          reportIntent: _reportIntent,
+          executionLease: _executionLease,
+          ...interaction
+        } = current.domain
+        const updated: FleetProjectTask = {
+          ...base,
+          domain: {
+            ...interaction,
+            settledRevision: current.domain.inputRevision,
+            waitingTaskIds: [],
+          },
+          stableState: { kind: 'blocked', since: now, reason: `Team closed: ${detail}` },
+          stateVersion: current.stateVersion + 1,
+          updatedAt: now,
+        }
+        staged.set(updated.id, updated)
+        changed.push({ action: 'domain_updated', task: updated })
+        continue
+      }
+      const updated: FleetProjectTask = {
+        ...base,
+        stableState: { kind: 'cancelled', cancelledAt: now, reason: `Team closed: ${detail}` },
+        stateVersion: current.stateVersion + 1,
+        updatedAt: now,
+      }
+      staged.set(updated.id, updated)
+      changed.push({ action: 'cancelled', task: updated })
+    }
+
+    if (changed.length === 0) return []
+    this.commit(staged, changed.map(item => item.task))
+    for (const item of changed) this.emit({ action: item.action, task: item.task, actor: SYSTEM_TARGET })
+    return changed.map(item => snapshot(item.task))
   }
 
   close(): void {
