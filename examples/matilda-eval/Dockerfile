@@ -107,6 +107,7 @@ RUN ln -sf /opt/elan/bin/lean /usr/local/bin/lean \
     && ln -sf /opt/elan/bin/lake /usr/local/bin/lake
 
 ENV PATH="/opt/matilda-eval/venv/bin:${PATH}" \
+    DSH_HARMONY_ACTIVE_DSH_ENTRY=/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/index.js \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_INDEX=1 \
     PYTHONDONTWRITEBYTECODE=1 \

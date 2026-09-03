@@ -105,6 +105,7 @@ describe('Matilda blind evaluation Team template', () => {
     const editorRules = config.modules['dsh-agent-fleet/ui'].editor.rules
     const task = readFileSync(resolve('examples/matilda-eval/task.md'), 'utf8')
     const compose = readFileSync(resolve('examples/matilda-eval/compose.yaml'), 'utf8')
+    const dockerfile = readFileSync(resolve('examples/matilda-eval/Dockerfile'), 'utf8')
 
     expect(rules).toContain('container network boundary permits only the configured model inference service')
     expect(rules).toContain('Fleet messaging and shared local artifacts remain available')
@@ -122,5 +123,8 @@ describe('Matilda blind evaluation Team template', () => {
     expect(task).toContain('团队工作语言使用中文')
     expect(task).toContain('至少继续一个由当前证据驱动的改进阶段')
     expect(compose).toContain('FLEET_MEMBER_DENY_HOST_TOOLS: "web_search"')
+    expect(dockerfile).toContain(
+      'DSH_HARMONY_ACTIVE_DSH_ENTRY=/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/index.js',
+    )
   })
 })
