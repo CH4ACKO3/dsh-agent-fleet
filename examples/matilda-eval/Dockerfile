@@ -46,6 +46,8 @@ RUN git clone --branch "${MATHLIB_VERSION}" --depth 1 \
     && lake exe cache get \
     && rm -rf "${MATHLIB_ROOT}/.git"
 
+ARG DSH_TURN_FOLD_VERSION=0.5.1
+
 RUN mkdir -p /opt/matilda-eval/pnpm-seed \
     && pnpm --dir /opt/matilda-eval/pnpm-seed init \
     && pnpm --dir /opt/matilda-eval/pnpm-seed config set auto-install-peers false --location project \
@@ -54,7 +56,7 @@ RUN mkdir -p /opt/matilda-eval/pnpm-seed \
         "the-binding-of-dsh@0.1.7" \
         "/opt/dsh/plugins/dsh-agent-fleet.tgz" \
         "/opt/dsh/plugins/dsh-llm-memorax-0.1.0.tgz" \
-        "@ch4acko3/dsh-turn-fold@0.4.4" \
+        "@ch4acko3/dsh-turn-fold@${DSH_TURN_FOLD_VERSION}" \
         "@ch4acko3/dsh-shiki@0.1.2" \
         "@ch4acko3/dsh-syntax-highlight@0.1.1" \
         "@ch4acko3/dsh-code-render@0.1.2" \
@@ -68,6 +70,13 @@ RUN mkdir -p /opt/matilda-eval/pnpm-seed \
         "@ch4acko3/dsh-diff-render@0.1.3" \
         "@ch4acko3/dsh-ansi-render@0.1.2" \
     && rm -rf /opt/matilda-eval/pnpm-seed
+
+RUN sed -i \
+        -e "s|@ch4acko3/dsh-turn-fold@0.4.4|@ch4acko3/dsh-turn-fold@${DSH_TURN_FOLD_VERSION}|g" \
+        -e "s|memorax-render-v1|memorax-render-v1-turn-fold-${DSH_TURN_FOLD_VERSION}|g" \
+        /usr/local/bin/dsh-container-entrypoint \
+    && grep -F "@ch4acko3/dsh-turn-fold@${DSH_TURN_FOLD_VERSION}" /usr/local/bin/dsh-container-entrypoint \
+    && grep -F "memorax-render-v1-turn-fold-${DSH_TURN_FOLD_VERSION}" /usr/local/bin/dsh-container-entrypoint
 
 COPY requirements.txt /opt/matilda-eval/requirements.txt
 RUN python3 -m venv /opt/matilda-eval/venv \
