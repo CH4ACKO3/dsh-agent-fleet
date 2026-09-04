@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 import { randomBytes, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
-import { HOST_GENERATION_MARKER, advancePromotionWindow, authorizeRequest, stripHostGenerationFooter, verifyRequest } from './protocol.mjs'
+import { HOST_GENERATION_MARKER, advancePromotionWindow, assertCandidateSourceSnapshot, authorizeRequest, stripHostGenerationFooter, verifyRequest } from './protocol.mjs'
 
 const execFileAsync = promisify(execFile)
 const generationMonitors = new Map()
+let requestedSupervisorHandoff
+let supervisorHandoffLaunch
+let supervisorHandoffActivating = false
 
 function parseArgs(values) {
   const result = { _: [] }
@@ -137,11 +140,140 @@ function composeEnvironment(state, generation) {
     FLEET_PACKAGE_PATH: generation.packagePath,
     FLEET_PATCHOULI_PACKAGE_PATH: generation.patchouliPackagePath,
     FLEET_SOURCE_COMMIT: generation.sourceCommit,
+    SELF_EVOLVE_IMAGE: generation.image ?? 'local/dsh-agent-fleet-self-evolve:latest',
     FLEET_AUTO_BOOTSTRAP_ID: generation.id,
     SELF_EVOLVE_CPUS: String(state.resources.cpus),
     SELF_EVOLVE_MEMORY: state.resources.memory,
     ...(state.provider === undefined ? {} : { FLEET_AUTO_PROVIDER: state.provider }),
     ...(state.model === undefined ? {} : { FLEET_AUTO_MODEL: state.model }),
+  }
+}
+
+function generationExampleRoot(state, generation) {
+  return generation.exampleRoot ?? state.exampleRoot
+}
+
+function generationRuntimeImage(generation) {
+  return generation.image ?? 'local/dsh-agent-fleet-self-evolve:latest'
+}
+
+function supervisorHandoffDirectory(stateDirectory) {
+  return join(stateDirectory, 'control', 'supervisor-handoffs')
+}
+
+function supervisorHandoffPaths(stateDirectory, id) {
+  const directory = supervisorHandoffDirectory(stateDirectory)
+  return {
+    directory,
+    spec: join(directory, `${id}.json`),
+    ready: join(directory, `${id}.ready`),
+    activate: join(directory, `${id}.activate`),
+    active: join(directory, `${id}.active`),
+  }
+}
+
+async function waitForPath(path, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`${label} timed out after ${timeoutMs}ms`)
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  }
+}
+
+function scheduleSupervisorHandoff(stateDirectory, state, generation) {
+  const id = randomUUID()
+  const script = join(generationExampleRoot(state, generation), 'scripts', 'supervisor.mjs')
+  if (!existsSync(script)) throw new Error(`Promoted generation supervisor is missing: ${script}`)
+  const handoff = {
+    id,
+    generation: generation.id,
+    sourceCommit: generation.sourceCommit,
+    script,
+    requestedAt: new Date().toISOString(),
+    status: 'pending',
+  }
+  const paths = supervisorHandoffPaths(stateDirectory, id)
+  mkdirSync(paths.directory, { recursive: true })
+  atomicJson(paths.spec, handoff)
+  state.supervisorHandoff = handoff
+  requestedSupervisorHandoff = handoff
+}
+
+async function activateIncomingSupervisorHandoff(stateDirectory, id) {
+  const paths = supervisorHandoffPaths(stateDirectory, id)
+  if (!existsSync(paths.spec)) throw new Error(`Supervisor handoff ${id} does not exist`)
+  writeFileSync(paths.ready, `${process.pid}\n`, 'utf8')
+  await waitForPath(paths.activate, 30_000, `Supervisor handoff ${id} activation`)
+  const state = readState(stateDirectory)
+  const handoff = state.supervisorHandoff
+  if (handoff?.id !== id) throw new Error(`Supervisor handoff ${id} is no longer current`)
+  return handoff
+}
+
+function markIncomingSupervisorActive(stateDirectory, handoff) {
+  const state = readState(stateDirectory)
+  if (state.supervisorHandoff?.id !== handoff.id) {
+    throw new Error(`Supervisor handoff ${handoff.id} is no longer current`)
+  }
+  state.supervisor = {
+    generation: handoff.generation,
+    sourceCommit: handoff.sourceCommit,
+    script: handoff.script,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  }
+  state.supervisorHandoff = { ...handoff, status: 'active', activatedAt: new Date().toISOString() }
+  writeState(stateDirectory, state)
+  writeFileSync(supervisorHandoffPaths(stateDirectory, handoff.id).active, `${process.pid}\n`, 'utf8')
+}
+
+async function performSupervisorHandoffLaunch(stateDirectory) {
+  const handoff = requestedSupervisorHandoff
+  if (handoff === undefined) return undefined
+  const paths = supervisorHandoffPaths(stateDirectory, handoff.id)
+  const stdout = openSync(join(stateDirectory, 'supervisor.stdout.log'), 'a')
+  const stderr = openSync(join(stateDirectory, 'supervisor.stderr.log'), 'a')
+  try {
+    const child = spawn(process.execPath, [handoff.script, 'serve', '--state', stateDirectory, '--handoff', handoff.id], {
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', stdout, stderr],
+    })
+    child.unref()
+  } finally {
+    closeSync(stdout)
+    closeSync(stderr)
+  }
+  try {
+    await waitForPath(paths.ready, 15_000, `Successor supervisor ${handoff.id}`)
+    supervisorHandoffActivating = true
+    writeFileSync(paths.activate, `${new Date().toISOString()}\n`, 'utf8')
+    await waitForPath(paths.active, 15_000, `Active successor supervisor ${handoff.id}`)
+  } catch (error) {
+    const state = readState(stateDirectory)
+    state.supervisorHandoff = {
+      ...handoff,
+      status: 'failed',
+      failedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    }
+    writeState(stateDirectory, state)
+    requestedSupervisorHandoff = undefined
+    supervisorHandoffActivating = false
+    return undefined
+  }
+  requestedSupervisorHandoff = undefined
+  supervisorHandoffActivating = false
+  return handoff.id
+}
+
+async function launchRequestedSupervisorHandoff(stateDirectory) {
+  if (supervisorHandoffLaunch !== undefined) return supervisorHandoffLaunch
+  supervisorHandoffLaunch = performSupervisorHandoffLaunch(stateDirectory)
+  try {
+    return await supervisorHandoffLaunch
+  } finally {
+    supervisorHandoffLaunch = undefined
   }
 }
 
@@ -174,6 +306,23 @@ async function recordGenerationCommit(state, sourceWorkspace, generationIdValue,
     `${sourceCommit}:refs/heads/${branch}`,
   ], { cwd: sourceWorkspace })
   return branch
+}
+
+async function resolveCandidateSourceSnapshot(sourceWorkspace, sourceRef) {
+  const { stdout: statusBefore } = await run('git', ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: sourceWorkspace,
+  })
+  const sourceCommit = await resolveCommit(sourceWorkspace, sourceRef)
+  const headCommit = await resolveCommit(sourceWorkspace, 'HEAD')
+  const { stdout: statusAfter } = await run('git', ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: sourceWorkspace,
+  })
+  assertCandidateSourceSnapshot({
+    status: [statusBefore, statusAfter].filter(Boolean).join('\n'),
+    sourceCommit,
+    headCommit,
+  })
+  return headCommit
 }
 
 async function publishCandidateReadySource(state, candidate, payload) {
@@ -247,6 +396,12 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
     if (patchouliPackageName === undefined) throw new Error('pnpm pack did not produce a Fleet Patchouli package')
     const bootstrapDirectory = join(workspace, '.self-evolve')
     mkdirSync(bootstrapDirectory, { recursive: true })
+    if (options.parent !== undefined) {
+      const inheritedSource = join(state.generations[options.parent].workspace, '.self-evolve', 'inherited')
+      if (existsSync(inheritedSource)) {
+        cpSync(inheritedSource, join(bootstrapDirectory, 'inherited'), { recursive: true, force: true })
+      }
+    }
     const bootstrapPath = join(bootstrapDirectory, 'bootstrap.md')
     const teamConfigPath = join(bootstrapDirectory, 'team.local.json')
     const role = options.parent === undefined ? 'stable' : 'candidate'
@@ -262,7 +417,7 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       `- 源提交：${sourceCommit}`,
       `- 控制命令：node /opt/self-evolve/scripts/generation-control.mjs`,
       '- 可以在候选 bootstrap 中改进下一代的工作方式；如需调整角色或团队提示词，复制并修改 `.self-evolve/team.local.json`，再向 `start-candidate` 传入 `--team-config <absolute-file>`。',
-      '- 等待状态变化请使用 `watch`；它会阻塞直到事件到达，不要按时间轮询。',
+      '- 需要动作的代际事件会自动唤醒团队助理；`watch` 只用于人工诊断，不要按时间轮询。',
       '',
     ].join('\n'), 'utf8')
     const token = randomBytes(32).toString('hex')
@@ -276,6 +431,8 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       sourceCommit,
       gitBranch,
       workspace,
+      exampleRoot: join(workspace, 'examples', 'self-evolving-team'),
+      image: `local/dsh-agent-fleet-self-evolve:${id}-${sourceCommit.slice(0, 12)}`,
       packagePath: join(packageDirectory, packageName),
       patchouliPackagePath: join(packageDirectory, patchouliPackageName),
       bootstrapPath,
@@ -306,7 +463,7 @@ async function prepareLinuxWorkspace(state, generation) {
     '--workdir', '/workspace',
     '--volume', `${generation.workspace}:/workspace`,
     '--volume', `${volume}:/workspace/node_modules`,
-    'local/dsh-agent-fleet-self-evolve:latest',
+    generationRuntimeImage(generation),
     'install', '--frozen-lockfile',
   ])
 }
@@ -341,7 +498,7 @@ async function preparePatchouliData(state, generation) {
       '--entrypoint', 'sh',
       '--volume', `${source}:/source:ro`,
       '--volume', `${destination}:/destination`,
-      'local/dsh-agent-fleet-self-evolve:latest',
+      generationRuntimeImage(generation),
       '-lc', 'cp -a /source/. /destination/',
     ])
     generation.memoryInheritance = {
@@ -355,13 +512,14 @@ async function preparePatchouliData(state, generation) {
 }
 
 async function compose(state, generation, args) {
+  const exampleRoot = generationExampleRoot(state, generation)
   return run('docker', [
     'compose',
-    '--project-directory', state.exampleRoot,
-    '-f', join(state.exampleRoot, 'compose.yaml'),
-    '-f', join(state.exampleRoot, 'compose.source.yaml'),
+    '--project-directory', exampleRoot,
+    '-f', join(exampleRoot, 'compose.yaml'),
+    '-f', join(exampleRoot, 'compose.source.yaml'),
     ...args,
-  ], { cwd: state.exampleRoot, env: composeEnvironment(state, generation) })
+  ], { cwd: exampleRoot, env: composeEnvironment(state, generation) })
 }
 
 async function captureGenerationLogs(state, generation) {
@@ -389,7 +547,7 @@ async function archiveGenerationContext(state, generation) {
       '--entrypoint', 'tar',
       '--volume', `${volume}:/source:ro`,
       '--volume', `${archiveDirectory}:/archive`,
-      'local/dsh-agent-fleet-self-evolve:latest',
+      generationRuntimeImage(generation),
       '-czf', `/archive/${temporaryName}`,
       '-C', '/source',
       '--exclude=.dsh/profiles',
@@ -418,7 +576,7 @@ async function archiveGenerationContext(state, generation) {
       '--entrypoint', 'tar',
       '--volume', `${memoryVolume}:/source:ro`,
       '--volume', `${archiveDirectory}:/archive`,
-      'local/dsh-agent-fleet-self-evolve:latest',
+      generationRuntimeImage(generation),
       '-czf', `/archive/${memoryTemporaryName}`,
       '-C', '/source',
       '.',
@@ -529,6 +687,14 @@ async function monitorGeneration(stateDirectory, state, generation) {
   })
 }
 
+function stopGenerationMonitors() {
+  for (const child of generationMonitors.values()) {
+    child.removeAllListeners('close')
+    child.kill()
+  }
+  generationMonitors.clear()
+}
+
 async function launchGeneration(stateDirectory, state, generation, options = {}) {
   state.generations[generation.id] = generation
   state.eventSequences[generation.id] ??= 0
@@ -603,6 +769,10 @@ async function cleanupOldGenerations(stateDirectory, state) {
       await run('docker', ['volume', 'rm', generationVolume(generation, suffix)]).catch(() => undefined)
     }
     try {
+      if (generation.image !== undefined) {
+        await run('docker', ['image', 'rm', generation.image]).catch(() => undefined)
+        generation.imageCleanedAt = new Date().toISOString()
+      }
       const workspace = assertManagedWorkspace(state, generation.workspace)
       const generationRoot = dirname(workspace)
       if (existsSync(workspace)) rmSync(workspace, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 })
@@ -624,10 +794,12 @@ async function startCandidate(stateDirectory, state, request) {
   const bootstrapContent = requiredText(bootstrap, 'candidate bootstrap content')
   let candidate = state.candidate === null ? undefined : state.generations[state.candidate]
   if (candidate === undefined) {
+    const stable = state.generations[state.stable]
+    const sourceCommit = await resolveCandidateSourceSnapshot(stable.workspace, sourceRef)
     const number = state.nextGeneration
     state.nextGeneration += 1
-    candidate = await prepareGeneration(state, number, sourceRef, bootstrapContent, {
-      sourceWorkspace: state.generations[state.stable].workspace,
+    candidate = await prepareGeneration(state, number, sourceCommit, bootstrapContent, {
+      sourceWorkspace: stable.workspace,
       parent: state.stable,
       ...(payload.teamConfig?.content === undefined
         ? {}
@@ -807,6 +979,8 @@ async function processRequest(stateDirectory, request) {
       }
     }
     await cleanupOldGenerations(stateDirectory, state)
+    scheduleSupervisorHandoff(stateDirectory, state, candidate)
+    writeState(stateDirectory, state)
   }
   const completed = readState(stateDirectory)
   if (!completed.processedRequests.includes(request.id)) completed.processedRequests.push(request.id)
@@ -842,7 +1016,10 @@ async function scanRequests(stateDirectory) {
   }
 }
 
-async function serve(stateDirectory) {
+async function serve(stateDirectory, options = {}) {
+  const incomingHandoff = options.handoffId === undefined
+    ? undefined
+    : await activateIncomingSupervisorHandoff(stateDirectory, options.handoffId)
   const requestDirectory = join(stateDirectory, 'control', 'requests')
   mkdirSync(requestDirectory, { recursive: true })
   let active = false
@@ -865,6 +1042,9 @@ async function serve(stateDirectory) {
   await drain()
   const state = readState(stateDirectory)
   if (state.status === 'stopped') return
+  if (options.handoffId === undefined && state.supervisorHandoff?.status === 'pending') {
+    requestedSupervisorHandoff = state.supervisorHandoff
+  }
   for (const generation of Object.values(state.generations)) {
     if (['stable', 'guardian', 'hibernating', 'observing', 'ready'].includes(generation.phase)) {
       await monitorGeneration(stateDirectory, state, generation)
@@ -873,17 +1053,38 @@ async function serve(stateDirectory) {
   await cleanupOldGenerations(stateDirectory, state)
   process.stdout.write(`Self-evolution supervisor watching ${requestDirectory}\n`)
   await new Promise((resolvePromise, rejectPromise) => {
+    let stopped = false
     const watcher = watch(requestDirectory, { persistent: true }, () => {
-      void drain().then(() => {
+      if (supervisorHandoffActivating) return
+      void drain().then(async () => {
         if (readState(stateDirectory).status === 'stopped') stop()
+        else {
+          const handoffId = await launchRequestedSupervisorHandoff(stateDirectory)
+          if (handoffId !== undefined) {
+            stop()
+          } else if (!stopped) {
+            await drain()
+          }
+        }
       }).catch(rejectPromise)
     })
     const stop = () => {
+      if (stopped) return
+      stopped = true
       watcher.close()
+      stopGenerationMonitors()
       resolvePromise()
     }
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)
+    if (incomingHandoff !== undefined) markIncomingSupervisorActive(stateDirectory, incomingHandoff)
+    void launchRequestedSupervisorHandoff(stateDirectory).then(handoffId => {
+      if (handoffId !== undefined) {
+        stop()
+      } else if (!stopped) {
+        void drain()
+      }
+    }).catch(rejectPromise)
   })
 }
 
@@ -975,7 +1176,9 @@ async function main() {
   const args = parseArgs(process.argv.slice(2))
   const command = args._[0]
   if (command === 'init') return initialize(args)
-  if (command === 'serve') return serve(requiredAbsolute(args.state, '--state'))
+  if (command === 'serve') return serve(requiredAbsolute(args.state, '--state'), {
+    ...(args.handoff === undefined ? {} : { handoffId: requiredText(args.handoff, '--handoff') }),
+  })
   if (command === 'stop') {
     const state = await stopRun(requiredAbsolute(args.state, '--state'))
     process.stdout.write(`${JSON.stringify(publicState(state), null, 2)}\n`)

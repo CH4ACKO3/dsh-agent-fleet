@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   advancePromotionWindow,
+  assertCandidateSourceSnapshot,
   authorizeRequest,
   signRequest,
   stripHostGenerationFooter,
@@ -61,6 +62,18 @@ describe('self-evolution generation protocol', () => {
     expect(() => authorizeRequest(state('ready'), request('g0001', 'generation.promote'))).not.toThrow()
     expect(() => authorizeRequest(state('ready'), request('g0002', 'generation.promote')))
       .toThrow('Only the stable generation')
+  })
+
+  it('starts a candidate only from the clean, exact stable HEAD', () => {
+    expect(assertCandidateSourceSnapshot({
+      status: '', sourceCommit: 'abc', headCommit: 'abc',
+    })).toBe('abc')
+    expect(() => assertCandidateSourceSnapshot({
+      status: ' M evidence/handoff.md', sourceCommit: 'abc', headCommit: 'abc',
+    })).toThrow('Stable workspace must be clean')
+    expect(() => assertCandidateSourceSnapshot({
+      status: '', sourceCommit: 'abc', headCommit: 'def',
+    })).toThrow('does not match stable workspace HEAD')
   })
 
   it('keeps the previous stable generation as a guardian until its child reproduces', () => {

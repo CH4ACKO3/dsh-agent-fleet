@@ -74,6 +74,17 @@ export function authorizeRequest(state, request) {
   throw new Error(`Unsupported request type ${request.type}`)
 }
 
+export function assertCandidateSourceSnapshot({ status, sourceCommit, headCommit }) {
+  const dirty = typeof status === 'string' ? status.trim() : ''
+  if (dirty) {
+    throw new Error(`Stable workspace must be clean before starting a candidate:\n${dirty}`)
+  }
+  if (sourceCommit !== headCommit) {
+    throw new Error(`Candidate source ${sourceCommit} does not match stable workspace HEAD ${headCommit}`)
+  }
+  return headCommit
+}
+
 export function advancePromotionWindow(state) {
   const previous = state.generations[state.stable]
   const candidate = state.candidate === null ? undefined : state.generations[state.candidate]

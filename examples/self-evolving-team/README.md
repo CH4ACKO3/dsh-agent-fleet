@@ -13,19 +13,21 @@
   -> promote 事件先交给新稳定代，宿主再停止旧代
 ```
 
-没有半小时探针或五分钟轮询。监督器通过文件系统事件接收请求，通过 `docker wait` 接收容器退出；团队成员使用阻塞式 `generation-control watch` 等事件。Docker Compose 的启动健康检查只负责判断新进程能否提供服务，不参与代际决策。
+没有半小时探针或五分钟轮询。监督器通过文件系统事件接收请求，通过 `docker wait` 接收容器退出；容器内事件 relay 使用持久游标把需要动作的状态变化投递给团队助理。`generation-control watch` 仅用于人工诊断。Docker Compose 的启动健康检查只负责判断新进程能否提供服务，不参与代际决策。
 
 ## 边界
 
 - Agent 容器不挂载 Docker socket，也不能直接启动、停止或删除任何容器。
-- 每代使用新的完整 Git clone、DSH 数据卷、Linux `node_modules` 卷和 Patchouli 数据卷。候选代继承父代 Patchouli 记忆的隔离快照，但不会复制正在写入的 Session 数据。容器内可以正常执行 `git status`、`git commit` 和 `git log`。
+- 每代使用新的完整 Git clone、由该代源码中的 compose/Dockerfile 构建的唯一镜像、DSH 数据卷、Linux `node_modules` 卷和 Patchouli 数据卷。候选代继承父代 Patchouli 记忆的隔离快照和 `.self-evolve/inherited/` 运行时托付链，但不会复制正在写入的 Session 数据。容器内可以正常执行 `git status`、`git commit` 和 `git log`。
 - 宿主状态目录维护独立裸仓库。启动下一代时，宿主从稳定代工作区解析请求中的 commit，把它固化为 `generations/gNNNN` 分支，再从该分支创建候选。上一代工作区被回收后，提交历史仍然存在。
 - 容器只读挂载代际裸仓库，不获得宿主 Git 凭据，也不挂载主仓库的 `.git`。本代可以 commit，但不能直接修改 `main` 或其他代的分支；跨代导入只由宿主监督器完成。
 - 下一代从该代 Git commit 中构建被测 Fleet 包，因此运行时代码与其中的系统提示词修改都会进入候选。
-- 当前监督器目录中的 Compose、Dockerfile、代际客户端和团队安全模板是本轮根信任，不从候选 clone 加载。团队可以提出这些控制文件的修改，但必须由宿主在下一轮明确采用；否则一个不可靠候选只需修改挂载、权限或晋升脚本就能绕过蓝绿保护。
+- 候选使用自己冻结提交中的 Compose、Dockerfile、代际客户端和团队模板，因此基座修改可以在下一代被实际验证；但候选容器没有 Docker 权限，也不能替换当前宿主 supervisor。只有候选自证、稳定代批准并完成晋升后，旧 supervisor 才通过双阶段交接把请求监听权交给新稳定代脚本，失败时继续留任。
 - 同时只有一个候选，整个窗口最多三代：一个 Docker 休眠的保障代、一个活跃稳定代、一个活跃候选代。候选只能为自己提交 `ready` 或 `reject`；只有稳定代能 `start-candidate`、`destroy-candidate` 或 `promote`。
 - 晋升必须同时满足候选自证和稳定代批准。晋升时先把旧稳定代 checkpoint 并暂停为保障代，再让候选成为活跃稳定代；只有新稳定代以后成功启动、验收并晋升自己的候选，自己成为新保障代后，更老保障代才会被归档并删除。这样候选不仅要证明“能启动”，还要证明“能把链路传给下下代”。拒绝、异常退出和整轮停止走同一归档清理路径。已退休代默认只保留最近两代的工作区供诊断，更旧的由监督器按明确代路径回收；Git 历史、上下文归档和事件不随工作区回收而丢失。
-- 晋升请求中的 handoff 会被宿主复制到新稳定代的 `.self-evolve/inherited/<父代>-handoff.md`，同时生成带来源代、目标代、提交与晋升时间的 `inherited.json`。它用于容器内显式托付，不依赖聊天记录或记忆召回是否命中。
+- 晋升请求中的 handoff 会被宿主复制到新稳定代的 `.self-evolve/inherited/<父代>-handoff.md`，同时生成带来源代、目标代、提交与晋升时间的 `inherited.json`；启动再下一代时宿主会继续复制这条运行时托付链，不要求 Agent 用 `git add -f` 才能维持连续性。它用于容器内显式托付，不依赖聊天记录或记忆召回是否命中。
+- `candidate.ready`、`candidate.failed`、`generation.promoted`、恢复和清理异常等需要动作的状态机事件由 Fleet 自动 bootstrap 组件按持久游标投递给本代助理；CLI `watch` 只保留为诊断入口。
+- 每次晋升后，宿主 supervisor 会通过 ready/activate 双阶段交接切换到新稳定代提交中的 supervisor 脚本；旧 supervisor 在继任进程确认可启动前持续持有请求监听权。
 - 控制请求使用每代独立的 HMAC 身份。密钥写入本代工作区内只供控制客户端读取的文件，避免 Agent 工具执行环境过滤自定义环境变量后失效；包含其他代密钥的监督器状态文件不挂载到容器。
 - `dsh-patchouli` 提供持久记忆与原生上下文索引，`dsh-agent-fleet-patchouli` 提供 Team 语义适配。Patchouli 数据不在父子代之间共享写入：候选启动前由监督器复制父代卷，淘汰候选不会污染稳定代记忆，晋升后候选副本成为下一代来源。Git 提交和显式交接文件仍是版本与恢复的权威来源，记忆服务只是检索加速层。
 
@@ -82,7 +84,7 @@ node examples/self-evolving-team/scripts/supervisor.mjs stop `
 
 ## 团队使用的控制命令
 
-这些命令由模板指定的平台工程师在容器内执行。`start-candidate` 的 `--ref` 必须是已经提交的 commit；文件参数的内容会被放入签名请求，避免把容器路径误当成宿主路径。
+这些命令由模板指定的平台工程师在容器内执行。`start-candidate` 的 `--ref` 必须等于干净工作区的当前 `HEAD`；宿主会在发布分支前后复核快照。文件参数的内容会被放入签名请求，避免把容器路径误当成宿主路径。
 
 ```sh
 # 任一代：查看宿主写入的本代身份、父代、源提交和代际分支

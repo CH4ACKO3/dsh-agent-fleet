@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 
@@ -22,6 +22,24 @@ export interface FleetAutoBootstrapConfiguration {
   readonly provider?: string
   readonly model?: string
   readonly maxTokens?: number
+  readonly controlDirectory?: string
+  readonly generation?: string
+}
+
+interface FleetAutoBootstrapMarker {
+  readonly id: string
+  readonly runId: string
+  readonly taskPath: string
+  readonly startedAt: string
+  readonly eventSequence?: number
+}
+
+interface FleetGenerationEvent {
+  readonly sequence: number
+  readonly generation: string
+  readonly type: string
+  readonly createdAt: string
+  readonly data?: Record<string, unknown>
 }
 
 interface FleetAutoBootstrapContext extends Context {
@@ -70,6 +88,11 @@ export function fleetAutoBootstrapConfiguration(
   const provider = optionalText(env.FLEET_AUTO_PROVIDER)
   const model = optionalText(env.FLEET_AUTO_MODEL)
   const readyFileValue = optionalText(env.FLEET_AUTO_READY_FILE)
+  const controlDirectory = optionalText(env.SELF_EVOLVE_CONTROL_DIR)
+  const generation = optionalText(env.SELF_EVOLVE_GENERATION)
+  if ((controlDirectory === undefined) !== (generation === undefined)) {
+    throw new Error('SELF_EVOLVE_CONTROL_DIR and SELF_EVOLVE_GENERATION must be configured together')
+  }
   const maxTokens = maxTokensText === undefined ? undefined : Number(maxTokensText)
   if (maxTokens !== undefined && (!Number.isSafeInteger(maxTokens) || maxTokens <= 0)) {
     throw new Error('FLEET_AUTO_MAX_TOKENS must be a positive integer')
@@ -86,6 +109,10 @@ export function fleetAutoBootstrapConfiguration(
     ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(controlDirectory === undefined ? {} : {
+      controlDirectory: requiredAbsolutePath(controlDirectory, 'SELF_EVOLVE_CONTROL_DIR'),
+      generation: generation as string,
+    }),
   }
 }
 
@@ -110,17 +137,161 @@ function atomicJson(path: string, value: unknown): void {
   renameSync(temporary, path)
 }
 
-function writeMarker(configuration: FleetAutoBootstrapConfiguration, run: FleetRunRecord): void {
-  const value = {
+function readMarker(configuration: FleetAutoBootstrapConfiguration): FleetAutoBootstrapMarker | undefined {
+  const path = markerPath(configuration)
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as FleetAutoBootstrapMarker : undefined
+}
+
+function writeMarker(
+  configuration: FleetAutoBootstrapConfiguration,
+  run: FleetRunRecord,
+  eventSequence = readMarker(configuration)?.eventSequence,
+): void {
+  const previous = readMarker(configuration)
+  const value: FleetAutoBootstrapMarker = {
     id: configuration.id,
     runId: run.id,
     taskPath: configuration.taskPath,
-    startedAt: new Date().toISOString(),
+    startedAt: previous?.startedAt ?? new Date().toISOString(),
+    ...(eventSequence === undefined ? {} : { eventSequence }),
   }
   atomicJson(markerPath(configuration), value)
   if (configuration.readyFile !== undefined) {
     rmSync(`${configuration.readyFile}.error.json`, { force: true })
     atomicJson(configuration.readyFile, value)
+  }
+}
+
+function generationEventDirectory(configuration: FleetAutoBootstrapConfiguration): string | undefined {
+  if (configuration.controlDirectory === undefined || configuration.generation === undefined) return undefined
+  return join(configuration.controlDirectory, 'events', configuration.generation)
+}
+
+function generationEventsAfter(
+  configuration: FleetAutoBootstrapConfiguration,
+  after: number,
+): FleetGenerationEvent[] {
+  const directory = generationEventDirectory(configuration)
+  if (directory === undefined || !existsSync(directory)) return []
+  return readdirSync(directory)
+    .filter(name => /^\d+-.*\.json$/.test(name))
+    .sort()
+    .map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')) as FleetGenerationEvent)
+    .filter(event => event.generation === configuration.generation && event.sequence > after)
+}
+
+export function fleetGenerationEventInstruction(event: FleetGenerationEvent): string | undefined {
+  const data = event.data ?? {}
+  const detail = JSON.stringify(Object.fromEntries(Object.entries(data).map(([key, value]) => {
+    if ((key === 'evidence' || key === 'handoff') && value !== null && typeof value === 'object') {
+      const file = value as Record<string, unknown>
+      return [key, { name: file.name, path: file.path }]
+    }
+    return [key, value]
+  }))).slice(0, 2_000)
+  const actions: Record<string, string> = {
+    'candidate.ready': '候选代已经声明 ready。立即建立一次独立复核，核对候选提交、证据、测试和交接能力；随后明确执行 promote 或 destroy-candidate。',
+    'candidate.failed': '候选代启动失败。立即读取失败证据，清理失败候选，并在修复基座原因后从同一稳定提交重试。',
+    'candidate.destroyed': '候选代已销毁。若全局迭代目标仍存在，立即修复已记录原因并启动替代候选。',
+    'candidate.self_rejected': '候选代已自我拒绝。立即审查拒绝原因，修复后启动替代候选。',
+    'generation.promoted': '你已晋升为新的稳定代。立即确认 guardian 与继承材料，然后在干净、冻结的提交上启动下一候选；成功启动下一代之前不要把交接视为完成。',
+    'generation.recovered': '保障代已因稳定代故障恢复。立即检查失败代与被丢弃候选，修复根因后重新建立候选链。',
+    'generation.peer_exited': '关联代容器异常退出。立即读取退出证据，恢复代际窗口并记录根因。',
+    'guardian.exited': '保障代异常退出。立即记录保护窗口降级，并在继续晋升前恢复可靠的保障路径。',
+    'guardian.retirement_failed': '旧保障代清理失败。立即检查归档与容器/卷清理，不要让遗留资源持续累积。',
+    'request.rejected': '一个代际控制请求被宿主拒绝。读取拒绝原因并纠正请求；不要盲目重复同一命令。',
+  }
+  const action = actions[event.type]
+  if (action === undefined) return undefined
+  return [
+    '[Fleet generation lifecycle event]',
+    `事件 ${event.sequence}: ${event.type}`,
+    action,
+    `宿主数据：${detail}`,
+    '这是状态机事件，不是频道消息；无需报告“已读”，直接完成所需生命周期动作。',
+  ].join('\n\n')
+}
+
+export async function deliverPendingFleetGenerationEvents(
+  agent: Agent,
+  run: FleetRunRecord,
+  configuration: FleetAutoBootstrapConfiguration,
+): Promise<number> {
+  if (generationEventDirectory(configuration) === undefined) return 0
+  const sequence = readMarker(configuration)?.eventSequence ?? 0
+  const events = generationEventsAfter(configuration, sequence)
+  if (events.length === 0) return 0
+  const instructions = events
+    .map(fleetGenerationEventInstruction)
+    .filter((instruction): instruction is string => instruction !== undefined)
+  if (instructions.length > 0) {
+    await agent.followup(createUserMessage({
+      source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+      content: [{ type: 'text', text: instructions.join('\n\n---\n\n') }],
+    }))
+  }
+  writeMarker(configuration, run, events.at(-1)?.sequence ?? sequence)
+  return instructions.length
+}
+
+function startGenerationEventRelay(
+  agent: Agent,
+  run: FleetRunRecord,
+  configuration: FleetAutoBootstrapConfiguration,
+): { dispose(): Promise<void> } {
+  if (generationEventDirectory(configuration) === undefined) return { dispose: () => Promise.resolve() }
+  let active = false
+  const drain = async (): Promise<void> => {
+    if (active) return
+    active = true
+    try {
+      await deliverPendingFleetGenerationEvents(agent, run, configuration)
+    } catch (error) {
+      process.stderr.write(`Fleet generation event relay failed: ${error instanceof Error ? error.message : String(error)}\n`)
+    } finally {
+      active = false
+    }
+  }
+  const interval = setInterval(() => { void drain() }, 1_000)
+  interval.unref()
+  void drain()
+  return {
+    dispose: () => {
+      clearInterval(interval)
+      return Promise.resolve()
+    },
+  }
+}
+
+function startDeferredGenerationEventRelay(
+  ctx: FleetAutoBootstrapContext,
+  run: FleetRunRecord,
+  configuration: FleetAutoBootstrapConfiguration,
+): { dispose(): Promise<void> } {
+  const attached = run.assistants[0]
+  if (attached === undefined || generationEventDirectory(configuration) === undefined) {
+    return { dispose: () => Promise.resolve() }
+  }
+  let relay: { dispose(): Promise<void> } | undefined
+  let interval: NodeJS.Timeout | undefined
+  const attach = (): void => {
+    if (relay !== undefined) return
+    const agent = ctx.agents.get(SessionId(attached.sessionId))
+    if (agent !== undefined) {
+      relay = startGenerationEventRelay(agent, run, configuration)
+      if (interval !== undefined) clearInterval(interval)
+    }
+  }
+  attach()
+  if (relay === undefined) {
+    interval = setInterval(attach, 1_000)
+    interval.unref()
+  }
+  return {
+    dispose: async () => {
+      if (interval !== undefined) clearInterval(interval)
+      await relay?.dispose()
+    },
   }
 }
 
@@ -168,7 +339,8 @@ export async function activateFleetAutoBootstrap(
     if (configuration.readyFile !== undefined && !existsSync(configuration.readyFile)) {
       atomicJson(configuration.readyFile, JSON.parse(readFileSync(marker, 'utf8')) as unknown)
     }
-    return { run: existing, dispose: () => Promise.resolve() }
+    const relay = startDeferredGenerationEventRelay(ctx, existing, configuration)
+    return { run: existing, dispose: () => relay.dispose() }
   }
   if (existing !== undefined) {
     const attached = existing.assistants[0]
@@ -183,7 +355,8 @@ export async function activateFleetAutoBootstrap(
       content: [{ type: 'text', text: bootstrapMessage(configuration) }],
     }))
     writeMarker(configuration, existing)
-    return { run: existing, dispose: () => Promise.resolve() }
+    const relay = startGenerationEventRelay(agent, existing, configuration)
+    return { run: existing, dispose: () => relay.dispose() }
   }
 
   let handle: AgentHandle | undefined
@@ -224,8 +397,15 @@ export async function activateFleetAutoBootstrap(
       content: [{ type: 'text', text: bootstrapMessage(configuration) }],
     }))
     writeMarker(configuration, run)
+    const relay = startGenerationEventRelay(handle.agent, run, configuration)
     const owned = handle
-    return { run, dispose: () => owned.dispose() }
+    return {
+      run,
+      dispose: async () => {
+        await relay.dispose()
+        await owned.dispose()
+      },
+    }
   } catch (error) {
     await handle?.dispose()
     throw error
@@ -233,8 +413,7 @@ export async function activateFleetAutoBootstrap(
 }
 
 export function readFleetAutoBootstrapMarker(configuration: FleetAutoBootstrapConfiguration): unknown {
-  const path = markerPath(configuration)
-  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as unknown : undefined
+  return readMarker(configuration)
 }
 
 export type FleetAutoBootstrapRunService = Pick<FleetRunService, 'list' | 'create' | 'agentSessionStarted'>

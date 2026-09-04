@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/dsh-agent-fleet-self-evolve:latest
+    image: ${SELF_EVOLVE_IMAGE:-local/dsh-agent-fleet-self-evolve:latest}
     pull_policy: never
     entrypoint: ["/opt/self-evolve/network-guard.sh"]
     restart: "no"
@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/dsh-agent-fleet-self-evolve:latest
+    image: ${SELF_EVOLVE_IMAGE:-local/dsh-agent-fleet-self-evolve:latest}
     pull_policy: never
     restart: "no"
     working_dir: /workspace

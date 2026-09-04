@@ -30,6 +30,7 @@ describe('self-evolving Team template', () => {
     expect(reliability?.prompt).toContain('下一代同角色')
     expect(reliability?.prompt).toContain('fleet_resurrect')
     expect(compose).toContain('SELF_EVOLVE_CONTROL_DIR: /workspace/.self-evolve/control')
+    expect(compose).toContain('${SELF_EVOLVE_IMAGE:-local/dsh-agent-fleet-self-evolve:latest}')
     expect(compose).toContain('target: /workspace/.self-evolve/control')
     expect(compose).not.toContain('target: /control')
   })
