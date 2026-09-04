@@ -50,6 +50,7 @@ COPY team.local.json /opt/self-evolve/team.local.json
 COPY scripts /opt/self-evolve/scripts
 COPY scripts/network-guard.sh /opt/self-evolve/network-guard.sh
 RUN sed -i 's/\r$//' /opt/self-evolve/network-guard.sh /opt/self-evolve/scripts/*.mjs \
-    && chmod 0555 /opt/self-evolve/network-guard.sh /opt/self-evolve/scripts/*.mjs
+    && chmod 0555 /opt/self-evolve/network-guard.sh /opt/self-evolve/scripts/*.mjs \
+    && git config --system --add safe.directory /workspace
 
 WORKDIR /workspace

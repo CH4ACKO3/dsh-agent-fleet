@@ -72,6 +72,10 @@ services:
       - type: bind
         source: ${SELF_EVOLVE_CONTROL_ROOT:?SELF_EVOLVE_CONTROL_ROOT must be an absolute host path}
         target: /control
+      - type: bind
+        source: ${SELF_EVOLVE_REPOSITORY:?SELF_EVOLVE_REPOSITORY must be an absolute host path}
+        target: /repository
+        read_only: true
     healthcheck:
       test: ["CMD-SHELL", "test -f /workspace/.self-evolve/fleet-bootstrap-ready.json && node -e \"fetch('http://127.0.0.1:3081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 3s

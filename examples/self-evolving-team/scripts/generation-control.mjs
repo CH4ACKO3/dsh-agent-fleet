@@ -130,6 +130,12 @@ async function waitForEvent(args) {
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const command = args._[0]
+  if (command === 'info') {
+    const path = '/workspace/.self-evolve/generation.json'
+    if (!existsSync(path)) throw new Error(`Generation manifest is missing: ${path}`)
+    process.stdout.write(`${JSON.stringify(JSON.parse(readFileSync(path, 'utf8')), null, 2)}\n`)
+    return
+  }
   if (command === 'watch') return waitForEvent(args)
   const types = {
     'start-candidate': 'candidate.start',
@@ -140,7 +146,7 @@ async function main() {
   }
   const type = types[command]
   if (type === undefined) {
-    throw new Error('Usage: generation-control <start-candidate|destroy-candidate|ready|reject|promote|watch> [options]')
+    throw new Error('Usage: generation-control <info|start-candidate|destroy-candidate|ready|reject|promote|watch> [options]')
   }
   submit(type, args)
 }

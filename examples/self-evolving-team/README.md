@@ -1,6 +1,6 @@
 # Fleet 自我迭代蓝绿团队
 
-这个示例从内置“中型软件工程团队”派生一个持续改进团队。每一代 DSH/Fleet 运行在独立 Docker Compose 项目、数据卷和 Git worktree 中；宿主监督器是唯一拥有 Docker 生命周期权限的进程。
+这个示例从内置“中型软件工程团队”派生一个持续改进团队。每一代 DSH/Fleet 运行在独立 Docker Compose 项目、数据卷和完整 Git clone 中；宿主监督器是唯一拥有 Docker 生命周期权限的进程。
 
 它解决的不是“让 Agent 自由重写并重启自己”，而是保证下面这条链始终成立：
 
@@ -18,11 +18,13 @@
 ## 边界
 
 - Agent 容器不挂载 Docker socket，也不能直接启动、停止或删除任何容器。
-- 每代使用新的 Git worktree 和 DSH 数据卷；不会复制正在写入的 Session 数据。
+- 每代使用新的完整 Git clone 和 DSH 数据卷；不会复制正在写入的 Session 数据。容器内可以正常执行 `git status`、`git commit` 和 `git log`。
+- 宿主状态目录维护独立裸仓库。启动下一代时，宿主从稳定代工作区解析请求中的 commit，把它固化为 `generations/gNNNN` 分支，再从该分支创建候选。上一代工作区被回收后，提交历史仍然存在。
+- 容器只读挂载代际裸仓库，不获得宿主 Git 凭据，也不挂载主仓库的 `.git`。本代可以 commit，但不能直接修改 `main` 或其他代的分支；跨代导入只由宿主监督器完成。
 - 下一代从该代 Git commit 中构建被测 Fleet 包，因此运行时代码与其中的系统提示词修改都会进入候选。
-- 当前监督器目录中的 Compose、Dockerfile、代际客户端和团队安全模板是本轮根信任，不从候选 worktree 加载。团队可以提出这些控制文件的修改，但必须由宿主在下一轮明确采用；否则一个不可靠候选只需修改挂载、权限或晋升脚本就能绕过蓝绿保护。
+- 当前监督器目录中的 Compose、Dockerfile、代际客户端和团队安全模板是本轮根信任，不从候选 clone 加载。团队可以提出这些控制文件的修改，但必须由宿主在下一轮明确采用；否则一个不可靠候选只需修改挂载、权限或晋升脚本就能绕过蓝绿保护。
 - 同时只有一个候选。候选只能为自己提交 `ready` 或 `reject`；只有稳定代能 `start-candidate`、`destroy-candidate` 或 `promote`。
-- 晋升必须同时满足候选自证和稳定代批准。先写 `generation.promoted` 事件，再停止并删除旧代容器与网络；拒绝代的数据卷立即删除。已退休代默认只保留最近两代的 worktree/数据卷供诊断，更旧的由监督器按明确代路径回收。
+- 晋升必须同时满足候选自证和稳定代批准。先写 `generation.promoted` 事件，再停止并删除旧代容器、网络与数据卷；拒绝代同样立即清理这些 Docker 资源。已退休代默认只保留最近两代的工作区供诊断，更旧的由监督器按明确代路径回收；Git 历史和事件不随工作区回收而丢失。
 - 控制请求使用每代独立的 HMAC 身份。密钥只通过本代容器环境传入；包含密钥的监督器状态文件不挂载到容器。
 
 ## 文件
@@ -51,7 +53,7 @@ node examples/self-evolving-team/scripts/supervisor.mjs init `
   --retain-generations 2
 ```
 
-`init` 完成四件事：创建 `g0001` worktree、按冻结 lockfile 安装并构建/打包 Fleet、启动隔离 Compose 项目、保持前台监督请求目录。宿主构建阶段可访问依赖源；候选容器运行时仍只允许模型端点。候选 UI 地址从 `3120` 起按代递增。容器内 Fleet 自动创建团队，并向助理注入“按 `.self-evolve/bootstrap.md` 开始任务”的一次性指令，不需要用户打开 UI 导入配置。
+`init` 完成五件事：复制一份宿主管理的代际裸仓库、创建 `g0001` 隔离 clone、按冻结 lockfile 安装并构建/打包 Fleet、启动隔离 Compose 项目、保持前台监督请求目录。宿主构建阶段可访问依赖源；候选容器运行时仍只允许模型端点。候选 UI 地址从 `3120` 起按代递增。容器内 Fleet 自动创建团队，并向助理注入“按 `.self-evolve/bootstrap.md` 开始任务”的一次性指令，不需要用户打开 UI 导入配置。
 
 如果宿主进程退出，只恢复监督器，不创建新一代：
 
@@ -74,13 +76,16 @@ node examples/self-evolving-team/scripts/supervisor.mjs stop `
   --state D:/Projects/DeepSeekHarness/self-evolve-runs/fleet-001
 ```
 
-`stop` 是宿主操作，容器内成员不能调用。它保留 Git worktree、控制事件和交接文件供复盘；若不再需要，可在确认提交与工件已保存后由宿主单独删除状态目录。
+`stop` 是宿主操作，容器内成员不能调用。它保留代际裸仓库、隔离工作区、控制事件和交接文件供复盘；若不再需要，可在确认提交与工件已保存后由宿主单独删除状态目录。
 
 ## 团队使用的控制命令
 
 这些命令由模板指定的平台工程师在容器内执行。`start-candidate` 的 `--ref` 必须是已经提交的 commit；文件参数的内容会被放入签名请求，避免把容器路径误当成宿主路径。
 
 ```sh
+# 任一代：查看宿主写入的本代身份、父代、源提交和代际分支
+node /opt/self-evolve/scripts/generation-control.mjs info
+
 # 稳定代：启动一个候选
 node /opt/self-evolve/scripts/generation-control.mjs start-candidate \
   --ref "$(git rev-parse HEAD)" \
@@ -114,4 +119,4 @@ node /opt/self-evolve/scripts/generation-control.mjs destroy-candidate \
 - 稳定代意外退出：候选不会被静默晋升。监督器保留候选和完整状态并发出退出事件，等待宿主判断；这比在缺少上一代批准时自动接管更安全。
 - 监督器退出：容器不受影响；重新运行 `serve` 会扫描尚未归档的请求并重新挂接运行中容器的退出事件。
 
-状态、完成请求、拒绝请求和逐代事件都保存在宿主状态目录。容器和网络在淘汰/交接后立即删除；拒绝候选的数据卷也立即删除。监督器只保留 `--retain-generations` 指定数量的最近退休/失败 worktree 与数据卷（默认 2），随后按它自己创建并验证过的精确路径回收，避免长期循环让本机资源无限增长。Git commit、控制事件以及交接摘要仍保留为轻量审计记录。
+状态、完成请求、拒绝请求和逐代事件都保存在宿主状态目录。容器、网络和数据卷在淘汰/交接后立即删除，不随代数累积。监督器只保留 `--retain-generations` 指定数量的最近退休/失败工作区（默认 2），随后按它自己创建并验证过的精确路径回收。代际裸仓库中的 Git commit、控制事件以及交接摘要仍保留为轻量审计记录。

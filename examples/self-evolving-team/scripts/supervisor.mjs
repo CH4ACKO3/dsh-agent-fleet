@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomBytes, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, watch, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -58,6 +58,21 @@ function writeState(stateDirectory, state) {
   atomicJson(join(stateDirectory, 'state.json'), state)
 }
 
+function writeGenerationManifest(generation, role) {
+  atomicJson(join(generation.workspace, '.self-evolve', 'generation.json'), {
+    schemaVersion: 1,
+    id: generation.id,
+    number: generation.number,
+    role,
+    parent: generation.parent,
+    sourceRef: generation.sourceRef,
+    sourceCommit: generation.sourceCommit,
+    gitBranch: generation.gitBranch,
+    createdAt: generation.createdAt,
+    ...(generation.promotedAt === undefined ? {} : { promotedAt: generation.promotedAt }),
+  })
+}
+
 function publicState(state) {
   return {
     ...state,
@@ -106,6 +121,7 @@ function composeEnvironment(state, generation) {
     SELF_EVOLVE_HOST_PORT: String(generation.port),
     SELF_EVOLVE_WORKSPACE: generation.workspace,
     SELF_EVOLVE_CONTROL_ROOT: join(state.stateDirectory, 'control'),
+    SELF_EVOLVE_REPOSITORY: state.repository,
     SELF_EVOLVE_GENERATION: generation.id,
     SELF_EVOLVE_CONTROL_TOKEN: generation.token,
     FLEET_PACKAGE_PATH: generation.packagePath,
@@ -140,15 +156,34 @@ async function resolveCommit(sourceRoot, ref) {
   return stdout
 }
 
-async function prepareGeneration(state, number, sourceRef, bootstrapContent) {
+async function recordGenerationCommit(state, sourceWorkspace, generationIdValue, sourceCommit) {
+  const branch = `generations/${generationIdValue}`
+  await run('git', [
+    'push', state.repository,
+    `${sourceCommit}:refs/heads/${branch}`,
+  ], { cwd: sourceWorkspace })
+  return branch
+}
+
+async function prepareGeneration(state, number, sourceRef, bootstrapContent, options = {}) {
   const id = generationId(number)
   const generationRoot = join(state.stateDirectory, 'generations', id)
   const workspace = join(generationRoot, 'workspace')
   if (existsSync(workspace)) throw new Error(`Generation workspace already exists: ${workspace}`)
-  const sourceCommit = await resolveCommit(state.sourceRoot, sourceRef)
+  const sourceWorkspace = options.sourceWorkspace ?? state.sourceRoot
+  const sourceCommit = await resolveCommit(sourceWorkspace, sourceRef)
   mkdirSync(generationRoot, { recursive: true })
-  await run('git', ['worktree', 'add', '--detach', workspace, sourceCommit], { cwd: state.sourceRoot })
+  const gitBranch = await recordGenerationCommit(state, sourceWorkspace, id, sourceCommit)
+  await run('git', [
+    'clone', '--no-hardlinks', '--branch', gitBranch,
+    state.repository, workspace,
+  ], { cwd: generationRoot })
   try {
+    await run('git', ['remote', 'set-url', 'origin', '/repository'], { cwd: workspace })
+    await run('git', ['config', 'user.name', `Fleet ${id}`], { cwd: workspace })
+    await run('git', ['config', 'user.email', `${id}@fleet.local`], { cwd: workspace })
+    const excludePath = join(workspace, '.git', 'info', 'exclude')
+    writeFileSync(excludePath, `${readFileSync(excludePath, 'utf8')}\n.self-evolve/\n`, 'utf8')
     await run('pnpm', ['install', '--frozen-lockfile'], { cwd: workspace })
     await run('pnpm', ['build'], { cwd: workspace })
     mkdirSync(join(generationRoot, 'packages'), { recursive: true })
@@ -159,6 +194,8 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent) {
     const bootstrapDirectory = join(workspace, '.self-evolve')
     mkdirSync(bootstrapDirectory, { recursive: true })
     const bootstrapPath = join(bootstrapDirectory, 'bootstrap.md')
+    const role = options.parent === undefined ? 'stable' : 'candidate'
+    const createdAt = new Date().toISOString()
     writeFileSync(bootstrapPath, [
       bootstrapContent.trim(),
       '',
@@ -170,11 +207,13 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent) {
       '- 等待状态变化请使用 `watch`；它会阻塞直到事件到达，不要按时间轮询。',
       '',
     ].join('\n'), 'utf8')
-    return {
+    const generation = {
       id,
       number,
+      parent: options.parent ?? null,
       sourceRef,
       sourceCommit,
+      gitBranch,
       workspace,
       packagePath: join(packageDirectory, packageName),
       bootstrapPath,
@@ -182,10 +221,12 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent) {
       port: state.basePort + number - 1,
       token: randomBytes(32).toString('hex'),
       phase: 'starting',
-      createdAt: new Date().toISOString(),
+      createdAt,
     }
+    writeGenerationManifest(generation, role)
+    return generation
   } catch (error) {
-    await run('git', ['worktree', 'remove', '--force', workspace], { cwd: state.sourceRoot }).catch(() => undefined)
+    rmSync(workspace, { recursive: true, force: true, maxRetries: 3 })
     throw error
   }
 }
@@ -198,6 +239,16 @@ async function compose(state, generation, args) {
     '-f', join(state.exampleRoot, 'compose.source.yaml'),
     ...args,
   ], { cwd: state.exampleRoot, env: composeEnvironment(state, generation) })
+}
+
+async function captureGenerationLogs(state, generation) {
+  const path = join(dirname(generation.workspace), 'runtime.log')
+  const result = await compose(state, generation, ['logs', '--no-color', '--timestamps']).catch(error => ({
+    stdout: '',
+    stderr: `Could not capture Compose logs: ${error instanceof Error ? error.message : String(error)}`,
+  }))
+  writeFileSync(path, [result.stdout, result.stderr].filter(Boolean).join('\n'), 'utf8')
+  generation.runtimeLog = path
 }
 
 async function monitorGeneration(stateDirectory, state, generation) {
@@ -227,6 +278,10 @@ async function monitorGeneration(stateDirectory, state, generation) {
           generation: stopped.id, exitCode,
         })
       }
+      await captureGenerationLogs(current, stopped)
+      await stopGeneration(current, stopped, { removeVolumes: true })
+      writeState(stateDirectory, current)
+      await cleanupOldGenerations(stateDirectory, current)
     } catch (error) {
       process.stderr.write(`generation monitor failed: ${error instanceof Error ? error.message : String(error)}\n`)
     }
@@ -246,6 +301,8 @@ async function launchGeneration(stateDirectory, state, generation) {
   } catch (error) {
     generation.phase = 'failed'
     generation.failure = error instanceof Error ? error.message : String(error)
+    await captureGenerationLogs(state, generation)
+    await stopGeneration(state, generation, { removeVolumes: true }).catch(() => undefined)
     writeState(stateDirectory, state)
     throw error
   }
@@ -277,9 +334,10 @@ async function cleanupOldGenerations(stateDirectory, state) {
   for (const generation of inactive.slice(keep)) {
     await run('docker', ['volume', 'rm', `${generation.composeProject}_dsh-data`]).catch(() => undefined)
     const workspace = assertManagedWorkspace(state, generation.workspace)
-    if (existsSync(workspace)) {
-      await run('git', ['worktree', 'remove', '--force', workspace], { cwd: state.sourceRoot })
-    }
+    const generationRoot = dirname(workspace)
+    if (existsSync(workspace)) rmSync(workspace, { recursive: true, force: true, maxRetries: 3 })
+    const packages = join(generationRoot, 'packages')
+    if (existsSync(packages)) rmSync(packages, { recursive: true, force: true, maxRetries: 3 })
     generation.cleanedAt = new Date().toISOString()
     writeState(stateDirectory, state)
   }
@@ -294,7 +352,10 @@ async function startCandidate(stateDirectory, state, request) {
   if (candidate === undefined) {
     const number = state.nextGeneration
     state.nextGeneration += 1
-    candidate = await prepareGeneration(state, number, sourceRef, bootstrapContent)
+    candidate = await prepareGeneration(state, number, sourceRef, bootstrapContent, {
+      sourceWorkspace: state.generations[state.stable].workspace,
+      parent: state.stable,
+    })
     candidate.requestId = request.id
     state.candidate = candidate.id
     writeState(stateDirectory, state)
@@ -363,6 +424,7 @@ async function processRequest(stateDirectory, request) {
     candidate.phase = 'stable'
     candidate.promotedAt = new Date().toISOString()
     candidate.handoff = request.payload ?? {}
+    writeGenerationManifest(candidate, 'stable')
     previous.phase = 'retiring'
     state.stable = candidate.id
     state.candidate = null
@@ -372,7 +434,7 @@ async function processRequest(stateDirectory, request) {
       handoff: request.payload?.handoff,
       summary: request.payload?.summary ?? '',
     })
-    await stopGeneration(state, previous)
+    await stopGeneration(state, previous, { removeVolumes: true })
     previous.phase = 'retired'
     writeState(stateDirectory, state)
     await cleanupOldGenerations(stateDirectory, state)
@@ -490,11 +552,14 @@ async function initialize(args) {
     throw new Error('--retain-generations must be a non-negative integer')
   }
   mkdirSync(join(stateDirectory, 'control', 'requests'), { recursive: true })
+  const repository = join(stateDirectory, 'repository.git')
+  await run('git', ['clone', '--bare', '--no-hardlinks', sourceRoot, repository], { cwd: stateDirectory })
   const state = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: requiredText(args.name ?? `self-evolve-${randomUUID().slice(0, 8)}`, '--name'),
     stateDirectory,
     sourceRoot,
+    repository,
     exampleRoot,
     basePort,
     resources: { cpus, memory: requiredText(args.memory ?? '8g', '--memory') },
