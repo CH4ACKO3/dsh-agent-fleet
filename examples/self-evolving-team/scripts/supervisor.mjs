@@ -176,6 +176,30 @@ async function recordGenerationCommit(state, sourceWorkspace, generationIdValue,
   return branch
 }
 
+async function publishCandidateReadySource(state, candidate, payload) {
+  const { stdout: status } = await run('git', ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: candidate.workspace,
+  })
+  if (status) throw new Error(`Candidate ${candidate.id} workspace must be clean before ready:\n${status}`)
+  const sourceRef = typeof payload?.sourceRef === 'string' && payload.sourceRef.trim()
+    ? payload.sourceRef.trim()
+    : 'HEAD'
+  const sourceCommit = await resolveCommit(candidate.workspace, sourceRef)
+  const headCommit = await resolveCommit(candidate.workspace, 'HEAD')
+  if (sourceCommit !== headCommit) {
+    throw new Error(`Candidate ready source ${sourceCommit} does not match workspace HEAD ${headCommit}`)
+  }
+  const gitBranch = await recordGenerationCommit(state, candidate.workspace, candidate.id, sourceCommit)
+  const publishedCommit = await resolveCommit(state.repository, `refs/heads/${gitBranch}`)
+  if (publishedCommit !== sourceCommit) {
+    throw new Error(`Published ${gitBranch} is ${publishedCommit}, expected ${sourceCommit}`)
+  }
+  candidate.sourceRef = sourceRef
+  candidate.sourceCommit = sourceCommit
+  candidate.gitBranch = gitBranch
+  writeGenerationManifest(candidate, 'candidate')
+}
+
 async function prepareGeneration(state, number, sourceRef, bootstrapContent, options = {}) {
   const id = generationId(number)
   const generationRoot = join(state.stateDirectory, 'generations', id)
@@ -692,6 +716,7 @@ async function processRequest(stateDirectory, request) {
   else if (request.type === 'candidate.reject') await destroyCandidate(stateDirectory, state, request, 'candidate.self_rejected')
   else if (request.type === 'candidate.ready') {
     const candidate = state.generations[state.candidate]
+    await publishCandidateReadySource(state, candidate, request.payload)
     candidate.phase = 'ready'
     candidate.readiness = request.payload ?? {}
     writeState(stateDirectory, state)

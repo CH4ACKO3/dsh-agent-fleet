@@ -98,6 +98,7 @@ node /opt/self-evolve/scripts/generation-control.mjs start-candidate \
 node /opt/self-evolve/scripts/generation-control.mjs watch --after 3
 
 # 候选代：自检通过或失败
+# ready 前先提交全部应继承文件并确认 git status 干净；宿主会发布当前 HEAD
 node /opt/self-evolve/scripts/generation-control.mjs ready \
   --summary "启动、构建和目标回归通过" \
   --evidence /workspace/evidence/candidate-readiness.md
