@@ -1,0 +1,14 @@
+harness: ale_run.agents.dsh_fleet.deployer.DshFleetDeployer
+executor: sandbox
+model: deepseek-v4-flash
+
+config:
+  api_key: ${env:DEEPSEEK_FLASH_API_KEY}
+  provider: memorax
+  provider_env_key: DEEPSEEK_FLASH_API_KEY
+  model: deepseek-v4-flash
+  max_tokens: 65536
+  team_config: /opt/dsh-fleet-ale/coding-small.json
+  patch_path: /opt/dsh-fleet-ale/memorax-headless.patch.yml
+  bridge_command: /usr/local/bin/dsh-llm-memorax-bridge
+  bridge_port: 3081

@@ -1,0 +1,15 @@
+name: dsh_fleet_k8s_migration
+
+agent: /data/zzr/frontal-team/ale/run-configs/dsh-fleet-scenarios/agent.yaml
+environment: /data/zzr/frontal-team/ale/run-configs/dsh-fleet-scenarios/environment.yaml
+tasks:
+  - path: computing_math/k8s_migration_1
+    variants: [0]
+
+output:
+  root: /data/zzr/frontal-team/ale/runs-dsh-fleet-scenarios/k8s-migration
+concurrency: 1
+wall_time_s: 7200
+auto_resume: false
+max_attempts: 1
+cleanup_mode: stop
