@@ -69,7 +69,8 @@ function publicState(state) {
 }
 
 async function run(command, args, options = {}) {
-  const result = await execFileAsync(command, args, {
+  const executable = process.platform === 'win32' && command === 'pnpm' ? 'pnpm.cmd' : command
+  const result = await execFileAsync(executable, args, {
     cwd: options.cwd,
     env: options.env ?? process.env,
     maxBuffer: 16 * 1024 * 1024,
