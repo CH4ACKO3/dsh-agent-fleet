@@ -792,7 +792,9 @@ export class FleetCollaborationService {
       const allowed = new Set<string>()
       for (const entry of FLEET_TOOL_CATALOG) {
         if (entry.source === 'host') {
-          if (!exposeHostFleetTools) continue
+          // A formal member may rescue an exhausted peer without receiving the
+          // broader host lifecycle and administration surface.
+          if (!exposeHostFleetTools && entry.name !== 'fleet_resurrect') continue
           if (ctx.tools.get(entry.name) === undefined) continue
           if (entry.name === 'fleet_member' && !permissions.has('team.manage') && !effective.op) continue
           allowed.add(entry.name)

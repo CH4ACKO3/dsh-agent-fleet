@@ -11,7 +11,7 @@ describe('Fleet member tool catalog', () => {
     expect([...all]).toEqual(expect.arrayContaining([
       'fleet_inbox', 'fleet_send', 'fleet_reply', 'fleet_goal', 'fleet_vote',
       'fleet_task', 'fleet_reconcile', 'fleet_channel', 'fleet_resource', 'fleet_progress',
-      'fleet_user_task',
+      'fleet_user_task', 'fleet_resurrect',
     ]))
     expect([...all]).not.toEqual(expect.arrayContaining([
       'fleet_messages', 'fleet_followup', 'fleet_wait', 'fleet_member_status',
@@ -27,6 +27,7 @@ describe('Fleet member tool catalog', () => {
       ['投票决定是否发布', 'fleet_vote'],
       ['处理任务状态决议', 'fleet_reconcile'],
       ['谁正在做什么', 'fleet_progress'],
+      ['复活异常成员', 'fleet_resurrect'],
       ['汇报用户任务结果', 'fleet_user_task'],
       ['助理接管执行', 'fleet_user_task'],
     ] as const

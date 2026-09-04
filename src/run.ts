@@ -2217,6 +2217,10 @@ interface ProtocolRecovery {
   readonly member: string
   readonly attempt: number
   pending: boolean
+  readonly exhausted?: boolean
+  readonly resurrections?: number
+  readonly resurrectedBy?: string
+  readonly resurrectionReason?: string
 }
 
 interface TeamActiveParticipantState {
@@ -6864,13 +6868,20 @@ export class FleetRunService {
     const record = this.records.get(runId)
     if (record === undefined || !this.hasRecoverableMemberTask(record, member)) return false
     const sessionId = String(agent.id)
-    const attempt = (this.protocolRecoveries.get(sessionId)?.attempt ?? 0) + 1
+    const currentRecovery = this.protocolRecoveries.get(sessionId)
+    const attempt = (currentRecovery?.attempt ?? 0) + 1
     if (attempt > PROTOCOL_RECOVERY_MAX_ATTEMPTS) {
       this.protocolRecoveries.set(sessionId, {
         runId,
         member,
         attempt: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
         pending: false,
+        exhausted: true,
+        resurrections: currentRecovery?.resurrections ?? 0,
+        ...(currentRecovery?.resurrectedBy === undefined ? {} : { resurrectedBy: currentRecovery.resurrectedBy }),
+        ...(currentRecovery?.resurrectionReason === undefined
+          ? {}
+          : { resurrectionReason: currentRecovery.resurrectionReason }),
       })
       this.appendEvent(runId, 'member_protocol_recovery_exhausted', {
         member,
@@ -6889,7 +6900,18 @@ export class FleetRunService {
       })
       return this.escalateProtocolRecovery(record, member, sessionId, message, failedTasks.map(task => task.id))
     }
-    this.protocolRecoveries.set(sessionId, { runId, member, attempt, pending: true })
+    this.protocolRecoveries.set(sessionId, {
+      runId,
+      member,
+      attempt,
+      pending: true,
+      exhausted: false,
+      resurrections: currentRecovery?.resurrections ?? 0,
+      ...(currentRecovery?.resurrectedBy === undefined ? {} : { resurrectedBy: currentRecovery.resurrectedBy }),
+      ...(currentRecovery?.resurrectionReason === undefined
+        ? {}
+        : { resurrectionReason: currentRecovery.resurrectionReason }),
+    })
     this.appendEvent(runId, 'member_protocol_recovery_scheduled', {
       member,
       sessionId,
@@ -6926,7 +6948,10 @@ export class FleetRunService {
     if (agent.status !== 'idle') return
     recovery.pending = false
     const recoveryScope = record.work?.id ?? record.id
-    const retryGuidance = recovery.attempt === 1
+    const resurrectionGuidance = recovery.attempt === 0 && recovery.resurrectedBy !== undefined
+    const retryGuidance = resurrectionGuidance
+      ? `Peer @${recovery.resurrectedBy} explicitly resurrected you with a fresh bounded recovery grant.${recovery.resurrectionReason === undefined ? '' : ` Reason: ${recovery.resurrectionReason}`}`
+      : recovery.attempt === 1
       ? 'Re-check durable Task state and artifacts, assume an earlier external action may already have completed, and continue from the smallest safe next step without blindly replaying irreversible actions.'
       : `Retry ${recovery.attempt}/${PROTOCOL_RECOVERY_MAX_ATTEMPTS}: continue from durable state and do not replay irreversible actions.`
     this.requireRuntime(record.id).messages.sendSystemNotification(sessionId, {
@@ -6943,7 +6968,73 @@ export class FleetRunService {
       member: recovery.member,
       sessionId,
       attempt: recovery.attempt,
+      ...(recovery.resurrectedBy === undefined ? {} : { resurrectedBy: recovery.resurrectedBy }),
     })
+  }
+
+  resurrectMember(
+    caller: Agent,
+    runId: string | undefined,
+    memberReference: string,
+    reason?: string,
+  ): { readonly member: FleetRunMember; readonly resurrectedBy: string; readonly attemptsGranted: number } {
+    const record = this.requireCallerRecord(caller, runId)
+    this.requireParticipant(record, caller)
+    const callerId = String(caller.id)
+    const callerParticipant = this.participants(record).find(candidate => candidate.sessionId === callerId)
+    if (callerParticipant === undefined) throw new Error(`Agent ${callerId} is not a Fleet participant`)
+    const reference = memberReference.startsWith('@') ? memberReference.slice(1) : memberReference
+    const views = this.memberViews(record.id)
+    const matches = this.participants(record).filter(candidate => {
+      const view = views.find(value => value.id === candidate.name)
+      return candidate.name === reference || view?.name === reference
+    })
+    if (matches.length === 0) throw new Error(`unknown Fleet member ${memberReference}`)
+    if (matches.length > 1) throw new Error(`ambiguous Fleet member ${memberReference}`)
+    const target = matches[0]!
+    if (target.sessionId === callerId) throw new Error('a Fleet member cannot resurrect itself')
+    const targetMember = record.members.find(candidate => candidate.name === target.name)
+      ?? this.assistantAsMember(record.assistants.find(candidate => candidate.view.id === target.name)!)
+    const recovery = this.protocolRecoveries.get(target.sessionId)
+    if (recovery?.exhausted !== true) {
+      throw new Error(`Fleet member ${target.name} has not exhausted protocol recovery`)
+    }
+    if ((recovery.resurrections ?? 0) >= 1) {
+      throw new Error(`Fleet member ${target.name} already used its peer resurrection grant for this failure sequence`)
+    }
+    const budget = this.budgetRemaining(record, target.name)
+    if (budget.exhaustedScope !== undefined) throw this.budgetError(record, target.name, budget.exhaustedScope)
+    if (!this.hasRecoverableMemberTask(record, target.name)) {
+      throw new Error(`Assign replacement work to Fleet member ${target.name} before resurrecting it`)
+    }
+    const agent = this.ctx.agents.get(SessionId(target.sessionId))
+    if (agent === undefined || agent.status !== 'idle') {
+      throw new Error(`Fleet member ${target.name} must be loaded and idle before resurrection`)
+    }
+    const resurrectionReason = reason?.trim()
+    this.protocolRecoveries.set(target.sessionId, {
+      runId: record.id,
+      member: target.name,
+      attempt: 0,
+      pending: true,
+      exhausted: false,
+      resurrections: 1,
+      resurrectedBy: callerParticipant.name,
+      ...(resurrectionReason === undefined || resurrectionReason === '' ? {} : { resurrectionReason }),
+    })
+    this.appendEvent(record.id, 'member_protocol_resurrected', {
+      member: target.name,
+      sessionId: target.sessionId,
+      resurrectedBy: callerParticipant.name,
+      attemptsGranted: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+      ...(resurrectionReason === undefined || resurrectionReason === '' ? {} : { reason: resurrectionReason }),
+    })
+    queueMicrotask(() => { this.wakeProtocolRecovery(target.sessionId) })
+    return {
+      member: structuredClone(targetMember),
+      resurrectedBy: callerParticipant.name,
+      attemptsGranted: PROTOCOL_RECOVERY_MAX_ATTEMPTS,
+    }
   }
 
   private escalateProtocolRecovery(
@@ -9959,6 +10050,15 @@ const MESSAGE_ACTION_RESULT_SCHEMA = {
   properties: {},
 } as const
 
+const MEMBER_RESURRECTION_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false, properties: {
+    action: { type: 'string', required: true, const: 'resurrect' },
+    member: { ...RUN_MEMBER_SCHEMA, required: true },
+    resurrectedBy: { type: 'string', required: true },
+    attemptsGranted: { type: 'integer', required: true },
+  },
+} as const
+
 const MEMBER_MANAGEMENT_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
     action: { type: 'string', required: true, enum: ['list', 'add', 'update', 'configure', 'configure_all', 'pause', 'resume', 'remove'] },
@@ -10140,6 +10240,22 @@ export function installRunTools(
         ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to }),
         ...(args.resources === undefined ? {} : { resources: args.resources }),
       }))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'fleet_resurrect',
+    description: 'Resurrect one other Team member after malformed tool protocol exhausted its automatic retries. First assign that member concrete replacement work. This grants one fresh bounded recovery sequence, wakes the member immediately, and cannot bypass model-token budgets. The same uninterrupted failure sequence can be resurrected only once; valid output resets it.',
+    parameters: {
+      member: { type: 'string', required: true, description: 'Exact member id or display name, optionally prefixed with @. You cannot resurrect yourself.' },
+      run_id: { type: 'string', description: 'Team id; inferred from the calling member when omitted.' },
+      reason: { type: 'string', description: 'Short explanation of the replacement work or new evidence that makes another attempt useful.' },
+    },
+    output: jsonOutput(MEMBER_RESURRECTION_RESULT_SCHEMA),
+    execute(args, exec) {
+      const caller = callingAgent(exec.agent, 'fleet_resurrect')
+      const result = service.resurrectMember(caller, args.run_id, args.member, args.reason)
+      return Promise.resolve({ action: 'resurrect' as const, ...result })
     },
   }))
 

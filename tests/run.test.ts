@@ -2733,7 +2733,7 @@ describe('FleetRunService', () => {
     const register = vi.fn(() => () => {})
     const restrict = vi.fn(() => () => {})
     const guard = vi.fn(() => () => {})
-    const get = vi.fn((name: string) => name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
+    const get = vi.fn((name: string) => name === 'fleet_resurrect' || name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
     const memberSetup = vi.fn()
     const onMemberEvent = vi.fn(() => () => true)
     context.on('fleet/member/setup', memberSetup)
@@ -2771,6 +2771,7 @@ describe('FleetRunService', () => {
       'fleet_inbox', 'fleet_reply', 'fleet_send', 'fleet_channel',
       'fleet_task', 'fleet_goal', 'fleet_vote', 'fleet_reconcile',
     ]))
+    expect(restrict.mock.calls.some(call => (call[0] as { deny: readonly string[] }).deny.includes('fleet_resurrect'))).toBe(false)
     expect(residentTools).not.toEqual(expect.arrayContaining([
       'fleet_messages', 'fleet_followup', 'fleet_wait', 'fleet_meeting',
       'fleet_schedule', 'fleet_calendar', 'fleet_tools',
@@ -5521,6 +5522,98 @@ describe('FleetRunService', () => {
     expect(service.taskBoard(run.id).ownerTasks('lead')).toEqual([])
     expect(service.readTrace(run.id, 0, 300).events.some(event =>
       event.type === 'member_auto_continuation_paused')).toBe(false)
+    disconnect()
+  })
+
+  it('lets one peer resurrect an exhausted member for one fresh bounded recovery sequence', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+    if (lead === undefined || reviewer === undefined) throw new Error('expected live Team peers')
+    const malformedTurn = (seq: number): SessionEvent => ({
+      seq,
+      time: Date.now(),
+      type: 'turn/end',
+      data: {
+        turn: seq,
+        reason: {
+          kind: 'error',
+          error: {
+            code: 'PI_AI_ERROR',
+            message: 'malformed_tool_protocol: Inference backend returned malformed tool-call protocol.',
+          },
+        },
+      },
+    } as unknown as SessionEvent)
+
+    for (const seq of [10, 11, 12]) {
+      service.recordMemberSessionEvent(lead.id, malformedTurn(seq))
+      service.agentIdle(lead as unknown as Agent)
+      await Promise.resolve()
+    }
+    expect(() => service.resurrectMember(
+      reviewer as unknown as Agent,
+      run.id,
+      'lead',
+      'retry the replacement task',
+    )).toThrow('Assign replacement work')
+    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({ status: 'idle' })
+
+    service.taskBoard(run.id).createGoal(reviewer.id, {
+      title: 'Recover the interrupted implementation',
+      owners: ['lead'],
+    })
+    const result = service.resurrectMember(
+      reviewer as unknown as Agent,
+      run.id,
+      '@Lead',
+      'continue from the checked artifact',
+    )
+    await Promise.resolve()
+
+    expect(result).toMatchObject({
+      member: { name: 'lead' },
+      resurrectedBy: 'reviewer',
+      attemptsGranted: 2,
+    })
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('explicitly resurrected you') }),
+    ])
+    expect(() => service.resurrectMember(reviewer as unknown as Agent, run.id, 'lead'))
+      .toThrow('has not exhausted protocol recovery')
+    expect(service.readTrace(run.id, 0, 400).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'member_protocol_resurrected',
+        data: expect.stringContaining('"resurrectedBy":"reviewer"'),
+      }),
+      expect.objectContaining({
+        type: 'member_protocol_recovery_woken',
+        data: expect.stringContaining('"attempt":0'),
+      }),
+    ]))
+
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 13,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: {
+        interrupted: false,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Recovered with useful evidence.' }] },
+      },
+    } as unknown as SessionEvent)
+    expect(service.readTrace(run.id, 0, 500).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'member_protocol_recovery_reset',
+        data: expect.stringContaining('valid_assistant_output'),
+      }),
+    ]))
     disconnect()
   })
 
