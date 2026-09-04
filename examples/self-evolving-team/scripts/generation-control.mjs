@@ -119,22 +119,41 @@ async function waitForEvent(args) {
     return
   }
   await new Promise((resolve, reject) => {
-    const watcher = watch(directory, { persistent: true }, () => {
+    let settled = false
+    let watcher
+    let fallback
+    const cleanup = () => {
+      watcher?.close()
+      if (fallback !== undefined) clearInterval(fallback)
+      process.off('SIGINT', interrupted)
+    }
+    const check = () => {
+      if (settled) return
       try {
         const event = nextEvent(directory, after)
         if (event === undefined) return
-        watcher.close()
+        settled = true
+        cleanup()
         process.stdout.write(`${JSON.stringify(event)}\n`)
         resolve()
       } catch (error) {
-        watcher.close()
+        settled = true
+        cleanup()
         reject(error)
       }
-    })
-    process.once('SIGINT', () => {
-      watcher.close()
+    }
+    const interrupted = () => {
+      if (settled) return
+      settled = true
+      cleanup()
       reject(new Error('Event wait interrupted'))
-    })
+    }
+    watcher = watch(directory, { persistent: true }, check)
+    // Docker Desktop bind mounts can drop fs.watch notifications. This timer
+    // only rescans the local event directory; it does not wake an Agent turn.
+    fallback = setInterval(check, 1_000)
+    process.once('SIGINT', interrupted)
+    check()
   })
 }
 
