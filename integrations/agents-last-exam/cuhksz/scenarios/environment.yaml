@@ -1,0 +1,16 @@
+snapshots:
+  cpu-free-ubuntu:
+    provider: docker
+    image: ale-ubuntu22-docker
+    docker:
+      image_ref: ale-ubuntu22-dsh-fleet:0.2.0
+      shm_size: 2g
+      resolution: [1024, 768]
+      cpus: 6
+      memory: 12g
+      privileged: true
+      enable_dind: true
+
+task_data_source: local:/data/zzr/frontal-team/ale/repo/task-data
+output_path: local
+name: dsh_fleet_scenarios
