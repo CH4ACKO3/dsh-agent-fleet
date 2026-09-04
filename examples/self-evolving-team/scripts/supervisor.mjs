@@ -43,6 +43,16 @@ function requiredAbsolute(value, name) {
   return resolve(normalized)
 }
 
+function validateJsonDocument(content, name) {
+  try {
+    JSON.parse(content)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`${name} is not valid JSON: ${detail}`, { cause: error })
+  }
+  return content
+}
+
 function atomicJson(path, value) {
   mkdirSync(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
@@ -171,6 +181,15 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
   const generationRoot = join(state.stateDirectory, 'generations', id)
   const workspace = join(generationRoot, 'workspace')
   if (existsSync(workspace)) throw new Error(`Generation workspace already exists: ${workspace}`)
+  const inheritedTeamConfigPath = options.parent === undefined
+    ? join(state.exampleRoot, 'team.local.json')
+    : state.generations[options.parent].teamConfigPath
+  const teamConfigContent = validateJsonDocument(
+    options.teamConfigContent ?? readFileSync(inheritedTeamConfigPath, 'utf8'),
+    options.teamConfigContent === undefined
+      ? `inherited team configuration ${inheritedTeamConfigPath}`
+      : 'candidate team configuration',
+  )
   const sourceWorkspace = options.sourceWorkspace ?? state.sourceRoot
   const sourceCommit = await resolveCommit(sourceWorkspace, sourceRef)
   mkdirSync(generationRoot, { recursive: true })
@@ -223,10 +242,6 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       '',
     ].join('\n'), 'utf8')
     const token = randomBytes(32).toString('hex')
-    const teamConfigContent = options.teamConfigContent
-      ?? readFileSync(options.parent === undefined
-        ? join(state.exampleRoot, 'team.local.json')
-        : state.generations[options.parent].teamConfigPath, 'utf8')
     writeFileSync(teamConfigPath, teamConfigContent, 'utf8')
     writeFileSync(join(bootstrapDirectory, 'control-token'), `${token}\n`, 'utf8')
     const generation = {
