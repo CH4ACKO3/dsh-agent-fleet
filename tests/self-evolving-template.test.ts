@@ -24,6 +24,7 @@ describe('self-evolving Team template', () => {
 
     expect(bootstrap).toContain('evidence/evolution-backlog.md')
     expect(bootstrap).toContain('临时规避必须同时留下永久修复入口')
+    expect(bootstrap).toContain('休眠保障代、活跃稳定代、可选的活跃候选代')
     expect(platform?.prompt).toContain('建议的同角色提示词改进')
     expect(reliability?.prompt).toContain('下一代同角色')
   })

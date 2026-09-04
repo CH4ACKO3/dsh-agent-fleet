@@ -73,3 +73,21 @@ export function authorizeRequest(state, request) {
   }
   throw new Error(`Unsupported request type ${request.type}`)
 }
+
+export function advancePromotionWindow(state) {
+  const previous = state.generations[state.stable]
+  const candidate = state.candidate === null ? undefined : state.generations[state.candidate]
+  if (previous === undefined) throw new Error('Stable generation is unavailable')
+  if (candidate === undefined || candidate.phase !== 'ready') {
+    throw new Error('A ready candidate is required to advance the generation window')
+  }
+  const retiredGuardian = state.guardian === null || state.guardian === undefined
+    ? undefined
+    : state.generations[state.guardian]
+  previous.phase = 'guardian'
+  candidate.phase = 'stable'
+  state.stable = candidate.id
+  state.guardian = previous.id
+  state.candidate = null
+  return { previous, candidate, retiredGuardian }
+}

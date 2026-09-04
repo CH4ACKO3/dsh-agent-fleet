@@ -7,7 +7,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
-import { HOST_GENERATION_MARKER, authorizeRequest, stripHostGenerationFooter, verifyRequest } from './protocol.mjs'
+import { HOST_GENERATION_MARKER, advancePromotionWindow, authorizeRequest, stripHostGenerationFooter, verifyRequest } from './protocol.mjs'
 
 const execFileAsync = promisify(execFile)
 const generationMonitors = new Map()
@@ -396,6 +396,22 @@ async function archiveGenerationContext(state, generation) {
   }
 }
 
+async function suspendGeneration(state, generation) {
+  await compose(state, generation, [
+    'exec', '-T', 'dsh',
+    '/root/.patchouli/bin/v0.1.6/patchouli-db',
+    'checkpoint', '--endpoint', '/data/.patchouli/run/patchouli.sock',
+  ])
+  await compose(state, generation, ['pause'])
+  generation.suspendedAt = new Date().toISOString()
+}
+
+async function resumeGeneration(state, generation) {
+  await compose(state, generation, ['unpause'])
+  generation.resumedAt = new Date().toISOString()
+  delete generation.suspendedAt
+}
+
 async function monitorGeneration(stateDirectory, state, generation) {
   if (generationMonitors.has(generation.id)) return
   const { stdout } = await compose(state, generation, ['ps', '-q', 'dsh'])
@@ -410,18 +426,59 @@ async function monitorGeneration(stateDirectory, state, generation) {
     try {
       const current = readState(stateDirectory)
       const stopped = current.generations[generation.id]
-      if (stopped === undefined || ['retiring', 'retired', 'rejecting', 'rejected', 'failed'].includes(stopped.phase)) return
+      if (stopped === undefined || ['retiring', 'retirement_failed', 'retired', 'rejecting', 'rejected', 'failed'].includes(stopped.phase)) return
       const reportedExitCode = Number(waitOutput.trim().split(/\s+/).at(-1))
       const exitCode = Number.isInteger(reportedExitCode) ? reportedExitCode : waitProcessCode
+      const stoppedRole = current.stable === stopped.id
+        ? 'stable'
+        : current.guardian === stopped.id
+          ? 'guardian'
+          : current.candidate === stopped.id
+            ? 'candidate'
+            : 'generation'
       stopped.phase = 'failed'
       stopped.failure = `DSH container exited with code ${exitCode ?? 'unknown'}`
       writeState(stateDirectory, current)
-      await emit(stateDirectory, current, stopped.id, 'generation.exited', { exitCode })
-      const peer = current.stable === stopped.id ? current.candidate : current.stable
-      if (peer !== null && peer !== stopped.id) {
-        await emit(stateDirectory, current, peer, 'generation.peer_exited', {
-          generation: stopped.id, exitCode,
+      await emit(stateDirectory, current, stopped.id, 'generation.exited', { exitCode, role: stoppedRole })
+      if (stoppedRole === 'stable' && current.guardian !== null && current.guardian !== undefined) {
+        const guardian = current.generations[current.guardian]
+        const orphanedCandidate = current.candidate === null ? undefined : current.generations[current.candidate]
+        if (orphanedCandidate !== undefined) {
+          orphanedCandidate.phase = 'rejecting'
+        }
+        await resumeGeneration(current, guardian)
+        guardian.phase = 'stable'
+        guardian.recoveredAt = new Date().toISOString()
+        guardian.recoveredFrom = stopped.id
+        current.stable = guardian.id
+        current.guardian = null
+        current.candidate = null
+        writeGenerationManifest(guardian, 'stable')
+        writeState(stateDirectory, current)
+        await emit(stateDirectory, current, guardian.id, 'generation.recovered', {
+          failed: stopped.id,
+          discardedCandidate: orphanedCandidate?.id,
         })
+        if (orphanedCandidate !== undefined) {
+          await stopGeneration(current, orphanedCandidate, { removeVolumes: true }).catch(() => undefined)
+          orphanedCandidate.phase = 'rejected'
+          orphanedCandidate.reason = `Parent stable generation ${stopped.id} exited`
+          writeState(stateDirectory, current)
+        }
+      } else if (stoppedRole === 'guardian') {
+        current.guardian = null
+        writeState(stateDirectory, current)
+        await emit(stateDirectory, current, current.stable, 'guardian.exited', {
+          guardian: stopped.id,
+          exitCode,
+        })
+      } else {
+        const peer = stoppedRole === 'candidate' ? current.stable : null
+        if (peer !== null && peer !== stopped.id) {
+          await emit(stateDirectory, current, peer, 'generation.peer_exited', {
+            generation: stopped.id, exitCode,
+          })
+        }
       }
       await captureGenerationLogs(current, stopped)
       await stopGeneration(current, stopped, { removeVolumes: true })
@@ -460,8 +517,13 @@ async function launchGeneration(stateDirectory, state, generation, options = {})
 async function stopGeneration(state, generation, { removeVolumes = false, archiveContext = removeVolumes } = {}) {
   if (archiveContext) {
     await captureGenerationLogs(state, generation)
-    await compose(state, generation, ['stop', '--timeout', '30'])
-    await archiveGenerationContext(state, generation)
+    if (generation.suspendedAt === undefined) {
+      await compose(state, generation, ['stop', '--timeout', '30'])
+      await archiveGenerationContext(state, generation)
+    } else {
+      await archiveGenerationContext(state, generation)
+      await compose(state, generation, ['kill']).catch(() => undefined)
+    }
   }
   await compose(state, generation, [
     'down',
@@ -481,6 +543,18 @@ function assertManagedWorkspace(state, workspace) {
 }
 
 async function cleanupOldGenerations(stateDirectory, state) {
+  for (const generation of Object.values(state.generations).filter(candidate => candidate.phase === 'retirement_failed')) {
+    try {
+      await stopGeneration(state, generation, { removeVolumes: true })
+      generation.phase = 'retired'
+      generation.retiredAt = new Date().toISOString()
+      delete generation.retirementFailure
+      writeState(stateDirectory, state)
+    } catch (error) {
+      generation.retirementFailure = error instanceof Error ? error.message : String(error)
+      writeState(stateDirectory, state)
+    }
+  }
   const keep = state.retention?.generations ?? 2
   const inactive = Object.values(state.generations)
     .filter(generation => ['retired', 'rejected', 'failed'].includes(generation.phase) && generation.cleanedAt === undefined)
@@ -609,24 +683,84 @@ async function processRequest(stateDirectory, request) {
   } else if (request.type === 'generation.promote') {
     const previous = state.generations[state.stable]
     const candidate = state.generations[state.candidate]
-    candidate.phase = 'stable'
-    candidate.promotedAt = new Date().toISOString()
-    candidate.handoff = request.payload ?? {}
-    const inherited = persistInheritedHandoff(previous, candidate, request.payload)
-    writeGenerationManifest(candidate, 'stable')
-    previous.phase = 'retiring'
-    state.stable = candidate.id
-    state.candidate = null
+    const previousGuardian = state.guardian
+    const inheritedDirectory = join(candidate.workspace, '.self-evolve', 'inherited')
+    const inheritedJsonPath = join(inheritedDirectory, 'inherited.json')
+    const handoffPath = join(inheritedDirectory, `${previous.id}-handoff.md`)
+    const inheritedJsonBefore = existsSync(inheritedJsonPath) ? readFileSync(inheritedJsonPath) : undefined
+    const handoffBefore = existsSync(handoffPath) ? readFileSync(handoffPath) : undefined
+    previous.phase = 'hibernating'
     writeState(stateDirectory, state)
+    try {
+      await suspendGeneration(state, previous)
+    } catch (error) {
+      previous.phase = 'stable'
+      delete previous.suspendedAt
+      writeState(stateDirectory, state)
+      throw error
+    }
+    let inherited
+    let advanced
+    try {
+      candidate.promotedAt = new Date().toISOString()
+      candidate.handoff = request.payload ?? {}
+      inherited = persistInheritedHandoff(previous, candidate, request.payload)
+      advanced = advancePromotionWindow(state)
+      writeGenerationManifest(previous, 'guardian')
+      writeGenerationManifest(candidate, 'stable')
+      writeState(stateDirectory, state)
+    } catch (error) {
+      state.stable = previous.id
+      state.guardian = previousGuardian
+      state.candidate = candidate.id
+      previous.phase = 'stable'
+      candidate.phase = 'ready'
+      delete candidate.promotedAt
+      delete candidate.handoff
+      delete candidate.inheritedHandoff
+      if (inheritedJsonBefore === undefined) rmSync(inheritedJsonPath, { force: true })
+      else writeFileSync(inheritedJsonPath, inheritedJsonBefore)
+      if (handoffBefore === undefined) rmSync(handoffPath, { force: true })
+      else writeFileSync(handoffPath, handoffBefore)
+      await resumeGeneration(state, previous)
+      writeGenerationManifest(previous, 'stable')
+      writeGenerationManifest(candidate, 'candidate')
+      writeState(stateDirectory, state)
+      throw error
+    }
     await emit(stateDirectory, state, candidate.id, 'generation.promoted', {
       previous: previous.id,
+      guardian: previous.id,
+      retiredGuardian: advanced.retiredGuardian?.id,
       handoff: request.payload?.handoff,
       summary: request.payload?.summary ?? '',
       inherited,
     })
-    await stopGeneration(state, previous, { removeVolumes: true })
-    previous.phase = 'retired'
-    writeState(stateDirectory, state)
+    const oldGuardian = advanced.retiredGuardian
+    if (oldGuardian !== undefined) {
+      oldGuardian.phase = 'retiring'
+      writeState(stateDirectory, state)
+      try {
+        await stopGeneration(state, oldGuardian, { removeVolumes: true })
+        oldGuardian.phase = 'retired'
+        oldGuardian.retiredBy = candidate.id
+        oldGuardian.retiredAt = new Date().toISOString()
+        writeState(stateDirectory, state)
+        await emit(stateDirectory, state, candidate.id, 'guardian.retired', {
+          guardian: oldGuardian.id,
+          replacement: previous.id,
+        })
+      } catch (error) {
+        oldGuardian.phase = 'retirement_failed'
+        oldGuardian.retirementFailure = error instanceof Error ? error.message : String(error)
+        writeState(stateDirectory, state)
+        await emit(stateDirectory, state, candidate.id, 'guardian.retirement_failed', {
+          guardian: oldGuardian.id,
+          replacement: previous.id,
+          error: oldGuardian.retirementFailure,
+        })
+      }
+    }
     await cleanupOldGenerations(stateDirectory, state)
   }
   const completed = readState(stateDirectory)
@@ -687,7 +821,7 @@ async function serve(stateDirectory) {
   const state = readState(stateDirectory)
   if (state.status === 'stopped') return
   for (const generation of Object.values(state.generations)) {
-    if (['stable', 'observing', 'ready'].includes(generation.phase)) {
+    if (['stable', 'guardian', 'hibernating', 'observing', 'ready'].includes(generation.phase)) {
       await monitorGeneration(stateDirectory, state, generation)
     }
   }
@@ -719,6 +853,7 @@ async function stopRun(stateDirectory) {
     generation.phase = 'stopped'
   }
   state.status = 'stopped'
+  state.guardian = null
   state.candidate = null
   state.stoppedAt = new Date().toISOString()
   writeState(stateDirectory, state)
@@ -745,7 +880,7 @@ async function initialize(args) {
   const repository = join(stateDirectory, 'repository.git')
   await run('git', ['clone', '--bare', '--no-hardlinks', sourceRoot, repository], { cwd: stateDirectory })
   const state = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     name: requiredText(args.name ?? `self-evolve-${randomUUID().slice(0, 8)}`, '--name'),
     stateDirectory,
     sourceRoot,
@@ -759,6 +894,7 @@ async function initialize(args) {
     ...(args.provider === undefined ? {} : { provider: requiredText(args.provider, '--provider') }),
     ...(args.model === undefined ? {} : { model: requiredText(args.model, '--model') }),
     stable: generationId(1),
+    guardian: null,
     candidate: null,
     nextGeneration: 2,
     generations: {},

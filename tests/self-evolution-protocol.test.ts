@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  advancePromotionWindow,
   authorizeRequest,
   signRequest,
   stripHostGenerationFooter,
@@ -10,11 +11,12 @@ import {
 function state(candidatePhase = 'observing') {
   return {
     stable: 'g0001',
+    guardian: null as string | null,
     candidate: 'g0002',
     generations: {
       g0001: { id: 'g0001', phase: 'stable' },
       g0002: { id: 'g0002', phase: candidatePhase },
-    },
+    } as Record<string, { id: string, phase: string }>,
   }
 }
 
@@ -59,5 +61,20 @@ describe('self-evolution generation protocol', () => {
     expect(() => authorizeRequest(state('ready'), request('g0001', 'generation.promote'))).not.toThrow()
     expect(() => authorizeRequest(state('ready'), request('g0002', 'generation.promote')))
       .toThrow('Only the stable generation')
+  })
+
+  it('keeps the previous stable generation as a guardian until its child reproduces', () => {
+    const first = state('ready')
+    const firstAdvance = advancePromotionWindow(first)
+    expect(first).toMatchObject({ stable: 'g0002', guardian: 'g0001', candidate: null })
+    expect(firstAdvance.previous.phase).toBe('guardian')
+    expect(firstAdvance.retiredGuardian).toBeUndefined()
+
+    first.generations.g0003 = { id: 'g0003', phase: 'ready' }
+    first.candidate = 'g0003'
+    const secondAdvance = advancePromotionWindow(first)
+    expect(first).toMatchObject({ stable: 'g0003', guardian: 'g0002', candidate: null })
+    expect(secondAdvance.retiredGuardian?.id).toBe('g0001')
+    expect(first.generations.g0002.phase).toBe('guardian')
   })
 })
