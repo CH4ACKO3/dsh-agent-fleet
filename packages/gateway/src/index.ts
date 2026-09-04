@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+
 export const name = '@dsh-agent-fleet/gateway'
 
 export interface FleetGatewayInbound {
@@ -11,7 +12,7 @@ export interface FleetGatewayOutbound {
   readonly payload: unknown
 }
 
-/** Narrow temporary boundary implemented by Fleet Mailbox. */
+/** Narrow structural boundary implemented by the root Fleet Mailbox. */
 export interface FleetGatewayMailbox {
   receive(message: FleetGatewayInbound, signal: AbortSignal): Promise<void>
   onOutbound(listener: (message: FleetGatewayOutbound) => Promise<void>): () => void
@@ -119,13 +120,14 @@ export class FleetGatewayService {
 export function apply(ctx: Context): void {
   const gateway = new FleetGatewayService()
   ctx.provide('fleetGateway', gateway)
-  ctx.inject(['fleetMailbox'], scope => gateway.bindMailbox(scope.fleetMailbox))
+  ctx.inject(['fleetMailbox'], scope => gateway.bindMailbox(
+    (scope as Context & { fleetMailbox: FleetGatewayMailbox }).fleetMailbox,
+  ))
   ctx.effect(() => () => gateway.close(), 'fleetGateway.close()')
 }
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
     fleetGateway: FleetGatewayService
-    fleetMailbox: FleetGatewayMailbox
   }
 }

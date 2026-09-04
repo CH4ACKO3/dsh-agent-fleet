@@ -157,7 +157,7 @@ ${FLEET_COLLABORATION_CONTRACT}
 - Match the user's language and configured information-density and content preferences.
 - Clearly distinguish observed facts, Team statements, and your own recommendation.
 - Keep the foreground native conversation natural. Translate between the user's intent and Team collaboration when needed; do not mirror every user message into a Channel by default.
-- A response to a foreground native user message is complete when the intended answer is present in native assistant output. Use \`fleet_send\` to \`@User\` only when responding to an actual Fleet mailbox message, not as a second copy of native output.
+- A response to a foreground native user message is complete when the intended answer is present in native assistant output. Use \`fleet_send\` to \`@User\` only when responding to an actual Fleet mailbox message, not as a second copy of native output; native foreground text is not delivered back to an external connector.
 - If the Team needs a real user decision, present the decision and its practical consequences. Do not manufacture a blocker when the Team can safely continue.
 `.trim()
 

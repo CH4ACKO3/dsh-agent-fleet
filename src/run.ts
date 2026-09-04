@@ -2295,6 +2295,7 @@ export class FleetRunService {
   private residentAssistants: FleetResidentAssistantController | undefined
   private readonly changeListeners = new Set<() => void>()
   private readonly traceChangeListeners = new Set<(teamId: string, memberId: string) => void>()
+  private readonly coordinationListeners = new Set<(runId: string, event: FleetCoordinationEvent) => void>()
   private readonly registryDirectory: string
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
@@ -2350,6 +2351,11 @@ export class FleetRunService {
   subscribeTraceChanges(listener: (teamId: string, memberId: string) => void): () => void {
     this.traceChangeListeners.add(listener)
     return () => { this.traceChangeListeners.delete(listener) }
+  }
+
+  subscribeCoordination(listener: (runId: string, event: FleetCoordinationEvent) => void): () => void {
+    this.coordinationListeners.add(listener)
+    return () => { this.coordinationListeners.delete(listener) }
   }
 
   setResidentAssistantController(controller: FleetResidentAssistantController | undefined): void {
@@ -5689,6 +5695,7 @@ export class FleetRunService {
     const runtime = this.collaboration.get(runId)
     if (record === undefined || runtime === undefined) return
     this.appendEvent(record.id, `coordination.${event.type}`, event)
+    for (const listener of this.coordinationListeners) listener(record.id, structuredClone(event))
     if (event.type === 'message') {
       const sender = this.participants(record).find(participant =>
         participant.name === event.message.from || participant.sessionId === event.message.from)
@@ -8358,6 +8365,7 @@ export class FleetRunService {
     this.sharedFileLastScans.clear()
     this.changeListeners.clear()
     this.traceChangeListeners.clear()
+    this.coordinationListeners.clear()
   }
 
   private watchSharedFiles(record: FleetRunRecord): void {
