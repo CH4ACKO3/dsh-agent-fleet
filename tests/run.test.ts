@@ -3210,6 +3210,8 @@ describe('FleetRunService', () => {
     writeFileSync(resultPath, '# Result\n\nVerified.\n')
     mkdirSync(join(root, '.cache'), { recursive: true })
     writeFileSync(join(root, '.cache', 'solver.bin'), 'cache payload\n')
+    mkdirSync(join(root, 'packages', 'example', 'lib'), { recursive: true })
+    writeFileSync(join(root, 'packages', 'example', 'lib', 'index.js'), 'generated output\n')
     const fileSyncInternals = service as unknown as {
       readonly sharedFileLastScans: Map<string, number>
       stopSharedFileWatcher(teamId: string): void
@@ -3232,6 +3234,9 @@ describe('FleetRunService', () => {
     }))
     expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
       path: join(root, '.cache', 'solver.bin'),
+    }))
+    expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
+      path: join(root, 'packages', 'example', 'lib', 'index.js'),
     }))
     expect(service.resourceStore(run.id).listResources()).not.toContainEqual(expect.objectContaining({
       path: configPath,

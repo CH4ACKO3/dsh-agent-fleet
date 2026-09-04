@@ -58,7 +58,7 @@ services:
       FLEET_AUTO_READY_FILE: /workspace/.self-evolve/fleet-bootstrap-ready.json
       FLEET_AUTO_PROVIDER: ${FLEET_AUTO_PROVIDER:-memorax}
       FLEET_AUTO_MODEL: ${FLEET_AUTO_MODEL:-deepseek-v4-flash}
-      SELF_EVOLVE_CONTROL_DIR: /control
+      SELF_EVOLVE_CONTROL_DIR: /workspace/.self-evolve/control
       SELF_EVOLVE_GENERATION: ${SELF_EVOLVE_GENERATION:?SELF_EVOLVE_GENERATION is required}
       SELF_EVOLVE_CONTROL_TOKEN_FILE: /workspace/.self-evolve/control-token
       NPM_CONFIG_OFFLINE: "true"
@@ -73,7 +73,7 @@ services:
         target: /workspace
       - type: bind
         source: ${SELF_EVOLVE_CONTROL_ROOT:?SELF_EVOLVE_CONTROL_ROOT must be an absolute host path}
-        target: /control
+        target: /workspace/.self-evolve/control
       - type: bind
         source: ${SELF_EVOLVE_REPOSITORY:?SELF_EVOLVE_REPOSITORY must be an absolute host path}
         target: /repository

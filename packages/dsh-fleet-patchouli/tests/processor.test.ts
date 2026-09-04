@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { FleetRunRecord } from 'dsh-agent-fleet'
 import { describe, expect, it, vi } from 'vitest'
 
+import { requestQuery } from '../src/fleet-context.js'
 import type { FleetMemoryAlgorithm, MemoryPlugin } from '../src/patchouli.js'
 import { apply, createFleetMemoryProcessor } from '../src/processor.js'
 
@@ -31,6 +32,11 @@ describe('Fleet Patchouli processor', () => {
       operation: 'update',
       meta: { ...meta, source: { type: 'session', id: 'session-1' } },
     })).toBe(false)
+    await expect(plugin.update({ meta, data: { kind: 'fleet-event', event: 'example' } }, {})).resolves.toMatchObject({
+      handled: true,
+      stored: 1,
+      sourceType: 'fleet',
+    })
     await expect(plugin.update({ meta, data: { event: 'example' } }, {})).resolves.toMatchObject({
       handled: false,
       sourceType: 'fleet',
@@ -39,6 +45,53 @@ describe('Fleet Patchouli processor', () => {
       handled: false,
       items: [],
     })
+  })
+
+  it('derives a bounded query from automatic pre-step messages', () => {
+    const meta = {
+      source: { type: 'agent-loop', id: 'dsh-patchouli-agent-loop' },
+      scope: '/workspace',
+      attributes: { point: 'agent/pre-step', step: 1 },
+    }
+    expect(requestQuery({
+      meta,
+      data: {
+        messages: [{
+          role: 'user',
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet' },
+          content: [{ type: 'text', text: '[Fleet DM | msg_7 | from=@Mina] 请复核候选代的交接证据。\n补充说明' }],
+        }, {
+          role: 'user',
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet' },
+          content: [{ type: 'text', text: 'System reminder, no reply: 优先推进已有任务。' }],
+        }],
+      },
+    })).toBe('请复核候选代的交接证据。')
+
+    expect(requestQuery({
+      meta,
+      data: {
+        messages: [{
+          role: 'user',
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet' },
+          content: [{
+            type: 'text',
+            text: '[Fleet owner task list]\nYour running owner Tasks:\n- 验证 Patchouli 被动召回 (task_1): call fleet_goal complete',
+          }],
+        }],
+      },
+    })).toBe('验证 Patchouli 被动召回')
+
+    expect(requestQuery({
+      meta: { ...meta, attributes: { ...meta.attributes, step: 2 } },
+      data: {
+        messages: [{
+          role: 'user',
+          source: { kind: 'tool', callId: 'call_1' },
+          content: [{ type: 'text', text: '工具结果不应触发新一轮被动召回' }],
+        }],
+      },
+    })).toBeUndefined()
   })
 
   it('runs only algorithms whose minimum effort fits the request budget', async () => {

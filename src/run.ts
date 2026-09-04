@@ -1217,7 +1217,7 @@ const FLEET_ARCHIVE_FORMAT = 'dsh-agent-fleet-archive'
 const FLEET_ARCHIVE_VERSION = 1
 const WORKSPACE_DISCOVERY_IGNORED_DIRECTORIES = new Set([
   '.fleet', '.git', '.hg', '.svn', '.cache', '.lake', '.venv',
-  '__pycache__', 'node_modules', 'venv',
+  '__pycache__', 'lib', 'node_modules', 'venv',
 ])
 
 function emptyBudgetAccount(startedAt: string, limit?: number): FleetBudgetAccount {

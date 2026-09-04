@@ -6,6 +6,7 @@ import {
   createFleetHistorySearchAlgorithm,
   FLEET_HISTORY_SEARCH_ALGORITHM_ID,
 } from '../src/history-search.js'
+import { createFleetMemoryProcessor } from '../src/processor.js'
 
 const team = {
   id: 'team-1',
@@ -107,5 +108,38 @@ describe('Fleet conversation history search', () => {
       effort: 'medium', deferRecallAudit,
     })).resolves.toEqual({ handled: false, items: [] })
     expect(deferRecallAudit).not.toHaveBeenCalled()
+  })
+
+  it('recalls matching Fleet history passively from a first-step Fleet message', async () => {
+    const fixture = setup()
+    const recordRecallAudit = vi.fn()
+    const processor = createFleetMemoryProcessor([fixture.algorithm], { recordRecallAudit })
+
+    await expect(processor.retrieve({
+      meta: {
+        ...request.meta,
+        attributes: {
+          ...request.meta.attributes,
+          point: 'agent/pre-step',
+          step: 1,
+        },
+      },
+      data: {
+        messages: [{
+          role: 'user',
+          source: { kind: 'plugin', plugin: 'dsh-agent-fleet' },
+          content: [{ type: 'text', text: '[Fleet DM | msg_9 | from=@reviewer] decision' }],
+        }],
+      },
+    }, {})).resolves.toMatchObject({
+      items: [
+        expect.objectContaining({ messageId: 'message-channel' }),
+        expect.objectContaining({ messageId: 'message-private' }),
+      ],
+    })
+    expect(fixture.searchParticipantMessages).toHaveBeenCalledWith('team-1', 'lead', 'decision', 20)
+    expect(recordRecallAudit).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: 'team-1', member: 'lead', resultCount: 2,
+    }))
   })
 })

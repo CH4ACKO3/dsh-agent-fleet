@@ -38,6 +38,22 @@ const RETRIEVAL_TOKEN_BUDGET: Record<FleetMemoryEffort, number> = {
   high: 12_288,
 }
 
+const fleetEventIndex: FleetMemoryAlgorithm = {
+  id: 'fleet-event-index',
+  minimumEffort: 'low',
+  filter: call => call.operation === 'update' && call.meta.source.type === 'fleet',
+  update: async request => {
+    const data = typeof request.data === 'object' && request.data !== null && !Array.isArray(request.data)
+      ? request.data as Record<string, unknown>
+      : undefined
+    return data?.kind === 'fleet-event'
+      // Fleet's durable journal remains the source of truth. This acknowledgement
+      // marks the event as addressable by the read-through memory algorithms.
+      ? { handled: true, stored: 1 }
+      : { handled: false, stored: 0 }
+  },
+}
+
 function estimatedTokens(value: unknown): number {
   return Math.ceil(JSON.stringify(value).length / 4)
 }
@@ -298,6 +314,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
   host.inject(['patchouli', 'fleetRuns'], scope => scope.patchouli.register(
     createFleetMemoryProcessor([
+      fleetEventIndex,
       createFleetHistorySearchAlgorithm(scope, scope.fleetRuns),
       createFleetTeamStateAlgorithm(scope, scope.fleetRuns),
       createFleetTeamActivityAlgorithm(scope.fleetRuns),
