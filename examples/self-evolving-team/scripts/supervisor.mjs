@@ -80,13 +80,19 @@ async function run(command, args, options = {}) {
     executable = process.execPath
     commandArgs = [cli, ...args]
   }
-  const result = await execFileAsync(executable, commandArgs, {
-    cwd: options.cwd,
-    env: options.env ?? process.env,
-    maxBuffer: 16 * 1024 * 1024,
-    windowsHide: true,
-  })
-  return { stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+  try {
+    const result = await execFileAsync(executable, commandArgs, {
+      cwd: options.cwd,
+      env: options.env ?? process.env,
+      maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
+    })
+    return { stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+  } catch (error) {
+    const output = [error?.stdout, error?.stderr].map(value => String(value ?? '').trim()).filter(Boolean).join('\n')
+    if (!output) throw error
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\n${output}`, { cause: error })
+  }
 }
 
 function generationId(number) {
@@ -143,7 +149,7 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent) {
   mkdirSync(generationRoot, { recursive: true })
   await run('git', ['worktree', 'add', '--detach', workspace, sourceCommit], { cwd: state.sourceRoot })
   try {
-    await run('pnpm', ['install', '--offline', '--frozen-lockfile'], { cwd: workspace })
+    await run('pnpm', ['install', '--frozen-lockfile'], { cwd: workspace })
     await run('pnpm', ['build'], { cwd: workspace })
     mkdirSync(join(generationRoot, 'packages'), { recursive: true })
     await run('pnpm', ['pack', '--pack-destination', join(generationRoot, 'packages')], { cwd: workspace })
