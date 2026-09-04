@@ -13,8 +13,10 @@ import type {
   FleetGatewayConnector,
   FleetGatewayConnectorContext,
 } from '@ch4acko3/dsh-agent-fleet-gateway'
+import type { FleetUserMailboxInbound, FleetUserMailboxOutbound } from 'dsh-agent-fleet'
 
 export type FleetLarkBotInbound =
+  | FleetUserMailboxInbound
   | { readonly kind: 'message'; readonly identity: 'bot'; readonly accountId: string; readonly message: NormalizedMessage }
   | { readonly kind: 'card-action'; readonly identity: 'bot'; readonly accountId: string; readonly action: CardActionEvent }
   | { readonly kind: 'reaction'; readonly identity: 'bot'; readonly accountId: string; readonly reaction: ReactionEvent }
@@ -22,6 +24,7 @@ export type FleetLarkBotInbound =
   | { readonly kind: 'comment'; readonly identity: 'bot'; readonly accountId: string; readonly comment: CommentEvent }
 
 export type FleetLarkBotOutbound =
+  | FleetUserMailboxOutbound
   | { readonly kind: 'send'; readonly to: string; readonly input: SendInput; readonly options?: SendOptions }
   | { readonly kind: 'edit'; readonly messageId: string; readonly text: string }
   | { readonly kind: 'recall'; readonly messageId: string }
@@ -33,6 +36,12 @@ export type FleetLarkBotOutbound =
 export interface FleetLarkBotLogger {
   info(message: string): void
   warn(message: string): void
+}
+
+export interface FleetLarkUserMailboxRoute {
+  readonly userOpenId: string
+  readonly teamId?: string
+  readonly assistantId?: string
 }
 
 type ChannelPort = Pick<
@@ -63,6 +72,7 @@ export class FleetLarkBotConnector implements FleetGatewayConnector {
     private readonly channel: ChannelPort,
     private readonly accountId: string,
     private readonly logger: FleetLarkBotLogger,
+    private readonly userMailbox?: FleetLarkUserMailboxRoute,
   ) {
     this.id = larkBotConnectorId(accountId)
   }
@@ -73,11 +83,27 @@ export class FleetLarkBotConnector implements FleetGatewayConnector {
       void deliver(payload).catch(error => this.logger.warn(`Fleet Lark inbound delivery failed: ${errorText(error)}`))
     }
     const handlers: Partial<EventMap> = {
-      message: message => deliver({ kind: 'message', identity: 'bot', accountId: this.accountId, message }),
-      cardAction: action => deliver({ kind: 'card-action', identity: 'bot', accountId: this.accountId, action }),
-      reaction: reaction => deliverDetached({ kind: 'reaction', identity: 'bot', accountId: this.accountId, reaction }),
-      botAdded: event => deliverDetached({ kind: 'bot-added', identity: 'bot', accountId: this.accountId, event }),
-      comment: comment => deliver({ kind: 'comment', identity: 'bot', accountId: this.accountId, comment }),
+      message: message => {
+        if (this.userMailbox === undefined) {
+          return deliver({ kind: 'message', identity: 'bot', accountId: this.accountId, message })
+        }
+        if (message.chatType !== 'p2p' || message.senderId !== this.userMailbox.userOpenId) return Promise.resolve()
+        return deliver({
+          kind: 'user-message',
+          ...(this.userMailbox.teamId === undefined ? {} : { teamId: this.userMailbox.teamId }),
+          ...(this.userMailbox.assistantId === undefined ? {} : { assistantId: this.userMailbox.assistantId }),
+          externalUserId: message.senderId,
+          conversationId: message.chatId,
+          messageId: message.messageId,
+          text: message.content,
+        })
+      },
+      ...(this.userMailbox === undefined ? {
+        cardAction: (action: CardActionEvent) => deliver({ kind: 'card-action', identity: 'bot', accountId: this.accountId, action }),
+        reaction: (reaction: ReactionEvent) => deliverDetached({ kind: 'reaction', identity: 'bot', accountId: this.accountId, reaction }),
+        botAdded: (event: BotAddedEvent) => deliverDetached({ kind: 'bot-added', identity: 'bot', accountId: this.accountId, event }),
+        comment: (comment: CommentEvent) => deliver({ kind: 'comment', identity: 'bot', accountId: this.accountId, comment }),
+      } : {}),
       error: error => this.logger.warn(`Fleet Lark channel error: ${error.message}`),
       reconnecting: () => this.logger.info(`Fleet Lark bot ${this.accountId} reconnecting`),
       reconnected: () => this.logger.info(`Fleet Lark bot ${this.accountId} reconnected`),
@@ -97,6 +123,9 @@ export class FleetLarkBotConnector implements FleetGatewayConnector {
   async send(payload: unknown, _signal: AbortSignal): Promise<void> {
     const outbound = parseOutbound(payload)
     switch (outbound.kind) {
+      case 'user-message':
+        await this.channel.send(outbound.conversationId, { markdown: outbound.text })
+        return
       case 'send':
         await this.channel.send(outbound.to, outbound.input, outbound.options)
         return
@@ -126,6 +155,10 @@ function parseOutbound(payload: unknown): FleetLarkBotOutbound {
     throw new TypeError('Fleet Lark bot outbound payload must be an object with a kind')
   }
   switch (payload.kind) {
+    case 'user-message':
+      requireString(payload, 'conversationId')
+      requireString(payload, 'text')
+      return payload as unknown as FleetLarkBotOutbound
     case 'send':
       requireString(payload, 'to')
       if (!isRecord(payload.input)) throw new TypeError('Fleet Lark send input must be an object')

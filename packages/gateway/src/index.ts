@@ -1,23 +1,15 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from 'dsh-agent-fleet'
+import type {
+  FleetMailboxGatewayInbound,
+  FleetMailboxGatewayOutbound,
+  FleetMailboxPort,
+} from 'dsh-agent-fleet'
 
 export const name = '@ch4acko3/dsh-agent-fleet-gateway'
 
-export interface FleetGatewayInbound {
-  readonly connector: string
-  readonly payload: unknown
-}
-
-export interface FleetGatewayOutbound {
-  readonly connector: string
-  readonly payload: unknown
-}
-
-/** Narrow temporary boundary implemented by Fleet Mailbox. */
-export interface FleetGatewayMailbox {
-  receive(message: FleetGatewayInbound, signal: AbortSignal): Promise<void>
-  onOutbound(listener: (message: FleetGatewayOutbound) => Promise<void>): () => void
-}
+export type FleetGatewayInbound = FleetMailboxGatewayInbound
+export type FleetGatewayOutbound = FleetMailboxGatewayOutbound
+export type FleetGatewayMailbox = FleetMailboxPort
 
 export interface FleetGatewayConnectorContext {
   deliver(payload: unknown, signal?: AbortSignal): Promise<void>
@@ -128,6 +120,5 @@ export function apply(ctx: Context): void {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     fleetGateway: FleetGatewayService
-    fleetMailbox: FleetGatewayMailbox
   }
 }

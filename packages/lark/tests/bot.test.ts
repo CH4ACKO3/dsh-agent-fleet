@@ -81,4 +81,53 @@ describe('FleetLarkBotConnector', () => {
     expect(fake.spies.addReaction).toHaveBeenCalledWith('message-1', 'THUMBSUP')
     await expect(connector.send({ kind: 'unknown' }, signal)).rejects.toThrow(/Unknown Fleet Lark/u)
   })
+
+  it('connects one allowed private user to the Fleet user Mailbox', async () => {
+    const fake = channelFake()
+    const deliver = vi.fn(async () => {})
+    const connector = new FleetLarkBotConnector(fake.channel, 'default', {
+      info: vi.fn(),
+      warn: vi.fn(),
+    }, {
+      userOpenId: 'ou_user',
+      teamId: 'team-1',
+      assistantId: 'team-assistant',
+    })
+    connector.start({ deliver })
+    const message = {
+      messageId: 'om_1',
+      chatId: 'oc_private',
+      chatType: 'p2p',
+      senderId: 'ou_user',
+      content: 'hello',
+      rawContentType: 'text',
+      resources: [],
+      mentions: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: 1,
+    } satisfies NormalizedMessage
+
+    await fake.handlers().message?.(message)
+    await fake.handlers().message?.({ ...message, senderId: 'ou_other' })
+    await fake.handlers().message?.({ ...message, chatType: 'group' })
+
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(deliver).toHaveBeenCalledWith({
+      kind: 'user-message',
+      teamId: 'team-1',
+      assistantId: 'team-assistant',
+      externalUserId: 'ou_user',
+      conversationId: 'oc_private',
+      messageId: 'om_1',
+      text: 'hello',
+    })
+
+    await connector.send({
+      kind: 'user-message',
+      conversationId: 'oc_private',
+      text: '**done**',
+    }, new AbortController().signal)
+    expect(fake.spies.send).toHaveBeenCalledWith('oc_private', { markdown: '**done**' })
+  })
 })

@@ -9,4 +9,6 @@ Set `LARK_APP_ID` and store the App Secret under the DSH credential reference `L
 
 The package performs transport and identity adaptation only. Fleet Mailbox owns persistence and Team routing; DSH decides which identity and capability to expose.
 
+Set `LARK_USER_OPEN_ID` to make the realtime Bot a private user-Mailbox entrance. `FLEET_LARK_TEAM_ID` selects the Team when several Teams are active, and `FLEET_LARK_ASSISTANT_ID` selects one of several attached assistants. Only direct messages from that user are delivered; Agent Lark permissions are not involved.
+
 Fleet registers `lark.read`, `lark.message-post`, `lark.content-write`, `lark.manage`, and `lark.act-as-user` plus the `lark-resource` resource kind. Trusted DSH adapters call `ctx.fleetLark.executeForAgent(...)` with an Agent id, classified action, and canonical resource. User-identity calls require both the business action and `lark.act-as-user`; raw CLI adapters remain Host-only.

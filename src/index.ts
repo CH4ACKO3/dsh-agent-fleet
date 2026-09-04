@@ -13,6 +13,7 @@ import { installFleetActivationBridge } from './activation.js'
 import { FleetCollaborationService } from './collaboration.js'
 import { FleetConfigurationRegistry } from './configuration.js'
 import { FleetMetaAssistantService } from './meta.js'
+import { createFleetMailbox, type FleetMailboxService } from './mailbox.js'
 import { FleetRunService, installRunTools } from './run.js'
 import { FleetSetupService, installSetupTool } from './setup.js'
 import { FLEET_WEB_LOCAL, FleetWebRemote } from './web.js'
@@ -29,6 +30,7 @@ export * from './configuration.js'
 export * from './member-view.js'
 export * from './tool-discovery.js'
 export * from './meta.js'
+export * from './mailbox.js'
 export * from './productivity/index.js'
 export * from './run.js'
 export * from './setup.js'
@@ -81,6 +83,7 @@ export function apply(ctx: Context): void {
     const meta = new FleetMetaAssistantService(assistant)
     const collaboration = new FleetCollaborationService(scope, authorization)
     const service = new FleetRunService(scope, scope.fleetCore, collaboration, { archives, authorization, configuration })
+    const mailbox = createFleetMailbox(service, message => scope.logger.warn(message))
     authorization.installBaseline(service.authorizationBaseline())
     const setups = new FleetSetupService(assistant, service, { configuration })
     scope.provide('fleetAuthorization', authorization)
@@ -89,6 +92,7 @@ export function apply(ctx: Context): void {
     scope.provide('fleetCollaboration', collaboration)
     scope.provide('fleetConfiguration', configuration)
     scope.provide('fleetMetaAssistant', meta)
+    scope.provide('fleetMailbox', mailbox)
     scope.provide('fleetRuns', service)
     scope.provide('fleetSetups', setups)
     installSetupTool(scope, setups)
@@ -109,6 +113,7 @@ export function apply(ctx: Context): void {
     })
     scope.effect(() => () => {
       assistant.close()
+      mailbox.close()
       service.close()
     }, 'fleetRuns.close()')
   })
@@ -132,6 +137,7 @@ declare module '@deepseek-ai/cordis' {
     fleetCollaboration: FleetCollaborationService
     fleetConfiguration: FleetConfigurationRegistry
     fleetMetaAssistant: FleetMetaAssistantService
+    fleetMailbox: FleetMailboxService
     fleetRuns: FleetRunService
     fleetSetups: FleetSetupService
   }

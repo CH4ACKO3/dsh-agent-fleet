@@ -6,6 +6,10 @@
           appId: !!js process.env.LARK_APP_ID
           appSecretRef: LARK_APP_SECRET
           domain: !!js process.env.LARK_DOMAIN ?? 'feishu'
+          userMailbox:
+            userOpenId: !!js process.env.LARK_USER_OPEN_ID
+            teamId: !!js process.env.FLEET_LARK_TEAM_ID
+            assistantId: !!js process.env.FLEET_LARK_ASSISTANT_ID
         cli:
           executable: !!js process.env.LARK_CLI_PATH ?? 'lark-cli'
           profile: !!js process.env.LARK_CLI_PROFILE

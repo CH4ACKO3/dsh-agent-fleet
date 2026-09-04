@@ -1206,6 +1206,7 @@ export class FleetRunService {
   private readonly waitingSessionIds = new Set<string>()
   private readonly abnormalSessionIds = new Set<string>()
   private readonly changeListeners = new Set<() => void>()
+  private readonly coordinationListeners = new Set<(runId: string, event: FleetCoordinationEvent) => void>()
   private readonly registryDirectory: string
   private readonly archives: FleetArchiveRegistry
   private readonly authorization: FleetAuthorizationService | undefined
@@ -1228,6 +1229,11 @@ export class FleetRunService {
   subscribeChanges(listener: () => void): () => void {
     this.changeListeners.add(listener)
     return () => { this.changeListeners.delete(listener) }
+  }
+
+  subscribeCoordination(listener: (runId: string, event: FleetCoordinationEvent) => void): () => void {
+    this.coordinationListeners.add(listener)
+    return () => { this.coordinationListeners.delete(listener) }
   }
 
   authorizationBaseline(): FleetAuthorizationBaseline {
@@ -3076,6 +3082,7 @@ export class FleetRunService {
     const voteBindings = this.voteWorkIds.get(runId)
     if (record === undefined || runtime === undefined || voteBindings === undefined) return
     this.appendEvent(record.id, `coordination.${event.type}`, event)
+    for (const listener of this.coordinationListeners) listener(record.id, structuredClone(event))
     if (
       event.type === 'vote'
       && event.action === 'opened'
@@ -4049,6 +4056,7 @@ export class FleetRunService {
     this.teamProjectionEvents.clear()
     this.memberViewSnapshots.clear()
     this.changeListeners.clear()
+    this.coordinationListeners.clear()
   }
 
   private async settleFinishedWork(record: FleetRunRecord): Promise<void> {

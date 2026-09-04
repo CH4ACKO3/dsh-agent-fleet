@@ -47,6 +47,11 @@ export interface FleetLarkBotConfig {
   readonly dmMode?: 'open' | 'allowlist' | 'pair' | 'disabled'
   readonly dmAllowlist?: readonly string[]
   readonly groupAllowlist?: readonly string[]
+  readonly userMailbox?: {
+    readonly userOpenId?: string
+    readonly teamId?: string
+    readonly assistantId?: string
+  }
 }
 
 export interface Config {
@@ -144,6 +149,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
 
     const accountId = bot.accountId ?? 'default'
+    const userMailbox = normalizeUserMailbox(bot.userMailbox)
     const channel = createLarkChannel({
       appId: bot.appId!,
       appSecret: secret.value,
@@ -162,17 +168,38 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
       policy: {
         requireMention: bot.requireMention ?? true,
-        dmMode: bot.dmMode ?? 'open',
-        ...(bot.dmAllowlist === undefined ? {} : { dmAllowlist: [...bot.dmAllowlist] }),
+        dmMode: userMailbox === undefined ? bot.dmMode ?? 'open' : 'allowlist',
+        ...(userMailbox === undefined
+          ? (bot.dmAllowlist === undefined ? {} : { dmAllowlist: [...bot.dmAllowlist] })
+          : { dmAllowlist: [userMailbox.userOpenId] }),
         ...(bot.groupAllowlist === undefined ? {} : { groupAllowlist: [...bot.groupAllowlist] }),
       },
       outbound: {
         retry: { maxAttempts: 3, baseDelayMs: 500 },
       },
     })
-    const connector = new FleetLarkBotConnector(channel, accountId, scope.logger)
+    const connector = new FleetLarkBotConnector(channel, accountId, scope.logger, userMailbox)
     return scope.fleetGateway.register(connector)
   })
+}
+
+function normalizeUserMailbox(value: FleetLarkBotConfig['userMailbox']): {
+  readonly userOpenId: string
+  readonly teamId?: string
+  readonly assistantId?: string
+} | undefined {
+  const userOpenId = value?.userOpenId?.trim()
+  if (userOpenId === undefined || userOpenId.length === 0) return undefined
+  if (!/^ou_[A-Za-z0-9_-]+$/u.test(userOpenId)) {
+    throw new Error('Fleet Lark user Mailbox userOpenId must be a Feishu/Lark open_id')
+  }
+  const teamId = value?.teamId?.trim()
+  const assistantId = value?.assistantId?.trim()
+  return {
+    userOpenId,
+    ...(teamId === undefined || teamId.length === 0 ? {} : { teamId }),
+    ...(assistantId === undefined || assistantId.length === 0 ? {} : { assistantId }),
+  }
 }
 
 function normalizeLarkResource(value: string): string {
