@@ -124,7 +124,7 @@ describe('Matilda blind evaluation Team template', () => {
     expect(task).toContain('团队工作语言使用中文')
     expect(task).toContain('至少继续一个由当前证据驱动的改进阶段')
     expect(compose).toContain('FLEET_MEMBER_DENY_HOST_TOOLS: "web_search"')
-    expect(compose).toContain('cpus: ${MATILDA_CPUS:-8}')
+    expect(compose).toContain('cpus: ${MATILDA_CPUS:-4}')
     expect(compose).toContain('mem_limit: ${MATILDA_MEMORY:-12g}')
     expect(dockerfile).toContain(
       'DSH_HARMONY_ACTIVE_DSH_ENTRY=/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/index.js',

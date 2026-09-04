@@ -40,7 +40,7 @@ services:
       - NET_RAW
     security_opt:
       - no-new-privileges:true
-    cpus: ${MATILDA_CPUS:-8}
+    cpus: ${MATILDA_CPUS:-4}
     mem_limit: ${MATILDA_MEMORY:-12g}
     stop_grace_period: 30s
     environment:

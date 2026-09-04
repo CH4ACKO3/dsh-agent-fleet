@@ -42,7 +42,7 @@ $env:COMPOSE_PROJECT_NAME = 'matilda-eval-001'
 $env:DSH_HOST_PORT = '3093'
 $env:DSH_WORKSPACE = 'D:/Projects/DeepSeekHarness/evaluation-runs/matilda-001'
 $env:DEEPSEEK_FLASH_API_KEY = '<local runtime key>'
-$env:MATILDA_CPUS = '8'
+$env:MATILDA_CPUS = '4'
 $env:MATILDA_MEMORY = '12g'
 New-Item -ItemType Directory -Force -Path $env:DSH_WORKSPACE
 
@@ -66,7 +66,7 @@ Then tell the foreground assistant:
 
 Choose the provider/model at Team creation time. Blank routes in the preset deliberately inherit that selection and keep credentials and machine-specific routing out of version control.
 
-The business container defaults to 8 CPUs and 12 GiB of memory. Keep these limits explicit in recorded runs; override them only when the evaluation protocol requires a different resource envelope.
+The business container defaults to 4 CPUs and 12 GiB of memory. Keep these limits explicit in recorded runs; override them only when the evaluation protocol requires a different resource envelope.
 
 ## Test the current Fleet source instead of the image copy
 
