@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomBytes, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -247,6 +247,7 @@ async function compose(state, generation, args) {
 }
 
 async function captureGenerationLogs(state, generation) {
+  if (generation.runtimeLog !== undefined && existsSync(generation.runtimeLog)) return
   const path = join(dirname(generation.workspace), 'runtime.log')
   const result = await compose(state, generation, ['logs', '--no-color', '--timestamps']).catch(error => ({
     stdout: '',
@@ -254,6 +255,40 @@ async function captureGenerationLogs(state, generation) {
   }))
   writeFileSync(path, [result.stdout, result.stderr].filter(Boolean).join('\n'), 'utf8')
   generation.runtimeLog = path
+}
+
+async function archiveGenerationContext(state, generation) {
+  if (generation.contextArchive?.path !== undefined && existsSync(generation.contextArchive.path)) return
+  const archiveDirectory = join(dirname(generation.workspace), 'archive')
+  mkdirSync(archiveDirectory, { recursive: true })
+  const finalPath = join(archiveDirectory, 'dsh-context.tar.gz')
+  const temporaryName = `dsh-context-${randomUUID()}.partial.tar.gz`
+  const temporaryPath = join(archiveDirectory, temporaryName)
+  const volume = `${generation.composeProject}_dsh-data`
+  try {
+    await run('docker', [
+      'run', '--rm', '--pull', 'never',
+      '--entrypoint', 'tar',
+      '--volume', `${volume}:/source:ro`,
+      '--volume', `${archiveDirectory}:/archive`,
+      'local/dsh-agent-fleet-self-evolve:latest',
+      '-czf', `/archive/${temporaryName}`,
+      '-C', '/source',
+      '--exclude=.dsh/profiles',
+      '--exclude=.dsh/node_modules',
+      '.',
+    ])
+    renameSync(temporaryPath, finalPath)
+  } catch (error) {
+    if (existsSync(temporaryPath)) rmSync(temporaryPath, { force: true })
+    throw error
+  }
+  generation.contextArchive = {
+    path: finalPath,
+    createdAt: new Date().toISOString(),
+    bytes: statSync(finalPath).size,
+    excludes: ['.dsh/profiles', '.dsh/node_modules'],
+  }
 }
 
 async function monitorGeneration(stateDirectory, state, generation) {
@@ -313,7 +348,12 @@ async function launchGeneration(stateDirectory, state, generation, options = {})
   }
 }
 
-async function stopGeneration(state, generation, { removeVolumes = false } = {}) {
+async function stopGeneration(state, generation, { removeVolumes = false, archiveContext = removeVolumes } = {}) {
+  if (archiveContext) {
+    await captureGenerationLogs(state, generation)
+    await compose(state, generation, ['stop', '--timeout', '30'])
+    await archiveGenerationContext(state, generation)
+  }
   await compose(state, generation, [
     'down',
     '--remove-orphans',
