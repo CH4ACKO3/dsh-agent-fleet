@@ -1,0 +1,141 @@
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import {
+  activateFleetAutoBootstrap,
+  fleetAutoBootstrapConfiguration,
+  readFleetAutoBootstrapMarker,
+} from '../src/auto-bootstrap.js'
+
+function temporaryDirectory(): string {
+  return mkdtempSync(join(tmpdir(), 'fleet-auto-bootstrap-'))
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
+describe('Fleet automatic bootstrap', () => {
+  it('is disabled unless one of its explicit paths is configured', () => {
+    expect(fleetAutoBootstrapConfiguration({})).toBeUndefined()
+  })
+
+  it('requires a complete absolute configuration and validates max tokens', () => {
+    expect(() => fleetAutoBootstrapConfiguration({ FLEET_AUTO_TEAM_CONFIG: '/team.json' }))
+      .toThrow('FLEET_AUTO_WORKSPACE is required')
+    expect(() => fleetAutoBootstrapConfiguration({
+      FLEET_AUTO_TEAM_CONFIG: '/team.json',
+      FLEET_AUTO_BOOTSTRAP_TASK: '/task.md',
+      FLEET_AUTO_WORKSPACE: '/workspace',
+      FLEET_AUTO_MAX_TOKENS: '0',
+    })).toThrow('FLEET_AUTO_MAX_TOKENS must be a positive integer')
+  })
+
+  it('creates a fresh Team, activates its assistant, and delivers one idempotent bootstrap', async () => {
+    const root = temporaryDirectory()
+    const workspace = join(root, 'workspace')
+    const dshHome = join(root, 'dsh')
+    mkdirSync(workspace, { recursive: true })
+    const teamConfigPath = join(root, 'team.json')
+    const taskPath = join(workspace, 'task.md')
+    writeFileSync(teamConfigPath, '{}')
+    writeFileSync(taskPath, '# Task')
+    vi.stubEnv('DSH_HOME', dshHome)
+    const configuration = {
+      id: 'generation-one',
+      projectRoot: workspace, teamConfigPath, taskPath,
+      agentPreset: 'standard',
+      readyFile: join(workspace, '.self-evolve', 'ready.json'),
+      provider: 'provider', model: 'model', maxTokens: 4096,
+    }
+    const followup = vi.fn()
+    const dispose = vi.fn(() => Promise.resolve())
+    const agent = {
+      id: 'assistant-session', followup,
+      session: { header: { agentPreset: 'standard' }, events: [] },
+    } as unknown as Agent
+    const mount = vi.fn(() => Promise.resolve())
+    const createAgent = vi.fn(async (options: { setup?: (ctx: Context) => unknown }) => {
+      await options.setup?.({ agent, get: (name: string) => name === 'agentPresets' ? { mount } : undefined } as unknown as Context)
+      return { agent, dispose }
+    })
+    const run = {
+      id: 'team-one', sourceSetupId: 'auto-bootstrap:generation-one', status: 'idle',
+      assistants: [{ sessionId: 'assistant-session', view: { id: 'assistant' } }],
+    }
+    const createRun = vi.fn(async () => run)
+    const activate = vi.fn()
+    const started = vi.fn()
+
+    const result = await activateFleetAutoBootstrap(
+      { agents: { create: createAgent, get: vi.fn() } } as unknown as Context,
+      { list: () => [], create: createRun, agentSessionStarted: started } as never,
+      { activate } as never,
+      configuration,
+    )
+
+    expect(result.run).toBe(run)
+    expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
+      meta: { cwd: workspace, agentPreset: 'standard' },
+      agentOptions: { provider: 'provider', model: 'model', maxTokens: 4096 },
+    }))
+    expect(createRun).toHaveBeenCalledWith(agent, expect.objectContaining({
+      configPath: teamConfigPath,
+      projectRoot: workspace,
+      sourceSetupId: 'auto-bootstrap:generation-one',
+    }))
+    expect(mount).toHaveBeenCalledWith(expect.anything(), 'standard')
+    expect(activate).toHaveBeenCalledWith(agent, 'team-one', run.assistants[0]?.view)
+    expect(started).toHaveBeenCalledWith(agent)
+    expect(followup).toHaveBeenCalledOnce()
+    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ runId: 'team-one' })
+    expect(JSON.parse(readFileSync(configuration.readyFile, 'utf8'))).toMatchObject({ runId: 'team-one' })
+    await result.dispose()
+    expect(dispose).toHaveBeenCalledOnce()
+
+    const repeated = await activateFleetAutoBootstrap(
+      { agents: { create: createAgent, get: vi.fn() } } as unknown as Context,
+      { list: () => [run], create: createRun, agentSessionStarted: started } as never,
+      { activate } as never,
+      configuration,
+    )
+    expect(repeated.run).toBe(run)
+    expect(createAgent).toHaveBeenCalledOnce()
+    expect(followup).toHaveBeenCalledOnce()
+  })
+
+  it('recovers a created Team whose bootstrap delivery marker was not written', async () => {
+    const root = temporaryDirectory()
+    const workspace = join(root, 'workspace')
+    mkdirSync(workspace, { recursive: true })
+    const teamConfigPath = join(root, 'team.json')
+    const taskPath = join(workspace, 'task.md')
+    writeFileSync(teamConfigPath, '{}')
+    writeFileSync(taskPath, '# Task')
+    vi.stubEnv('DSH_HOME', join(root, 'dsh'))
+    const configuration = { id: 'recover', projectRoot: workspace, teamConfigPath, taskPath, agentPreset: 'standard' }
+    const followup = vi.fn()
+    const agent = { id: 'assistant-session', followup } as unknown as Agent
+    const run = {
+      id: 'team-recover', sourceSetupId: 'auto-bootstrap:recover', status: 'idle',
+      assistants: [{ sessionId: 'assistant-session', view: { id: 'assistant' } }],
+    }
+    const createRun = vi.fn()
+
+    await activateFleetAutoBootstrap(
+      { agents: { create: vi.fn(), get: vi.fn(() => agent) } } as unknown as Context,
+      { list: () => [run], create: createRun, agentSessionStarted: vi.fn() } as never,
+      { activate: vi.fn() } as never,
+      configuration,
+    )
+
+    expect(createRun).not.toHaveBeenCalled()
+    expect(followup).toHaveBeenCalledOnce()
+    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ runId: 'team-recover' })
+  })
+})

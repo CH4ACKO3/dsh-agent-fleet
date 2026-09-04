@@ -1,0 +1,83 @@
+name: ${COMPOSE_PROJECT_NAME:-self-evolving-team}
+
+services:
+  model-egress:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/dsh-agent-fleet-self-evolve:latest
+    pull_policy: never
+    entrypoint: ["/opt/self-evolve/network-guard.sh"]
+    restart: "no"
+    cap_add:
+      - NET_ADMIN
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    ports:
+      - "127.0.0.1:${SELF_EVOLVE_HOST_PORT:?SELF_EVOLVE_HOST_PORT is required}:3081"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/self-evolve-network-ready && test \"$(iptables -S OUTPUT | head -n 1)\" = '-P OUTPUT DROP' && test \"$(ip6tables -S OUTPUT | head -n 1)\" = '-P OUTPUT DROP'"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  dsh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/dsh-agent-fleet-self-evolve:latest
+    pull_policy: never
+    restart: "no"
+    working_dir: /workspace
+    network_mode: "service:model-egress"
+    depends_on:
+      model-egress:
+        condition: service_healthy
+    cap_drop:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    cpus: ${SELF_EVOLVE_CPUS:-4}
+    mem_limit: ${SELF_EVOLVE_MEMORY:-8g}
+    stop_grace_period: 30s
+    environment:
+      DSH_HOME: /data/.dsh
+      DSH_PORT: "3080"
+      DSH_PROXY_PORT: "3081"
+      DSH_TRUSTED_HOST: 127.0.0.1:${SELF_EVOLVE_HOST_PORT}
+      DSH_TRUSTED_HOST_ALT: localhost:${SELF_EVOLVE_HOST_PORT}
+      FLEET_SOURCE_COMMIT: ${FLEET_SOURCE_COMMIT:?FLEET_SOURCE_COMMIT is required}
+      DEEPSEEK_FLASH_API_KEY: ${DEEPSEEK_FLASH_API_KEY:?DEEPSEEK_FLASH_API_KEY is required}
+      FLEET_AUTO_BOOTSTRAP_ID: ${FLEET_AUTO_BOOTSTRAP_ID:?FLEET_AUTO_BOOTSTRAP_ID is required}
+      FLEET_AUTO_TEAM_CONFIG: /opt/self-evolve/team.local.json
+      FLEET_AUTO_BOOTSTRAP_TASK: /workspace/.self-evolve/bootstrap.md
+      FLEET_AUTO_WORKSPACE: /workspace
+      FLEET_AUTO_READY_FILE: /workspace/.self-evolve/fleet-bootstrap-ready.json
+      FLEET_AUTO_PROVIDER: ${FLEET_AUTO_PROVIDER:-memorax}
+      FLEET_AUTO_MODEL: ${FLEET_AUTO_MODEL:-deepseek-v4-flash}
+      SELF_EVOLVE_CONTROL_DIR: /control
+      SELF_EVOLVE_GENERATION: ${SELF_EVOLVE_GENERATION:?SELF_EVOLVE_GENERATION is required}
+      SELF_EVOLVE_CONTROL_TOKEN: ${SELF_EVOLVE_CONTROL_TOKEN:?SELF_EVOLVE_CONTROL_TOKEN is required}
+      NPM_CONFIG_OFFLINE: "true"
+      PNPM_CONFIG_OFFLINE: "true"
+      PNPM_CONFIG_STORE_DIR: /root/.local/share/pnpm/store
+    volumes:
+      - dsh-data:/data
+      - type: bind
+        source: ${SELF_EVOLVE_WORKSPACE:?SELF_EVOLVE_WORKSPACE must be an absolute host path}
+        target: /workspace
+      - type: bind
+        source: ${SELF_EVOLVE_CONTROL_ROOT:?SELF_EVOLVE_CONTROL_ROOT must be an absolute host path}
+        target: /control
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /workspace/.self-evolve/fleet-bootstrap-ready.json && node -e \"fetch('http://127.0.0.1:3081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+
+volumes:
+  dsh-data:

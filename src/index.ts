@@ -9,6 +9,7 @@ import * as Authorization from './authorization/index.js'
 import * as Data from './data/index.js'
 import { FleetArchiveRegistry } from './archive.js'
 import { FleetAssistantRuntime } from './assistant.js'
+import { activateFleetAutoBootstrap } from './auto-bootstrap.js'
 import { activateResidentFleetAssistants } from './resident-assistants.js'
 import { FleetAuthorizationService } from './authorization.js'
 import { installFleetActivationBridge } from './activation.js'
@@ -32,6 +33,7 @@ export * from './authorization/index.js'
 export * from './data/index.js'
 export * from './authorization.js'
 export * from './assistant.js'
+export * from './auto-bootstrap.js'
 export * from './archive.js'
 export * from './activation.js'
 export * from './collaboration.js'
@@ -129,6 +131,7 @@ export function apply(ctx: Context): void {
     installFleetActivationBridge(scope, setups, service, assistant, meta)
     installRunTools(scope, service, assistant)
     let residentAssistants: Awaited<ReturnType<typeof activateResidentFleetAssistants>> | undefined
+    let autoBootstrap: Awaited<ReturnType<typeof activateFleetAutoBootstrap>> | undefined
     scope.on('agent/disposed', ({ agent }) => {
       service.agentDisconnected(String(agent.id))
       assistant.disposed(String(agent.id))
@@ -148,7 +151,17 @@ export function apply(ctx: Context): void {
       const controller = await activateResidentFleetAssistants(residentScope, service, assistant)
       residentAssistants = controller
       service.setResidentAssistantController(controller)
+      try {
+        autoBootstrap = await activateFleetAutoBootstrap(residentScope, service, assistant)
+      } catch (error) {
+        residentScope.logger('dsh-agent-fleet').error(
+          `Fleet auto bootstrap failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
       return async () => {
+        const bootstrap = autoBootstrap
+        autoBootstrap = undefined
+        await bootstrap?.dispose()
         residentAssistants = undefined
         service.setResidentAssistantController(undefined)
         await controller.dispose()
