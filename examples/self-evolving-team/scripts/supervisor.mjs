@@ -578,12 +578,17 @@ async function cleanupOldGenerations(stateDirectory, state) {
     for (const suffix of ['dsh-data', 'patchouli-data', 'workspace-node-modules']) {
       await run('docker', ['volume', 'rm', generationVolume(generation, suffix)]).catch(() => undefined)
     }
-    const workspace = assertManagedWorkspace(state, generation.workspace)
-    const generationRoot = dirname(workspace)
-    if (existsSync(workspace)) rmSync(workspace, { recursive: true, force: true, maxRetries: 3 })
-    const packages = join(generationRoot, 'packages')
-    if (existsSync(packages)) rmSync(packages, { recursive: true, force: true, maxRetries: 3 })
-    generation.cleanedAt = new Date().toISOString()
+    try {
+      const workspace = assertManagedWorkspace(state, generation.workspace)
+      const generationRoot = dirname(workspace)
+      if (existsSync(workspace)) rmSync(workspace, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 })
+      const packages = join(generationRoot, 'packages')
+      if (existsSync(packages)) rmSync(packages, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 })
+      generation.cleanedAt = new Date().toISOString()
+      delete generation.cleanupFailure
+    } catch (error) {
+      generation.cleanupFailure = error instanceof Error ? error.message : String(error)
+    }
     writeState(stateDirectory, state)
   }
 }
