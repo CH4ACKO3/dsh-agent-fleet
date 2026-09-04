@@ -742,7 +742,14 @@ async function initialize(args) {
     readFileSync(bootstrapPath, 'utf8'),
   )
   generation.phase = 'stable'
-  await launchGeneration(stateDirectory, state, generation, { monitor: args['no-serve'] !== true })
+  try {
+    await launchGeneration(stateDirectory, state, generation, { monitor: args['no-serve'] !== true })
+  } catch (error) {
+    state.status = 'failed'
+    state.failedAt = new Date().toISOString()
+    writeState(stateDirectory, state)
+    throw error
+  }
   generation.phase = 'stable'
   writeState(stateDirectory, state)
   await emit(stateDirectory, state, generation.id, 'generation.started', {
