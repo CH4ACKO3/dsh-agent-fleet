@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   authorizeRequest,
   signRequest,
+  stripHostGenerationFooter,
   verifyRequest,
 } from '../examples/self-evolving-team/scripts/protocol.mjs'
 
@@ -28,6 +29,12 @@ function request(generation: string, type: string) {
 }
 
 describe('self-evolution generation protocol', () => {
+  it('replaces inherited host generation footers instead of accumulating them', () => {
+    const task = '# Task\n\nDo the work.'
+    expect(stripHostGenerationFooter(`${task}\n\n<!-- self-evolve:host-generation -->\n\n## 宿主代际信息\n\n- 当前代：g0001`)).toBe(task)
+    expect(stripHostGenerationFooter(`${task}\n\n## 宿主代际信息\n\n- 当前代：g0001`)).toBe(task)
+  })
+
   it('authenticates the generation identity without exposing Docker authority', () => {
     const unsigned = request('g0001', 'candidate.destroy')
     const signed = { ...unsigned, signature: signRequest(unsigned, 'secret') }
@@ -54,4 +61,3 @@ describe('self-evolution generation protocol', () => {
       .toThrow('Only the stable generation')
   })
 })
-

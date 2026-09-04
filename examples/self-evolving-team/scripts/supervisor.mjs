@@ -7,7 +7,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
-import { authorizeRequest, verifyRequest } from './protocol.mjs'
+import { HOST_GENERATION_MARKER, authorizeRequest, stripHostGenerationFooter, verifyRequest } from './protocol.mjs'
 
 const execFileAsync = promisify(execFile)
 const generationMonitors = new Map()
@@ -200,7 +200,9 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
     const role = options.parent === undefined ? 'stable' : 'candidate'
     const createdAt = new Date().toISOString()
     writeFileSync(bootstrapPath, [
-      bootstrapContent.trim(),
+      stripHostGenerationFooter(bootstrapContent),
+      '',
+      HOST_GENERATION_MARKER,
       '',
       '## 宿主代际信息',
       '',

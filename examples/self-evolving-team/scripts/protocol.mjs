@@ -8,6 +8,19 @@ export const REQUEST_TYPES = Object.freeze([
   'generation.promote',
 ])
 
+const HOST_GENERATION_MARKER = '<!-- self-evolve:host-generation -->'
+
+export function stripHostGenerationFooter(content) {
+  const normalized = String(content ?? '').trim()
+  const markedIndex = normalized.indexOf(`\n${HOST_GENERATION_MARKER}`)
+  const legacyIndex = normalized.indexOf('\n## 宿主代际信息\n')
+  const indexes = [markedIndex, legacyIndex].filter(index => index >= 0)
+  if (indexes.length === 0) return normalized
+  return normalized.slice(0, Math.min(...indexes)).trim()
+}
+
+export { HOST_GENERATION_MARKER }
+
 export function requestBody(request) {
   return JSON.stringify({
     id: request.id,
