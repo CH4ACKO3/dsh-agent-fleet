@@ -182,10 +182,13 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
     await run('git', ['remote', 'set-url', 'origin', '/repository'], { cwd: workspace })
     await run('git', ['config', 'user.name', `Fleet ${id}`], { cwd: workspace })
     await run('git', ['config', 'user.email', `${id}@fleet.local`], { cwd: workspace })
+    await run('git', ['config', 'core.autocrlf', 'true'], { cwd: workspace })
     const excludePath = join(workspace, '.git', 'info', 'exclude')
     writeFileSync(excludePath, `${readFileSync(excludePath, 'utf8')}\n.self-evolve/\n`, 'utf8')
     await run('pnpm', ['install', '--frozen-lockfile'], { cwd: workspace })
     await run('pnpm', ['build'], { cwd: workspace })
+    await run('git', ['add', '-u'], { cwd: workspace })
+    await run('git', ['diff', '--cached', '--exit-code', '--stat'], { cwd: workspace })
     mkdirSync(join(generationRoot, 'packages'), { recursive: true })
     await run('pnpm', ['pack', '--pack-destination', join(generationRoot, 'packages')], { cwd: workspace })
     const packageDirectory = join(generationRoot, 'packages')
@@ -288,7 +291,7 @@ async function monitorGeneration(stateDirectory, state, generation) {
   })
 }
 
-async function launchGeneration(stateDirectory, state, generation) {
+async function launchGeneration(stateDirectory, state, generation, options = {}) {
   state.generations[generation.id] = generation
   state.eventSequences[generation.id] ??= 0
   writeState(stateDirectory, state)
@@ -296,7 +299,7 @@ async function launchGeneration(stateDirectory, state, generation) {
     await compose(state, generation, ['up', '-d', '--build', '--wait'])
     generation.phase = 'observing'
     writeState(stateDirectory, state)
-    await monitorGeneration(stateDirectory, state, generation)
+    if (options.monitor !== false) await monitorGeneration(stateDirectory, state, generation)
     return generation
   } catch (error) {
     generation.phase = 'failed'
@@ -583,7 +586,7 @@ async function initialize(args) {
     readFileSync(bootstrapPath, 'utf8'),
   )
   generation.phase = 'stable'
-  await launchGeneration(stateDirectory, state, generation)
+  await launchGeneration(stateDirectory, state, generation, { monitor: args['no-serve'] !== true })
   generation.phase = 'stable'
   writeState(stateDirectory, state)
   await emit(stateDirectory, state, generation.id, 'generation.started', {
