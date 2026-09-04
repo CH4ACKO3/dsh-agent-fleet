@@ -556,6 +556,35 @@ async function destroyCandidate(stateDirectory, state, request, kind = 'candidat
   await cleanupOldGenerations(stateDirectory, state)
 }
 
+function persistInheritedHandoff(previous, candidate, payload = {}) {
+  const directory = join(candidate.workspace, '.self-evolve', 'inherited')
+  mkdirSync(directory, { recursive: true })
+  const name = `${previous.id}-handoff.md`
+  const path = join(directory, name)
+  const supplied = typeof payload.handoff?.content === 'string' ? payload.handoff.content.trim() : ''
+  const summary = typeof payload.summary === 'string' ? payload.summary.trim() : ''
+  const content = supplied || [
+    `# ${previous.id} → ${candidate.id} 代际托付`,
+    '',
+    summary || '上一代未提供额外交接正文；请结合 inherited.json、Git 历史和代际事件继续工作。',
+    '',
+  ].join('\n')
+  writeFileSync(path, `${content}\n`, 'utf8')
+  const inherited = {
+    schemaVersion: 1,
+    from: previous.id,
+    to: candidate.id,
+    promotedAt: candidate.promotedAt,
+    sourceCommit: candidate.sourceCommit,
+    handoffPath: `/workspace/.self-evolve/inherited/${name}`,
+    ...(payload.handoff?.path === undefined ? {} : { sourceHandoffPath: payload.handoff.path }),
+    summary,
+  }
+  atomicJson(join(directory, 'inherited.json'), inherited)
+  candidate.inheritedHandoff = inherited
+  return inherited
+}
+
 async function processRequest(stateDirectory, request) {
   const state = readState(stateDirectory)
   if (state.processedRequests.includes(request.id)) return
@@ -583,6 +612,7 @@ async function processRequest(stateDirectory, request) {
     candidate.phase = 'stable'
     candidate.promotedAt = new Date().toISOString()
     candidate.handoff = request.payload ?? {}
+    const inherited = persistInheritedHandoff(previous, candidate, request.payload)
     writeGenerationManifest(candidate, 'stable')
     previous.phase = 'retiring'
     state.stable = candidate.id
@@ -592,6 +622,7 @@ async function processRequest(stateDirectory, request) {
       previous: previous.id,
       handoff: request.payload?.handoff,
       summary: request.payload?.summary ?? '',
+      inherited,
     })
     await stopGeneration(state, previous, { removeVolumes: true })
     previous.phase = 'retired'

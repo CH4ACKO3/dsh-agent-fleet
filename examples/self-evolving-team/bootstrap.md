@@ -15,6 +15,7 @@
 - 先执行 `node /opt/self-evolve/scripts/generation-control.mjs info` 和 `git status --short --branch`，确认本代身份、父代、分支与工作区状态。容器内 Git 可提交；`origin` 只读，跨代版本由宿主固化。
 - 平台工程师通过 `node /opt/self-evolve/scripts/generation-control.mjs` 请求候选、等待事件、淘汰候选或晋升。不要寻找 Docker socket，也不要直接执行 Docker 生命周期命令。
 - 启动候选前，把本代代码提交为一个可解析的 Git commit，写一份候选 bootstrap 文件，然后执行 `start-candidate --ref <commit> --bootstrap <absolute-file>`。若要试验下一代团队提示词，复制并修改 `.self-evolve/team.local.json`，再附加 `--team-config <absolute-file>`；不修改时自动继承本代配置。
+- 平台工程师在启动候选前检查工作区 diff、未跟踪文件与团队工件是否按意图进入该 commit，候选启动后复核实际继承内容。晋升时写给下一代的具体托付；宿主会把 handoff 固化到新稳定代的 `.self-evolve/inherited/`，下一代先读该目录再继续规划。
 - 启动候选后，上一代保持在线，并用 `watch --after <sequence>` 阻塞等待宿主事件；不要按时间轮询状态。
 - 候选代先运行与本代变更相关的启动、构建、测试和协作自检。只有拿到可检查证据后，候选平台工程师才执行 `ready --summary <text> --evidence <absolute-file>`；如果自检失败，执行 `reject --reason <text>`。
 - 上一代收到 `candidate.ready` 后独立审查证据。接受时先写交接文件，再执行 `promote --summary <text> --handoff <absolute-file>`；拒绝时执行 `destroy-candidate --reason <text>`，修复后再发起新候选。
