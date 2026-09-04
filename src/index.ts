@@ -9,7 +9,7 @@ import * as Authorization from './authorization/index.js'
 import * as Data from './data/index.js'
 import { FleetArchiveRegistry } from './archive.js'
 import { FleetAssistantRuntime } from './assistant.js'
-import { activateFleetAutoBootstrap } from './auto-bootstrap.js'
+import { activateFleetAutoBootstrap, writeFleetAutoBootstrapFailure } from './auto-bootstrap.js'
 import { activateResidentFleetAssistants } from './resident-assistants.js'
 import { FleetAuthorizationService } from './authorization.js'
 import { installFleetActivationBridge } from './activation.js'
@@ -158,6 +158,7 @@ export function apply(ctx: Context): void {
       try {
         autoBootstrap = await activateFleetAutoBootstrap(residentScope, service, assistant)
       } catch (error) {
+        writeFleetAutoBootstrapFailure(error)
         residentScope.logger('dsh-agent-fleet').error(
           `Fleet auto bootstrap failed: ${error instanceof Error ? error.message : String(error)}`,
         )

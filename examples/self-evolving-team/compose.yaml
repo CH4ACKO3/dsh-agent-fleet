@@ -87,7 +87,7 @@ services:
         target: /opt/dsh/plugins/dsh-agent-fleet-patchouli.tgz
         read_only: true
     healthcheck:
-      test: ["CMD-SHELL", "test -f /workspace/.self-evolve/fleet-bootstrap-ready.json && node -e \"fetch('http://127.0.0.1:3081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      test: ["CMD-SHELL", "if test -f /workspace/.self-evolve/fleet-bootstrap-ready.json.error.json; then cat /workspace/.self-evolve/fleet-bootstrap-ready.json.error.json >&2; exit 1; fi; test -f /workspace/.self-evolve/fleet-bootstrap-ready.json && node -e \"fetch('http://127.0.0.1:3081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 3s
       timeout: 3s
       retries: 40

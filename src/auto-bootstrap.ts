@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 
@@ -118,7 +118,23 @@ function writeMarker(configuration: FleetAutoBootstrapConfiguration, run: FleetR
     startedAt: new Date().toISOString(),
   }
   atomicJson(markerPath(configuration), value)
-  if (configuration.readyFile !== undefined) atomicJson(configuration.readyFile, value)
+  if (configuration.readyFile !== undefined) {
+    rmSync(`${configuration.readyFile}.error.json`, { force: true })
+    atomicJson(configuration.readyFile, value)
+  }
+}
+
+export function writeFleetAutoBootstrapFailure(
+  error: unknown,
+  configuration = fleetAutoBootstrapConfiguration(),
+): void {
+  if (configuration?.readyFile === undefined) return
+  atomicJson(`${configuration.readyFile}.error.json`, {
+    id: configuration.id,
+    failedAt: new Date().toISOString(),
+    error: error instanceof Error ? error.message : String(error),
+    ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
+  })
 }
 
 function bootstrapMessage(configuration: FleetAutoBootstrapConfiguration): string {
