@@ -38,6 +38,7 @@ RUN mkdir -p /opt/self-evolve/pnpm-seed \
         "dsh-patchouli@${DSH_PATCHOULI_VERSION}" \
         "dsh-patchouli-native-context-service@${DSH_PATCHOULI_VERSION}" \
         "dsh-agent-fleet-patchouli@0.1.3" \
+        "tinyexec@1.3.1" \
     && pnpm --dir /opt/self-evolve/pnpm-seed exec patchouli-db --help >/dev/null \
     && rm -rf /opt/self-evolve/pnpm-seed
 
