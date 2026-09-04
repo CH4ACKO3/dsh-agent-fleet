@@ -69,8 +69,18 @@ function publicState(state) {
 }
 
 async function run(command, args, options = {}) {
-  const executable = process.platform === 'win32' && command === 'pnpm' ? 'pnpm.cmd' : command
-  const result = await execFileAsync(executable, args, {
+  let executable = command
+  let commandArgs = args
+  if (process.platform === 'win32' && command === 'pnpm') {
+    const { stdout } = await execFileAsync('where.exe', ['pnpm.cmd'], { windowsHide: true })
+    const shim = stdout.split(/\r?\n/).map(value => value.trim()).find(Boolean)
+    if (shim === undefined) throw new Error('Could not locate pnpm.cmd')
+    const cli = join(dirname(shim), 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+    if (!existsSync(cli)) throw new Error(`Could not locate the pnpm CLI behind ${shim}`)
+    executable = process.execPath
+    commandArgs = [cli, ...args]
+  }
+  const result = await execFileAsync(executable, commandArgs, {
     cwd: options.cwd,
     env: options.env ?? process.env,
     maxBuffer: 16 * 1024 * 1024,
