@@ -51,23 +51,7 @@ export interface FleetUiConfiguration {
   readonly editor?: FleetConfigurationValue
 }
 
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`)
-  }
-  return value as Record<string, unknown>
-}
-
-function requiredText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} is required`)
-  return value.trim()
-}
-
-function optionalText(value: unknown, label: string): string {
-  if (value === undefined) return ''
-  if (typeof value !== 'string') throw new Error(`${label} must be a string`)
-  return value.trim()
-}
+import { object, requiredText, optionalText } from './validation.js'
 
 function optionalNonNegativeInteger(value: unknown, label: string, fallback: number): number {
   if (value === undefined) return fallback

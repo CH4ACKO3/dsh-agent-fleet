@@ -21,6 +21,7 @@ import {
 } from '@dsh-agent-fleet/core/names'
 
 import type { FleetAssistantRuntime } from './assistant.js'
+import { object, requiredText, optionalText, errorMessage } from './validation.js'
 import {
   FLEET_MESSAGE_MODULE,
   FLEET_RESOURCES_MODULE,
@@ -75,30 +76,6 @@ export interface FleetSetupConfigurationGuide {
     readonly id: string
     readonly description: string
   }[]
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`)
-  }
-  return value as Record<string, unknown>
-}
-
-function requiredText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`${label} is required`)
-  }
-  return value.trim()
-}
-
-function optionalText(value: unknown, label: string): string {
-  if (value === undefined) return ''
-  if (typeof value !== 'string') throw new Error(`${label} must be a string`)
-  return value.trim()
 }
 
 function optionalStringField(

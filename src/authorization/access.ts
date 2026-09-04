@@ -13,6 +13,7 @@ import type {
 import type { FleetMemberView } from '../member-view.js'
 import type { FleetRunService } from '../run.js'
 import { fleetPrivateGroupId, isFleetPrivateGroupId, type FleetGroupService } from './groups.js'
+import { object, text } from '../validation.js'
 
 export const FLEET_ACCESS_STATE_NAMESPACE = 'authorization-access'
 export const FLEET_ACCESS_CONFIGURATION_MODULE = 'dsh-agent-fleet/authorization/access'
@@ -67,16 +68,6 @@ const LEVELS = new Set<string>(FLEET_ACCESS_LEVELS)
 
 function cloneState(state: FleetAccessState): FleetAccessState {
   return structuredClone(state)
-}
-
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${label} must be an object`)
-  return value as Record<string, unknown>
-}
-
-function text(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`)
-  return value.trim()
 }
 
 function principal(value: unknown, label: string): FleetAccessPrincipal {

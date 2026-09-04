@@ -5,6 +5,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { FleetMemberDirectory } from '@dsh-agent-fleet/core'
+import { requiredText } from '../validation.js'
 
 export const FLEET_SCHEDULE_STATE_NAMESPACE = 'productivity-schedules'
 
@@ -55,12 +56,6 @@ export interface FleetScheduledTaskEvent {
 }
 
 const EMPTY_STATE: FleetScheduleState = { version: 1, schedules: [] }
-
-function requiredText(value: string, label: string): string {
-  const normalized = value.trim()
-  if (normalized.length === 0) throw new Error(`${label} cannot be empty`)
-  return normalized
-}
 
 function snapshot<T>(value: T): T {
   return structuredClone(value)

@@ -11,6 +11,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type { FleetAccessService } from '../authorization/access.js'
 import type { FleetAuthorizationService, FleetEffectiveAuthorization } from '../authorization.js'
 import type { FleetRunService } from '../run.js'
+import { object, text } from '../validation.js'
 
 export const FLEET_DOCUMENT_STATE_NAMESPACE = 'documents'
 
@@ -61,16 +62,6 @@ export interface FleetDocumentFiles {
 const EMPTY_STATE: FleetDocumentState = { version: 1, documents: [] }
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 const ID = /^doc_[a-f0-9-]+$/u
-
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${label} must be an object`)
-  return value as Record<string, unknown>
-}
-
-function text(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`)
-  return value.trim()
-}
 
 function positiveInteger(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`${label} must be a positive integer`)

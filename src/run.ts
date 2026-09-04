@@ -111,6 +111,7 @@ import {
   type FleetTurnReminderLists,
   type FleetTurnReminderSlot,
 } from './turn-reminders.js'
+import { object, text, optionalText, errorMessage } from './validation.js'
 
 export type FleetRunStatus = 'starting' | 'idle' | 'running' | 'paused' | 'finishing' | 'closed' | 'failed'
 export type FleetWorkStatus = 'running' | 'finished' | 'blocked' | 'failed' | 'cancelled'
@@ -1467,13 +1468,6 @@ function recordSnapshot(record: FleetRunRecord): FleetRunRecord {
   return structuredClone(record)
 }
 
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`)
-  }
-  return value as Record<string, unknown>
-}
-
 function archiveManifest(value: unknown): FleetArchiveManifest {
   const manifest = object(value, 'Fleet archive manifest')
   if (manifest.format !== FLEET_ARCHIVE_FORMAT || manifest.version !== FLEET_ARCHIVE_VERSION) {
@@ -1734,17 +1728,6 @@ function assertSafeArchiveLinks(root: string, directory = root): void {
       assertSafeArchiveLinks(root, path)
     }
   }
-}
-
-function text(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`)
-  return value.trim()
-}
-
-function optionalText(value: unknown, label: string): string {
-  if (value === undefined) return ''
-  if (typeof value !== 'string') throw new Error(`${label} must be a string`)
-  return value.trim()
 }
 
 function array(value: unknown, label: string): unknown[] {
@@ -2075,10 +2058,6 @@ function initialChannelMembers(
 
 function isTerminal(status: FleetRunStatus): boolean {
   return TERMINAL.has(status)
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 const TRACE_EVENT_DATA_LIMIT = 2_000

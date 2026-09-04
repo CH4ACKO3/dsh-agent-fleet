@@ -10,6 +10,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type { FleetArchiveRegistry, FleetArchiveTeam } from '../archive.js'
 import type { FleetAuthorizationService, FleetEffectiveAuthorization } from '../authorization.js'
 import type { FleetRunService } from '../run.js'
+import { object, text } from '../validation.js'
 
 export const FLEET_WORKSPACE_STATE_NAMESPACE = 'workspaces'
 export const FLEET_WORKSPACE_ARCHIVE_CONTRIBUTOR = 'fleet.workspaces'
@@ -45,16 +46,6 @@ const EMPTY_STATE: FleetWorkspaceState = { version: 1, workspaces: [], members: 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 const ID = /^workspace_[a-f0-9-]+$/u
 const PROJECT_WORKSPACE_ID = 'project'
-
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${label} must be an object`)
-  return value as Record<string, unknown>
-}
-
-function text(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`)
-  return value.trim()
-}
 
 function parseWorkspace(value: unknown, label: string): FleetWorkspace {
   const input = object(value, label)

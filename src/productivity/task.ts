@@ -5,6 +5,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { FleetMemberDirectory } from '@dsh-agent-fleet/core'
+import { requiredText } from '../validation.js'
 
 export const FLEET_TASK_STATE_NAMESPACE = 'productivity-tasks'
 
@@ -382,12 +383,6 @@ export interface SettleFleetTaskOutcomeInput {
 
 const EMPTY_STATE: FleetTaskState = { version: 6, tasks: [] }
 const SYSTEM_TARGET = '$system'
-
-function requiredText(value: string, label: string): string {
-  const result = value.trim()
-  if (result.length === 0) throw new Error(`${label} cannot be empty`)
-  return result
-}
 
 function unique(values: readonly string[]): string[] { return [...new Set(values)] }
 function snapshot<T>(value: T): T { return structuredClone(value) }
