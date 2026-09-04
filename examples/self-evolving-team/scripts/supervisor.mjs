@@ -1096,6 +1096,10 @@ async function stopRun(stateDirectory) {
     generation.phase = 'retiring'
     writeState(stateDirectory, state)
     await stopGeneration(state, generation, { removeVolumes: true }).catch(() => undefined)
+    if (generation.image !== undefined) {
+      await run('docker', ['image', 'rm', generation.image]).catch(() => undefined)
+      generation.imageCleanedAt = new Date().toISOString()
+    }
     generation.phase = 'stopped'
   }
   state.status = 'stopped'
