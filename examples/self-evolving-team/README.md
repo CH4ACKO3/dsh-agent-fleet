@@ -18,20 +18,21 @@
 ## 边界
 
 - Agent 容器不挂载 Docker socket，也不能直接启动、停止或删除任何容器。
-- 每代使用新的完整 Git clone 和 DSH 数据卷；不会复制正在写入的 Session 数据。容器内可以正常执行 `git status`、`git commit` 和 `git log`。
+- 每代使用新的完整 Git clone、DSH 数据卷、Linux `node_modules` 卷和 Patchouli 数据卷。候选代继承父代 Patchouli 记忆的隔离快照，但不会复制正在写入的 Session 数据。容器内可以正常执行 `git status`、`git commit` 和 `git log`。
 - 宿主状态目录维护独立裸仓库。启动下一代时，宿主从稳定代工作区解析请求中的 commit，把它固化为 `generations/gNNNN` 分支，再从该分支创建候选。上一代工作区被回收后，提交历史仍然存在。
 - 容器只读挂载代际裸仓库，不获得宿主 Git 凭据，也不挂载主仓库的 `.git`。本代可以 commit，但不能直接修改 `main` 或其他代的分支；跨代导入只由宿主监督器完成。
 - 下一代从该代 Git commit 中构建被测 Fleet 包，因此运行时代码与其中的系统提示词修改都会进入候选。
 - 当前监督器目录中的 Compose、Dockerfile、代际客户端和团队安全模板是本轮根信任，不从候选 clone 加载。团队可以提出这些控制文件的修改，但必须由宿主在下一轮明确采用；否则一个不可靠候选只需修改挂载、权限或晋升脚本就能绕过蓝绿保护。
 - 同时只有一个候选。候选只能为自己提交 `ready` 或 `reject`；只有稳定代能 `start-candidate`、`destroy-candidate` 或 `promote`。
 - 晋升必须同时满足候选自证和稳定代批准。先写 `generation.promoted` 事件，再停止旧代，把其成员独立上下文和 Fleet 事件导出到 `archive/dsh-context.tar.gz`，最后删除容器、网络与数据卷；拒绝、异常退出和整轮停止走同一归档清理路径。已退休代默认只保留最近两代的工作区供诊断，更旧的由监督器按明确代路径回收；Git 历史、上下文归档和事件不随工作区回收而丢失。
-- 控制请求使用每代独立的 HMAC 身份。密钥只通过本代容器环境传入；包含密钥的监督器状态文件不挂载到容器。
+- 控制请求使用每代独立的 HMAC 身份。密钥写入本代工作区内只供控制客户端读取的文件，避免 Agent 工具执行环境过滤自定义环境变量后失效；包含其他代密钥的监督器状态文件不挂载到容器。
+- `dsh-patchouli` 提供持久记忆与原生上下文索引，`dsh-agent-fleet-patchouli` 提供 Team 语义适配。Patchouli 数据不在父子代之间共享写入：候选启动前由监督器复制父代卷，淘汰候选不会污染稳定代记忆，晋升后候选副本成为下一代来源。Git 提交和显式交接文件仍是版本与恢复的权威来源，记忆服务只是检索加速层。
 
 ## 文件
 
 - `team.local.json`：基于中型开发团队的中文派生模板。角色数量与职责面保持不变，只增加代际责任和自我改进边界。
 - `bootstrap.md`：第一代的持续任务。后续代由上一代提供更具体的候选 bootstrap。
-- `Dockerfile`、`compose.yaml`、`compose.source.yaml`：每代隔离运行环境；默认 4 CPU、8 GiB，并在运行时只允许访问模型端点。
+- `Dockerfile`、`compose.yaml`、`compose.source.yaml`：每代隔离运行环境；默认 4 CPU、8 GiB，并在运行时只允许访问模型端点。镜像预装 Patchouli，宿主源码仍使用自己的依赖，容器测试使用独立 Linux `node_modules` 卷。
 - `scripts/supervisor.mjs`：宿主唯一生命周期控制器。
 - `scripts/generation-control.mjs`：容器内请求/事件客户端。
 - `scripts/protocol.mjs`：请求认证与双确认授权规则。
@@ -89,7 +90,8 @@ node /opt/self-evolve/scripts/generation-control.mjs info
 # 稳定代：启动一个候选
 node /opt/self-evolve/scripts/generation-control.mjs start-candidate \
   --ref "$(git rev-parse HEAD)" \
-  --bootstrap /workspace/evidence/next-bootstrap.md
+  --bootstrap /workspace/evidence/next-bootstrap.md \
+  --team-config /workspace/.self-evolve/team.local.json
 
 # 稳定代：阻塞等待下一条宿主事件
 node /opt/self-evolve/scripts/generation-control.mjs watch --after 3
@@ -119,4 +121,4 @@ node /opt/self-evolve/scripts/generation-control.mjs destroy-candidate \
 - 稳定代意外退出：候选不会被静默晋升。监督器保留候选和完整状态并发出退出事件，等待宿主判断；这比在缺少上一代批准时自动接管更安全。
 - 监督器退出：容器不受影响；重新运行 `serve` 会扫描尚未归档的请求并重新挂接运行中容器的退出事件。
 
-状态、完成请求、拒绝请求和逐代事件都保存在宿主状态目录。每代停止时会先归档除可重装依赖外的 DSH 数据，其中包含团队事件、各成员 Session 上下文和工作区索引；归档成功后才删除容器、网络和数据卷，因此 Docker 资源不随代数累积。监督器只保留 `--retain-generations` 指定数量的最近退休/失败工作区（默认 2），随后按它自己创建并验证过的精确路径回收。代际裸仓库中的 Git commit、上下文归档、控制事件以及交接摘要继续保留。
+状态、完成请求、拒绝请求和逐代事件都保存在宿主状态目录。每代停止时会先归档除可重装依赖外的 DSH 数据，其中包含团队事件、各成员 Session 上下文和工作区索引；归档成功后才删除容器、网络和数据卷，因此 Docker 资源不随代数累积。跨代 Patchouli 记忆随晋升复制到下一代，显式交接证据同时保留在 Git 与宿主状态目录。监督器只保留 `--retain-generations` 指定数量的最近退休/失败工作区（默认 2），随后按它自己创建并验证过的精确路径回收。代际裸仓库中的 Git commit、上下文归档、控制事件以及交接摘要继续保留。

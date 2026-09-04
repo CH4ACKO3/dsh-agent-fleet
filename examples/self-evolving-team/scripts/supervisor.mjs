@@ -123,8 +123,9 @@ function composeEnvironment(state, generation) {
     SELF_EVOLVE_CONTROL_ROOT: join(state.stateDirectory, 'control'),
     SELF_EVOLVE_REPOSITORY: state.repository,
     SELF_EVOLVE_GENERATION: generation.id,
-    SELF_EVOLVE_CONTROL_TOKEN: generation.token,
+    SELF_EVOLVE_TEAM_CONFIG: generation.teamConfigPath,
     FLEET_PACKAGE_PATH: generation.packagePath,
+    FLEET_PATCHOULI_PACKAGE_PATH: generation.patchouliPackagePath,
     FLEET_SOURCE_COMMIT: generation.sourceCommit,
     FLEET_AUTO_BOOTSTRAP_ID: generation.id,
     SELF_EVOLVE_CPUS: String(state.resources.cpus),
@@ -191,12 +192,20 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
     await run('git', ['diff', '--cached', '--exit-code', '--stat'], { cwd: workspace })
     mkdirSync(join(generationRoot, 'packages'), { recursive: true })
     await run('pnpm', ['pack', '--pack-destination', join(generationRoot, 'packages')], { cwd: workspace })
+    await run('pnpm', [
+      '--filter', 'dsh-agent-fleet-patchouli',
+      'pack', '--pack-destination', join(generationRoot, 'packages'),
+    ], { cwd: workspace })
     const packageDirectory = join(generationRoot, 'packages')
-    const packageName = readdirSync(packageDirectory).find(name => name.endsWith('.tgz'))
+    const packageNames = readdirSync(packageDirectory).filter(name => name.endsWith('.tgz'))
+    const packageName = packageNames.find(name => /^dsh-agent-fleet-\d/.test(name))
+    const patchouliPackageName = packageNames.find(name => name.startsWith('dsh-agent-fleet-patchouli-'))
     if (packageName === undefined) throw new Error('pnpm pack did not produce a Fleet package')
+    if (patchouliPackageName === undefined) throw new Error('pnpm pack did not produce a Fleet Patchouli package')
     const bootstrapDirectory = join(workspace, '.self-evolve')
     mkdirSync(bootstrapDirectory, { recursive: true })
     const bootstrapPath = join(bootstrapDirectory, 'bootstrap.md')
+    const teamConfigPath = join(bootstrapDirectory, 'team.local.json')
     const role = options.parent === undefined ? 'stable' : 'candidate'
     const createdAt = new Date().toISOString()
     writeFileSync(bootstrapPath, [
@@ -209,9 +218,17 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       `- 当前代：${id}`,
       `- 源提交：${sourceCommit}`,
       `- 控制命令：node /opt/self-evolve/scripts/generation-control.mjs`,
+      '- 可以在候选 bootstrap 中改进下一代的工作方式；如需调整角色或团队提示词，复制并修改 `.self-evolve/team.local.json`，再向 `start-candidate` 传入 `--team-config <absolute-file>`。',
       '- 等待状态变化请使用 `watch`；它会阻塞直到事件到达，不要按时间轮询。',
       '',
     ].join('\n'), 'utf8')
+    const token = randomBytes(32).toString('hex')
+    const teamConfigContent = options.teamConfigContent
+      ?? readFileSync(options.parent === undefined
+        ? join(state.exampleRoot, 'team.local.json')
+        : state.generations[options.parent].teamConfigPath, 'utf8')
+    writeFileSync(teamConfigPath, teamConfigContent, 'utf8')
+    writeFileSync(join(bootstrapDirectory, 'control-token'), `${token}\n`, 'utf8')
     const generation = {
       id,
       number,
@@ -221,10 +238,12 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       gitBranch,
       workspace,
       packagePath: join(packageDirectory, packageName),
+      patchouliPackagePath: join(packageDirectory, patchouliPackageName),
       bootstrapPath,
+      teamConfigPath,
       composeProject: `${state.name}-${id}`.toLowerCase().replace(/[^a-z0-9_-]+/g, '-'),
       port: state.basePort + number - 1,
-      token: randomBytes(32).toString('hex'),
+      token,
       phase: 'starting',
       createdAt,
     }
@@ -233,6 +252,66 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
   } catch (error) {
     rmSync(workspace, { recursive: true, force: true, maxRetries: 3 })
     throw error
+  }
+}
+
+function generationVolume(generation, suffix) {
+  return `${generation.composeProject}_${suffix}`
+}
+
+async function prepareLinuxWorkspace(state, generation) {
+  const volume = generationVolume(generation, 'workspace-node-modules')
+  await run('docker', [
+    'run', '--rm', '--pull', 'never',
+    '--entrypoint', 'pnpm',
+    '--workdir', '/workspace',
+    '--volume', `${generation.workspace}:/workspace`,
+    '--volume', `${volume}:/workspace/node_modules`,
+    'local/dsh-agent-fleet-self-evolve:latest',
+    'install', '--frozen-lockfile',
+  ])
+}
+
+async function preparePatchouliData(state, generation) {
+  const destination = generationVolume(generation, 'patchouli-data')
+  if (generation.parent === null) return
+  const parent = state.generations[generation.parent]
+  if (parent === undefined) return
+  const source = generationVolume(parent, 'patchouli-data')
+  const present = await run('docker', ['volume', 'inspect', source]).then(() => true, () => false)
+  if (!present) return
+  const checkpointed = await compose(state, parent, [
+    'exec', '-T', 'dsh',
+    '/root/.patchouli/bin/v0.1.6/patchouli-db',
+    'checkpoint', '--endpoint', '/data/.patchouli/run/patchouli.sock',
+  ]).then(() => true, () => false)
+  if (!checkpointed) {
+    generation.memoryInheritance = {
+      status: 'skipped',
+      reason: `Patchouli checkpoint was unavailable in ${parent.id}`,
+      createdAt: new Date().toISOString(),
+    }
+    return
+  }
+  let paused = false
+  try {
+    await compose(state, parent, ['pause'])
+    paused = true
+    await run('docker', [
+      'run', '--rm', '--pull', 'never',
+      '--entrypoint', 'sh',
+      '--volume', `${source}:/source:ro`,
+      '--volume', `${destination}:/destination`,
+      'local/dsh-agent-fleet-self-evolve:latest',
+      '-lc', 'cp -a /source/. /destination/',
+    ])
+    generation.memoryInheritance = {
+      status: 'copied',
+      from: parent.id,
+      createdAt: new Date().toISOString(),
+    }
+  } finally {
+    if (paused) await compose(state, parent, ['unpause'])
   }
 }
 
@@ -289,6 +368,32 @@ async function archiveGenerationContext(state, generation) {
     bytes: statSync(finalPath).size,
     excludes: ['.dsh/profiles', '.dsh/node_modules'],
   }
+
+  const memoryFinalPath = join(archiveDirectory, 'patchouli-memory.tar.gz')
+  const memoryTemporaryName = `patchouli-memory-${randomUUID()}.partial.tar.gz`
+  const memoryTemporaryPath = join(archiveDirectory, memoryTemporaryName)
+  const memoryVolume = generationVolume(generation, 'patchouli-data')
+  try {
+    await run('docker', [
+      'run', '--rm', '--pull', 'never',
+      '--entrypoint', 'tar',
+      '--volume', `${memoryVolume}:/source:ro`,
+      '--volume', `${archiveDirectory}:/archive`,
+      'local/dsh-agent-fleet-self-evolve:latest',
+      '-czf', `/archive/${memoryTemporaryName}`,
+      '-C', '/source',
+      '.',
+    ])
+    renameSync(memoryTemporaryPath, memoryFinalPath)
+    generation.memoryArchive = {
+      path: memoryFinalPath,
+      createdAt: new Date().toISOString(),
+      bytes: statSync(memoryFinalPath).size,
+    }
+  } catch (error) {
+    if (existsSync(memoryTemporaryPath)) rmSync(memoryTemporaryPath, { force: true })
+    throw error
+  }
 }
 
 async function monitorGeneration(stateDirectory, state, generation) {
@@ -333,7 +438,11 @@ async function launchGeneration(stateDirectory, state, generation, options = {})
   state.eventSequences[generation.id] ??= 0
   writeState(stateDirectory, state)
   try {
-    await compose(state, generation, ['up', '-d', '--build', '--wait'])
+    await compose(state, generation, ['build'])
+    await compose(state, generation, ['create'])
+    await prepareLinuxWorkspace(state, generation)
+    await preparePatchouliData(state, generation)
+    await compose(state, generation, ['up', '-d', '--no-build', '--wait'])
     generation.phase = 'observing'
     writeState(stateDirectory, state)
     if (options.monitor !== false) await monitorGeneration(stateDirectory, state, generation)
@@ -377,7 +486,9 @@ async function cleanupOldGenerations(stateDirectory, state) {
     .filter(generation => ['retired', 'rejected', 'failed'].includes(generation.phase) && generation.cleanedAt === undefined)
     .sort((left, right) => right.number - left.number)
   for (const generation of inactive.slice(keep)) {
-    await run('docker', ['volume', 'rm', `${generation.composeProject}_dsh-data`]).catch(() => undefined)
+    for (const suffix of ['dsh-data', 'patchouli-data', 'workspace-node-modules']) {
+      await run('docker', ['volume', 'rm', generationVolume(generation, suffix)]).catch(() => undefined)
+    }
     const workspace = assertManagedWorkspace(state, generation.workspace)
     const generationRoot = dirname(workspace)
     if (existsSync(workspace)) rmSync(workspace, { recursive: true, force: true, maxRetries: 3 })
@@ -400,6 +511,9 @@ async function startCandidate(stateDirectory, state, request) {
     candidate = await prepareGeneration(state, number, sourceRef, bootstrapContent, {
       sourceWorkspace: state.generations[state.stable].workspace,
       parent: state.stable,
+      ...(payload.teamConfig?.content === undefined
+        ? {}
+        : { teamConfigContent: requiredText(payload.teamConfig.content, 'candidate team config content') }),
     })
     candidate.requestId = request.id
     state.candidate = candidate.id

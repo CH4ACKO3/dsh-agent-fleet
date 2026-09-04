@@ -9,6 +9,7 @@ RUN apt-get update \
 
 ARG DSH_HARMONY_VERSION=0.8.10
 ARG DSH_TURN_FOLD_VERSION=0.6.0
+ARG DSH_PATCHOULI_VERSION=0.1.6
 
 # Runtime networking is closed, so every dependency used by the inherited
 # entrypoint must be present in the image's pnpm store before a generation starts.
@@ -33,6 +34,11 @@ RUN mkdir -p /opt/self-evolve/pnpm-seed \
         "@ch4acko3/dsh-diff-engine@0.1.2" \
         "@ch4acko3/dsh-diff-render@0.1.3" \
         "@ch4acko3/dsh-ansi-render@0.1.2" \
+        "patchouli-db@${DSH_PATCHOULI_VERSION}" \
+        "dsh-patchouli@${DSH_PATCHOULI_VERSION}" \
+        "dsh-patchouli-native-context-service@${DSH_PATCHOULI_VERSION}" \
+        "dsh-agent-fleet-patchouli@0.1.3" \
+    && pnpm --dir /opt/self-evolve/pnpm-seed exec patchouli-db --help >/dev/null \
     && rm -rf /opt/self-evolve/pnpm-seed
 
 RUN sed -i \
@@ -49,8 +55,12 @@ ENV DSH_HARMONY_ACTIVE_DSH_ENTRY=/usr/local/lib/node_modules/@deepseek-ai/dsh/li
 COPY team.local.json /opt/self-evolve/team.local.json
 COPY scripts /opt/self-evolve/scripts
 COPY scripts/network-guard.sh /opt/self-evolve/network-guard.sh
+COPY scripts/configure-profile.mjs /opt/dsh/configure-profile.mjs
+COPY scripts/dsh-container-entrypoint /usr/local/bin/dsh-container-entrypoint
 RUN sed -i 's/\r$//' /opt/self-evolve/network-guard.sh /opt/self-evolve/scripts/*.mjs \
+        /usr/local/bin/dsh-container-entrypoint \
     && chmod 0555 /opt/self-evolve/network-guard.sh /opt/self-evolve/scripts/*.mjs \
+        /opt/dsh/configure-profile.mjs /usr/local/bin/dsh-container-entrypoint \
     && git config --system --add safe.directory /workspace
 
 WORKDIR /workspace

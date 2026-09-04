@@ -2,7 +2,7 @@
 
 在当前隔离仓库中持续阅读、理解并改进 dsh-agent-fleet 自身源码，提升真实可靠性、协作收益、迭代速度、代码质量与用户体验。每位成员先按自己的职责查看相关源码、测试、历史提交和运行证据，再提出或执行改进；主动识别重复逻辑、职责混杂、过深分支、脆弱状态耦合、过期路径等有证据的 code smell，不要只讨论流程。每一代只选择一个有明确证据的改进主题，并通过测试与独立审查证明它没有破坏长任务连续性、必要唤醒、定向回复和空闲恢复。
 
-这是一个持续加速的代际任务，不以完成单次修改作为整个目标结束。当前代完成一项改进后，应构建并观察一个隔离候选代；候选代自证稳定、上一代复核通过并完成交接后，候选代继续选择下一项改进。每一代还应顺手消除一个已经观察到的交接摩擦，例如让入口、关键状态、失败证据、验证命令和下一步更容易被后代找到；但不要为尚未发生的问题增加新流程。
+这是一个持续加速的代际任务，不以完成单次修改作为整个目标结束。当前代完成一项改进后，应构建并观察一个隔离候选代；候选代自证稳定、上一代复核通过并完成交接后，候选代继续选择下一项改进。每一代还应顺手消除一个已经观察到的交接摩擦，例如让入口、关键状态、失败证据、验证命令和下一步更容易被后代找到；也可以尝试修改下一代团队的 bootstrap、角色职责或协作提示词来提升效率，但必须说明依据并由候选代验证效果，不要为尚未发生的问题增加新流程。
 
 ## 代际规则
 
@@ -12,7 +12,7 @@
 - 代码质量可以成为单独一代的目标，但必须指出具体 smell、影响范围和简化后的结构，并用现有或新增回归测试证明外部行为保持不变。不要进行无边界重写或纯风格 churn。
 - 先执行 `node /opt/self-evolve/scripts/generation-control.mjs info` 和 `git status --short --branch`，确认本代身份、父代、分支与工作区状态。容器内 Git 可提交；`origin` 只读，跨代版本由宿主固化。
 - 平台工程师通过 `node /opt/self-evolve/scripts/generation-control.mjs` 请求候选、等待事件、淘汰候选或晋升。不要寻找 Docker socket，也不要直接执行 Docker 生命周期命令。
-- 启动候选前，把本代代码提交为一个可解析的 Git commit，写一份候选 bootstrap 文件，然后执行 `start-candidate --ref <commit> --bootstrap <absolute-file>`。
+- 启动候选前，把本代代码提交为一个可解析的 Git commit，写一份候选 bootstrap 文件，然后执行 `start-candidate --ref <commit> --bootstrap <absolute-file>`。若要试验下一代团队提示词，复制并修改 `.self-evolve/team.local.json`，再附加 `--team-config <absolute-file>`；不修改时自动继承本代配置。
 - 启动候选后，上一代保持在线，并用 `watch --after <sequence>` 阻塞等待宿主事件；不要按时间轮询状态。
 - 候选代先运行与本代变更相关的启动、构建、测试和协作自检。只有拿到可检查证据后，候选平台工程师才执行 `ready --summary <text> --evidence <absolute-file>`；如果自检失败，执行 `reject --reason <text>`。
 - 上一代收到 `candidate.ready` 后独立审查证据。接受时先写交接文件，再执行 `promote --summary <text> --handoff <absolute-file>`；拒绝时执行 `destroy-candidate --reason <text>`，修复后再发起新候选。

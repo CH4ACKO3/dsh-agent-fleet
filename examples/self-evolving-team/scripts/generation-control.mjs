@@ -31,6 +31,15 @@ function requiredEnv(name) {
   return value
 }
 
+function controlToken() {
+  const path = process.env.SELF_EVOLVE_CONTROL_TOKEN_FILE?.trim()
+    || '/workspace/.self-evolve/control-token'
+  if (!isAbsolute(path) || !existsSync(path)) {
+    throw new Error(`generation control token file is missing: ${path}`)
+  }
+  return requiredText(readFileSync(path, 'utf8'), 'generation control token')
+}
+
 function requiredText(value, name) {
   const normalized = typeof value === 'string' ? value.trim() : ''
   if (!normalized) throw new Error(`${name} is required`)
@@ -57,10 +66,11 @@ function submit(type, args) {
   if (!REQUEST_TYPES.includes(type)) throw new Error(`Unknown request type ${type}`)
   const control = requiredEnv('SELF_EVOLVE_CONTROL_DIR')
   const generation = requiredEnv('SELF_EVOLVE_GENERATION')
-  const token = requiredEnv('SELF_EVOLVE_CONTROL_TOKEN')
+  const token = controlToken()
   const bootstrap = optionalFile(args.bootstrap, '--bootstrap')
   const evidence = optionalFile(args.evidence, '--evidence')
   const handoff = optionalFile(args.handoff, '--handoff')
+  const teamConfig = optionalFile(args['team-config'], '--team-config')
   const request = {
     id: randomUUID(),
     generation,
@@ -73,6 +83,7 @@ function submit(type, args) {
       ...(bootstrap === undefined ? {} : { bootstrap }),
       ...(evidence === undefined ? {} : { evidence }),
       ...(handoff === undefined ? {} : { handoff }),
+      ...(teamConfig === undefined ? {} : { teamConfig }),
     },
   }
   const signed = { ...request, signature: signRequest(request, token) }
@@ -146,7 +157,7 @@ async function main() {
   }
   const type = types[command]
   if (type === undefined) {
-    throw new Error('Usage: generation-control <info|start-candidate|destroy-candidate|ready|reject|promote|watch> [options]')
+    throw new Error('Usage: generation-control <info|start-candidate|destroy-candidate|ready|reject|promote|watch> [options]; start-candidate accepts --team-config <absolute-file>')
   }
   submit(type, args)
 }
