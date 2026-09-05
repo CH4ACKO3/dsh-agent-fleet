@@ -62,7 +62,70 @@ function atomicJson(path, value) {
   renameSync(temporary, path)
 }
 
-function submit(type, args) {
+function requestFile(directory, id) {
+  if (!existsSync(directory)) return undefined
+  const name = readdirSync(directory).find(candidate => candidate.endsWith(`-${id}.json`))
+  return name === undefined ? undefined : join(directory, name)
+}
+
+function rejectionFor(control, generation, id) {
+  const directory = join(control, 'events', generation)
+  for (const name of eventFiles(directory).reverse()) {
+    const event = JSON.parse(readFileSync(join(directory, name), 'utf8'))
+    if (event.type === 'request.rejected' && event.data?.requestId === id) return event
+  }
+  return undefined
+}
+
+async function waitForRequestResult(control, generation, request) {
+  const completed = join(control, 'completed')
+  const rejected = join(control, 'rejected')
+  mkdirSync(completed, { recursive: true })
+  mkdirSync(rejected, { recursive: true })
+  await new Promise((resolve, reject) => {
+    let settled = false
+    let fallback
+    const watchers = []
+    const cleanup = () => {
+      for (const watcher of watchers) watcher.close()
+      if (fallback !== undefined) clearInterval(fallback)
+      process.off('SIGINT', interrupted)
+    }
+    const finish = (callback) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      callback()
+    }
+    const check = () => {
+      try {
+        if (requestFile(completed, request.id) !== undefined) {
+          finish(() => {
+            process.stdout.write(`${JSON.stringify({ accepted: true, finalized: true, id: request.id, type: request.type })}\n`)
+            resolve()
+          })
+          return
+        }
+        if (requestFile(rejected, request.id) !== undefined) {
+          const event = rejectionFor(control, generation, request.id)
+          const detail = event?.data?.error ?? 'The host rejected the request without an error detail.'
+          finish(() => reject(new Error(`Host rejected ${request.type} request ${request.id}: ${detail}`)))
+        }
+      } catch (error) {
+        finish(() => reject(error))
+      }
+    }
+    const interrupted = () => finish(() => reject(new Error(`Request ${request.id} wait interrupted; host outcome is unknown`)))
+    watchers.push(watch(completed, { persistent: true }, check))
+    watchers.push(watch(rejected, { persistent: true }, check))
+    // Docker Desktop bind mounts can drop fs.watch notifications.
+    fallback = setInterval(check, 1_000)
+    process.once('SIGINT', interrupted)
+    check()
+  })
+}
+
+async function submit(type, args) {
   if (!REQUEST_TYPES.includes(type)) throw new Error(`Unknown request type ${type}`)
   const control = requiredEnv('SELF_EVOLVE_CONTROL_DIR')
   const generation = requiredEnv('SELF_EVOLVE_GENERATION')
@@ -90,7 +153,17 @@ function submit(type, args) {
   const requests = join(control, 'requests')
   mkdirSync(requests, { recursive: true })
   atomicJson(join(requests, `${Date.now()}-${request.id}.json`), signed)
-  process.stdout.write(`${JSON.stringify({ accepted: true, id: request.id, type })}\n`)
+  if (type === 'candidate.ready') {
+    await waitForRequestResult(control, generation, request)
+    return
+  }
+  process.stdout.write(`${JSON.stringify({
+    submitted: true,
+    finalized: false,
+    id: request.id,
+    type,
+    message: 'Request queued; this is not host acceptance. Wait for the matching generation event.',
+  })}\n`)
 }
 
 function eventFiles(directory) {
@@ -178,7 +251,7 @@ async function main() {
   if (type === undefined) {
     throw new Error('Usage: generation-control <info|start-candidate|destroy-candidate|ready|reject|promote|watch> [options]; start-candidate accepts --team-config <absolute-file>')
   }
-  submit(type, args)
+  await submit(type, args)
 }
 
 main().catch(error => {
