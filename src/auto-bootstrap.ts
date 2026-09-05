@@ -194,7 +194,7 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
     return [key, value]
   }))).slice(0, 2_000)
   const actions: Record<string, string> = {
-    'candidate.ready': '候选代已经声明 ready。立即为一名独立审查者建立单 owner 持久 Goal；从宿主数据给出的 gitBranch/sourceCommit 读取候选提交与 evidence，核对测试、记忆继承、协作链和交接能力。审查 Goal 到达明确终态后，才执行 promote 或 destroy-candidate；回复或开工确认不算审查完成。',
+    'candidate.ready': '候选代已经声明 ready。立即建立两个有依赖的单 owner 持久 Goal：先由一名独立审查者从宿主数据给出的 gitBranch/sourceCommit 读取候选提交与 evidence，核对测试、记忆继承、协作链和交接能力；再建立平台工程师单 owner 的最终决定 Goal，依赖该审查，负责根据审查终态写交接并实际执行 promote 或 destroy-candidate。两个节点必须在同一次建图时创建，不要等审查结束后再依赖助理被唤醒补建。回复或开工确认不算审查完成。',
     'candidate.failed': '候选代启动失败。立即读取失败证据，清理失败候选，并在修复基座原因后从同一稳定提交重试。',
     'candidate.destroyed': '候选代已销毁。若全局迭代目标仍存在，立即修复已记录原因并启动替代候选。',
     'candidate.self_rejected': '候选代已自我拒绝。立即审查拒绝原因，修复后启动替代候选。',
