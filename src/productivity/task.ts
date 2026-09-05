@@ -2928,13 +2928,13 @@ export function installGoalTools(
 ): () => void {
   return ctx.tools.register(defineTool({
     name: 'fleet_goal',
-    description: 'Create and inspect Goals, atomically split owned work into child Goals, submit a completed result, or report a terminal external blocker. Prefer one accountable owner per Goal; every listed owner must submit, and any block terminates its dependent branch.',
+    description: 'Create and inspect Goals, atomically split owned work into child Goals, submit a completed result, or report a terminal external blocker. Use exactly one accountable owner per work Goal; represent collaborators and reviewers as separate dependent Goals. Every listed owner must submit, and any block terminates its dependent branch.',
     parameters: {
       action: { type: 'string', required: true, enum: ['list', 'get', 'create', 'split', 'complete', 'block'] },
       id: { type: 'string' },
       title: { type: 'string' },
       description: { type: 'string' },
-      owners: { type: 'array', items: { type: 'string' }, description: 'Prefer one accountable owner. Multiple owners are all required; any owner block terminates this Goal and its dependent branch.' },
+      owners: { type: 'array', items: { type: 'string' }, description: 'Use exactly one accountable owner for a work Goal. Multiple owners are all required; any owner block terminates this Goal and its dependent branch.' },
       parent_id: { type: 'string' },
       dependencies: { type: 'array', items: { type: 'string' }, description: 'Goal ids that must settle before this owner is woken; every dependency must complete before this Goal can complete.' },
       resources: { type: 'array', items: { type: 'string' } },
@@ -2947,7 +2947,7 @@ export function installGoalTools(
             key: { type: 'string', required: true },
             title: { type: 'string', required: true },
             description: { type: 'string' },
-            owners: { type: 'array', required: true, items: { type: 'string' }, description: 'Prefer one accountable owner. Multiple owners are all required; any owner block terminates this Goal and its dependent branch.' },
+            owners: { type: 'array', required: true, items: { type: 'string' }, description: 'Use exactly one accountable owner for a work Goal. Multiple owners are all required; any owner block terminates this Goal and its dependent branch.' },
             dependencies: { type: 'array', items: { type: 'string' } },
             resources: { type: 'array', items: { type: 'string' } },
             timeout_at: { type: 'string' },
