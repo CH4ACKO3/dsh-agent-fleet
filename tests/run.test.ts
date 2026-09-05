@@ -1794,6 +1794,45 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('wakes the assistant after finished work settles from finishing to idle', async () => {
+    vi.useFakeTimers()
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected lead')
+    const running = service.start(launcher as unknown as Agent, {
+      runId: run.id,
+      taskPath,
+      projectRoot: root,
+    })
+    const rootTaskId = running.work?.rootTaskId
+    if (rootTaskId === undefined) throw new Error('expected composite root Task')
+    const wakeCount = (): number => launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('first no-Goal reminder'))).length
+
+    lead.status = 'running'
+    service.agentStatusChanged(lead as unknown as Agent)
+    settleDefaultCompositeWork(
+      service.taskBoard(run.id), lead.id, rootTaskId, 'complete', 'Work finished while its final owner was active.',
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(service.status(run.id)).toMatchObject({ status: 'running', work: { status: 'running' } })
+
+    lead.completeTurn()
+    service.agentStatusChanged(lead as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(service.status(run.id)).toMatchObject({ status: 'idle', work: { status: 'finished' } })
+    expect(wakeCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wakeCount()).toBe(1)
+    disconnect()
+  })
+
   it('preserves the consumed no-Goal idle wake across Team resume', async () => {
     vi.useFakeTimers()
     const { root, configPath } = fixture()

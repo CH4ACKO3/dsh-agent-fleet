@@ -8686,6 +8686,7 @@ export class FleetRunService {
         if (agent?.status === 'idle') this.continueOwnedTasks(idle.id, runtime, idle, agent)
       }
     }
+    this.signalAssistantTeamIdle(idle.id)
     this.notify(idle)
   }
 
