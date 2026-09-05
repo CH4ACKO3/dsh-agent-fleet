@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -522,6 +522,36 @@ async function compose(state, generation, args) {
   ], { cwd: exampleRoot, env: composeEnvironment(state, generation) })
 }
 
+function sha256File(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+async function assertRuntimePackage(state, generation, hostPath, containerPath, label) {
+  const expected = sha256File(hostPath)
+  const { stdout } = await compose(state, generation, ['exec', '-T', 'dsh', 'sha256sum', containerPath])
+  const actual = stdout.split(/\s+/, 1)[0]?.toLowerCase()
+  if (actual !== expected) {
+    throw new Error(`${label} runtime package mismatch: expected ${expected}, received ${actual ?? 'no hash'}`)
+  }
+}
+
+async function assertRuntimePackages(state, generation) {
+  await assertRuntimePackage(
+    state,
+    generation,
+    generation.packagePath,
+    '/opt/dsh/plugins/dsh-agent-fleet.tgz',
+    'Fleet',
+  )
+  await assertRuntimePackage(
+    state,
+    generation,
+    generation.patchouliPackagePath,
+    '/opt/dsh/plugins/dsh-agent-fleet-patchouli.tgz',
+    'Fleet Patchouli',
+  )
+}
+
 async function captureGenerationLogs(state, generation) {
   if (generation.runtimeLog !== undefined && existsSync(generation.runtimeLog)) return
   const path = join(dirname(generation.workspace), 'runtime.log')
@@ -705,6 +735,7 @@ async function launchGeneration(stateDirectory, state, generation, options = {})
     await prepareLinuxWorkspace(state, generation)
     await preparePatchouliData(state, generation)
     await compose(state, generation, ['up', '-d', '--no-build', '--wait'])
+    await assertRuntimePackages(state, generation)
     generation.phase = 'observing'
     writeState(stateDirectory, state)
     if (options.monitor !== false) await monitorGeneration(stateDirectory, state, generation)
