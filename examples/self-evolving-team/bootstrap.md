@@ -22,7 +22,7 @@
 - 平台工程师通过 `node /opt/self-evolve/scripts/generation-control.mjs` 请求候选、等待事件、淘汰候选或晋升。不要寻找 Docker socket，也不要直接执行 Docker 生命周期命令。
 - 启动候选前，把本代代码和所有应继承工件提交到当前 `HEAD`，确认普通未跟踪文件也已处理，然后执行 `start-candidate --ref HEAD --bootstrap <absolute-file>`。宿主会拒绝脏工作区或不等于 `HEAD` 的 ref，并从该不可变提交构建下一代自己的 compose、镜像和控制脚本。若要试验下一代团队提示词，复制并修改 `.self-evolve/team.local.json`，再附加 `--team-config <absolute-file>`；不修改时自动继承本代配置。
 - 平台工程师在启动候选前检查工作区 diff、未跟踪文件与团队工件是否按意图进入该 commit，并确认 `evidence/evolution-backlog.md` 中未完成事项没有遗失；候选启动后复核实际继承内容。晋升时写给下一代的具体托付，说明未完问题、重构路线、已知工作方式缺陷，以及建议怎样改进下一代各对应角色的提示词、入口或工具；宿主会把 handoff 固化到新稳定代的 `.self-evolve/inherited/`，下一代先读该目录再继续规划。
-- 启动候选后，上一代保持在线，并用 `watch --after <sequence>` 阻塞等待宿主事件；不要按时间轮询状态。
+- 启动候选后，上一代保持在线但结束当前工作，不创建“等待候选”的 Goal、子任务、后台命令或定时轮询，也不主动调用 `watch`。宿主会静默等待候选；只有候选 `ready`、失败、拒绝或退出时才向上一代投递一次事件并唤醒助理。收到 `candidate.ready` 后只组织一次验收；`watch --after <sequence>` 仅供人类或故障诊断临时使用。
 - 候选代先运行与本代变更相关的启动、构建、测试和协作自检。只有拿到可检查证据、提交全部应继承文件且 `git status` 干净后，候选平台工程师才执行 `ready --summary <text> --evidence <absolute-file>`；宿主会把当时的 `HEAD` 固化到代际仓库并更新代际元数据。如果自检失败，执行 `reject --reason <text>`。代际事件会由容器内 relay 持久记录游标并可靠唤醒团队助理；`watch` 仅用于人工诊断。晋升成为稳定代后立即接续未完 backlog，并在合适时启动自己的候选来证明交接能力。
 - 上一代收到 `candidate.ready` 后，为一名独立审查者建立单 owner 持久 Goal；按事件给出的 `gitBranch`/`sourceCommit` 从本地 `origin` 读取候选提交和证据，不要在父代工作区猜候选文件路径。只有该审查 Goal 明确完成后才能决策：接受时先写交接文件，再执行 `promote --summary <text> --handoff <absolute-file>`；拒绝时执行 `destroy-candidate --reason <text>`，修复后再发起新候选。审查者的回复或开工确认不等于审查完成。
 - 候选自证与上一代批准缺一不可。不要让候选自行晋升，也不要让上一代替候选声明就绪。
