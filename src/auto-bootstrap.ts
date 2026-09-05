@@ -211,7 +211,7 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
     return [key, value]
   }))).slice(0, 2_000)
   const actions: Record<string, string> = {
-    'candidate.ready': '候选代已经被宿主接受并最终确认 ready；本事件中的 sourceCommit/gitBranch 是当前权威快照。立即建立两个有依赖的单 owner 持久 Goal：先由一名独立审查者从该快照读取候选提交与 evidence，核对测试、记忆继承、协作链和交接能力；再建立平台工程师单 owner 的最终决定 Goal，依赖该审查，负责根据审查终态写交接并实际执行 promote 或 destroy-candidate。两个节点必须在同一次建图时创建，不要等审查结束后再依赖助理被唤醒补建。忽略发生在本事件之前、针对更早 ready 尝试的 request.rejected 或旧审查文件；回复或开工确认不算审查完成。',
+    'candidate.ready': '候选代已经被宿主接受并最终确认 ready；本事件就是唯一需要的 ready 确认，不存在另一个 generation.ready。本事件中的 sourceCommit/gitBranch 是当前权威快照，审查者应通过 Git 从该提交读取 evidence，不得因候选容器不可访问而声称证据不可访问。测试数量只能在命令和范围相同时比较；根目录测试与全 workspace 汇总计数不同不是回归。立即建立两个有依赖的单 owner 持久 Goal：先由一名独立审查者从该快照读取候选提交与 evidence，核对测试、记忆继承、协作链和交接能力；再建立平台工程师单 owner 的最终决定 Goal，依赖该审查，负责根据审查终态写交接并实际执行 promote 或 destroy-candidate。两个节点必须在同一次建图时创建，不要等审查结束后再依赖助理被唤醒补建。忽略发生在本事件之前、针对更早 ready 尝试的 request.rejected 或旧审查文件；回复或开工确认不算审查完成。',
     'candidate.failed': '候选代启动失败。立即读取失败证据，清理失败候选，并在修复基座原因后从同一稳定提交重试。',
     'candidate.destroyed': '候选代已销毁。若全局迭代目标仍存在，立即修复已记录原因并启动替代候选。',
     'candidate.self_rejected': '候选代已自我拒绝。立即审查拒绝原因，修复后启动替代候选。',
