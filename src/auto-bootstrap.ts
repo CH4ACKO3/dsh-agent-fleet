@@ -271,6 +271,7 @@ export async function deliverPendingFleetGenerationEvents(
   }
   runs?.setGenerationEventWait?.(run.id, waitingForCandidate)
   const instructions = events
+    .filter(event => event.type !== 'generation.started')
     .map(fleetGenerationEventInstruction)
     .filter((instruction): instruction is string => instruction !== undefined)
   if (instructions.length > 0) {

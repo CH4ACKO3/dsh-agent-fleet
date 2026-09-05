@@ -176,8 +176,8 @@ describe('Fleet automatic bootstrap', () => {
       teamConfigPath: join(root, 'team.json'), taskPath: join(workspace, 'task.md'),
       agentPreset: 'standard', controlDirectory, generation: 'g0002',
     }
-    writeFileSync(join(eventDirectory, '0000000001-started.json'), JSON.stringify({
-      sequence: 1, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:00:00Z',
+    writeFileSync(join(eventDirectory, '0000000002-started.json'), JSON.stringify({
+      sequence: 2, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:00:00Z',
       data: { candidate: 'g0003' },
     }))
     const followup = vi.fn()
@@ -186,6 +186,11 @@ describe('Fleet automatic bootstrap', () => {
     const setGenerationEventWait = vi.fn()
     const runs = { setGenerationEventWait } as never
 
+    writeFileSync(join(eventDirectory, '0000000001-generation-started.json'), JSON.stringify({
+      sequence: 1, generation: 'g0002', type: 'generation.started', createdAt: '2026-09-03T23:59:00Z',
+      data: { role: 'stable', sourceCommit: 'parent123' },
+    }))
+
     expect(fleetGenerationEventInstruction({
       sequence: 1, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:00:00Z',
     })).toBeUndefined()
@@ -193,12 +198,12 @@ describe('Fleet automatic bootstrap', () => {
     expect(followup).not.toHaveBeenCalled()
     expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', 'g0003')
     expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({
-      eventSequence: 1,
+      eventSequence: 2,
       waitingForCandidate: 'g0003',
     })
 
-    writeFileSync(join(eventDirectory, '0000000002-ready.json'), JSON.stringify({
-      sequence: 2, generation: 'g0002', type: 'candidate.ready', createdAt: '2026-09-04T00:01:00Z',
+    writeFileSync(join(eventDirectory, '0000000003-ready.json'), JSON.stringify({
+      sequence: 3, generation: 'g0002', type: 'candidate.ready', createdAt: '2026-09-04T00:01:00Z',
       data: {
         candidate: 'g0003',
         gitBranch: 'generations/g0003',
@@ -221,7 +226,7 @@ describe('Fleet automatic bootstrap', () => {
     expect(relayed.content[0].text).toContain('最终决定 Goal')
     expect(relayed.content[0].text).toContain('两个节点必须在同一次建图时创建')
     expect(relayed.content[0].text).not.toContain('large evidence body')
-    expect(readFleetAutoBootstrapMarker(configuration)).toEqual(expect.objectContaining({ eventSequence: 2 }))
+    expect(readFleetAutoBootstrapMarker(configuration)).toEqual(expect.objectContaining({ eventSequence: 3 }))
     expect(readFleetAutoBootstrapMarker(configuration)).not.toHaveProperty('waitingForCandidate')
     await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(0)
     expect(followup).toHaveBeenCalledOnce()
