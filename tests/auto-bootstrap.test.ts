@@ -217,6 +217,9 @@ describe('Fleet automatic bootstrap', () => {
     })
 
     expect(instruction).toContain('你是候选代，不是稳定代')
+    expect(instruction).toContain('优先复用前置 Goal 产出的可检查证据')
+    expect(instruction).toContain('只有在证据缺失或相互矛盾时才重跑')
+    expect(instruction).toContain('不要把属于下游平台就绪节点')
     expect(instruction).toContain('少量单 owner Goal')
     expect(instruction).toContain('不得选择新的改进主题')
     expect(instruction).toContain('不能只用 Vote 表态后结束工作')
