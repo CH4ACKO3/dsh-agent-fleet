@@ -1727,6 +1727,102 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('wakes an idle assistant for each formal-Team quiescence edge while a Goal remains live', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected lead')
+    service.taskBoard(run.id).createGoal(lead.id, {
+      title: 'Live work', description: 'Remain unfinished during recovery checks.', owners: ['lead'],
+    })
+    const wakeCount = (): number => launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('unfinished Goal remains'))).length
+
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wakeCount()).toBe(1)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(wakeCount()).toBe(1)
+
+    lead.status = 'running'
+    service.agentStatusChanged(lead as unknown as Agent)
+    lead.completeTurn()
+    service.agentStatusChanged(lead as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wakeCount()).toBe(2)
+    disconnect()
+  })
+
+  it('wakes only once without a Goal until creation of a new Goal refreshes the marker', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    if (lead === undefined) throw new Error('expected lead')
+    const wakeCount = (): number => launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('first no-Goal reminder'))).length
+
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wakeCount()).toBe(1)
+    launcher.status = 'running'
+    service.agentStatusChanged(launcher as unknown as Agent)
+    launcher.completeTurn()
+    service.agentStatusChanged(launcher as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(wakeCount()).toBe(1)
+
+    const goal = service.taskBoard(run.id).createGoal(lead.id, {
+      title: 'Refresh idle recovery', description: 'Reset the no-Goal wake marker.', owners: ['lead'],
+    })
+    service.taskBoard(run.id).submitGoal(lead.id, goal.id, {
+      kind: 'complete', reason: 'Marker refreshed.', result: 'Done.',
+    })
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wakeCount()).toBe(2)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(wakeCount()).toBe(2)
+    disconnect()
+  })
+
+  it('preserves the consumed no-Goal idle wake across Team resume', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(first.launcher.messages.flatMap(message => message.content).some(block =>
+      block.type === 'text' && block.text.includes('first no-Goal reminder'))).toBe(true)
+    for (const member of run.members) {
+      const agent = first.runtime.get(member.sessionId)
+      if (agent !== undefined) first.persisted.set(member.sessionId, structuredClone(agent.session.events))
+    }
+    first.disconnect()
+    await first.core.close()
+
+    const second = setup(root, { launcherId: 'replacement-launcher', persisted: first.persisted })
+    await second.service.resume(second.launcher as unknown as Agent, { runId: run.id, projectRoot: root })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(second.launcher.messages.flatMap(message => message.content).some(block =>
+      block.type === 'text' && block.text.includes('first no-Goal reminder'))).toBe(false)
+    second.service.end(second.launcher as unknown as Agent, 'Idle wake persistence verified.', run.id)
+    await second.service.wait(run.id, 1_000)
+    second.disconnect()
+  })
+
   it('uses member display names in messages and accepts them as message targets', async () => {
     const { root, configPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)

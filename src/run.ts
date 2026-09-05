@@ -2292,6 +2292,9 @@ export class FleetRunService {
   private readonly pendingAssistantKickoffs = new Map<string, PendingAssistantKickoff>()
   private readonly assistantQuiescenceTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly assistantQuiescenceArmed = new Set<string>()
+  private readonly assistantTeamIdleTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly assistantTeamIdleArmed = new Set<string>()
+  private readonly assistantNoGoalIdleWakeUsed = new Set<string>()
   private residentAssistants: FleetResidentAssistantController | undefined
   private readonly changeListeners = new Set<() => void>()
   private readonly traceChangeListeners = new Set<(teamId: string, memberId: string) => void>()
@@ -2652,6 +2655,7 @@ export class FleetRunService {
       this.appendEvent(record.id, 'team_status', { status: 'idle' })
       runtime.activateProductivity()
       runtime.events.emit('fleet/team/session-start', { source: 'create' })
+      this.signalAssistantTeamIdle(record.id)
       return this.describeRecord(idle)
     } catch (error) {
       for (const name of created.reverse()) {
@@ -3011,6 +3015,7 @@ export class FleetRunService {
       else runtime.activateProductivity()
       if (restored.work?.status === 'running') this.manualWakeRequiredRunIds.add(record.id)
       runtime.events.emit('fleet/team/session-start', { source: 'resume' })
+      this.signalAssistantTeamIdle(record.id)
       return this.describeRecord(restored)
     } catch (error) {
       runtime.detachMember(String(launcher.id))
@@ -5131,7 +5136,11 @@ export class FleetRunService {
     })
     this.bindAssistantInput(caller)
     await this.captureLatestAssistantUserInput(updated, assistant, caller)
-    queueMicrotask(() => { this.signalAssistantInteractionDeliveries(updated.id) })
+    this.initializeAssistantTeamIdle(updated, assistant.view.id)
+    queueMicrotask(() => {
+      this.signalAssistantInteractionDeliveries(updated.id)
+      this.signalAssistantTeamIdle(updated.id)
+    })
     return { run: this.describeRecord(updated), assistant: structuredClone(assistant) }
   }
 
@@ -6702,6 +6711,136 @@ export class FleetRunService {
     }
   }
 
+  private clearAssistantTeamIdleTimer(runId: string): void {
+    const timer = this.assistantTeamIdleTimers.get(runId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.assistantTeamIdleTimers.delete(runId)
+  }
+
+  private clearAssistantTeamIdleState(runId: string): void {
+    this.clearAssistantTeamIdleTimer(runId)
+    const prefix = `${runId}\u0000`
+    for (const key of [...this.assistantTeamIdleArmed]) {
+      if (key.startsWith(prefix)) this.assistantTeamIdleArmed.delete(key)
+    }
+    for (const key of [...this.assistantNoGoalIdleWakeUsed]) {
+      if (key.startsWith(prefix)) this.assistantNoGoalIdleWakeUsed.delete(key)
+    }
+  }
+
+  private noGoalIdleWakeWasUsed(record: FleetRunRecord, assistantId: string): boolean {
+    for (const event of this.storedEvents(record).reverse()) {
+      if (event.type === 'task.created') {
+        const task = (event.data as { readonly task?: FleetProjectTask }).task
+        if (task?.domain.kind === 'goal') return false
+      }
+      if (event.type !== 'assistant_team_idle_woken') continue
+      const data = event.data as { readonly assistants?: unknown; readonly hasGoal?: unknown }
+      if (Array.isArray(data.assistants) && data.assistants.includes(assistantId) && data.hasGoal === false) return true
+    }
+    return false
+  }
+
+  private armAssistantTeamIdle(record: FleetRunRecord, assistantId?: string): void {
+    const assistants = assistantId === undefined
+      ? record.assistants
+      : record.assistants.filter(candidate => candidate.view.id === assistantId)
+    for (const assistant of assistants) {
+      this.assistantTeamIdleArmed.add(this.assistantQuiescenceKey(record.id, assistant.view.id))
+    }
+    this.clearAssistantTeamIdleTimer(record.id)
+  }
+
+  private initializeAssistantTeamIdle(record: FleetRunRecord, assistantId: string): void {
+    const key = this.assistantQuiescenceKey(record.id, assistantId)
+    if (this.noGoalIdleWakeWasUsed(record, assistantId)) this.assistantNoGoalIdleWakeUsed.add(key)
+    else this.assistantNoGoalIdleWakeUsed.delete(key)
+    this.armAssistantTeamIdle(record, assistantId)
+  }
+
+  private refreshAssistantNoGoalIdleWake(record: FleetRunRecord): void {
+    for (const assistant of record.assistants) {
+      this.assistantNoGoalIdleWakeUsed.delete(this.assistantQuiescenceKey(record.id, assistant.view.id))
+    }
+    this.armAssistantTeamIdle(record)
+  }
+
+  private hasLiveGoal(runtime: FleetCollaborationTeam): boolean {
+    return runtime.tasks.state().tasks.some(task => task.domain.kind === 'goal'
+      && task.stableState.kind !== 'completed'
+      && task.stableState.kind !== 'blocked'
+      && task.stableState.kind !== 'cancelled')
+  }
+
+  private assistantHasLiveInteraction(runtime: FleetCollaborationTeam, assistantId: string): boolean {
+    const interaction = runtime.tasks.interactionTask(assistantId)
+    return interaction?.domain.kind === 'interaction'
+      && interaction.stableState.kind !== 'completed'
+      && interaction.stableState.kind !== 'blocked'
+      && interaction.stableState.kind !== 'cancelled'
+  }
+
+  private signalAssistantTeamIdle(runId: string, graceElapsed = false): void {
+    const record = this.records.get(runId)
+    const runtime = this.collaboration.get(runId)
+    if (record === undefined || runtime === undefined || this.dormantRunIds.has(runId)) {
+      this.clearAssistantTeamIdleTimer(runId)
+      return
+    }
+    if (!this.teamIsQuiescent(record)) {
+      this.clearAssistantTeamIdleTimer(runId)
+      return
+    }
+    const hasGoal = this.hasLiveGoal(runtime)
+    const assistants = record.assistants.filter(assistant => {
+      const key = this.assistantQuiescenceKey(runId, assistant.view.id)
+      if (!this.assistantTeamIdleArmed.has(key)) return false
+      if (!hasGoal && this.assistantNoGoalIdleWakeUsed.has(key)) {
+        this.assistantTeamIdleArmed.delete(key)
+        return false
+      }
+      if (assistant.status === 'paused'
+        || this.ctx.agents.get(SessionId(assistant.sessionId))?.status !== 'idle'
+        || this.assistantHasLiveInteraction(runtime, assistant.view.id)
+        || this.budgetRemaining(record, assistant.view.id).exhaustedScope !== undefined) return false
+      return true
+    })
+    if (assistants.length === 0) {
+      this.clearAssistantTeamIdleTimer(runId)
+      return
+    }
+    if (!graceElapsed) {
+      if (this.assistantTeamIdleTimers.has(runId)) return
+      const timer = setTimeout(() => {
+        this.assistantTeamIdleTimers.delete(runId)
+        this.signalAssistantTeamIdle(runId, true)
+      }, TEAM_QUIESCENCE_GRACE_MS)
+      this.assistantTeamIdleTimers.set(runId, timer)
+      return
+    }
+    this.clearAssistantTeamIdleTimer(runId)
+    const woken: string[] = []
+    for (const assistant of assistants) {
+      const key = this.assistantQuiescenceKey(runId, assistant.view.id)
+      this.assistantTeamIdleArmed.delete(key)
+      if (!hasGoal) this.assistantNoGoalIdleWakeUsed.add(key)
+      runtime.messages.sendSystemNotification(assistant.sessionId, {
+        kind: 'team_wake',
+        text: this.userLocale === 'zh-CN'
+          ? hasGoal
+            ? '团队成员已全部空闲，但仍有未完成的 Goal。请检查任务图和最新证据，恢复、重分配或收尾；不要只报告已读。'
+            : '团队成员已全部空闲，且当前没有未完成的 Goal。这是本轮无 Goal 状态的首次提醒：请判断是否需要创建后续 Goal；若无需继续则直接结束。新建 Goal 前不会再次因此唤醒。'
+          : hasGoal
+            ? 'Every formal Team member is idle while an unfinished Goal remains. Inspect the Task graph and latest evidence, then resume, reassign, or close the work; do not merely acknowledge this notice.'
+            : 'Every formal Team member is idle and no unfinished Goal remains. This is the first no-Goal reminder: decide whether follow-up needs a new Goal, otherwise stop. This state will not wake you again until a new Goal is created.',
+        delivery: 'wakeup',
+        coalesceKey: `assistant-team-idle:${runId}:${assistant.view.id}:${randomUUID()}`,
+      })
+      woken.push(assistant.view.id)
+    }
+    if (woken.length > 0) this.appendEvent(runId, 'assistant_team_idle_woken', { assistants: woken, hasGoal })
+  }
+
   private armAssistantQuiescenceFromTask(
     record: FleetRunRecord,
     task: FleetProjectTask,
@@ -6813,6 +6952,7 @@ export class FleetRunService {
         queueMicrotask(() => {
           this.finishReadyWork(record.id)
           this.signalAssistantInteractionDeliveries(record.id)
+          this.signalAssistantTeamIdle(record.id)
         })
       }
     } else {
@@ -6820,8 +6960,10 @@ export class FleetRunService {
         const participant = record.members.find(member => member.sessionId === agentId)
         if (participant !== undefined) {
           for (const assistant of record.assistants) this.armAssistantQuiescence(record.id, assistant.view.id)
+          this.armAssistantTeamIdle(record)
         }
         this.signalAssistantInteractionDeliveries(record.id)
+        this.signalAssistantTeamIdle(record.id)
       }
     }
   }
@@ -8352,6 +8494,10 @@ export class FleetRunService {
     for (const timer of this.assistantQuiescenceTimers.values()) clearTimeout(timer)
     this.assistantQuiescenceTimers.clear()
     this.assistantQuiescenceArmed.clear()
+    for (const timer of this.assistantTeamIdleTimers.values()) clearTimeout(timer)
+    this.assistantTeamIdleTimers.clear()
+    this.assistantTeamIdleArmed.clear()
+    this.assistantNoGoalIdleWakeUsed.clear()
     for (const sessionId of [...this.memberToolActivity.keys()]) this.clearMemberActivity(sessionId)
     this.waitingSessionIds.clear()
     this.abnormalSessionIds.clear()
@@ -8817,7 +8963,11 @@ export class FleetRunService {
       onTask: (event, state) => {
         this.writeExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE, state as unknown as JsonValue)
         if (event.action !== 'notification') this.appendEvent(record.id, `task.${event.action}`, event)
-        this.armAssistantQuiescenceFromTask(record, event.task, event.actor, state)
+        const current = this.records.get(record.id) ?? record
+        this.armAssistantQuiescenceFromTask(current, event.task, event.actor, state)
+        if (event.action === 'created' && event.task.domain.kind === 'goal') {
+          this.refreshAssistantNoGoalIdleWake(current)
+        }
         if (event.action === 'created'
           || event.action === 'domain_updated'
           || event.action === 'reconcile_ready'
@@ -8832,6 +8982,7 @@ export class FleetRunService {
             this.reconcileOwnerTasks(record.id)
             this.finishReadyWork(record.id)
             this.signalAssistantInteractionDeliveries(record.id)
+            this.signalAssistantTeamIdle(record.id)
           })
         }
       },
@@ -9567,6 +9718,7 @@ export class FleetRunService {
     this.manualWakeRequiredRunIds.delete(runId)
     this.clearAssistantQuiescenceTimer(runId)
     this.clearAssistantQuiescenceArms(runId)
+    this.clearAssistantTeamIdleState(runId)
     const path = this.teamReferencePath(runId)
     if (existsSync(path)) unlinkSync(path)
   }
