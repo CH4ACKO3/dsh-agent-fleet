@@ -47,7 +47,9 @@ describe('Fleet automatic bootstrap', () => {
     const taskPath = join(workspace, 'task.md')
     writeFileSync(teamConfigPath, '{}')
     writeFileSync(taskPath, '# Task')
-    writeFileSync(join(workspace, '.self-evolve', 'generation.json'), JSON.stringify({ role: 'candidate' }))
+    writeFileSync(join(workspace, '.self-evolve', 'generation.json'), JSON.stringify({
+      id: 'g0001', role: 'candidate', parent: 'g0000', sourceCommit: 'abc123', gitBranch: 'generations/g0001',
+    }))
     vi.stubEnv('DSH_HOME', dshHome)
     const configuration = {
       id: 'generation-one',
@@ -57,6 +59,12 @@ describe('Fleet automatic bootstrap', () => {
       provider: 'provider', model: 'model', maxTokens: 4096,
       controlDirectory: join(root, 'control'), generation: 'g0001',
     }
+    const eventDirectory = join(configuration.controlDirectory, 'events', configuration.generation)
+    mkdirSync(eventDirectory, { recursive: true })
+    writeFileSync(join(eventDirectory, '0000000001-started.json'), JSON.stringify({
+      sequence: 1, generation: 'g0001', type: 'generation.started', createdAt: '2026-09-04T00:00:00Z',
+      data: { role: 'candidate', parent: 'g0000', sourceCommit: 'abc123' },
+    }))
     const followup = vi.fn()
     const dispose = vi.fn(() => Promise.resolve())
     const agent = {
@@ -101,7 +109,8 @@ describe('Fleet automatic bootstrap', () => {
     expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('你是候选代，不是稳定代')
     expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('不得选择新的改进主题')
     expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('不能只用 Vote 表态后结束工作')
-    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ runId: 'team-one' })
+    expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('"sourceCommit":"abc123"')
+    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ runId: 'team-one', eventSequence: 1 })
     expect(JSON.parse(readFileSync(configuration.readyFile, 'utf8'))).toMatchObject({ runId: 'team-one' })
     await result.dispose()
     expect(dispose).toHaveBeenCalledOnce()

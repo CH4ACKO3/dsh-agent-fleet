@@ -27,7 +27,11 @@ export interface FleetAutoBootstrapConfiguration {
 }
 
 interface FleetGenerationManifest {
+  readonly id?: string
   readonly role?: string
+  readonly parent?: string
+  readonly sourceCommit?: string
+  readonly gitBranch?: string
 }
 
 interface FleetAutoBootstrapMarker {
@@ -190,6 +194,11 @@ function generationEventsAfter(
     .sort()
     .map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')) as FleetGenerationEvent)
     .filter(event => event.generation === configuration.generation && event.sequence > after)
+}
+
+function initialGenerationStartedSequence(configuration: FleetAutoBootstrapConfiguration): number | undefined {
+  const first = generationEventsAfter(configuration, 0)[0]
+  return first?.type === 'generation.started' ? first.sequence : undefined
 }
 
 export function fleetGenerationEventInstruction(event: FleetGenerationEvent): string | undefined {
@@ -360,6 +369,7 @@ function bootstrapMessage(configuration: FleetAutoBootstrapConfiguration): strin
     '[Fleet automatic bootstrap]',
     `按 ${configuration.taskPath} 开始任务。`,
     ...(roleInstruction === undefined ? [] : ['[Fleet generation role]', roleInstruction]),
+    ...(manifest === undefined ? [] : ['[Fleet generation state]', `宿主数据：${JSON.stringify(manifest)}`]),
     '这是由宿主监督器注入的一次性启动指令。请读取该文件，以实际团队成员的职责设计初始 DAG，并调用一次 fleet_run start；不要把固定流程从模板反推到任务中。',
   ].join('\n\n')
 }
@@ -403,7 +413,7 @@ export async function activateFleetAutoBootstrap(
       source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
       content: [{ type: 'text', text: bootstrapMessage(configuration) }],
     }))
-    writeMarker(configuration, existing)
+    writeMarker(configuration, existing, initialGenerationStartedSequence(configuration))
     const relay = startGenerationEventRelay(agent, existing, configuration, runs)
     return { run: existing, dispose: () => relay.dispose() }
   }
@@ -446,7 +456,7 @@ export async function activateFleetAutoBootstrap(
       source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
       content: [{ type: 'text', text: bootstrapMessage(configuration) }],
     }))
-    writeMarker(configuration, run)
+    writeMarker(configuration, run, initialGenerationStartedSequence(configuration))
     const relay = startGenerationEventRelay(handle.agent, run, configuration, runs)
     const owned = handle
     return {
