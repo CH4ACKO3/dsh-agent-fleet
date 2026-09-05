@@ -57,6 +57,7 @@ interface FleetAutoBootstrapRuns {
     readonly projectRoot: string
     readonly requiredPaths: readonly string[]
     readonly sourceSetupId?: string
+    readonly continuous?: boolean
     readonly provider?: string
     readonly model?: string
     readonly maxTokens?: number
@@ -403,6 +404,7 @@ export async function activateFleetAutoBootstrap(
       projectRoot: configuration.projectRoot,
       requiredPaths: [configuration.taskPath],
       sourceSetupId: `auto-bootstrap:${configuration.id}`,
+      ...(configuration.generation === undefined ? {} : { continuous: true }),
       ...(configuration.provider === undefined ? {} : { provider: configuration.provider }),
       ...(configuration.model === undefined ? {} : { model: configuration.model }),
       ...(configuration.maxTokens === undefined ? {} : { maxTokens: configuration.maxTokens }),

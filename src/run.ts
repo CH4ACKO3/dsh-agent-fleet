@@ -233,6 +233,8 @@ export interface FleetTeamBudgetSnapshot {
 export interface FleetRunRecord {
   readonly id: string
   readonly sourceSetupId?: string
+  /** Keep recovering the assistant from quiescence until the Team is paused or closed. */
+  readonly continuous?: boolean
   readonly team: string
   readonly name: string
   readonly configPath: string
@@ -988,6 +990,7 @@ export interface CreateRunInput {
   readonly projectRoot: string
   readonly requiredPaths: readonly string[]
   readonly sourceSetupId?: string
+  readonly continuous?: boolean
   readonly provider?: string
   readonly model?: string
   readonly maxTokens?: number
@@ -2491,6 +2494,7 @@ export class FleetRunService {
     const record: FleetRunRecord = {
       id: runId,
       ...(input.sourceSetupId === undefined ? {} : { sourceSetupId: input.sourceSetupId }),
+      ...(input.continuous === true ? { continuous: true } : {}),
       team: template.team,
       name: template.name,
       configPath,
@@ -6753,7 +6757,9 @@ export class FleetRunService {
 
   private initializeAssistantTeamIdle(record: FleetRunRecord, assistantId: string): void {
     const key = this.assistantQuiescenceKey(record.id, assistantId)
-    if (this.noGoalIdleWakeWasUsed(record, assistantId)) this.assistantNoGoalIdleWakeUsed.add(key)
+    if (record.continuous !== true && this.noGoalIdleWakeWasUsed(record, assistantId)) {
+      this.assistantNoGoalIdleWakeUsed.add(key)
+    }
     else this.assistantNoGoalIdleWakeUsed.delete(key)
     this.armAssistantTeamIdle(record, assistantId)
   }
@@ -6795,7 +6801,7 @@ export class FleetRunService {
     const assistants = record.assistants.filter(assistant => {
       const key = this.assistantQuiescenceKey(runId, assistant.view.id)
       if (!this.assistantTeamIdleArmed.has(key)) return false
-      if (!hasGoal && this.assistantNoGoalIdleWakeUsed.has(key)) {
+      if (!hasGoal && record.continuous !== true && this.assistantNoGoalIdleWakeUsed.has(key)) {
         this.assistantTeamIdleArmed.delete(key)
         return false
       }
@@ -6823,15 +6829,19 @@ export class FleetRunService {
     for (const assistant of assistants) {
       const key = this.assistantQuiescenceKey(runId, assistant.view.id)
       this.assistantTeamIdleArmed.delete(key)
-      if (!hasGoal) this.assistantNoGoalIdleWakeUsed.add(key)
+      if (!hasGoal && record.continuous !== true) this.assistantNoGoalIdleWakeUsed.add(key)
       runtime.messages.sendSystemNotification(assistant.sessionId, {
         kind: 'team_wake',
         text: this.userLocale === 'zh-CN'
           ? hasGoal
             ? '团队成员已全部空闲，但仍有未完成的 Goal。请检查任务图和最新证据，恢复、重分配或收尾；不要只报告已读。'
+            : record.continuous === true
+              ? '团队成员已全部空闲，但当前 Team 配置为持续运行。请立即创建或恢复下一项 Goal；如果正在等待外部代际事件，请建立持久事件等待。当前代暂停或关闭前不要让团队永久空闲。'
             : '团队成员已全部空闲，且当前没有未完成的 Goal。这是本轮无 Goal 状态的首次提醒：请判断是否需要创建后续 Goal；若无需继续则直接结束。新建 Goal 前不会再次因此唤醒。'
           : hasGoal
             ? 'Every formal Team member is idle while an unfinished Goal remains. Inspect the Task graph and latest evidence, then resume, reassign, or close the work; do not merely acknowledge this notice.'
+            : record.continuous === true
+              ? 'Every formal Team member is idle, but this Team is configured for continuous operation. Create or resume the next Goal now; if an external generation event is pending, establish a durable event wait. Do not leave the Team permanently idle before this generation is paused or closed.'
             : 'Every formal Team member is idle and no unfinished Goal remains. This is the first no-Goal reminder: decide whether follow-up needs a new Goal, otherwise stop. This state will not wake you again until a new Goal is created.',
         delivery: 'wakeup',
         coalesceKey: `assistant-team-idle:${runId}:${assistant.view.id}:${randomUUID()}`,
@@ -6960,6 +6970,9 @@ export class FleetRunService {
         const participant = record.members.find(member => member.sessionId === agentId)
         if (participant !== undefined) {
           for (const assistant of record.assistants) this.armAssistantQuiescence(record.id, assistant.view.id)
+          this.armAssistantTeamIdle(record)
+        } else if (record.continuous === true
+          && record.assistants.some(assistant => assistant.sessionId === agentId)) {
           this.armAssistantTeamIdle(record)
         }
         this.signalAssistantInteractionDeliveries(record.id)
@@ -10043,6 +10056,7 @@ const RUN_SCHEMA = {
   properties: {
     id: { type: 'string', required: true },
     sourceSetupId: { type: 'string' },
+    continuous: { type: 'boolean' },
     team: { type: 'string', required: true },
     name: { type: 'string', required: true },
     configPath: { type: 'string', required: true },

@@ -92,6 +92,7 @@ describe('Fleet automatic bootstrap', () => {
       configPath: teamConfigPath,
       projectRoot: workspace,
       sourceSetupId: 'auto-bootstrap:generation-one',
+      continuous: true,
     }))
     expect(mount).toHaveBeenCalledWith(expect.anything(), 'standard')
     expect(activate).toHaveBeenCalledWith(agent, 'team-one', run.assistants[0]?.view)
