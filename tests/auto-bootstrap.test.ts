@@ -201,4 +201,19 @@ describe('Fleet automatic bootstrap', () => {
     expect(instruction).toContain('有证据的实际改进')
     expect(instruction).toContain('不要用纯自检或交接文档空转出下一代')
   })
+
+  it('tells a freshly started candidate to verify instead of starting stable work', () => {
+    const instruction = fleetGenerationEventInstruction({
+      sequence: 1,
+      generation: 'g0004',
+      type: 'generation.started',
+      createdAt: '2026-09-04T00:00:00Z',
+      data: { role: 'candidate', parent: 'g0002', sourceCommit: 'abc123' },
+    })
+
+    expect(instruction).toContain('你是候选代，不是稳定代')
+    expect(instruction).toContain('少量单 owner Goal')
+    expect(instruction).toContain('不得选择新的改进主题')
+    expect(instruction).toContain('失败则 reject')
+  })
 })

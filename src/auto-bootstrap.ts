@@ -201,7 +201,14 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
     'guardian.retirement_failed': '旧保障代清理失败。立即检查归档与容器/卷清理，不要让遗留资源持续累积。',
     'request.rejected': '一个代际控制请求被宿主拒绝。读取拒绝原因并纠正请求；不要盲目重复同一命令。',
   }
-  const action = actions[event.type]
+  const generationStarted = event.type === 'generation.started'
+    ? data.role === 'candidate'
+      ? '你是候选代，不是稳定代。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。验证通过后由平台工程师提交 ready，失败则 reject，然后等待父代决定。'
+      : data.role === 'stable'
+        ? '你是活跃稳定代。先确认身份、Git 状态和继承材料，再以一项有证据的实际改进开始本代工作；实现与独立审查完成前不要启动候选。'
+        : undefined
+    : undefined
+  const action = generationStarted ?? actions[event.type]
   if (action === undefined) return undefined
   return [
     '[Fleet generation lifecycle event]',
