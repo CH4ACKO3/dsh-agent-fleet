@@ -106,13 +106,20 @@ describe('Fleet automatic bootstrap', () => {
     await result.dispose()
     expect(dispose).toHaveBeenCalledOnce()
 
+    const marker = readFleetAutoBootstrapMarker(configuration) as Record<string, unknown>
+    writeFileSync(join(dshHome, 'dsh-agent-fleet', 'auto-bootstrap', 'generation-one.json'), JSON.stringify({
+      ...marker,
+      waitingForCandidate: 'g0002',
+    }))
+    const setGenerationEventWait = vi.fn()
     const repeated = await activateFleetAutoBootstrap(
       { agents: { create: createAgent, get: vi.fn() } } as unknown as Context,
-      { list: () => [run], create: createRun, agentSessionStarted: started } as never,
+      { list: () => [run], create: createRun, agentSessionStarted: started, setGenerationEventWait } as never,
       { activate } as never,
       configuration,
     )
     expect(repeated.run).toBe(run)
+    expect(setGenerationEventWait).toHaveBeenCalledWith('team-one', 'g0002')
     expect(createAgent).toHaveBeenCalledOnce()
     expect(followup).toHaveBeenCalledOnce()
   })
@@ -161,8 +168,26 @@ describe('Fleet automatic bootstrap', () => {
       agentPreset: 'standard', controlDirectory, generation: 'g0002',
     }
     writeFileSync(join(eventDirectory, '0000000001-started.json'), JSON.stringify({
-      sequence: 1, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:00:00Z', data: {},
+      sequence: 1, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:00:00Z',
+      data: { candidate: 'g0003' },
     }))
+    const followup = vi.fn()
+    const agent = { id: 'assistant-session', followup } as unknown as Agent
+    const run = { id: 'team-two' } as never
+    const setGenerationEventWait = vi.fn()
+    const runs = { setGenerationEventWait } as never
+
+    expect(fleetGenerationEventInstruction({
+      sequence: 1, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:00:00Z',
+    })).toBeUndefined()
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(0)
+    expect(followup).not.toHaveBeenCalled()
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', 'g0003')
+    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({
+      eventSequence: 1,
+      waitingForCandidate: 'g0003',
+    })
+
     writeFileSync(join(eventDirectory, '0000000002-ready.json'), JSON.stringify({
       sequence: 2, generation: 'g0002', type: 'candidate.ready', createdAt: '2026-09-04T00:01:00Z',
       data: {
@@ -172,15 +197,9 @@ describe('Fleet automatic bootstrap', () => {
         evidence: { name: 'ready.md', content: 'large evidence body' },
       },
     }))
-    const followup = vi.fn()
-    const agent = { id: 'assistant-session', followup } as unknown as Agent
-    const run = { id: 'team-two' } as never
-
-    expect(fleetGenerationEventInstruction({
-      sequence: 1, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:00:00Z',
-    })).toBeUndefined()
-    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration)).resolves.toBe(1)
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(1)
     expect(followup).toHaveBeenCalledOnce()
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', undefined)
     const relayed = followup.mock.calls[0]?.[0]
     expect(relayed).toMatchObject({
       content: [expect.objectContaining({ text: expect.stringContaining('candidate.ready') })],
@@ -191,8 +210,9 @@ describe('Fleet automatic bootstrap', () => {
     expect(relayed.content[0].text).toContain('最终决定 Goal')
     expect(relayed.content[0].text).toContain('两个节点必须在同一次建图时创建')
     expect(relayed.content[0].text).not.toContain('large evidence body')
-    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ eventSequence: 2 })
-    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration)).resolves.toBe(0)
+    expect(readFleetAutoBootstrapMarker(configuration)).toEqual(expect.objectContaining({ eventSequence: 2 }))
+    expect(readFleetAutoBootstrapMarker(configuration)).not.toHaveProperty('waitingForCandidate')
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(0)
     expect(followup).toHaveBeenCalledOnce()
   })
 

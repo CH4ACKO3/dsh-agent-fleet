@@ -2298,6 +2298,7 @@ export class FleetRunService {
   private readonly assistantTeamIdleTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly assistantTeamIdleArmed = new Set<string>()
   private readonly assistantNoGoalIdleWakeUsed = new Set<string>()
+  private readonly generationEventWaits = new Map<string, string>()
   private residentAssistants: FleetResidentAssistantController | undefined
   private readonly changeListeners = new Set<() => void>()
   private readonly traceChangeListeners = new Set<(teamId: string, memberId: string) => void>()
@@ -6786,10 +6787,31 @@ export class FleetRunService {
       && interaction.stableState.kind !== 'cancelled'
   }
 
+  /**
+   * A self-evolving stable generation waits for its candidate through the
+   * host lifecycle event relay. This wait is durable outside the Agent turn,
+   * so repeated all-idle wakeups would only make the model poll the host.
+   */
+  setGenerationEventWait(runId: string, waitingForCandidate?: string): void {
+    const record = this.records.get(runId)
+    if (record === undefined) return
+    if (waitingForCandidate === undefined) {
+      if (!this.generationEventWaits.delete(runId)) return
+      this.armAssistantTeamIdle(record)
+      return
+    }
+    this.generationEventWaits.set(runId, waitingForCandidate)
+    this.clearAssistantTeamIdleTimer(runId)
+  }
+
   private signalAssistantTeamIdle(runId: string, graceElapsed = false): void {
     const record = this.records.get(runId)
     const runtime = this.collaboration.get(runId)
     if (record === undefined || runtime === undefined || this.dormantRunIds.has(runId)) {
+      this.clearAssistantTeamIdleTimer(runId)
+      return
+    }
+    if (this.generationEventWaits.has(runId)) {
       this.clearAssistantTeamIdleTimer(runId)
       return
     }
@@ -9733,6 +9755,7 @@ export class FleetRunService {
     this.clearAssistantQuiescenceTimer(runId)
     this.clearAssistantQuiescenceArms(runId)
     this.clearAssistantTeamIdleState(runId)
+    this.generationEventWaits.delete(runId)
     const path = this.teamReferencePath(runId)
     if (existsSync(path)) unlinkSync(path)
   }

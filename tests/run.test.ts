@@ -1857,6 +1857,33 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('keeps a continuous stable Team quiet while the host relay waits for its candidate', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      continuous: true,
+    })
+    const wakeCount = (): number => launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('configured for continuous operation'))).length
+
+    service.setGenerationEventWait(run.id, 'g0002')
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(wakeCount()).toBe(0)
+
+    service.setGenerationEventWait(run.id)
+    launcher.status = 'running'
+    service.agentStatusChanged(launcher as unknown as Agent)
+    launcher.completeTurn()
+    service.agentStatusChanged(launcher as unknown as Agent)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wakeCount()).toBe(1)
+    disconnect()
+  })
+
   it('preserves the consumed no-Goal idle wake across Team resume', async () => {
     vi.useFakeTimers()
     const { root, configPath } = fixture()

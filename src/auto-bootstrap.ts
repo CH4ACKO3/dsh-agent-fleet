@@ -36,6 +36,7 @@ interface FleetAutoBootstrapMarker {
   readonly taskPath: string
   readonly startedAt: string
   readonly eventSequence?: number
+  readonly waitingForCandidate?: string
 }
 
 interface FleetGenerationEvent {
@@ -63,6 +64,7 @@ interface FleetAutoBootstrapRuns {
     readonly maxTokens?: number
   }): Promise<FleetRunRecord>
   agentSessionStarted(agent: Agent): void
+  setGenerationEventWait?(runId: string, waitingForCandidate?: string): void
 }
 
 interface FleetAutoBootstrapAssistant {
@@ -151,14 +153,19 @@ function writeMarker(
   configuration: FleetAutoBootstrapConfiguration,
   run: FleetRunRecord,
   eventSequence = readMarker(configuration)?.eventSequence,
+  waitingForCandidate?: string | null,
 ): void {
   const previous = readMarker(configuration)
+  const candidateWait = waitingForCandidate === undefined
+    ? previous?.waitingForCandidate
+    : waitingForCandidate ?? undefined
   const value: FleetAutoBootstrapMarker = {
     id: configuration.id,
     runId: run.id,
     taskPath: configuration.taskPath,
     startedAt: previous?.startedAt ?? new Date().toISOString(),
     ...(eventSequence === undefined ? {} : { eventSequence }),
+    ...(candidateWait === undefined ? {} : { waitingForCandidate: candidateWait }),
   }
   atomicJson(markerPath(configuration), value)
   if (configuration.readyFile !== undefined) {
@@ -232,11 +239,28 @@ export async function deliverPendingFleetGenerationEvents(
   agent: Agent,
   run: FleetRunRecord,
   configuration: FleetAutoBootstrapConfiguration,
+  runs?: FleetAutoBootstrapRuns,
 ): Promise<number> {
   if (generationEventDirectory(configuration) === undefined) return 0
   const sequence = readMarker(configuration)?.eventSequence ?? 0
   const events = generationEventsAfter(configuration, sequence)
   if (events.length === 0) return 0
+  let waitingForCandidate = readMarker(configuration)?.waitingForCandidate
+  for (const event of events) {
+    if (event.type === 'candidate.started') {
+      const candidate = event.data?.candidate
+      waitingForCandidate = typeof candidate === 'string' && candidate.trim().length > 0
+        ? candidate
+        : 'candidate'
+    } else if (event.type === 'candidate.ready'
+      || event.type === 'candidate.failed'
+      || event.type === 'candidate.destroyed'
+      || event.type === 'candidate.self_rejected'
+      || event.type === 'generation.peer_exited') {
+      waitingForCandidate = undefined
+    }
+  }
+  runs?.setGenerationEventWait?.(run.id, waitingForCandidate)
   const instructions = events
     .map(fleetGenerationEventInstruction)
     .filter((instruction): instruction is string => instruction !== undefined)
@@ -246,7 +270,7 @@ export async function deliverPendingFleetGenerationEvents(
       content: [{ type: 'text', text: instructions.join('\n\n---\n\n') }],
     }))
   }
-  writeMarker(configuration, run, events.at(-1)?.sequence ?? sequence)
+  writeMarker(configuration, run, events.at(-1)?.sequence ?? sequence, waitingForCandidate ?? null)
   return instructions.length
 }
 
@@ -254,6 +278,7 @@ function startGenerationEventRelay(
   agent: Agent,
   run: FleetRunRecord,
   configuration: FleetAutoBootstrapConfiguration,
+  runs: FleetAutoBootstrapRuns,
 ): { dispose(): Promise<void> } {
   if (generationEventDirectory(configuration) === undefined) return { dispose: () => Promise.resolve() }
   let active = false
@@ -261,7 +286,7 @@ function startGenerationEventRelay(
     if (active) return
     active = true
     try {
-      await deliverPendingFleetGenerationEvents(agent, run, configuration)
+      await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
     } catch (error) {
       process.stderr.write(`Fleet generation event relay failed: ${error instanceof Error ? error.message : String(error)}\n`)
     } finally {
@@ -283,6 +308,7 @@ function startDeferredGenerationEventRelay(
   ctx: FleetAutoBootstrapContext,
   run: FleetRunRecord,
   configuration: FleetAutoBootstrapConfiguration,
+  runs: FleetAutoBootstrapRuns,
 ): { dispose(): Promise<void> } {
   const attached = run.assistants[0]
   if (attached === undefined || generationEventDirectory(configuration) === undefined) {
@@ -294,7 +320,7 @@ function startDeferredGenerationEventRelay(
     if (relay !== undefined) return
     const agent = ctx.agents.get(SessionId(attached.sessionId))
     if (agent !== undefined) {
-      relay = startGenerationEventRelay(agent, run, configuration)
+      relay = startGenerationEventRelay(agent, run, configuration, runs)
       if (interval !== undefined) clearInterval(interval)
     }
   }
@@ -361,7 +387,8 @@ export async function activateFleetAutoBootstrap(
     if (configuration.readyFile !== undefined && !existsSync(configuration.readyFile)) {
       atomicJson(configuration.readyFile, JSON.parse(readFileSync(marker, 'utf8')) as unknown)
     }
-    const relay = startDeferredGenerationEventRelay(ctx, existing, configuration)
+    runs.setGenerationEventWait?.(existing.id, readMarker(configuration)?.waitingForCandidate)
+    const relay = startDeferredGenerationEventRelay(ctx, existing, configuration, runs)
     return { run: existing, dispose: () => relay.dispose() }
   }
   if (existing !== undefined) {
@@ -377,7 +404,7 @@ export async function activateFleetAutoBootstrap(
       content: [{ type: 'text', text: bootstrapMessage(configuration) }],
     }))
     writeMarker(configuration, existing)
-    const relay = startGenerationEventRelay(agent, existing, configuration)
+    const relay = startGenerationEventRelay(agent, existing, configuration, runs)
     return { run: existing, dispose: () => relay.dispose() }
   }
 
@@ -420,7 +447,7 @@ export async function activateFleetAutoBootstrap(
       content: [{ type: 'text', text: bootstrapMessage(configuration) }],
     }))
     writeMarker(configuration, run)
-    const relay = startGenerationEventRelay(handle.agent, run, configuration)
+    const relay = startGenerationEventRelay(handle.agent, run, configuration, runs)
     const owned = handle
     return {
       run,
@@ -439,5 +466,6 @@ export function readFleetAutoBootstrapMarker(configuration: FleetAutoBootstrapCo
   return readMarker(configuration)
 }
 
-export type FleetAutoBootstrapRunService = Pick<FleetRunService, 'list' | 'create' | 'agentSessionStarted'>
+export type FleetAutoBootstrapRunService = Pick<FleetRunService,
+  'list' | 'create' | 'agentSessionStarted' | 'setGenerationEventWait'>
 export type FleetAutoBootstrapAssistantRuntime = Pick<FleetAssistantRuntime, 'activate'>
