@@ -5441,6 +5441,62 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('keeps an idle member eligible when protocol recovery has no Task yet', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+    })
+    const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+    const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+    const rootTaskId = running.work?.rootTaskId
+    if (lead === undefined || rootTaskId === undefined) throw new Error('expected live lead and root Task')
+    settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, rootTaskId, 'block', 'No work is currently assigned.')
+    await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
+      status: 'idle', work: { status: 'blocked' },
+    })
+
+    const messagesBeforeFailure = lead.messages.length
+    service.recordMemberSessionEvent(lead.id, {
+      seq: 20,
+      time: Date.now(),
+      type: 'turn/end',
+      data: {
+        turn: 20,
+        reason: {
+          kind: 'error',
+          error: {
+            code: 'PI_AI_ERROR',
+            message: 'malformed_tool_protocol: Inference backend returned malformed tool-call protocol.',
+          },
+        },
+      },
+    } as unknown as SessionEvent)
+    service.agentIdle(lead as unknown as Agent)
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure)
+    expect(service.readTrace(run.id, 0, 300).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'member_protocol_recovery_deferred' }),
+    ]))
+    expect(service.readTrace(run.id, 0, 300).events.some(event =>
+      event.type === 'member_auto_continuation_paused')).toBe(false)
+
+    service.taskBoard(run.id).createGoal(lead.id, {
+      title: 'Review work created after the transient failure',
+      owners: ['lead'],
+    })
+    await Promise.resolve()
+
+    expect(lead.messages).toHaveLength(messagesBeforeFailure + 1)
+    expect(lead.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('[Fleet owner task list]') }),
+    ])
+    disconnect()
+  })
+
   it('retries consecutive malformed tool protocol twice, then escalates to one assistant without a storm', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)

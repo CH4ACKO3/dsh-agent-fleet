@@ -6258,12 +6258,22 @@ export class FleetRunService {
     runtime.tasks.releaseRunning(member, reason.kind === 'error'
       ? `turn failed with ${reason.error.code}`
       : `turn ended with ${reason.kind} before fleet_reconcile resolve`)
-    if (reason.kind === 'error' && isRetriableProtocolFailure(reason.error) && agent !== undefined) {
+    const deferredProtocolRecovery = reason.kind === 'error'
+      && isRetriableProtocolFailure(reason.error)
+      && agent !== undefined
+    if (deferredProtocolRecovery) {
       if (this.scheduleProtocolRecovery(runId, member, agent, reason.error.message)) return
+      this.protocolRecoveries.delete(sessionId)
+      this.abnormalSessionIds.delete(sessionId)
+      this.appendEvent(runId, 'member_protocol_recovery_deferred', {
+        member,
+        sessionId,
+        reason: clippedProgressText(reason.error.message, 1_000),
+      })
     } else if (reason.kind === 'error') {
       this.protocolRecoveries.delete(sessionId)
     }
-    if (reason.kind === 'error') {
+    if (reason.kind === 'error' && !deferredProtocolRecovery) {
       this.appendEvent(runId, 'member_auto_continuation_paused', {
         member,
         sessionId,
