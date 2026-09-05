@@ -522,6 +522,28 @@ async function compose(state, generation, args) {
   ], { cwd: exampleRoot, env: composeEnvironment(state, generation) })
 }
 
+async function startGenerationContainer(state, generation, timeoutMs = 180_000) {
+  await compose(state, generation, ['start'])
+  const { stdout } = await compose(state, generation, ['ps', '-q', 'dsh'])
+  const containerId = stdout.trim().split(/\s+/)[0]
+  if (!containerId) throw new Error(`Generation ${generation.id} compose service dsh was not created`)
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const inspected = await run('docker', [
+      'inspect', '--format',
+      '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}',
+      containerId,
+    ])
+    const status = inspected.stdout.trim()
+    if (status === 'healthy' || status === 'running') return
+    if (status === 'unhealthy' || status === 'exited' || status === 'dead') {
+      throw new Error(`Generation ${generation.id} container became ${status} during startup`)
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 1_000))
+  }
+  throw new Error(`Generation ${generation.id} container did not become healthy within ${timeoutMs}ms`)
+}
+
 function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
@@ -734,7 +756,7 @@ async function launchGeneration(stateDirectory, state, generation, options = {})
     await compose(state, generation, ['create'])
     await prepareLinuxWorkspace(state, generation)
     await preparePatchouliData(state, generation)
-    await compose(state, generation, ['up', '-d', '--no-build', '--wait'])
+    await startGenerationContainer(state, generation)
     await assertRuntimePackages(state, generation)
     generation.phase = 'observing'
     writeState(stateDirectory, state)

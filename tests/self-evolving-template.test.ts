@@ -44,5 +44,8 @@ describe('self-evolving Team template', () => {
     expect(supervisor).toContain("'/opt/dsh/plugins/dsh-agent-fleet.tgz'")
     expect(supervisor).toContain("'/opt/dsh/plugins/dsh-agent-fleet-patchouli.tgz'")
     expect(supervisor).toContain('runtime package mismatch')
+    expect(supervisor).toContain("await compose(state, generation, ['start'])")
+    expect(supervisor).toContain('container did not become healthy within')
+    expect(supervisor).not.toContain("['up', '-d', '--no-build', '--wait']")
   })
 })
