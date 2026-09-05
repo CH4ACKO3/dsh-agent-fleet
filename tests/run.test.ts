@@ -820,6 +820,7 @@ describe('FleetRunService', () => {
     expect(request).toContain(`Current Team: ${run.id}`)
     expect(request).toContain('Current reachable roster (use these exact identities only): @Lead [id=lead; role=lead]; @Reviewer [id=reviewer; role=reviewer]')
     expect(request).toContain('do not call fleet_user_task status merely because direct input arrived')
+    expect(request).toContain('preserve every required terminal action and externally visible side effect')
     expect(request).toContain(`Use action="status" with run_id="${run.id}" after a Task Delivery`)
     expect(request).toContain('Do not emit the final answer before that tool call')
     expect(request).toContain('emit the answer exactly once and end the turn')

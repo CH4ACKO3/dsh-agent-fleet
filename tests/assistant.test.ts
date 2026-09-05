@@ -100,6 +100,9 @@ describe('FleetAssistantRuntime', () => {
       'one persistent Interaction Task',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
+      'include every required terminal action and externally visible side effect',
+    )
+    expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Do not emit the final answer before that tool call',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
