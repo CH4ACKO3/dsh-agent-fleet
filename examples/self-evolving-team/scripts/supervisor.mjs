@@ -894,6 +894,8 @@ async function processRequest(stateDirectory, request) {
     writeState(stateDirectory, state)
     await emit(stateDirectory, state, state.stable, 'candidate.ready', {
       candidate: candidate.id,
+      sourceCommit: candidate.sourceCommit,
+      gitBranch: candidate.gitBranch,
       summary: request.payload?.summary ?? '',
       evidence: request.payload?.evidence,
     })

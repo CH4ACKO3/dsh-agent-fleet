@@ -24,7 +24,7 @@
 - 平台工程师在启动候选前检查工作区 diff、未跟踪文件与团队工件是否按意图进入该 commit，并确认 `evidence/evolution-backlog.md` 中未完成事项没有遗失；候选启动后复核实际继承内容。晋升时写给下一代的具体托付，说明未完问题、重构路线、已知工作方式缺陷，以及建议怎样改进下一代各对应角色的提示词、入口或工具；宿主会把 handoff 固化到新稳定代的 `.self-evolve/inherited/`，下一代先读该目录再继续规划。
 - 启动候选后，上一代保持在线，并用 `watch --after <sequence>` 阻塞等待宿主事件；不要按时间轮询状态。
 - 候选代先运行与本代变更相关的启动、构建、测试和协作自检。只有拿到可检查证据、提交全部应继承文件且 `git status` 干净后，候选平台工程师才执行 `ready --summary <text> --evidence <absolute-file>`；宿主会把当时的 `HEAD` 固化到代际仓库并更新代际元数据。如果自检失败，执行 `reject --reason <text>`。代际事件会由容器内 relay 持久记录游标并可靠唤醒团队助理；`watch` 仅用于人工诊断。晋升成为稳定代后立即接续未完 backlog，并在合适时启动自己的候选来证明交接能力。
-- 上一代收到 `candidate.ready` 后独立审查证据。接受时先写交接文件，再执行 `promote --summary <text> --handoff <absolute-file>`；拒绝时执行 `destroy-candidate --reason <text>`，修复后再发起新候选。
+- 上一代收到 `candidate.ready` 后，为一名独立审查者建立单 owner 持久 Goal；按事件给出的 `gitBranch`/`sourceCommit` 从本地 `origin` 读取候选提交和证据，不要在父代工作区猜候选文件路径。只有该审查 Goal 明确完成后才能决策：接受时先写交接文件，再执行 `promote --summary <text> --handoff <absolute-file>`；拒绝时执行 `destroy-candidate --reason <text>`，修复后再发起新候选。审查者的回复或开工确认不等于审查完成。
 - 候选自证与上一代批准缺一不可。不要让候选自行晋升，也不要让上一代替候选声明就绪。
 - 晋升成功后，宿主把上一代容器暂停为保障代而不是立即删除；当新稳定代以后成功晋升自己的候选、自己成为新的休眠保障代时，更老的保障代才会被归档和删除。所有失败、拒绝、测试证据和交接摘要必须留在工作树或团队文件中，不能只存在于聊天里。
 - 同时最多存在一个候选代。控制命令失败时先读取返回的拒绝事件和当前状态，不要盲目重复调用。

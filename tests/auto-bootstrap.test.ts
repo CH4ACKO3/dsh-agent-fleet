@@ -159,7 +159,12 @@ describe('Fleet automatic bootstrap', () => {
     }))
     writeFileSync(join(eventDirectory, '0000000002-ready.json'), JSON.stringify({
       sequence: 2, generation: 'g0002', type: 'candidate.ready', createdAt: '2026-09-04T00:01:00Z',
-      data: { candidate: 'g0003' },
+      data: {
+        candidate: 'g0003',
+        gitBranch: 'generations/g0003',
+        sourceCommit: 'abc123',
+        evidence: { name: 'ready.md', content: 'large evidence body' },
+      },
     }))
     const followup = vi.fn()
     const agent = { id: 'assistant-session', followup } as unknown as Agent
@@ -170,11 +175,30 @@ describe('Fleet automatic bootstrap', () => {
     })).toBeUndefined()
     await expect(deliverPendingFleetGenerationEvents(agent, run, configuration)).resolves.toBe(1)
     expect(followup).toHaveBeenCalledOnce()
-    expect(followup.mock.calls[0]?.[0]).toMatchObject({
+    const relayed = followup.mock.calls[0]?.[0]
+    expect(relayed).toMatchObject({
       content: [expect.objectContaining({ text: expect.stringContaining('candidate.ready') })],
     })
+    expect(relayed.content[0].text).toContain('generations/g0003')
+    expect(relayed.content[0].text).toContain('abc123')
+    expect(relayed.content[0].text).toContain('单 owner 持久 Goal')
+    expect(relayed.content[0].text).not.toContain('large evidence body')
     expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ eventSequence: 2 })
     await expect(deliverPendingFleetGenerationEvents(agent, run, configuration)).resolves.toBe(0)
     expect(followup).toHaveBeenCalledOnce()
+  })
+
+  it('starts promoted generations with real stable work before another candidate', () => {
+    const instruction = fleetGenerationEventInstruction({
+      sequence: 3,
+      generation: 'g0002',
+      type: 'generation.promoted',
+      createdAt: '2026-09-04T00:02:00Z',
+      data: { previous: 'g0001', guardian: 'g0001' },
+    })
+
+    expect(instruction).toContain('正常稳定代工作流')
+    expect(instruction).toContain('有证据的实际改进')
+    expect(instruction).toContain('不要用纯自检或交接文档空转出下一代')
   })
 })

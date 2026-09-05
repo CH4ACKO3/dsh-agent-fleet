@@ -190,11 +190,11 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
     return [key, value]
   }))).slice(0, 2_000)
   const actions: Record<string, string> = {
-    'candidate.ready': '候选代已经声明 ready。立即建立一次独立复核，核对候选提交、证据、测试和交接能力；随后明确执行 promote 或 destroy-candidate。',
+    'candidate.ready': '候选代已经声明 ready。立即为一名独立审查者建立单 owner 持久 Goal；从宿主数据给出的 gitBranch/sourceCommit 读取候选提交与 evidence，核对测试、记忆继承、协作链和交接能力。审查 Goal 到达明确终态后，才执行 promote 或 destroy-candidate；回复或开工确认不算审查完成。',
     'candidate.failed': '候选代启动失败。立即读取失败证据，清理失败候选，并在修复基座原因后从同一稳定提交重试。',
     'candidate.destroyed': '候选代已销毁。若全局迭代目标仍存在，立即修复已记录原因并启动替代候选。',
     'candidate.self_rejected': '候选代已自我拒绝。立即审查拒绝原因，修复后启动替代候选。',
-    'generation.promoted': '你已晋升为新的稳定代。立即确认 guardian 与继承材料，然后在干净、冻结的提交上启动下一候选；成功启动下一代之前不要把交接视为完成。',
+    'generation.promoted': '你已晋升为新的稳定代。先确认 guardian、继承材料与当前 Git 状态，再进入正常稳定代工作流：从 backlog 选择一项有证据的实际改进，以单 owner 实现和独立审查形成可验证提交。只有本代改进及审查均明确完成、工作区干净后，才启动下一候选；不要用纯自检或交接文档空转出下一代。成功启动并验收下一代之前不要把交接链视为完成。',
     'generation.recovered': '保障代已因稳定代故障恢复。立即检查失败代与被丢弃候选，修复根因后重新建立候选链。',
     'generation.peer_exited': '关联代容器异常退出。立即读取退出证据，恢复代际窗口并记录根因。',
     'guardian.exited': '保障代异常退出。立即记录保护窗口降级，并在继续晋升前恢复可靠的保障路径。',
