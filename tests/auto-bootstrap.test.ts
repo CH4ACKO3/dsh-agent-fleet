@@ -207,6 +207,8 @@ describe('Fleet automatic bootstrap', () => {
     expect(relayed.content[0].text).toContain('generations/g0003')
     expect(relayed.content[0].text).toContain('abc123')
     expect(relayed.content[0].text).toContain('两个有依赖的单 owner 持久 Goal')
+    expect(relayed.content[0].text).toContain('宿主接受并最终确认 ready')
+    expect(relayed.content[0].text).toContain('忽略发生在本事件之前')
     expect(relayed.content[0].text).toContain('最终决定 Goal')
     expect(relayed.content[0].text).toContain('两个节点必须在同一次建图时创建')
     expect(relayed.content[0].text).not.toContain('large evidence body')

@@ -4463,6 +4463,10 @@ export class FleetRunService {
   async pauseTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
     const record = this.requireMutableRecord(runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    if (record.continuous === true
+      && record.assistants.some(assistant => assistant.sessionId === String(caller.id))) {
+      throw new Error('the assistant for a continuous Fleet Team cannot pause its own Team; use an external operator or host lifecycle transition')
+    }
     return this.pauseTeamOperation(caller, record.id)
   }
 
@@ -4545,6 +4549,10 @@ export class FleetRunService {
     if (status === 'running') this.manualWakeRequiredRunIds.add(record.id)
     this.appendEvent(record.id, 'team_status', { status, resumedFrom: 'paused' })
     this.notify(resumed)
+    if (resumed.continuous === true) {
+      this.armAssistantTeamIdle(resumed)
+      this.signalAssistantTeamIdle(resumed.id)
+    }
     return this.describeRecord(resumed)
   }
 

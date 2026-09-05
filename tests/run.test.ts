@@ -1857,6 +1857,30 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('keeps a continuous Team assistant from pausing its own generation and rearms recovery after external resume', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = createTestFixture(tempDirs)
+    const { service, launcher, disconnect } = createRunTestSetup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      continuous: true,
+    })
+    const wakeCount = (): number => launcher.messages.filter(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('configured for continuous operation'))).length
+
+    await expect(service.pauseTeam(launcher as unknown as Agent, run.id))
+      .rejects.toThrow('cannot pause its own Team')
+    await expect(service.pauseTeamAsExternal(launcher as unknown as Agent, run.id))
+      .resolves.toMatchObject({ status: 'paused' })
+    await expect(service.resumeTeamAsExternal(launcher as unknown as Agent, run.id))
+      .resolves.toMatchObject({ status: 'idle' })
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wakeCount()).toBe(1)
+    disconnect()
+  })
+
   it('keeps a continuous stable Team quiet while the host relay waits for its candidate', async () => {
     vi.useFakeTimers()
     const { root, configPath } = fixture()
