@@ -10286,7 +10286,7 @@ export function installRunTools(
       reason: { type: 'string', description: 'Required for continue, take_over, report, and block.' },
       report: { type: 'string', description: 'Exact foreground result recorded for bookkeeping. Required for report and block; do not emit it before this tool call.' },
       message: { type: 'string', description: 'For update, the intentional mid-turn message delivered to the user. Do not repeat the final answer.' },
-      task_ids: { type: 'array', items: { type: 'string' }, description: 'For continue, optional additional live Tasks owned by formal Team members. Omit to retain existing live waits.' },
+      task_ids: { type: 'array', items: { type: 'string' }, description: 'For continue, optional additional live Tasks owned by formal Team members. When linking existing Tasks, omit title, instructions, and owners; those fields create an additional Goal. Omit task_ids to retain existing live waits.' },
       title: { type: 'string', description: 'For continue with instructions, title of the new Goal.' },
       instructions: { type: 'string', description: 'For continue, concrete work for a new formal-member Goal.' },
       owners: { type: 'array', items: { type: 'string' }, description: 'For continue with instructions, one or more formal Team members.' },
