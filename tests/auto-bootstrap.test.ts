@@ -42,11 +42,12 @@ describe('Fleet automatic bootstrap', () => {
     const root = temporaryDirectory()
     const workspace = join(root, 'workspace')
     const dshHome = join(root, 'dsh')
-    mkdirSync(workspace, { recursive: true })
+    mkdirSync(join(workspace, '.self-evolve'), { recursive: true })
     const teamConfigPath = join(root, 'team.json')
     const taskPath = join(workspace, 'task.md')
     writeFileSync(teamConfigPath, '{}')
     writeFileSync(taskPath, '# Task')
+    writeFileSync(join(workspace, '.self-evolve', 'generation.json'), JSON.stringify({ role: 'candidate' }))
     vi.stubEnv('DSH_HOME', dshHome)
     const configuration = {
       id: 'generation-one',
@@ -54,6 +55,7 @@ describe('Fleet automatic bootstrap', () => {
       agentPreset: 'standard',
       readyFile: join(workspace, '.self-evolve', 'ready.json'),
       provider: 'provider', model: 'model', maxTokens: 4096,
+      controlDirectory: join(root, 'control'), generation: 'g0001',
     }
     const followup = vi.fn()
     const dispose = vi.fn(() => Promise.resolve())
@@ -95,6 +97,8 @@ describe('Fleet automatic bootstrap', () => {
     expect(activate).toHaveBeenCalledWith(agent, 'team-one', run.assistants[0]?.view)
     expect(started).toHaveBeenCalledWith(agent)
     expect(followup).toHaveBeenCalledOnce()
+    expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('你是候选代，不是稳定代')
+    expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('不得选择新的改进主题')
     expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ runId: 'team-one' })
     expect(JSON.parse(readFileSync(configuration.readyFile, 'utf8'))).toMatchObject({ runId: 'team-one' })
     await result.dispose()

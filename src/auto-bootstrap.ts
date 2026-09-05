@@ -26,6 +26,10 @@ export interface FleetAutoBootstrapConfiguration {
   readonly generation?: string
 }
 
+interface FleetGenerationManifest {
+  readonly role?: string
+}
+
 interface FleetAutoBootstrapMarker {
   readonly id: string
   readonly runId: string
@@ -201,13 +205,7 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
     'guardian.retirement_failed': '旧保障代清理失败。立即检查归档与容器/卷清理，不要让遗留资源持续累积。',
     'request.rejected': '一个代际控制请求被宿主拒绝。读取拒绝原因并纠正请求；不要盲目重复同一命令。',
   }
-  const generationStarted = event.type === 'generation.started'
-    ? data.role === 'candidate'
-      ? '你是候选代，不是稳定代。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。验证通过后由平台工程师提交 ready，失败则 reject，然后等待父代决定。'
-      : data.role === 'stable'
-        ? '你是活跃稳定代。先确认身份、Git 状态和继承材料，再以一项有证据的实际改进开始本代工作；实现与独立审查完成前不要启动候选。'
-        : undefined
-    : undefined
+  const generationStarted = event.type === 'generation.started' ? generationRoleInstruction(data.role) : undefined
   const action = generationStarted ?? actions[event.type]
   if (action === undefined) return undefined
   return [
@@ -217,6 +215,16 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
     `宿主数据：${detail}`,
     '这是状态机事件，不是频道消息；无需报告“已读”，直接完成所需生命周期动作。',
   ].join('\n\n')
+}
+
+function generationRoleInstruction(role: unknown): string | undefined {
+  if (role === 'candidate') {
+    return '你是候选代，不是稳定代。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。验证通过后由平台工程师提交 ready，失败则 reject，然后等待父代决定。'
+  }
+  if (role === 'stable') {
+    return '你是活跃稳定代。先确认身份、Git 状态和继承材料，再以一项有证据的实际改进开始本代工作；实现与独立审查完成前不要启动候选。'
+  }
+  return undefined
 }
 
 export async function deliverPendingFleetGenerationEvents(
@@ -316,9 +324,15 @@ export function writeFleetAutoBootstrapFailure(
 }
 
 function bootstrapMessage(configuration: FleetAutoBootstrapConfiguration): string {
+  const manifestPath = join(configuration.projectRoot, '.self-evolve', 'generation.json')
+  const manifest = configuration.generation !== undefined && existsSync(manifestPath)
+    ? JSON.parse(readFileSync(manifestPath, 'utf8')) as FleetGenerationManifest
+    : undefined
+  const roleInstruction = generationRoleInstruction(manifest?.role)
   return [
     '[Fleet automatic bootstrap]',
     `按 ${configuration.taskPath} 开始任务。`,
+    ...(roleInstruction === undefined ? [] : ['[Fleet generation role]', roleInstruction]),
     '这是由宿主监督器注入的一次性启动指令。请读取该文件，以实际团队成员的职责设计初始 DAG，并调用一次 fleet_run start；不要把固定流程从模板反推到任务中。',
   ].join('\n\n')
 }
