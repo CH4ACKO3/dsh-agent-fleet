@@ -226,7 +226,8 @@ describe('Fleet automatic bootstrap', () => {
     })
 
     expect(instruction).toContain('正常稳定代工作流')
-    expect(instruction).toContain('有证据的实际改进')
+    expect(instruction).toContain('一批通常包含 2–4 个边界清楚的实际改进')
+    expect(instruction).toContain('不要因第一项完成就交接')
     expect(instruction).toContain('不要用纯自检或交接文档空转出下一代')
   })
 
