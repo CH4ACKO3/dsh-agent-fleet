@@ -58,7 +58,7 @@ node examples/self-evolving-team/scripts/supervisor.mjs init `
   --retain-generations 2
 ```
 
-`init` 完成五件事：复制一份宿主管理的代际裸仓库、创建 `g0001` 隔离 clone、按冻结 lockfile 安装并构建/打包 Fleet、启动隔离 Compose 项目、保持前台监督请求目录。宿主构建阶段可访问依赖源；候选容器运行时仍只允许模型端点。候选 UI 地址从 `3120` 起按代递增。容器内 Fleet 自动创建团队，并向助理注入“按 `.self-evolve/bootstrap.md` 开始任务”的一次性指令，不需要用户打开 UI 导入配置。
+`init` 完成五件事：复制一份宿主管理的代际裸仓库、创建 `g0001` 隔离 clone、按冻结 lockfile 安装并构建/打包 Fleet、启动 Compose 项目、保持前台监督请求目录。自迭代开发容器可以正常访问软件源和模型端点；需要禁止联网的评测任务应使用独立的评测模板，不与本模板共享网络策略。候选 UI 地址从 `3120` 起按代递增。容器内 Fleet 自动创建团队，并向助理注入“按 `.self-evolve/bootstrap.md` 开始任务”的一次性指令，不需要用户打开 UI 导入配置。
 
 如果宿主进程退出，只恢复监督器，不创建新一代：
 

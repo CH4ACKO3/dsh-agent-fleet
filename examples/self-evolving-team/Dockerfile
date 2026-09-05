@@ -4,15 +4,15 @@ FROM ${BASE_IMAGE}
 USER root
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git iptables jq procps \
+    && apt-get install -y --no-install-recommends ca-certificates curl git jq procps \
     && rm -rf /var/lib/apt/lists/*
 
 ARG DSH_HARMONY_VERSION=0.8.10
 ARG DSH_TURN_FOLD_VERSION=0.6.0
 ARG DSH_PATCHOULI_VERSION=0.1.6
 
-# Runtime networking is closed, so every dependency used by the inherited
-# entrypoint must be present in the image's pnpm store before a generation starts.
+# Prime the pnpm store to keep generation startup fast. Runtime networking stays
+# available so a newly resolved transitive dependency can still be installed.
 RUN mkdir -p /opt/self-evolve/pnpm-seed \
     && pnpm --dir /opt/self-evolve/pnpm-seed init \
     && pnpm --dir /opt/self-evolve/pnpm-seed config set auto-install-peers false --location project \
@@ -55,12 +55,11 @@ ENV DSH_HARMONY_ACTIVE_DSH_ENTRY=/usr/local/lib/node_modules/@deepseek-ai/dsh/li
 
 COPY team.local.json /opt/self-evolve/team.local.json
 COPY scripts /opt/self-evolve/scripts
-COPY scripts/network-guard.sh /opt/self-evolve/network-guard.sh
 COPY scripts/configure-profile.mjs /opt/dsh/configure-profile.mjs
 COPY scripts/dsh-container-entrypoint /usr/local/bin/dsh-container-entrypoint
-RUN sed -i 's/\r$//' /opt/self-evolve/network-guard.sh /opt/self-evolve/scripts/*.mjs \
+RUN sed -i 's/\r$//' /opt/self-evolve/scripts/*.mjs \
         /usr/local/bin/dsh-container-entrypoint \
-    && chmod 0555 /opt/self-evolve/network-guard.sh /opt/self-evolve/scripts/*.mjs \
+    && chmod 0555 /opt/self-evolve/scripts/*.mjs \
         /opt/dsh/configure-profile.mjs /usr/local/bin/dsh-container-entrypoint \
     && git config --system --add safe.directory /workspace
 
