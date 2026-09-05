@@ -219,7 +219,7 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
 
 function generationRoleInstruction(role: unknown): string | undefined {
   if (role === 'candidate') {
-    return '你是候选代，不是稳定代。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。验证通过后由平台工程师提交 ready，失败则 reject，然后等待父代决定。'
+    return '你是候选代，不是稳定代。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。初始 DAG 的最后一个节点必须是平台工程师单 owner Goal，依赖独立复核，负责写入 readiness 证据、确认工作区干净并实际执行 ready 或 reject；不能只用 Vote 表态后结束工作。提交后等待父代决定。'
   }
   if (role === 'stable') {
     return '你是活跃稳定代。先确认身份、Git 状态和继承材料，再以一项有证据的实际改进开始本代工作；实现与独立审查完成前不要启动候选。'
