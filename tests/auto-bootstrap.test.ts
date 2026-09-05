@@ -243,6 +243,8 @@ describe('Fleet automatic bootstrap', () => {
     })
 
     expect(instruction).toContain('你是候选代，不是稳定代')
+    expect(instruction).toContain('role、parent、sourceCommit')
+    expect(instruction).toContain('旧代的 request、review、decision 和 handoff 只是历史证据')
     expect(instruction).toContain('优先复用前置 Goal 产出的可检查证据')
     expect(instruction).toContain('只有在证据缺失或相互矛盾时才重跑')
     expect(instruction).toContain('不要把属于下游平台就绪节点')

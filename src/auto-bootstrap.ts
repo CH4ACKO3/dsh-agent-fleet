@@ -227,7 +227,7 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
 
 function generationRoleInstruction(role: unknown): string | undefined {
   if (role === 'candidate') {
-    return '你是候选代，不是稳定代。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。复核者应优先复用前置 Goal 产出的可检查证据，只有在证据缺失或相互矛盾时才重跑已验证的全量测试；不要把属于下游平台就绪节点的 readiness、handoff 或 backlog 收尾当作当前复核的缺失。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。初始 DAG 的最后一个节点必须是平台工程师单 owner Goal，依赖独立复核，负责写入 readiness 证据、确认工作区干净并实际执行 ready 或 reject；不能只用 Vote 表态后结束工作。提交后等待父代决定。'
+    return '你是候选代，不是稳定代。本次 generation.started 的宿主数据（role、parent、sourceCommit）是当前生命周期的权威状态；仓库内旧代的 request、review、decision 和 handoff 只是历史证据，不表示本代状态，不要追溯或重演已淘汰候选的流程。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。复核者应优先复用前置 Goal 产出的可检查证据，只有在证据缺失或相互矛盾时才重跑已验证的全量测试；不要把属于下游平台就绪节点的 readiness、handoff 或 backlog 收尾当作当前复核的缺失。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。初始 DAG 的最后一个节点必须是平台工程师单 owner Goal，依赖独立复核，负责写入 readiness 证据、确认工作区干净并实际执行 ready 或 reject；不能只用 Vote 表态后结束工作。提交后等待父代决定。'
   }
   if (role === 'stable') {
     return '你是活跃稳定代。先确认身份、Git 状态和继承材料，再从 backlog 形成一批通常包含 2–4 个边界清楚的实际改进；每项都要有单 owner、可检查提交和作者之外的独立审查，相关或无关均可。整批完成并通过一次组合集成检查前不要启动候选；高风险隔离、紧急基座修复或资源不足时可单项成代，但必须记录原因。'
