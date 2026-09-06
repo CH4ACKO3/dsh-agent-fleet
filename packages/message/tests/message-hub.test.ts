@@ -235,7 +235,7 @@ describe('MessageHub', () => {
       .toContainEqual(expect.objectContaining({ id: sent.messageId, delivery: 'fyi' }))
   })
 
-  it('keeps muted Channel activity unread without injecting a notice', () => {
+  it('keeps muted Channel activity visible in Inbox without creating Task work', () => {
     const lead = new FakeAgent('lead')
     const assistant = new FakeAgent('assistant')
     const agents = new Map([lead, assistant].map(agent => [agent.id, agent]))
@@ -257,6 +257,7 @@ describe('MessageHub', () => {
     expect(assistant.injected).toEqual([])
     expect(assistant.followedUp).toEqual([])
     expect(hub.pendingWakeups(assistant.id)).toEqual([])
+    // muted channel posts are visible in the Inbox but excluded from Task work
     expect(hub.unreadSummary(assistant.id)).toEqual({
       unreadMessages: 1,
       unreadChars: 'Routine Team context for later.'.length,
@@ -272,6 +273,44 @@ describe('MessageHub', () => {
     })
     expect(assistant.followedUp).toHaveLength(1)
     expect(hub.pendingWakeups(assistant.id)).toContainEqual(expect.objectContaining({ id: mentioned.messageId }))
+  })
+
+  it('filters unmentioned Channel posts from taskUnreadSummary for formal members as well', () => {
+    const lead = new FakeAgent('lead')
+    const member = new FakeAgent('member')
+    const agents = new Map([lead, member].map(agent => [agent.id, agent]))
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    })
+
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: 'General update for the whole channel.',
+      delivery: 'quiet',
+    })
+
+    // visible in full Inbox but excluded from task work
+    expect(hub.unreadSummary(member.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: 'General update for the whole channel.'.length,
+    })
+    expect(hub.taskUnreadSummary(member.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+    expect(hub.readInbox(member).messages).toContainEqual(expect.objectContaining({ id: sent.messageId }))
+
+    // @mentioned channel post still appears in task work
+    const mentioned = hub.send(lead, {
+      to: '#general',
+      text: '@member Please respond to this.',
+      mentions: ['@member'],
+      delivery: 'wakeup',
+    })
+    expect(hub.taskUnreadSummary(member.id)).toEqual({
+      unreadMessages: 1,
+      unreadChars: '@member Please respond to this.'.length,
+    })
+    expect(hub.pendingWakeups(member.id)).toContainEqual(expect.objectContaining({ id: mentioned.messageId }))
   })
 
   it('preserves trusted direct-human delivery while requiring an explicit mention for replies', () => {
@@ -2008,5 +2047,39 @@ describe('MessageHub', () => {
     expect(() => hub.closeMeeting(lead, 'task-review', {
       actionItems: [{ text: 'Review it.', assignee: '@reviewer', taskId: 'missing' }],
     })).toThrow('invalid linked task')
+  })
+
+  it('preserves message references after double restore (P23)', () => {
+    const first = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    first.hub.onEvent(event => { events.push(event) })
+    const sent = first.hub.send(first.lead, {
+      to: '#general',
+      text: '@reviewer First mention.',
+      delivery: 'quiet',
+    })
+    first.hub.read(first.reviewer, { conversation: '#general' })
+
+    const second = setup()
+    second.hub.restore(events)
+    const before = second.hub.search(second.lead, { conversation: '#general' })
+    second.hub.restore(events)
+    const after = second.hub.search(second.lead, { conversation: '#general' })
+
+    expect(before).toEqual(after)
+    expect(before[0]?.mentions).toEqual(['reviewer'])
+  })
+
+  it('tolerates unknown conversation formats during restore (P27)', () => {
+    const { hub } = setup()
+    expect(() => hub.restore([{
+      type: 'message',
+      message: {
+        id: 'msg_weird', sequence: 1, kind: 'text', conversation: 'unknown-format-123' as '@reviewer',
+        from: 'lead', text: 'Non-standard conversation.', resources: [], mentions: [], delivery: 'quiet',
+        createdAt: '2026-09-05T00:00:00.000Z',
+      },
+    }])).not.toThrow()
+    expect(hub.pendingWakeups('lead')).toEqual([])
   })
 })

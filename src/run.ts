@@ -2157,6 +2157,13 @@ const RESOURCE_REVISION_MAX_BYTES = 2 * 1024 * 1024
 const RESOURCE_HISTORY_LIMIT = 500
 const SHARED_FILE_WATCH_DEBOUNCE_MS = 150
 const SHARED_FILE_UI_REFRESH_MS = 5_000
+/**
+ * Tolerance for overlay/tmpfs file systems where stat.mtimeMs can lag behind
+ * Date.now() by up to 5ms (observed range 0.5–5ms under overlay2). Prevents
+ * newly created workspace files from being incorrectly filtered out during
+ * shared-file sync. See P11 (evolution-backlog.md).
+ */
+const SHARED_FILE_MTIME_TOLERANCE_MS = 10
 
 function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kind'] | undefined {
   const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
@@ -8668,14 +8675,23 @@ export class FleetRunService {
         const name = relative(root, path).split(sep).join('/')
         const existing = byPath.get(absolutePath)
         const autoWorkspaceResource = existing?.id.startsWith('workspace:') === true
-        if (namespace === 'workspace'
-          && !autoWorkspaceResource
-          && (workStartedAt === undefined || info.mtimeMs < workStartedAt)) continue
-        seen.add(absolutePath)
+
+        // Record version baseline for every file, even pre-existing workspace files
+        // that should not yet be published. This ensures that on the first scan after
+        // work starts the version is already known and the file is not mis-detected as
+        // "new" (P11 root cause: overlay filesystem mtime granularity + missing baseline).
         const version = `${String(info.mtimeMs)}:${String(info.size)}`
         const versionKey = `${namespace}:${name}`
         const previous = versions.get(versionKey)
         versions.set(versionKey, version)
+
+        if (namespace === 'workspace'
+          && !autoWorkspaceResource
+          && (workStartedAt === undefined || info.mtimeMs < workStartedAt - SHARED_FILE_MTIME_TOLERANCE_MS)) {
+          seen.add(absolutePath)
+          continue
+        }
+        seen.add(absolutePath)
         if (previous === version || (previous === undefined && existing !== undefined
           && (existing.size === undefined || existing.size === info.size))) continue
 

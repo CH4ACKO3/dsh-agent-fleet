@@ -198,19 +198,10 @@ export class FleetAssistantRuntime {
   ) {}
 
   activate(agent: Agent, runId?: string, view?: FleetAssistantView): FleetAssistantMode {
-    const identity = view === undefined ? '' : [
-      '## Your persistent Fleet assistant identity',
-      `Name: ${view.name}`,
-      `Role: ${view.role}`,
-      ...(view.responsibility === undefined ? [] : [`Responsibility: ${view.responsibility}`]),
-      ...(view.prompt.length === 0 ? [] : ['Additional instructions:', view.prompt]),
-    ].join('\n')
     return this.install(agent, {
       phase: 'operating',
       tools: assistantTools(view, this.toolGroupAvailable),
-      prompt: identity.length === 0
-        ? FLEET_ASSISTANT_SYSTEM_PROMPT
-        : `${FLEET_ASSISTANT_SYSTEM_PROMPT}\n\n${identity}`,
+      prompt: FLEET_ASSISTANT_SYSTEM_PROMPT,
       ...(runId === undefined ? {} : { runId }),
       ...(view === undefined ? {} : { view }),
     })
@@ -265,13 +256,31 @@ export class FleetAssistantRuntime {
       order: 0,
       text: mode.prompt,
     })
+    let removeIdentity: (() => void) | undefined
     let removeRestriction: (() => void) | undefined
     try {
+      if (mode.view !== undefined) {
+        const identityLines: string[] = [
+          '## Your persistent Fleet assistant identity',
+          `Name: ${mode.view.name}`,
+          `Role: ${mode.view.role}`,
+        ]
+        if (mode.view.responsibility !== undefined) identityLines.push(`Responsibility: ${mode.view.responsibility}`)
+        if (mode.view.prompt.length > 0) {
+          identityLines.push('Additional instructions:', mode.view.prompt)
+        }
+        removeIdentity = agentContext.systemPrompt.section({
+          name: 'deployment:identity',
+          order: 1,
+          text: identityLines.join('\n'),
+        })
+      }
       if (mode.restrictedTools !== undefined) {
         removeRestriction = agentContext.tools.restrict({ allow: mode.restrictedTools })
       }
     } catch (error) {
       removePersona()
+      removeIdentity?.()
       throw error
     }
 
@@ -285,6 +294,7 @@ export class FleetAssistantRuntime {
         if (this.active.get(sessionId) !== entry) return
         this.active.delete(sessionId)
         removeRestriction?.()
+        removeIdentity?.()
         removePersona()
       },
     }

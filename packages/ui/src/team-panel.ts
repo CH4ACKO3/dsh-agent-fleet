@@ -2144,6 +2144,37 @@ button.dsh-fleet-panel-team-title:focus-visible {
   background: var(--dsw-alias-state-warning-primary, #c38b36);
 }
 
+.dsh-fleet-panel-team-row-status[data-status="paused"] {
+  background: #d4a017;
+}
+
+.dsh-fleet-panel-team-row-status[data-status="closed"] {
+  background: #888;
+}
+
+.dsh-fleet-panel-team-row-status[data-status="failed"] {
+  background: #c0392b;
+}
+
+.dsh-fleet-panel-team-row-status[data-status="disconnected"] {
+  width: 6px;
+  height: 6px;
+  background: transparent;
+  border: 1.5px dashed #999;
+}
+
+.dsh-fleet-panel-team-row-status[data-status="starting"] {
+  background: #5dade2;
+}
+
+.dsh-fleet-panel-team-row-status[data-status="finishing"] {
+  background: #8e44ad;
+}
+
+.dsh-fleet-panel-team-row-status[data-status="dormant"] {
+  background: #7f8c8d;
+}
+
 .dsh-fleet-panel-attention {
   width: 6px;
   height: 6px;

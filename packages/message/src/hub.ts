@@ -269,7 +269,7 @@ export class MessageHub {
         && !this.isFullyRead(participantId, message),
       )
       if (parsed.length === 0) continue
-      const restored = { ...message, mentions: [...new Set([...message.mentions, ...parsed])] }
+      const restored = snapshot({ ...message, mentions: [...new Set([...message.mentions, ...parsed])] })
       this.history[index] = restored
       const conversationId = restored.conversationId ?? restored.conversation
       for (const participantId of parsed) {
@@ -611,13 +611,18 @@ export class MessageHub {
     }
   }
 
-  unreadSummary(reference: string): { readonly unreadMessages: number; readonly unreadChars: number } {
-    this.assertOpen()
-    const participantId = this.resolveAgent(reference)
-    const unread = this.history.filter(message => message.from !== participantId
+  /** Messages visible to the participant that are unread in the Inbox sense. */
+  private inboxRelevantUnread(participantId: string): FleetMessage[] {
+    return this.history.filter(message => message.from !== participantId
       && this.canSeeMessage(participantId, message)
       && this.isInboxRelevant(participantId, message)
       && !this.isFullyRead(participantId, message))
+  }
+
+  unreadSummary(reference: string): { readonly unreadMessages: number; readonly unreadChars: number } {
+    this.assertOpen()
+    const participantId = this.resolveAgent(reference)
+    const unread = this.inboxRelevantUnread(participantId)
     return {
       unreadMessages: unread.length,
       unreadChars: unread.reduce((total, message) =>
@@ -632,10 +637,7 @@ export class MessageHub {
     if (!Number.isSafeInteger(maxChars) || maxChars < 1 || maxChars > 12_000) {
       throw new Error('maxChars must be an integer from 1 through 12000')
     }
-    const unread = this.history.filter(message => message.from !== sender.id
-      && this.canSeeMessage(sender.id, message)
-      && this.isInboxRelevant(sender.id, message)
-      && !this.isFullyRead(sender.id, message))
+    const unread = this.inboxRelevantUnread(sender.id)
     const selected: FleetMessage[] = []
     let selectedChars = 0
     for (let index = unread.length - 1; index >= 0; index -= 1) {
@@ -1701,17 +1703,46 @@ export class MessageHub {
     }
   }
 
+  /** Collaboration diagnostics: message volume, channel/DM distribution, and recent ratio. */
+  collaborationDiagnostics(reference: string): {
+    readonly totalMessages: number
+    readonly channelMessages: number
+    readonly dmMessages: number
+    readonly meetingMessages: number
+    readonly recent20Channel: number
+    readonly recent20Dm: number
+  } {
+    this.assertOpen()
+    const participantId = this.resolveAgent(reference)
+    const visible = this.history.filter(message => this.canSeeMessage(participantId, message))
+    const totalMessages = visible.length
+    let channelMessages = 0
+    let dmMessages = 0
+    let meetingMessages = 0
+    for (const message of visible) {
+      if (message.conversation.startsWith('#')) channelMessages++
+      else if (message.conversation.startsWith('@')) dmMessages++
+      else if (message.conversation.startsWith('meeting:')) meetingMessages++
+    }
+    const recent = visible.slice(-20)
+    let recent20Channel = 0
+    let recent20Dm = 0
+    for (const message of recent) {
+      if (message.conversation.startsWith('#')) recent20Channel++
+      else if (message.conversation.startsWith('@')) recent20Dm++
+    }
+    return { totalMessages, channelMessages, dmMessages, meetingMessages, recent20Channel, recent20Dm }
+  }
+
   /** Unread work that must be claimed by the member, whether delivered as native context or a notice. */
   taskUnreadSummary(reference: string): { readonly unreadMessages: number; readonly unreadChars: number } {
     this.assertOpen()
     const participantId = this.resolveAgent(reference)
-    const unread = this.history.filter(message => message.from !== participantId
-      && this.canSeeMessage(participantId, message)
-      && this.isInboxRelevant(participantId, message)
-      && !(message.conversation.startsWith('#')
-        && this.options.muteChannelNotice?.(participantId, snapshot(message)) === true)
-      && this.options.excludeInboxTask?.(participantId, snapshot(message)) !== true
-      && !this.isFullyRead(participantId, message))
+    const unread = this.inboxRelevantUnread(participantId).filter(message =>
+      message.conversation.startsWith('#')
+        ? message.mentions.includes(participantId)
+        : true
+      && this.options.excludeInboxTask?.(participantId, snapshot(message)) !== true)
     return {
       unreadMessages: unread.length,
       unreadChars: unread.reduce((total, message) =>
@@ -2127,7 +2158,7 @@ export class MessageHub {
         if (wakes(message.delivery)) {
           for (const mention of message.mentions) this.addPendingWakeup(mention, message)
         }
-      } else {
+      } else if (message.conversation.startsWith('meeting:')) {
         const meeting = this.meetings.get(meetingId(message.conversation))
         if (meeting === undefined) continue
         if (wakes(message.delivery)) {

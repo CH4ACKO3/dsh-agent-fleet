@@ -1072,7 +1072,6 @@ export class FleetCollaborationService {
       restore: (state) => {
         messages.restore(state.coordination)
         for (const member of memberViews.keys()) {
-          for (const message of messages.pendingRequiredReplies(member)) ensureMessageTasks(message)
           syncMemberInbox(member)
         }
         resources.restoreResources(state.resources)
