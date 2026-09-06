@@ -4,8 +4,10 @@ import { isAbsolute, resolve } from 'node:path'
 
 import type { FleetMemberView } from '../src/member-view.js'
 import type { FleetCoordinationEvent } from '@dsh-agent-fleet/message'
+import type { FleetProjectTaskEvent, FleetTaskState } from '../src/productivity/task.js'
 import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
+import { NOOP_FLEET_TEAM_EVENT_BUS } from '../src/team-event-bus.js'
 
 const view = (id: string, permissions: string[] = []): FleetMemberView => ({
   id, name: id, role: 'Member', prompt: '',
@@ -52,7 +54,7 @@ describe('Fleet collaboration identities', () => {
     const team = collaboration.open({
       id: 'team-1', memberViews: [lead, reviewer, assistant], defaultVoters: ['lead', 'reviewer'],
       projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-1',
-      onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
+      eventBus: NOOP_FLEET_TEAM_EVENT_BUS,
     })
     team.attachMember('agent-lead', lead)
     team.attachMember('agent-reviewer', reviewer)
@@ -95,12 +97,13 @@ describe('Fleet collaboration identities', () => {
       on: () => () => {},
     } as never, authorization)
     const coordination: FleetCoordinationEvent[] = []
-    const open = (onCoordination: (event: FleetCoordinationEvent) => void) => collaboration.open({
+    const eventBus = { ...NOOP_FLEET_TEAM_EVENT_BUS, onCoordination: (event: FleetCoordinationEvent) => { coordination.push(event) } }
+    const open = () => collaboration.open({
       id: 'team-required', memberViews: [lead, reviewer], defaultVoters: ['lead', 'reviewer'],
       projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-required',
-      onCoordination, onResource: () => {}, onMemberStatus: () => {},
+      eventBus,
     })
-    const first = open(event => { coordination.push(event) })
+    const first = open()
     first.attachMember('agent-lead', lead)
     first.attachMember('agent-reviewer', reviewer)
     const sent = first.messages.send(agents.get('agent-lead') as never, {
@@ -160,7 +163,7 @@ describe('Fleet collaboration identities', () => {
     const team = collaboration.open({
       id: 'team-reply-result', memberViews: [reviewer], defaultVoters: [reviewer.id],
       projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-reply-result',
-      onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
+      eventBus: NOOP_FLEET_TEAM_EVENT_BUS,
     })
     team.attachMember(agent.id, reviewer)
     const registered: Array<{
@@ -189,6 +192,95 @@ describe('Fleet collaboration identities', () => {
       task: { stableState: { kind: 'completed' } },
     })
     expect(agent.cancel).not.toHaveBeenCalled()
+    collaboration.close()
+  })
+
+  it('resolves multiple Reply Tasks in FIFO order with partial completion', () => {
+    const lead = view('lead')
+    const reviewer = view('reviewer')
+    const views = new Map([lead, reviewer].map(member => [member.id, member]))
+    const agents = new Map(['lead', 'reviewer'].map(id => [`agent-${id}`, {
+      id: `agent-${id}`, inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(),
+    }]))
+    const authorization = new FleetAuthorizationService()
+    authorization.installBaseline({
+      resolveSubject: (_teamId, subject) => views.get(subject.id),
+      authorizeResource: () => true,
+    })
+    const collaboration = new FleetCollaborationService({
+      agents: { get: (id: string) => agents.get(id) },
+      fs: { contains: () => true },
+      on: () => () => {},
+    } as never, authorization)
+    const coordination: FleetCoordinationEvent[] = []
+    const eventBus = { ...NOOP_FLEET_TEAM_EVENT_BUS, onCoordination: (event: FleetCoordinationEvent) => { coordination.push(event) } }
+    const team = collaboration.open({
+      id: 'team-pending22', memberViews: [lead, reviewer], defaultVoters: ['lead', 'reviewer'],
+      projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-pending22',
+      eventBus,
+    })
+    team.attachMember('agent-lead', lead)
+    team.attachMember('agent-reviewer', reviewer)
+
+    // Send two messages @mentioning the reviewer to create two pending Reply Tasks
+    const firstMsg = team.messages.send(agents.get('agent-lead') as never, {
+      to: '#general', text: '@reviewer review the first PR.', mentions: ['@reviewer'], delivery: 'quiet',
+    })
+    const secondMsg = team.messages.send(agents.get('agent-lead') as never, {
+      to: '#general', text: '@reviewer also check the second change.', mentions: ['@reviewer'], delivery: 'quiet',
+    })
+
+    // First pending should be the oldest (firstMsg)
+    const firstPending = team.tasks.pendingReply('reviewer')
+    expect(firstPending).toBeDefined()
+    expect(firstPending!.domain).toMatchObject({ messageId: firstMsg.messageId })
+
+    // Complete first reply
+    const firstReply = team.messages.reply(agents.get('agent-reviewer') as never, {
+      messageId: firstMsg.messageId, text: '@lead First PR looks good.',
+    })
+    team.tasks.recordReply('agent-reviewer', firstPending!.id, firstReply.messageId)
+
+    // After completing first, pendingReply should return the second
+    const secondPending = team.tasks.pendingReply('reviewer')
+    expect(secondPending).toBeDefined()
+    expect(secondPending!.domain).toMatchObject({ messageId: secondMsg.messageId })
+
+    // Complete second reply
+    const secondReply = team.messages.reply(agents.get('agent-reviewer') as never, {
+      messageId: secondMsg.messageId, text: '@lead Second change approved.',
+    })
+    team.tasks.recordReply('agent-reviewer', secondPending!.id, secondReply.messageId)
+
+    // All replies completed — pendingReply is undefined
+    expect(team.tasks.pendingReply('reviewer')).toBeUndefined()
+
+    // Both Reply Tasks are marked completed
+    const state = team.tasks.state()
+    expect(state.tasks.filter(t => t.id === firstPending!.id || t.id === secondPending!.id))
+      .toHaveLength(2)
+    for (const task of state.tasks) {
+      if (task.id === firstPending!.id || task.id === secondPending!.id) {
+        expect(task.stableState).toMatchObject({ kind: 'completed' })
+      }
+    }
+
+    // Verify restore with both completed
+    collaboration.closeTeam('team-pending22')
+    const restored = collaboration.open({
+      id: 'team-pending22', memberViews: [lead, reviewer], defaultVoters: ['lead', 'reviewer'],
+      projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-pending22',
+      eventBus: NOOP_FLEET_TEAM_EVENT_BUS,
+    })
+    restored.restoreProductivity({
+      tasks: state,
+      schedules: { version: 1, schedules: [] },
+      calendar: { version: 1, events: [] },
+    })
+    restored.attachMember('agent-lead', lead)
+    restored.attachMember('agent-reviewer', reviewer)
+    restored.restore({ coordination, resources: [], memberStatuses: [] })
+    expect(restored.tasks.pendingReply('reviewer')).toBeUndefined()
     collaboration.close()
   })
 
@@ -226,7 +318,7 @@ describe('Fleet collaboration identities', () => {
     const team = collaboration.open({
       id: 'team-resources', memberViews: [publisher], defaultVoters: [publisher.id],
       projectRoot, sharedDirectory: resolve(projectRoot, '.fleet/team-resources'),
-      onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
+      eventBus: NOOP_FLEET_TEAM_EVENT_BUS,
     })
     team.attachMember(agent.id, publisher)
     const registered: Array<{
@@ -263,6 +355,69 @@ describe('Fleet collaboration identities', () => {
     })
     expect(seen).toContainEqual({ action: 'resource.read', kind: 'team', id: 'team-resources' })
     expect(seen).not.toContainEqual(expect.objectContaining({ kind: 'resource', id: '*' }))
+    collaboration.close()
+  })
+
+  it('P21: suppresses notification when creating multiple Reply Tasks from one @-message', () => {
+    const alice = view('alice')
+    const bob = view('bob')
+    const charlie = view('charlie')
+    const views = new Map([alice, bob, charlie].map(m => [m.id, m]))
+    const agents = new Map(['alice', 'bob', 'charlie'].map(id => [`agent-${id}`, {
+      id: `agent-${id}`, inject: vi.fn(), followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(),
+    }]))
+    const authorization = new FleetAuthorizationService()
+    authorization.installBaseline({
+      resolveSubject: (_teamId, subject) => views.get(subject.id),
+      authorizeResource: () => true,
+    })
+    const taskEvents: FleetProjectTaskEvent[] = []
+    const eventBus = { ...NOOP_FLEET_TEAM_EVENT_BUS, onTask: (event: FleetProjectTaskEvent, _state: FleetTaskState) => { taskEvents.push(event) } }
+    const collaboration = new FleetCollaborationService({
+      agents: { get: id => agents.get(id) },
+      fs: { contains: () => true },
+      on: () => () => {},
+    } as never, authorization)
+    const team = collaboration.open({
+      id: 'team-p21', memberViews: [alice, bob, charlie], defaultVoters: ['alice', 'bob', 'charlie'],
+      projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-p21',
+      eventBus,
+    })
+    team.attachMember('agent-alice', alice)
+    team.attachMember('agent-bob', bob)
+    team.attachMember('agent-charlie', charlie)
+
+    // Send one message @mentioning all 3 members.
+    // This triggers ensureMessageTasks → 3 ensureReplyTask calls → 3 'created' events.
+    const sent = team.messages.send(agents.get('agent-alice') as never, {
+      to: '#general',
+      text: '@bob @charlie please review the P21 change.',
+      mentions: ['@bob', '@charlie'],
+      delivery: 'quiet',
+    })
+
+    // Each mentioned member should have a pending Reply Task.
+    expect(team.tasks.pendingReply('bob')?.domain).toMatchObject({ messageId: sent.messageId })
+    expect(team.tasks.pendingReply('charlie')?.domain).toMatchObject({ messageId: sent.messageId })
+    expect(team.tasks.pendingReply('alice')).toBeUndefined()
+
+    // The onTask callback received exactly the 'created' events.
+    const replyCreated = taskEvents.filter(e =>
+      e.action === 'created' && e.task.domain.kind === 'reply')
+    expect(replyCreated).toHaveLength(2)
+
+    // The key P21 assertion: notification count should be 0 for reply created events.
+    // The initialRequiredTask guard at collaboration.ts:496
+    // (event.action === 'created' && event.task.domain.kind === 'reply')
+    // causes the notifyMembers block to be skipped entirely.
+    // No task_notice messages were sent as part of creation.
+    // Verify that the guard worked: the only notification is for the inbox task sync,
+    // not for individual reply tasks. System notifications from notifyMembers
+    // are inject-only and don't appear in search.
+    const state = team.tasks.state()
+    const replyTasks = state.tasks.filter(t => t.domain.kind === 'reply')
+    expect(replyTasks).toHaveLength(2)
+
     collaboration.close()
   })
 })

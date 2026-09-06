@@ -1,34 +1,25 @@
-import { unlinkSync } from 'node:fs'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
-
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import {
   FleetMemberStatusBoard,
-  installCollaborationTools,
 } from '@dsh-agent-fleet/core'
 import type {
   FleetMemberDirectory,
   FleetMemberStatusEvent,
 } from '@dsh-agent-fleet/core'
-import { installMessageTools, MessageHub } from '@dsh-agent-fleet/message'
+import { MessageHub } from '@dsh-agent-fleet/message'
 import type {
   AgentDirectory,
   FleetCoordinationEvent,
   FleetMessage,
-  FleetMessagePermission,
-  FleetTarget,
-  FleetSystemNotificationKind,
   MessageAgent,
   SendMessageInput,
   SendMessageResult,
 } from '@dsh-agent-fleet/message'
-import { FleetResources, installResourceTools } from '@dsh-agent-fleet/resources'
+import { FleetResources } from '@dsh-agent-fleet/resources'
 import type { FleetResourceEvent } from '@dsh-agent-fleet/resources'
 import {
   fleetMemberCanAccessChannel,
@@ -36,13 +27,15 @@ import {
 } from './member-view.js'
 import type { FleetMemberView } from './member-view.js'
 
-const SPECIAL_TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
-  'joyride.control': ['joyride_catalog', 'joyride_act', 'joyride_control'],
-  'livestream.host': ['live_stream', 'live_stage'],
-}
-
 import type { FleetMemberToolGroup } from './member-view.js'
-import { FLEET_TOOL_CATALOG, fleetToolHasAuthorizedAction } from './tool-discovery.js'
+import { ToolBindingManager } from './tool-binding.js'
+import { createTaskSync } from './task-sync.js'
+import {
+  CoordinationEventBridge,
+  createEventSubscriptions,
+} from './event-bridge.js'
+import { createNotifyMembers } from './team-notify.js'
+import { createProductiveEventHandlers } from './event-handlers.js'
 import type { FleetAuthorizationChange, FleetAuthorizationService } from './authorization.js'
 import {
   FleetTaskBoard,
@@ -68,150 +61,7 @@ import {
 } from './productivity/calendar.js'
 import { fleetTeamEvents } from './team-events.js'
 import type { FleetTeamEventDispatch } from './team-events.js'
-
-function taskToolCaller(agent: Agent | undefined, tool: string): Agent {
-  if (agent === undefined) throw new Error(`${tool} requires a calling Agent`)
-  return agent
-}
-
-const TASK_MESSAGE_OUTPUT = {
-  schema: { type: 'object', additionalProperties: true } as const,
-  render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
-}
-
-function taskMessageResult(value: object): Record<string, JsonValue> {
-  return structuredClone(value) as unknown as Record<string, JsonValue>
-}
-
-function taskMessageSearchView(message: FleetMessage): FleetMessage & {
-  readonly textRange?: { readonly start: number; readonly end: number; readonly total: number }
-} {
-  const maximum = 500
-  if (message.text.length <= maximum) return message
-  return {
-    ...message,
-    text: message.text.slice(0, maximum),
-    textRange: { start: 0, end: maximum, total: message.text.length },
-  }
-}
-
-function installTaskMessageTools(
-  ctx: Context,
-  messages: MessageHub,
-  tasks: FleetTaskBoard,
-): () => void {
-  const stops: Array<() => void> = []
-  const syncInbox = (agent: Agent): ReturnType<FleetTaskBoard['syncInbox']> => {
-    const summary = messages.taskUnreadSummary(String(agent.id))
-    return tasks.syncInbox(String(agent.id), summary.unreadMessages, summary.unreadChars)
-  }
-  stops.push(ctx.tools.register(defineTool({
-    name: 'fleet_inbox',
-    description: 'Inspect or consume the calling member persistent Inbox Task across all visible message sources. Reading advances durable unread progress; searching does not.',
-    parameters: {
-      action: { type: 'string', required: true, enum: ['status', 'read', 'search', 'text'] },
-      max_chars: { type: 'integer' },
-      query: { type: 'string' },
-      conversation: { type: 'string' },
-      from: { type: 'string' },
-      resource: { type: 'string' },
-      limit: { type: 'integer' },
-      message_id: { type: 'string' },
-      offset: { type: 'integer' },
-    },
-    output: TASK_MESSAGE_OUTPUT,
-    execute(args, exec) {
-      const agent = taskToolCaller(exec.agent, 'fleet_inbox')
-      const callerId = String(agent.id)
-      if (args.action === 'status') {
-        const task = syncInbox(agent)
-        return Promise.resolve(taskMessageResult({ action: 'status', task: fleetTaskToolDetail(task), summary: messages.unreadSummary(callerId) }))
-      }
-      if (args.action === 'read') {
-        const result = messages.readInbox(agent, args.max_chars ?? 12_000)
-        const task = syncInbox(agent)
-        return Promise.resolve(taskMessageResult({ action: 'read', ...result, task: fleetTaskToolDetail(task) }))
-      }
-      if (args.action === 'search') {
-        return Promise.resolve(taskMessageResult({ action: 'search', messages: messages.search(agent, {
-          ...(args.query === undefined ? {} : { query: args.query }),
-          ...(args.conversation === undefined ? {} : { conversation: args.conversation as FleetTarget }),
-          ...(args.from === undefined ? {} : { from: args.from }),
-          ...(args.resource === undefined ? {} : { resource: args.resource }),
-          limit: args.limit ?? 10,
-        }).map(taskMessageSearchView) }))
-      }
-      if (args.message_id === undefined) throw new Error('fleet_inbox text requires message_id')
-      const chunk = messages.readMessageText(agent, args.message_id, args.offset, args.limit ?? 12_000)
-      const task = syncInbox(agent)
-      return Promise.resolve(taskMessageResult({ action: 'text', chunk, task: fleetTaskToolDetail(task) }))
-    },
-  })))
-  stops.push(ctx.tools.register(defineTool({
-    name: 'fleet_reply',
-    description: 'Promptly answer or acknowledge one owned Reply Task before starting long work. Omit id when exactly one Reply Task is pending; Fleet binds it automatically. The first visible reply completes the response obligation; later progress or results may be posted with fleet_send and reply_to.',
-    parameters: {
-      id: { type: 'string', description: 'Owned Reply Task id. Optional when exactly one Reply Task is pending.' },
-      content: { type: 'string', required: true, description: 'Actual response sent back to the source conversation.' },
-      resources: { type: 'array', items: { type: 'string' } },
-    },
-    output: TASK_MESSAGE_OUTPUT,
-    execute(args, exec) {
-      const agent = taskToolCaller(exec.agent, 'fleet_reply')
-      const callerId = String(agent.id)
-      const pending = tasks.ownerTasks(callerId).filter(candidate => candidate.domain.kind === 'reply')
-      let task = args.id === undefined ? undefined : pending.find(candidate => candidate.id === args.id)
-      if (task === undefined && args.id !== undefined) {
-        try {
-          const explicit = tasks.get(callerId, args.id)
-          if (explicit.domain.kind === 'reply' && explicit.domain.completionMessageId !== undefined) task = explicit
-        } catch {}
-      }
-      if (task === undefined && pending.length === 1) task = pending[0]
-      if (task === undefined) {
-        if (pending.length === 0) throw new Error('No owned Reply Task is pending; use fleet_send for a new or optional message')
-        throw new Error(`Multiple Reply Tasks are pending; choose one of: ${pending.map(candidate => candidate.id).join(', ')}`)
-      }
-      if (task.domain.kind !== 'reply') throw new Error(`Fleet task ${args.id} is not a Reply Task`)
-      const domain = task.domain
-      const completionInstruction = tasks.interactionTask(callerId) === undefined
-        ? `Reply delivered and Reply Task completed. If you accepted work, continue it now and later post the result with fleet_send reply_to="${domain.messageId}". End only when no work remains.`
-        : 'Reply delivered and Reply Task completed. Do not repeat or narrate a delivery confirmation. Continue only if the current user Interaction still has unfinished work.'
-      if (domain.completionMessageId !== undefined) {
-        return Promise.resolve(taskMessageResult({
-          action: 'reply',
-          task: fleetTaskToolDetail(task),
-          messageId: domain.completionMessageId,
-          sourceMessageId: domain.messageId,
-          replayed: true,
-          instruction: completionInstruction,
-        }))
-      }
-      if (!tasks.ownerTasks(callerId).some(candidate => candidate.id === task.id)) {
-        throw new Error(`Fleet Reply Task ${args.id} is not owned by the calling member`)
-      }
-      const source = messages.getMessage(agent, domain.messageId)
-      const existing = messages.search(agent, { conversation: domain.replyTarget as FleetTarget, limit: 100 })
-        .find(message => message.from === domain.assignee && message.replyTo === source.id)
-      const messageId = existing?.id ?? messages.reply(agent, {
-        messageId: source.id,
-        text: args.content,
-        ...(args.resources === undefined ? {} : { resources: args.resources }),
-      }).messageId
-      messages.completeRequiredReply(callerId, source.id)
-      const result = taskMessageResult({
-        action: 'reply',
-        messageId,
-        sourceMessageId: domain.messageId,
-        replayed: existing !== undefined,
-        task: fleetTaskToolDetail(tasks.recordReply(callerId, task.id, messageId)),
-        instruction: completionInstruction,
-      })
-      return Promise.resolve(result)
-    },
-  })))
-  return () => { for (const stop of stops.reverse()) stop() }
-}
+import type { FleetTeamEventBus } from './team-event-bus.js'
 
 export interface FleetCollaborationTeam {
   readonly id: string
@@ -266,12 +116,8 @@ export interface OpenFleetCollaborationTeamInput {
   readonly defaultVoters: readonly string[]
   readonly projectRoot: string
   readonly sharedDirectory: string
-  readonly onCoordination: (event: FleetCoordinationEvent) => void
-  readonly onResource: (event: FleetResourceEvent) => void
-  readonly onMemberStatus: (event: FleetMemberStatusEvent) => void
-  readonly onTask?: (event: FleetProjectTaskEvent, state: FleetTaskState) => void
-  readonly onSchedule?: (event: FleetScheduledTaskEvent, state: FleetScheduleState) => void
-  readonly onCalendar?: (event: FleetCalendarEventChange, state: FleetCalendarState) => void
+  /** Aggregated event bus — replaces the 6 individual callbacks. */
+  readonly eventBus: FleetTeamEventBus
 }
 
 export class FleetCollaborationService {
@@ -556,25 +402,7 @@ export class FleetCollaborationService {
       return this.authorization.authorize({ teamId: input.id, subject, action: `${namespace}.manage` })
         || this.authorization.authorize({ teamId: input.id, subject, action: 'team.manage' })
     }
-    const notifyMembers = (
-      members: readonly string[],
-      text: string,
-      kind: FleetSystemNotificationKind,
-      coalesceKey: string,
-      delivery: 'quiet' | 'wakeup' = 'quiet',
-    ): string[] => {
-      const delivered: string[] = []
-      for (const member of new Set(members)) {
-        if (agentDirectory.get(member) === undefined) continue
-        try {
-          messages.sendSystemNotification(member, { kind, text, delivery, coalesceKey })
-          delivered.push(member)
-        } catch {}
-      }
-      return delivered
-    }
-    const replyTargetFor = (message: FleetMessage): FleetTarget =>
-      message.conversation.startsWith('@') ? `@${message.from}` : message.conversation
+    const notifyMembers = createNotifyMembers({ messages, agentDirectory })
     const tasks = new FleetTaskBoard(
       memberDirectory,
       agentId => canManage(agentId, 'task'),
@@ -597,44 +425,21 @@ export class FleetCollaborationService {
         : `The Reply Task for this exact message is ${task.id}. Use this exact id.`
       return `Fleet records this obligation as a persistent Reply Task. ${taskReference} Promptly acknowledge, decline, or ask a necessary question with fleet_reply before starting long work. That first reply is visible and completes the response obligation; later progress or results may use fleet_send with reply_to="${message.id}". Native text from this Reply turn may be committed as the acknowledgement. Read the source with fleet_inbox only if needed.`
     }
-    const hasPendingRequirement = (member: string): boolean => {
-      const task = tasks.pendingReply(member)
-      return task !== undefined && task.stableState.kind !== 'cancelled'
+    /* Mutable bridge: ensureFleetTaskTool is a no-op until ToolBindingManager
+       exists; createTaskSync captures the bridge by reference via closure,
+       so ensureMessageTasks always calls the real one when invoked. */
+    const toolBridge: { ensureFleetTaskTool: (member: string) => void } = {
+      ensureFleetTaskTool: () => {},
     }
-    const requiredRecipients = (message: FleetMessage): string[] =>
-      [...new Set(message.mentions)]
-    const requiredTitle = (message: FleetMessage): string => message.origin === 'user'
-      ? '对用户输入进行完整回复'
-      : '对必答消息进行完整回复'
-    const ensureMessageTasks = (message: FleetMessage): string[] => {
-      if (message.kind !== 'text') return []
-      const taskIds: string[] = []
-      const createdBy = participantName(message.from) ?? message.fromName ?? 'User'
-      for (const assignee of requiredRecipients(message)) {
-        if (!memberViews.has(assignee)) continue
-        // Foreground assistant input is already represented by its durable
-        // Interaction Task. A second Reply Task would compete with that user
-        // delivery path and encourage fleet_reply to be used on the user.
-        if (message.origin === 'user' && tasks.interactionTask(assignee) !== undefined) continue
-        const task = tasks.ensureReplyTask({
-          messageId: message.id,
-          conversation: message.conversationId ?? message.conversation,
-          createdBy,
-          assignee,
-          replyTarget: replyTargetFor(message),
-          title: requiredTitle(message),
-          description: `Reply obligation for Fleet message ${message.id} in ${message.conversation}. Read the source through fleet_inbox if needed.`,
-          resources: message.resources,
-        })
-        taskIds.push(task.id)
-        revealRequiredTaskTool(assignee)
-      }
-      return taskIds
-    }
-    const syncMemberInbox = (member: string): void => {
-      const summary = messages.taskUnreadSummary(member)
-      tasks.syncInbox(member, summary.unreadMessages, summary.unreadChars)
-    }
+    const taskSync = createTaskSync({
+      messages,
+      tasks,
+      memberViews,
+      memberNamesById,
+      ensureFleetTaskTool: member => toolBridge.ensureFleetTaskTool(member),
+      participantName,
+    })
+    const { hasPendingRequirement, ensureMessageTasks, syncMemberInbox } = taskSync
     const scheduler = new FleetScheduler(memberDirectory, agentId => canManage(agentId, 'schedule'), (task, recipients) =>
       notifyMembers(
         recipients,
@@ -665,289 +470,46 @@ export class FleetCollaborationService {
         return undefined
       }
     }, agentId => canManage(agentId, 'calendar'))
-    let revealRequiredTaskTool = (_member: string): void => {}
+    const eventBridge = new CoordinationEventBridge({ eventBus: input.eventBus, ensureMessageTasks, syncMemberInbox, calendar, memberViews })
+    const toolManager = new ToolBindingManager({
+      teamId: input.id,
+      projectRoot: input.projectRoot,
+      sharedDirectory: input.sharedDirectory,
+      authorization: this.authorization,
+      memberViews,
+      memberNamesById,
+      defaultVoterNames,
+      messages,
+      tasks,
+      memberStatuses,
+      resources,
+      assistantNames,
+      ensureMessageTasks,
+      hasPendingRequirement,
+    })
+    const productiveHandlers = createProductiveEventHandlers({
+      eventBus: input.eventBus,
+      tasks,
+      scheduler,
+      calendar,
+      toolManager,
+      notifyMembers,
+    })
+    const subs = createEventSubscriptions(
+      eventBridge.onCoordinationEvent.bind(eventBridge),
+      input.eventBus,
+    )
     const stops = [
-      messages.onEvent(event => {
-        input.onCoordination(event)
-        if (event.type === 'message') {
-          ensureMessageTasks(event.message)
-          for (const member of memberViews.keys()) syncMemberInbox(member)
-        }
-        if (event.type === 'inbox' && (event.action === 'read'
-          || (event.action === 'delivered' && event.content === 'full'))) {
-          syncMemberInbox(event.agentId)
-        }
-        if (event.type === 'meeting' && event.action === 'closed') {
-          calendar.closeLinkedMeeting(event.meeting.id, event.meeting.closedAt)
-        }
-      }),
-      resources.onEvent(input.onResource),
-      memberStatuses.onEvent(input.onMemberStatus),
-      tasks.onEvent(event => {
-        input.onTask?.(event, tasks.state())
-        if (event.task.domain.kind === 'reply') revealRequiredTaskTool(event.task.domain.assignee)
-        const initialRequiredTask = event.action === 'created' && event.task.domain.kind === 'reply'
-        if (event.task.domain.kind !== 'interaction' && event.task.domain.kind !== 'inbox'
-          && event.action !== 'due' && event.action !== 'notification' && !initialRequiredTask) {
-          const recipients = [
-            ...(event.action === 'created' ? [] : event.task.assignees),
-            ...event.task.reviewers,
-            ...event.task.followers,
-          ]
-            .filter(member => member !== event.actor)
-          const requiredTaskNotice = event.action === 'completed'
-            ? `[Fleet required task completed] ${event.task.title} (${event.task.id}). No further completion action is required.`
-            : `[Fleet Reply Task ${event.action}] ${event.task.title} (${event.task.id}). After the work is done, call fleet_reply with this id and the response content.`
-          notifyMembers(
-            recipients,
-            event.task.domain.kind !== 'reply'
-              ? `[Fleet task ${event.action}] ${event.task.title} (${event.task.id})`
-              : requiredTaskNotice,
-            'task_notice',
-            `task:${event.task.id}`,
-            'quiet',
-          )
-        }
-      }),
-      scheduler.onEvent(event => {
-        input.onSchedule?.(event, scheduler.state())
-        if (event.action !== 'triggered' && event.action !== 'notification') {
-          notifyMembers(
-            event.task.assignees.filter(member => member !== event.actor),
-            `[Fleet schedule ${event.action}] ${event.task.title} (${event.task.id})`,
-            'schedule_notice',
-            `schedule:${event.task.id}`,
-          )
-        }
-      }),
-      calendar.onEvent(event => {
-        input.onCalendar?.(event, calendar.state())
-        const recipients = [event.event.organizer, ...event.event.attendees].filter(member => member !== event.actor)
-        notifyMembers(
-          recipients,
-          `[Fleet calendar ${event.action}] ${event.event.title} (${event.event.id})`,
-          'calendar_notice',
-          `calendar:${event.event.id}`,
-        )
-      }),
+      messages.onEvent(subs.onCoordinationEvent),
+      resources.onEvent(subs.onResourceEvent),
+      memberStatuses.onEvent(subs.onMemberStatusEvent),
+      tasks.onEvent(productiveHandlers.onTaskEvent),
+      scheduler.onEvent(productiveHandlers.onScheduleEvent),
+      calendar.onEvent(productiveHandlers.onCalendarEvent),
     ]
-    interface ToolBinding {
-      readonly ctx: Context
-      readonly member: string
-      readonly exposeHostFleetTools: boolean
-      readonly toolGroups?: readonly FleetMemberToolGroup[]
-      residentTools: Set<string>
-      installTool: (name: string) => void
-      stop: () => void
-    }
-    const toolBindings = new Set<ToolBinding>()
-    const disposeMemberBindings = (member: string): void => {
-      for (const binding of [...toolBindings]) {
-        if (binding.member !== member) continue
-        toolBindings.delete(binding)
-        binding.stop()
-      }
-    }
-    const createToolBinding = (
-      ctx: Context,
-      member: string,
-      exposeHostFleetTools: boolean,
-      selectedToolGroups?: readonly FleetMemberToolGroup[],
-    ): Pick<ToolBinding, 'residentTools' | 'installTool' | 'stop'> => {
-      const view = memberViews.get(member)
-      if (view === undefined) throw new Error(`unknown Fleet member view ${member}`)
-      const effective = this.authorization.resolve(input.id, view)
-      const tools = new Set(selectedToolGroups ?? effective.toolGroups)
-      const permissions = new Set(effective.actions)
-      const authorize = (
-        agentId: string,
-        action: string,
-        resource?: { readonly kind: string; readonly id: string },
-      ): boolean => {
-        const actor = memberNamesById.get(agentId)
-        if (actor === undefined) return false
-        return this.authorization.authorize({
-          teamId: input.id,
-          subject: { kind: defaultVoterNames.has(actor) ? 'member' : 'assistant', id: actor },
-          action,
-          resource: resource ?? { kind: 'team', id: input.id },
-        })
-      }
-      const resourceTarget = (
-        kind: 'shared' | 'resource' | 'file' | 'work',
-        id?: string,
-      ): { readonly kind: string; readonly id: string } | undefined => {
-        if (kind === 'work' || (kind === 'resource' && id === undefined)) return undefined
-        return { kind: kind === 'shared' ? 'file' : kind, id: id ?? '*' }
-      }
-      const messagePermissions = new Set<FleetMessagePermission>(
-        effective.actions.filter((permission): permission is FleetMessagePermission =>
-          permission === 'channel.manage' || permission === 'meeting.manage' || permission === 'vote.create'),
-      )
-      const authorizationNamespaces = new Map(this.authorization.namespaces()
-        .map(namespace => [namespace.namespace, namespace]))
-      const visibleNamespaces = new Map([...authorizationNamespaces.values()]
-        .filter(namespace => this.authorization.visible(namespace, effective))
-        .map(namespace => [namespace.namespace, namespace]))
-      const allowed = new Set<string>()
-      for (const entry of FLEET_TOOL_CATALOG) {
-        if (entry.source === 'host') {
-          // A formal member may rescue an exhausted peer without receiving the
-          // broader host lifecycle and administration surface.
-          if (!exposeHostFleetTools && entry.name !== 'fleet_resurrect') continue
-          if (ctx.tools.get(entry.name) === undefined) continue
-          if (entry.name === 'fleet_member' && !permissions.has('team.manage') && !effective.op) continue
-          allowed.add(entry.name)
-          continue
-        }
-        if (entry.source === 'namespace') {
-          if (entry.namespace !== undefined && (visibleNamespaces.has(entry.namespace)
-            || entry.namespace === 'task')) allowed.add(entry.name)
-          continue
-        }
-        if (entry.source === 'messages' && tools.has('messages')) allowed.add(entry.name)
-        else if (entry.source === 'status' && tools.has('status')) allowed.add(entry.name)
-        else if (entry.source === 'coordination' && tools.has('coordination')) allowed.add(entry.name)
-        else if (entry.source === 'resources' && tools.has('resources')) allowed.add(entry.name)
-      }
-      const residentTools = new Set<string>()
-      const localStops: Array<() => void> = []
-      const add = (stop: (() => void) | void): (() => void) | void => {
-        if (stop !== undefined) localStops.push(stop)
-        return stop
-      }
-      add(installTaskMessageTools(ctx, messages, tasks))
-      residentTools.add('fleet_inbox')
-      residentTools.add('fleet_reply')
-      let hostRestrictionStop: (() => void) | undefined
-      const refreshHostRestriction = (): void => {
-        hostRestrictionStop?.()
-        const deny = [
-          'fleet_agent', 'fleet_archive', 'fleet_setup',
-          'fleet_trace', 'fleet_activity',
-          ...FLEET_TOOL_CATALOG.filter(entry => entry.source === 'host' && (!allowed.has(entry.name) || !residentTools.has(entry.name))).map(entry => entry.name),
-        ]
-        hostRestrictionStop = ctx.tools.restrict({ deny: [...new Set(deny)] })
-      }
-      const installTool = (name: string): void => {
-        if (!allowed.has(name) || residentTools.has(name)) return
-        const entry = FLEET_TOOL_CATALOG.find(candidate => candidate.name === name)
-        if (entry === undefined) return
-        const available = entry.namespace === 'task'
-          || (entry.name === 'fleet_task' && hasPendingRequirement(member))
-          || fleetToolHasAuthorizedAction(entry, permissions)
-        if (!available) return
-        let stop: (() => void) | void = undefined
-        if (entry.source === 'messages' || entry.source === 'coordination') {
-          stop = installMessageTools(ctx, messages, {
-            messages: entry.source === 'messages',
-            coordination: entry.source === 'coordination',
-            tools: new Set([name]),
-            permissions: messagePermissions,
-            authorize,
-            directReplyByDefault: assistantNames.has(member),
-            reconcileMessageTasks: (caller, messageId) =>
-              ensureMessageTasks(messages.getMessage(caller, messageId)),
-          })
-        } else if (entry.source === 'status') {
-          stop = installCollaborationTools(ctx, memberStatuses, { tools: new Set([name]), authorize })
-        } else if (entry.source === 'resources') {
-          stop = installResourceTools(ctx, resources, {
-            tools: new Set([name]),
-            projectRoot: input.projectRoot,
-            sharedDirectory: input.sharedDirectory,
-            canRead: (agentId, kind, id) => authorize(
-              agentId,
-              kind === 'work' ? 'work.read' : 'resource.read',
-              resourceTarget(kind, id),
-            ),
-            canWrite: (agentId, kind, id) => authorize(
-              agentId,
-              kind === 'work' ? 'work.claim' : 'resource.write',
-              resourceTarget(kind, id),
-            ),
-            resourceWrite: permissions.has('resource.write'),
-            deleteShared: path => {
-              const root = resolve(input.projectRoot, input.sharedDirectory)
-              const target = resolve(root, path)
-              const nested = relative(root, target)
-              if (nested === '' || nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) {
-                throw new Error('Fleet shared delete path must stay inside the Team shared directory')
-              }
-              unlinkSync(target)
-            },
-          })
-        } else if (entry.source === 'namespace' && entry.namespace !== undefined) {
-          const namespace = visibleNamespaces.get(entry.namespace)
-            ?? (entry.namespace === 'task'
-              ? authorizationNamespaces.get(entry.namespace)
-              : undefined)
-          if (namespace?.installTools === undefined) return
-          const namespaceTools = FLEET_TOOL_CATALOG
-            .filter(candidate => candidate.source === 'namespace'
-              && candidate.namespace === entry.namespace
-              && allowed.has(candidate.name))
-            .map(candidate => candidate.name)
-          if (namespaceTools.some(tool => residentTools.has(tool))) {
-            for (const tool of namespaceTools) residentTools.add(tool)
-            return
-          }
-          stop = namespace.installTools(ctx, {
-            teamId: input.id,
-            projectRoot: input.projectRoot,
-            member: view,
-            hasMember: candidate => memberViews.has(candidate),
-            authorization: effective,
-          })
-          for (const tool of namespaceTools) residentTools.add(tool)
-        } else if (entry.source === 'host') {
-          residentTools.add(name)
-          return
-        }
-        add(stop)
-        residentTools.add(name)
-      }
-      try {
-        for (const name of allowed) installTool(name)
-        const deniedSpecialTools = Object.entries(SPECIAL_TOOL_PERMISSIONS)
-          .filter(([permission]) => !permissions.has(permission))
-          .flatMap(([, names]) => names)
-        const installedDeniedTools = deniedSpecialTools.filter(name => ctx.tools.get(name) !== undefined)
-        if (installedDeniedTools.length > 0) {
-          add(ctx.tools.restrict({ deny: installedDeniedTools }))
-        }
-        if (deniedSpecialTools.length > 0) {
-          const denied = new Set(deniedSpecialTools)
-          add(ctx.tools.guard(execution => denied.has(execution.name)
-            ? `Fleet member @${view.id} is not permitted to use ${execution.name}`
-            : undefined))
-        }
-        refreshHostRestriction()
-      } catch (error) {
-        hostRestrictionStop?.()
-        for (const stop of localStops.reverse()) stop()
-        throw error
-      }
-      return { residentTools, installTool, stop: () => {
-        hostRestrictionStop?.()
-        for (const stop of localStops.reverse()) stop()
-      } }
-    }
-    const refreshBinding = (binding: ToolBinding): void => {
-      binding.stop()
-      const runtime = createToolBinding(
-        binding.ctx,
-        binding.member,
-        binding.exposeHostFleetTools,
-        binding.toolGroups,
-      )
-      binding.residentTools = runtime.residentTools
-      binding.installTool = runtime.installTool
-      binding.stop = runtime.stop
-    }
-    revealRequiredTaskTool = () => {
-      for (const binding of toolBindings) if (hasPendingRequirement(binding.member)) binding.installTool('fleet_task')
-    }
+    /* Wire the real ensureFleetTaskTool into the bridge that
+       createTaskSync captured by reference at construction time. */
+    toolBridge.ensureFleetTaskTool = member => toolManager.ensureFleetTaskTool(member)
     let closed = false
     const team: FleetCollaborationTeam = {
       id: input.id,
@@ -974,7 +536,7 @@ export class FleetCollaborationService {
         scheduler.replayPending(view.id)
       },
       rebindMember: (previousAgentId, agentId, view, kind = 'member') => {
-        disposeMemberBindings(view.id)
+        toolManager.dispose(view.id)
         memberViews.set(view.id, structuredClone(view))
         if (kind === 'assistant') assistantNames.add(view.id)
         else assistantNames.delete(view.id)
@@ -989,7 +551,7 @@ export class FleetCollaborationService {
       detachMember: (agentId) => {
         const name = memberNamesById.get(agentId)
         if (name === undefined) return
-        disposeMemberBindings(name)
+        toolManager.dispose(name)
         memberNamesById.delete(agentId)
         if (memberIdsByName.get(name) === agentId) memberIdsByName.delete(name)
       },
@@ -997,7 +559,7 @@ export class FleetCollaborationService {
         memberViews.set(view.id, structuredClone(view))
         defaultVoterNames.add(view.id)
         if (refreshTools) {
-          for (const binding of [...toolBindings]) if (binding.member === view.id) refreshBinding(binding)
+          toolManager.refreshAccess(view.id)
         }
       },
       retireMember: ({ agentId, member, successorAgentId, successor }) => {
@@ -1010,7 +572,7 @@ export class FleetCollaborationService {
       },
       ensureMessageTasks,
       removeMemberView: (member) => {
-        disposeMemberBindings(member)
+        toolManager.dispose(member)
         const agentId = memberIdsByName.get(member)
         if (agentId !== undefined) {
           memberIdsByName.delete(member)
@@ -1025,33 +587,14 @@ export class FleetCollaborationService {
         return messages.sendHuman(user, message)
       },
       installTools: (ctx, member, options = {}) => {
-        const binding: ToolBinding = {
-          ctx,
-          member,
+        const binding = toolManager.install(ctx, member, {
           exposeHostFleetTools: options.exposeHostFleetTools ?? false,
           ...(options.toolGroups === undefined ? {} : { toolGroups: [...options.toolGroups] }),
-          residentTools: new Set(),
-          installTool: () => {},
-          stop: () => {},
-        }
-        const runtime = createToolBinding(ctx, member, binding.exposeHostFleetTools, binding.toolGroups)
-        binding.residentTools = runtime.residentTools
-        binding.installTool = runtime.installTool
-        binding.stop = runtime.stop
-        toolBindings.add(binding)
-        if (hasPendingRequirement(member)) binding.installTool('fleet_task')
-        queueMicrotask(() => {
-          if (toolBindings.has(binding) && hasPendingRequirement(member)) binding.installTool('fleet_task')
         })
-        return () => {
-          if (!toolBindings.delete(binding)) return
-          binding.stop()
-        }
+        return () => toolManager.remove(binding)
       },
       refreshAccess: (member) => {
-        for (const binding of [...toolBindings]) {
-          if (member === undefined || binding.member === member) refreshBinding(binding)
-        }
+        toolManager.refreshAccess(member)
       },
       activateProductivity: () => {
         tasks.activate()
@@ -1080,10 +623,7 @@ export class FleetCollaborationService {
       close: () => {
         if (closed) return
         closed = true
-        for (const binding of [...toolBindings]) {
-          toolBindings.delete(binding)
-          binding.stop()
-        }
+        toolManager.close()
         for (const stop of stops) stop()
         messages.close()
         resources.reset()

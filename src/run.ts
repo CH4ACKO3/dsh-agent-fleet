@@ -65,6 +65,7 @@ import type { FleetAuthorizationActor, FleetAuthorizationBaseline, FleetAuthoriz
 import type { FleetAssistantRuntime, FleetAssistantView } from './assistant.js'
 import { FLEET_COLLABORATION_CONTRACT } from './collaboration-contract.js'
 import type { FleetCollaborationService, FleetCollaborationTeam } from './collaboration.js'
+import type { FleetTeamEventBus } from './team-event-bus.js'
 import {
   FLEET_MESSAGE_MODULE,
   FLEET_RESOURCES_MODULE,
@@ -9005,20 +9006,9 @@ export class FleetRunService {
     return this.collaboration.ids().filter(id => !this.dormantRunIds.has(id))
   }
 
-  private openCollaboration(
-    record: FleetRunRecord,
-    memberViews: readonly FleetMemberView[],
-  ): FleetCollaborationTeam {
-    const team = this.collaboration.open({
-      id: record.id,
-      memberViews: [
-        ...memberViews,
-        ...record.assistants.map(assistant => assistant.view),
-      ],
-      assistantIds: record.assistants.map(assistant => assistant.view.id),
-      defaultVoters: memberViews.filter(view => view.canVote !== false).map(view => view.id),
-      projectRoot: record.projectRoot,
-      sharedDirectory: `.fleet/${record.id}`,
+  /** Extract the FleetTeamEventBus implementation from inline closures. */
+  private createTeamEventBus(record: FleetRunRecord): FleetTeamEventBus {
+    return {
       onCoordination: event => { this.recordCoordination(record.id, event) },
       onResource: event => { this.recordResource(record.id, event) },
       onMemberStatus: event => {
@@ -9058,6 +9048,25 @@ export class FleetRunService {
         this.writeExtensionState(record.id, FLEET_CALENDAR_STATE_NAMESPACE, state as unknown as JsonValue)
         this.appendEvent(record.id, `calendar.${event.action}`, event)
       },
+    }
+  }
+
+  private openCollaboration(
+    record: FleetRunRecord,
+    memberViews: readonly FleetMemberView[],
+  ): FleetCollaborationTeam {
+    const eventBus = this.createTeamEventBus(record)
+    const team = this.collaboration.open({
+      id: record.id,
+      memberViews: [
+        ...memberViews,
+        ...record.assistants.map(assistant => assistant.view),
+      ],
+      assistantIds: record.assistants.map(assistant => assistant.view.id),
+      defaultVoters: memberViews.filter(view => view.canVote !== false).map(view => view.id),
+      projectRoot: record.projectRoot,
+      sharedDirectory: `.fleet/${record.id}`,
+      eventBus,
     })
     team.restoreProductivity({
       tasks: parseFleetTaskState(this.readExtensionState(record.id, FLEET_TASK_STATE_NAMESPACE)),

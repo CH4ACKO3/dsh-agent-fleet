@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { FleetAuthorizationService } from '../../src/authorization.js'
 import { FleetCollaborationService } from '../../src/collaboration.js'
+import { NOOP_FLEET_TEAM_EVENT_BUS } from '../../src/team-event-bus.js'
 import type { FleetMemberView } from '../../src/member-view.js'
 
 const member: FleetMemberView = {
@@ -32,7 +33,7 @@ describe('Fleet productivity authorization', () => {
     const team = collaboration.open({
       id: 'team-1', memberViews: [member], projectRoot: '/workspace', sharedDirectory: '/workspace/.fleet/team-1',
       defaultVoters: [member.id],
-      onCoordination: () => {}, onResource: () => {}, onMemberStatus: () => {},
+      eventBus: NOOP_FLEET_TEAM_EVENT_BUS,
     })
     team.attachMember(agent.id, member)
 

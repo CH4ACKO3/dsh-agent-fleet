@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
 import type { FleetMemberView } from '../src/member-view.js'
+import { NOOP_FLEET_TEAM_EVENT_BUS } from '../src/team-event-bus.js'
 
 const member: FleetMemberView = {
   id: 'alice', name: 'Alice', role: 'Engineer', prompt: '',
@@ -165,9 +166,7 @@ describe('FleetAuthorizationService', () => {
       defaultVoters: [member.id],
       projectRoot: '/workspace',
       sharedDirectory: '/workspace/.fleet/team-1',
-      onCoordination: () => {},
-      onResource: () => {},
-      onMemberStatus: () => {},
+      eventBus: NOOP_FLEET_TEAM_EVENT_BUS,
     })
     team.attachMember(agent.id, member)
     const refresh = vi.spyOn(team, 'refreshAccess')
