@@ -235,6 +235,65 @@ describe('Fleet automatic bootstrap', () => {
     expect(followup).toHaveBeenCalledOnce()
   })
 
+  it('arms the durable wait as soon as lifecycle control is submitted', async () => {
+    const root = temporaryDirectory()
+    const workspace = join(root, 'workspace')
+    const controlDirectory = join(root, 'control')
+    const eventDirectory = join(controlDirectory, 'events', 'g0002')
+    const completedDirectory = join(controlDirectory, 'completed')
+    mkdirSync(workspace, { recursive: true })
+    mkdirSync(eventDirectory, { recursive: true })
+    mkdirSync(completedDirectory, { recursive: true })
+    vi.stubEnv('DSH_HOME', join(root, 'dsh'))
+    const configuration = {
+      id: 'generation-two', projectRoot: workspace,
+      teamConfigPath: join(root, 'team.json'), taskPath: join(workspace, 'task.md'),
+      agentPreset: 'standard', controlDirectory, generation: 'g0002',
+    }
+    const run = { id: 'team-two' } as never
+    const followup = vi.fn()
+    const agent = { id: 'assistant-session', followup } as unknown as Agent
+    const setGenerationEventWait = vi.fn()
+    const runs = { setGenerationEventWait } as never
+
+    writeFileSync(join(eventDirectory, '0000000001-started.json'), JSON.stringify({
+      sequence: 1, generation: 'g0002', type: 'generation.started', createdAt: '2026-09-04T00:00:00Z',
+      data: { role: 'stable', sourceCommit: 'parent123' },
+    }))
+    writeFileSync(join(completedDirectory, '1756944060000-start.json'), JSON.stringify({
+      id: 'start', generation: 'g0002', type: 'candidate.start', createdAt: '2026-09-04T00:01:00Z',
+    }))
+
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(0)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', 'candidate')
+    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({
+      eventSequence: 1,
+      waitingForCandidate: 'candidate',
+    })
+
+    writeFileSync(join(eventDirectory, '0000000002-candidate-started.json'), JSON.stringify({
+      sequence: 2, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:02:00Z',
+      data: { candidate: 'g0003' },
+    }))
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(0)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', 'g0003')
+
+    writeFileSync(join(completedDirectory, '1756944240000-ready.json'), JSON.stringify({
+      id: 'ready', generation: 'g0002', type: 'candidate.ready', createdAt: '2026-09-04T00:03:00Z',
+    }))
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(0)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', 'promotion')
+    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ waitingForCandidate: 'promotion' })
+
+    writeFileSync(join(eventDirectory, '0000000003-promoted.json'), JSON.stringify({
+      sequence: 3, generation: 'g0002', type: 'generation.promoted', createdAt: '2026-09-04T00:04:00Z',
+      data: { previous: 'g0001', guardian: 'g0001' },
+    }))
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(1)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', undefined)
+    expect(readFleetAutoBootstrapMarker(configuration)).not.toHaveProperty('waitingForCandidate')
+  })
+
   it('starts promoted generations with real stable work before another candidate', () => {
     const instruction = fleetGenerationEventInstruction({
       sequence: 3,

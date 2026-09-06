@@ -51,6 +51,13 @@ interface FleetGenerationEvent {
   readonly data?: Record<string, unknown>
 }
 
+interface FleetGenerationRequest {
+  readonly id: string
+  readonly generation: string
+  readonly type: string
+  readonly createdAt: string
+}
+
 interface FleetAutoBootstrapContext extends Context {
   readonly agents: Context['agents']
 }
@@ -196,6 +203,25 @@ function generationEventsAfter(
     .filter(event => event.generation === configuration.generation && event.sequence > after)
 }
 
+function pendingGenerationControlWait(configuration: FleetAutoBootstrapConfiguration): string | undefined {
+  if (configuration.controlDirectory === undefined || configuration.generation === undefined) return undefined
+  const events = generationEventsAfter(configuration, 0)
+  const latestEventAt = events.at(-1)?.createdAt ?? ''
+  let latest: FleetGenerationRequest | undefined
+  for (const directoryName of ['requests', 'completed']) {
+    const directory = join(configuration.controlDirectory, directoryName)
+    if (!existsSync(directory)) continue
+    for (const name of readdirSync(directory).filter(candidate => candidate.endsWith('.json'))) {
+      const request = JSON.parse(readFileSync(join(directory, name), 'utf8')) as FleetGenerationRequest
+      if (request.generation !== configuration.generation
+        || (request.type !== 'candidate.start' && request.type !== 'candidate.ready')) continue
+      if (latest === undefined || request.createdAt > latest.createdAt) latest = request
+    }
+  }
+  if (latest === undefined || latest.createdAt <= latestEventAt) return undefined
+  return latest.type === 'candidate.ready' ? 'promotion' : 'candidate'
+}
+
 function initialGenerationStartedSequence(configuration: FleetAutoBootstrapConfiguration): number | undefined {
   const first = generationEventsAfter(configuration, 0)[0]
   return first?.type === 'generation.started' ? first.sequence : undefined
@@ -251,10 +277,10 @@ export async function deliverPendingFleetGenerationEvents(
   runs?: FleetAutoBootstrapRuns,
 ): Promise<number> {
   if (generationEventDirectory(configuration) === undefined) return 0
-  const sequence = readMarker(configuration)?.eventSequence ?? 0
+  const marker = readMarker(configuration)
+  const sequence = marker?.eventSequence ?? 0
   const events = generationEventsAfter(configuration, sequence)
-  if (events.length === 0) return 0
-  let waitingForCandidate = readMarker(configuration)?.waitingForCandidate
+  let waitingForCandidate = marker?.waitingForCandidate
   for (const event of events) {
     if (event.type === 'candidate.started') {
       const candidate = event.data?.candidate
@@ -265,11 +291,20 @@ export async function deliverPendingFleetGenerationEvents(
       || event.type === 'candidate.failed'
       || event.type === 'candidate.destroyed'
       || event.type === 'candidate.self_rejected'
-      || event.type === 'generation.peer_exited') {
+      || event.type === 'generation.peer_exited'
+      || event.type === 'generation.promoted'
+      || event.type === 'request.rejected') {
       waitingForCandidate = undefined
     }
   }
+  waitingForCandidate = pendingGenerationControlWait(configuration) ?? waitingForCandidate
   runs?.setGenerationEventWait?.(run.id, waitingForCandidate)
+  if (events.length === 0) {
+    if (waitingForCandidate !== marker?.waitingForCandidate) {
+      writeMarker(configuration, run, sequence, waitingForCandidate ?? null)
+    }
+    return 0
+  }
   const instructions = events
     .filter(event => event.type !== 'generation.started')
     .map(fleetGenerationEventInstruction)
