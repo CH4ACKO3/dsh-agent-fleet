@@ -5710,6 +5710,10 @@ export class FleetRunService {
   end(caller: Agent, summary: string, runId?: string): FleetRunRecord {
     const record = this.requireCallerRecord(caller, runId)
     this.requireLifecycleControl(record, caller)
+    if (record.continuous === true
+      && record.assistants.some(assistant => assistant.sessionId === String(caller.id))) {
+      throw new Error('the assistant for a continuous Fleet Team cannot close its own Team; use an external operator or host lifecycle transition')
+    }
     return this.setTerminal(record.id, summary, String(caller.id))
   }
 
@@ -6866,12 +6870,12 @@ export class FleetRunService {
           ? hasGoal
             ? '团队成员已全部空闲，但仍有未完成的 Goal。请检查任务图和最新证据，恢复、重分配或收尾；不要只报告已读。'
             : record.continuous === true
-              ? '团队成员已全部空闲，但当前 Team 配置为持续运行。请立即创建或恢复下一项 Goal；如果正在等待外部代际事件，请建立持久事件等待。当前代暂停或关闭前不要让团队永久空闲。'
+              ? '团队成员已全部空闲，但当前 Team 配置为持续运行。请立即创建或恢复下一项 Goal。若确实在等待外部代际事件，必须先确认外部控制请求已成功；外部事件中继会自动建立持久等待，不要用 Fleet Goal、暂停或关闭来冒充。'
             : '团队成员已全部空闲，且当前没有未完成的 Goal。这是本轮无 Goal 状态的首次提醒：请判断是否需要创建后续 Goal；若无需继续则直接结束。新建 Goal 前不会再次因此唤醒。'
           : hasGoal
             ? 'Every formal Team member is idle while an unfinished Goal remains. Inspect the Task graph and latest evidence, then resume, reassign, or close the work; do not merely acknowledge this notice.'
             : record.continuous === true
-              ? 'Every formal Team member is idle, but this Team is configured for continuous operation. Create or resume the next Goal now; if an external generation event is pending, establish a durable event wait. Do not leave the Team permanently idle before this generation is paused or closed.'
+              ? 'Every formal Team member is idle, but this Team is configured for continuous operation. Create or resume the next Goal now. If an external lifecycle event is genuinely pending, first confirm that its control request succeeded; the external relay arms the durable wait automatically, so do not imitate it with a Fleet Goal, pause, or close.'
             : 'Every formal Team member is idle and no unfinished Goal remains. This is the first no-Goal reminder: decide whether follow-up needs a new Goal, otherwise stop. This state will not wake you again until a new Goal is created.',
         delivery: 'wakeup',
         coalesceKey: `assistant-team-idle:${runId}:${assistant.view.id}:${randomUUID()}`,

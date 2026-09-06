@@ -1859,8 +1859,8 @@ describe('FleetRunService', () => {
 
   it('keeps a continuous Team assistant from pausing its own generation and rearms recovery after external resume', async () => {
     vi.useFakeTimers()
-    const { root, configPath } = createTestFixture(tempDirs)
-    const { service, launcher, disconnect } = createRunTestSetup(root)
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
       configPath,
       projectRoot: root,
@@ -1878,6 +1878,22 @@ describe('FleetRunService', () => {
       .resolves.toMatchObject({ status: 'idle' })
     await vi.advanceTimersByTimeAsync(3_000)
     expect(wakeCount()).toBe(1)
+    disconnect()
+  })
+
+  it('keeps a continuous Team assistant from closing its own generation', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    const run = await service.create(launcher as unknown as Agent, {
+      configPath,
+      projectRoot: root,
+      requiredPaths: [],
+      continuous: true,
+    })
+
+    expect(() => service.end(launcher as unknown as Agent, 'done', run.id))
+      .toThrow('cannot close its own Team')
+    expect(service.status(run.id)).toMatchObject({ status: 'idle', settled: false })
     disconnect()
   })
 
