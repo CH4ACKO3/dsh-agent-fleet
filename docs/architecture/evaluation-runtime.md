@@ -22,7 +22,7 @@ Fleet 已经提供：
 - 持久 Team、成员 Session、Task DAG 和 result stage。
 - Work 的 `running`、`finished`、`blocked`、`failed`、`cancelled` 状态。
 - 根 Task 和相关 Task 全部结算、相关成员 idle 后的自动终态收敛。
-- `FleetRunService.wait()` 宿主级等待能力。
+- Fleet 状态变更订阅和宿主级状态查询能力。
 - 自动 Team 创建和一次性 bootstrap 指令投递。
 - Session、Fleet state、事件、成员进展、共享文件和预算统计。
 
@@ -36,7 +36,7 @@ Fleet 已经提供：
 
 #### 现有 ALE 适配器依赖不存在的模型工具
 
-`integrations/agents-last-exam` 要求助理每五秒调用 `fleet_run wait`，但当前公开的 `fleet_run` 工具没有 `wait` 动作；只有宿主侧 `FleetRunService.wait()`。即使重新暴露模型工具，周期轮询仍会增加工具调用轮数、上下文和 token 成本，并依赖模型持续遵守轮询指令。
+`integrations/agents-last-exam` 要求助理每五秒调用 `fleet_run wait`，但当前公开的 `fleet_run` 工具没有 `wait` 动作。即使重新暴露模型工具，周期轮询仍会增加工具调用轮数、上下文和 token 成本，并依赖模型持续遵守轮询指令。现有 `FleetRunService.wait()` 等待的是 Team 离开 running 状态；全员短暂 idle 而 Work 仍在运行时也可能返回，因此不能直接充当评测完成条件。
 
 #### 退出码和输出不能证明任务完成
 
@@ -69,7 +69,7 @@ Fleet eval runner（宿主代码）
     ├─ 创建一次性 Team
     ├─ 投递最小 bootstrap 指令
     ├─ 等待助理首轮完成并确认 Work 已启动
-    ├─ 通过 FleetRunService.wait() 等待真实终态
+    ├─ 订阅 Fleet 状态变化并等待 Work 真实终态
     ├─ 原子写入答案、状态、指标、轨迹和产物索引
     └─ 按 Fleet Work 终态返回进程退出码
 ```
@@ -97,7 +97,7 @@ Eval runner 应作为独立伴随组件维护，不把评测平台适配代码�
 - 使用固定 Team 配置创建 Team；不让模型决定成员数量和基础权限。
 - 让助理读取任务文件，根据题目和成员职责自行设计初始 DAG。
 - 等待助理首轮 idle，检查 Work 是否已经进入 `running`。
-- 使用宿主级 `FleetRunService.wait()` 等待 Work 终态。
+- 订阅宿主侧 Fleet 状态变化，仅以 Work 终态或宿主超时作为退出条件。
 - 在 SIGTERM、超时和异常时尽最大努力 flush Session 与 Fleet state。
 - 从 result stage 或根 Task 直接取得默认答案，避免不必要的第二次总结调用。
 - 在明确配置 `finalizeWithAssistant` 时，才额外唤醒助理生成自然语言最终答复。
@@ -266,4 +266,3 @@ Fleet eval runner 是当前可独立交付的方案，不需要等待 DSH 上游
 6. 构建内容寻址、完全固定版本的评测运行镜像。
 7. 构建独立 inspector 镜像。
 8. 用至少一个代码任务和一个非代码长任务复跑，比较成功率、运行时、工具调用轮数、token、成本和产物完整性。
-

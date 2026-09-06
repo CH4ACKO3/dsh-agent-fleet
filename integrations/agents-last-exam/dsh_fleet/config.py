@@ -17,6 +17,7 @@ class DshFleetConfig:
     team_config: str = "/opt/dsh-fleet-ale/coding-small.json"
     dsh_home: str = "/home/user/.dsh"
     max_tokens: int = 65536
+    timeout_ms: int = 3_600_000
     patch_path: str | None = None
     bridge_command: str | None = None
     bridge_port: int = 3081

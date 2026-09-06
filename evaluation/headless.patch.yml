@@ -1,0 +1,14 @@
+# Replace DSH's single-Agent completion rule with Fleet's Team-aware runner.
+- id: headless-runner
+  disabled: true
+
+- insert:
+    - id: fleet-evaluation-runner
+      name: dsh-agent-fleet/evaluation
+      inject:
+        - appExit
+        - headlessStartup
+        - fleetRuns
+        - fleetAssistant
+        - agents
+        - sessions

@@ -7,25 +7,22 @@ USER root
 RUN if ! command -v dsh >/dev/null 2>&1; then \
       npm install --global \
         pnpm@11.19.0 \
-        @deepseek-ai/dsh@0.1.1-rc.2 \
-        dsh-harmony@0.8.8; \
+        @deepseek-ai/dsh@0.1.1-rc.2; \
     fi \
     && dsh --version \
     && pnpm --version
 RUN npm install --global dsh-llm-memorax@0.1.0
 RUN ln -sf /home/user/.npm-global/bin/dsh-llm-memorax-bridge /usr/local/bin/dsh-llm-memorax-bridge
 
-COPY enable-profile.cjs /opt/dsh-fleet-ale/enable-profile.cjs
 COPY coding-small.json /opt/dsh-fleet-ale/coding-small.json
-COPY memorax-headless.patch.yml /opt/dsh-fleet-ale/memorax-headless.patch.yml
+COPY headless.patch.yml /opt/dsh-fleet-ale/headless.patch.yml
+COPY dsh-agent-fleet-0.2.0.tgz /opt/dsh-fleet-ale/dsh-agent-fleet-0.2.0.tgz
 RUN chown -R user:user /opt/dsh-fleet-ale /home/user/.dsh /home/user/.npm-global
 
 USER user
-RUN for profile in headless web; do \
-      dsh --profile "$profile" --dump-config > /dev/null \
-      && printf '\nallowBuilds:\n  dsh-harmony: true\n' >> "/home/user/.dsh/profiles/$profile/pnpm-workspace.yaml" \
-      && dsh plugin --profile "$profile" add dsh-agent-fleet@0.2.0 \
-      && node /opt/dsh-fleet-ale/enable-profile.cjs "/home/user/.dsh/profiles/$profile/package.json" \
-      && dsh --profile "$profile" --dump-config > "/tmp/dsh-fleet-$profile.yml" \
-      && grep -q 'dsh-agent-fleet' "/tmp/dsh-fleet-$profile.yml"; \
-    done
+RUN dsh --profile headless --dump-config > /dev/null \
+    && dsh plugin --profile headless add /opt/dsh-fleet-ale/dsh-agent-fleet-0.2.0.tgz --allow-build=dsh-harmony \
+    && dsh plugin --profile headless add dsh-llm-memorax@0.1.0 \
+    && dsh --profile headless --patch /opt/dsh-fleet-ale/headless.patch.yml --dump-config > /tmp/dsh-fleet-headless.yml \
+    && grep -q 'name: dsh-agent-fleet/evaluation' /tmp/dsh-fleet-headless.yml \
+    && grep -q 'name: dsh-llm-memorax' /tmp/dsh-fleet-headless.yml

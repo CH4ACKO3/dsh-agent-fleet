@@ -19,6 +19,7 @@ _STDOUT = "dsh-fleet-stdout.log"
 _STDERR = "dsh-fleet-stderr.log"
 _BRIDGE = "dsh-fleet-bridge.log"
 _TASK = "dsh-fleet-task.md"
+_EVALUATION = "dsh-fleet-evaluation"
 _TERM_GRACE_S = 15
 
 
@@ -27,7 +28,7 @@ class DshFleetDeployer(BaseAgentDeployer):
 
     default_executor: ClassVar[str] = "sandbox"
     supported_executors: ClassVar[frozenset[str]] = frozenset({"sandbox"})
-    hot_artifacts: ClassVar[tuple[str, ...]] = (_REPORT, _STDOUT, _STDERR, _BRIDGE, _TASK)
+    hot_artifacts: ClassVar[tuple[str, ...]] = (_REPORT, _STDOUT, _STDERR, _BRIDGE, _TASK, _EVALUATION)
 
     @property
     def version(self) -> str | None:
@@ -45,6 +46,8 @@ class DshFleetDeployer(BaseAgentDeployer):
             raise RuntimeError(f"DSH patch is missing: {cfg.patch_path}")
         if cfg.bridge_command and shutil.which(cfg.bridge_command) is None:
             raise RuntimeError(f"model bridge is missing: {cfg.bridge_command}")
+        if cfg.timeout_ms <= 0:
+            raise RuntimeError("Fleet evaluation timeout_ms must be positive")
         Path(self.executor.work_dir).mkdir(parents=True, exist_ok=True)
 
     async def launch(self, prompt: str) -> AgentRunResult:
@@ -79,7 +82,19 @@ class DshFleetDeployer(BaseAgentDeployer):
             }
         )
 
-        launcher_prompt = self._launcher_prompt(cfg, workspace, task_path)
+        evaluation_dir = work_dir / _EVALUATION
+        env.update(
+            {
+                "FLEET_EVAL_WORKSPACE": str(workspace),
+                "FLEET_EVAL_TEAM_CONFIG": cfg.team_config,
+                "FLEET_EVAL_TASK_FILE": str(task_path),
+                "FLEET_EVAL_OUTPUT": str(evaluation_dir),
+                "FLEET_EVAL_TIMEOUT_MS": str(cfg.timeout_ms),
+                "FLEET_EVAL_PROVIDER": cfg.provider,
+                "FLEET_EVAL_MODEL": cfg.model,
+                "FLEET_EVAL_MAX_TOKENS": str(cfg.max_tokens),
+            }
+        )
         bridge: asyncio.subprocess.Process | None = None
         with (
             stdout_path.open("wb") as stdout,
@@ -99,7 +114,7 @@ class DshFleetDeployer(BaseAgentDeployer):
             command = ["dsh", "--profile", "headless"]
             if cfg.patch_path:
                 command.extend(["--patch", cfg.patch_path])
-            command.append(launcher_prompt)
+            command.append("Complete the task in the configured task file.")
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=workspace,
@@ -119,6 +134,7 @@ class DshFleetDeployer(BaseAgentDeployer):
                     status="timeout",
                     exit_code=124,
                     duration_s=time.monotonic() - t0,
+                    evaluation_dir=evaluation_dir,
                 )
                 self._capture_durable_trace(work_dir, cfg, workspace)
                 raise
@@ -135,6 +151,7 @@ class DshFleetDeployer(BaseAgentDeployer):
             status=status,
             exit_code=exit_code,
             duration_s=time.monotonic() - t0,
+            evaluation_dir=evaluation_dir,
         )
         self._capture_durable_trace(work_dir, cfg, workspace)
         return self._result(
@@ -145,23 +162,6 @@ class DshFleetDeployer(BaseAgentDeployer):
             exit_code=exit_code,
             error=error,
         )
-
-    @staticmethod
-    def _launcher_prompt(cfg: DshFleetConfig, workspace: Path, task_path: Path) -> str:
-        return f"""
-Act only as the external launcher and observer for one unattended ALE run. Do not perform the
-software-engineering task yourself and do not edit the workspace directly.
-
-1. Call fleet_run create with team_config={cfg.team_config!s}, cwd={workspace!s},
-   provider={cfg.provider!s}, model={cfg.model!s}, and max_tokens={cfg.max_tokens}.
-2. Call fleet_run start for the created run with task={task_path!s} and cwd={workspace!s}.
-3. Keep this native turn alive while the Team works. Repeatedly call fleet_run wait with the run id
-   and timeout_ms=5000, then inspect status when needed. Never emit a final answer or exit while the
-   work status is running. The Fleet runtime will wake an appropriate member when the Team becomes
-   idle without a terminal vote; do not take over its work and do not mark it finished yourself.
-4. Once Fleet reports that the work item has reached an explicit terminal state and the Team is idle,
-   call fleet_run status once more and return a concise factual terminal summary.
-""".strip()
 
     @classmethod
     def parse_artifacts(
@@ -193,6 +193,7 @@ software-engineering task yourself and do not edit the workspace directly.
             "report_path": str(report_path),
             "session_trace_path": str(work_dir / "dsh-sessions"),
             "fleet_trace_path": str(work_dir / "fleet-state"),
+            "evaluation_output_path": str(work_dir / _EVALUATION),
         }
 
     @staticmethod
@@ -249,12 +250,15 @@ software-engineering task yourself and do not edit the workspace directly.
         status: str,
         exit_code: int,
         duration_s: float,
+        evaluation_dir: Path,
     ) -> None:
-        output = workspace / "output"
-        deliverables = {
-            name: (output / name).is_file()
-            for name in ("warehouse.db", "data_quality_report.json", "warehouse_summary.json")
-        }
+        evaluation_status: dict[str, Any] = {}
+        status_path = evaluation_dir / "status.json"
+        if status_path.is_file():
+            try:
+                evaluation_status = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                evaluation_status = {}
         (work_dir / _REPORT).write_text(
             json.dumps(
                 {
@@ -264,7 +268,8 @@ software-engineering task yourself and do not edit the workspace directly.
                     "model": cfg.model,
                     "provider": cfg.provider,
                     "workspace": str(workspace),
-                    "deliverables": deliverables,
+                    "evaluation_output": str(evaluation_dir),
+                    "evaluation": evaluation_status,
                 },
                 indent=2,
             )

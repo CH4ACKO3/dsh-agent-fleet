@@ -18,12 +18,19 @@
       "types": "./lib/client/index.d.ts",
       "default": "./lib/client.js"
     },
+    "./evaluation": {
+      "types": "./lib/evaluation.d.ts",
+      "default": "./lib/evaluation.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "lib/**/*.js",
     "lib/**/*.d.ts",
     "harmony/**/*.cjs",
+    "evaluation/**/*.md",
+    "evaluation/**/*.sh",
+    "evaluation/**/*.yml",
     "skills/**/*.md",
     "cordis.patch.yml",
     "README.md"

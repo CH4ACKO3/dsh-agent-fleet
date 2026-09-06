@@ -9,6 +9,6 @@ config:
   model: deepseek-v4-flash
   max_tokens: 65536
   team_config: /opt/dsh-fleet-ale/coding-small.json
-  patch_path: /opt/dsh-fleet-ale/memorax-headless.patch.yml
+  patch_path: /opt/dsh-fleet-ale/headless.patch.yml
   bridge_command: /usr/local/bin/dsh-llm-memorax-bridge
   bridge_port: 3081

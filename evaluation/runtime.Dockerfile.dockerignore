@@ -1,0 +1,11 @@
+.git
+.fleet
+.self-evolve
+node_modules
+lib
+**/lib
+output
+outputs
+coverage
+*.tgz
+*.log

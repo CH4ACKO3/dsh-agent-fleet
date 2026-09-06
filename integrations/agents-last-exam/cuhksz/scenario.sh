@@ -78,15 +78,17 @@ EOF
 }
 
 sync_remote() {
+  local build_context
+  build_context=$(mktemp -d)
+  cp "$INTEGRATION_DIR/Dockerfile" "$build_context/Dockerfile"
+  cp "$REPO_ROOT/evaluation/headless.patch.yml" "$build_context/headless.patch.yml"
+  cp "$REPO_ROOT/examples/frontal-team/teams/coding-small.json" "$build_context/coding-small.json"
+  (cd "$REPO_ROOT" && pnpm run build && pnpm pack --pack-destination "$build_context")
   ssh "$REMOTE_HOST" "mkdir -p '$ALE_ROOT/ale_run/agents/dsh_fleet' '$REMOTE_CONFIG_ROOT' '$REMOTE_BUILD_ROOT' '$REMOTE_OUTPUT_ROOT'"
   rsync -az --exclude '__pycache__/' "$INTEGRATION_DIR/dsh_fleet/" "$REMOTE_HOST:$ALE_ROOT/ale_run/agents/dsh_fleet/"
   rsync -az "$SCRIPT_DIR/scenarios/" "$REMOTE_HOST:$REMOTE_CONFIG_ROOT/"
-  rsync -az \
-    "$INTEGRATION_DIR/Dockerfile" \
-    "$INTEGRATION_DIR/enable-profile.cjs" \
-    "$INTEGRATION_DIR/memorax-headless.patch.yml" \
-    "$REPO_ROOT/examples/frontal-team/teams/coding-small.json" \
-    "$REMOTE_HOST:$REMOTE_BUILD_ROOT/"
+  rsync -az --delete "$build_context/" "$REMOTE_HOST:$REMOTE_BUILD_ROOT/"
+  rm -rf "$build_context"
   echo "Synced ALE Fleet scenarios to $REMOTE_HOST"
 }
 

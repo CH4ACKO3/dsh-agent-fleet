@@ -1,0 +1,49 @@
+name: Evaluation runtime
+
+on:
+  push:
+    branches: [evaluation]
+  pull_request:
+    paths:
+      - '.github/workflows/evaluation.yml'
+      - 'evaluation/**'
+      - 'integrations/agents-last-exam/**'
+      - 'src/auto-bootstrap.ts'
+      - 'src/evaluation.ts'
+      - 'tests/evaluation.test.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile ALE adapter
+        run: python -m compileall -q integrations/agents-last-exam/dsh_fleet
+      - name: Build the isolated evaluation image
+        run: docker build --file evaluation/runtime.Dockerfile --tag dsh-fleet-evaluation:ci .
+      - name: Verify the Team-aware runner owns headless completion
+        shell: bash
+        run: |
+          set +e
+          output=$(docker run --rm --cpus 4 --memory 1g dsh-fleet-evaluation:ci 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -eq 5
+          grep -q 'FLEET_EVAL_TEAM_CONFIG is required' <<<"$output"
+          result_dir=$(mktemp -d)
+          set +e
+          output=$(docker run --rm --cpus 4 --memory 1g \
+            -e FLEET_EVAL_TEAM_CONFIG=/evaluation/missing-team.json \
+            -v "$result_dir:/results" \
+            dsh-fleet-evaluation:ci 'profile smoke' 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -eq 3
+          grep -q 'Team configuration does not exist' <<<"$output"
+          grep -q '"phase": "runtime_failed"' "$result_dir/status.json"

@@ -2,17 +2,18 @@
 
 This adapter keeps ALE's native task staging, episode lifecycle, output collection, and evaluator. It replaces only
 the agent harness with released DSH profiles plus `dsh-agent-fleet` and the repository's `coding-small` Team
-template. The image contains both `headless` (benchmark execution) and `web` (post-run browser inspection)
-profiles.
+template. The image contains only the `headless` benchmark runtime; WebUI/Harmony belongs in a separate
+post-run inspector and cannot affect the episode result.
 
 Build a thin image on a host that already has the official ALE base image:
 
 ```sh
 context=$(mktemp -d)
 cp integrations/agents-last-exam/Dockerfile "$context/Dockerfile"
-cp integrations/agents-last-exam/enable-profile.cjs "$context/enable-profile.cjs"
-cp integrations/agents-last-exam/memorax-headless.patch.yml "$context/memorax-headless.patch.yml"
+cp evaluation/headless.patch.yml "$context/headless.patch.yml"
 cp examples/frontal-team/teams/coding-small.json "$context/coding-small.json"
+pnpm run build
+pnpm pack --pack-destination "$context"
 docker build -t ale-ubuntu22-dsh-fleet:0.2.0 "$context"
 ```
 
@@ -22,9 +23,10 @@ Copy `dsh_fleet/` into the ALE checkout at `ale_run/agents/dsh_fleet/`, then use
 the isolated episode. The Memorax route instead consumes `DEEPSEEK_FLASH_API_KEY` and starts its packaged local
 TLS bridge for the lifetime of the episode.
 
-The deployer launches one native DSH foreground Session solely as the Team launcher. It creates and starts the
-persistent Team, remains alive until the Team reaches an explicit terminal vote, and captures DSH Session logs plus
-Fleet state alongside the normal ALE trajectory. It does not bypass the task evaluator or read ALE reference output.
+The deployer invokes the Fleet evaluation runner with a minimal task pointer. The runner creates the Team, lets its
+assistant design and start the DAG once, then waits for the Work terminal state in host code. It captures the answer,
+status, usage, artifacts, event trace, DSH Sessions, and Fleet state alongside the normal ALE trajectory. It does not
+bypass the task evaluator, read ALE reference output, or spend model calls polling for completion.
 
 ## Reproducible scenarios on `cuhksz106_zzr`
 
