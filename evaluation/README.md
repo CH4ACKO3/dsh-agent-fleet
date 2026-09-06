@@ -1,9 +1,15 @@
-# Fleet evaluation runtime
+# Fleet evaluation baseline
 
-This directory contains evaluation-only profile wiring. The Team runtime and
+This directory contains the reusable evaluation control plane. The Team runtime and
 generic lifecycle APIs remain in the root package; benchmark adapters,
 containers, fixed dependency matrices, and scenario overlays belong here or in
 the long-lived `evaluation` branch.
+
+The baseline is deliberately benchmark-neutral. It owns DSH/Fleet installation,
+the headless lifecycle, Team bootstrap, resource limits, terminal-state handling,
+and evidence export once. ALE, HorizonMath, SWE-style suites, and later benchmarks
+should reuse it and supply only their task/data adapter, evaluator, Team choice,
+and genuinely domain-specific tools.
 
 The evaluation runner replaces DSH's default single-Agent headless completion
 rule. It creates one Team through Fleet automatic bootstrap, lets the Team
@@ -45,23 +51,75 @@ assembly happen during the image build, never during an evaluation episode:
 ```sh
 docker build \
   --file evaluation/runtime.Dockerfile \
-  --tag dsh-fleet-evaluation:local .
+  --build-arg FLEET_REVISION="$(git rev-parse HEAD)" \
+  --tag dsh-fleet-evaluation:baseline .
 ```
 
-Run each episode in a fresh container and mount the Team configuration, task,
-workspace, and result directory explicitly:
+Run each episode through the common launcher. A provider-enabled image may be a
+local private derivative of the baseline; benchmark code does not need to know
+how that provider was installed:
 
 ```sh
-docker run --rm --cpus 4 --memory 8g \
-  -e FLEET_EVAL_TEAM_CONFIG=/evaluation/team.json \
-  -e FLEET_EVAL_TASK_FILE=/evaluation/task.md \
-  -e DEEPSEEK_API_KEY \
-  -v "$PWD/team.json:/evaluation/team.json:ro" \
-  -v "$PWD/task.md:/evaluation/task.md:ro" \
-  -v "$PWD/workspace:/workspace" \
-  -v "$PWD/results:/results" \
-  dsh-fleet-evaluation:local
+node evaluation/run-container.mjs \
+  --image dsh-fleet-evaluation:provider-local \
+  --task "$PWD/task.md" \
+  --run-root "$PWD/episode-001" \
+  --env MODEL_API_KEY
 ```
+
+The launcher consistently creates `/workspace` and `/results`, mounts the task
+and Team config read-only, applies the 4 CPU / 8 GiB defaults, and passes secrets
+by environment-variable name rather than embedding their values in commands.
+Use repeatable `--mount` arguments for benchmark datasets and `--env-file` for a
+private local provider configuration.
+
+## Optional nested-container profile
+
+The default `baseline` profile is sufficient when Agents can solve and validate
+the benchmark inside the episode container. Keep it as the default because it is
+smaller, starts faster, and does not require elevated container privileges.
+
+Build the optional rootless Docker-in-Docker overlay only when a benchmark or
+Team must create disposable child containers at runtime:
+
+```sh
+docker build \
+  --file evaluation/dind.Dockerfile \
+  --build-arg FLEET_BASE_IMAGE=dsh-fleet-evaluation:baseline \
+  --build-arg FLEET_REVISION="$(git rev-parse HEAD)" \
+  --tag dsh-fleet-evaluation:dind .
+
+node evaluation/run-container.mjs \
+  --profile dind \
+  --task "$PWD/task.md" \
+  --run-root "$PWD/episode-001" \
+  --env MODEL_API_KEY
+```
+
+The launcher enables `--privileged` only for this explicit profile. The nested
+daemon runs as the unprivileged `evaluator` account and uses its own ephemeral
+image/container store; the host Docker socket is never mounted. Child containers
+can affect the explicitly mounted episode workspace and results, but they cannot
+see other host paths unless the launcher is given an additional mount. The outer
+container's CPU, memory, and network boundaries remain the episode-wide ceiling.
+Docker's rootless DinD image still requires a privileged outer container, so use
+this profile only on a dedicated evaluation host or Docker Desktop VM.
+
+For a conventional benchmark image, inherit the control plane and add only the
+domain layer:
+
+```dockerfile
+ARG FLEET_BASE_IMAGE=dsh-fleet-evaluation:baseline
+FROM ${FLEET_BASE_IMAGE}
+USER root
+# Install only benchmark-owned tools, for example a prover or repository runtime.
+USER evaluator
+```
+
+Some suites, notably ALE and many SWE-style instance images, own their base image.
+Those images reuse `install-headless-profile.sh` to assemble the exact same Fleet
+profile instead of duplicating DSH plugin order and patch validation. This is the
+portable fallback when inheriting the baseline is impossible.
 
 The current Fleet package still declares Harmony as an install dependency for
 the interactive product. The image therefore explicitly approves its build

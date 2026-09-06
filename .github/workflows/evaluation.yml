@@ -24,16 +24,29 @@ jobs:
       - name: Compile ALE adapter
         run: python -m compileall -q integrations/agents-last-exam/dsh_fleet
       - name: Build the isolated evaluation image
-        run: docker build --file evaluation/runtime.Dockerfile --tag dsh-fleet-evaluation:ci .
+        run: |
+          docker build --file evaluation/runtime.Dockerfile \
+            --build-arg FLEET_REVISION=${{ github.sha }} \
+            --tag dsh-fleet-evaluation:baseline .
       - name: Verify the baseline coding toolchain
         run: |
-          docker run --rm --entrypoint sh dsh-fleet-evaluation:ci -lc \
-            'python3 --version && git --version'
+          docker run --rm --entrypoint dsh-fleet-evaluation-check \
+            dsh-fleet-evaluation:baseline
+          node evaluation/run-container.mjs --help
+          node --test evaluation/run-container.test.mjs
+      - name: Build and verify the optional rootless DinD overlay
+        run: |
+          docker build --file evaluation/dind.Dockerfile \
+            --build-arg FLEET_BASE_IMAGE=dsh-fleet-evaluation:baseline \
+            --build-arg FLEET_REVISION=${{ github.sha }} \
+            --tag dsh-fleet-evaluation:dind .
+          docker run --rm --privileged --cpus 4 --memory 4g \
+            dsh-fleet-evaluation:dind --dind-check
       - name: Verify the Team-aware runner owns headless completion
         shell: bash
         run: |
           set +e
-          output=$(docker run --rm --cpus 4 --memory 1g dsh-fleet-evaluation:ci 2>&1)
+          output=$(docker run --rm --cpus 4 --memory 1g dsh-fleet-evaluation:baseline 2>&1)
           status=$?
           set -e
           printf '%s\n' "$output"
@@ -44,7 +57,7 @@ jobs:
           output=$(docker run --rm --cpus 4 --memory 1g \
             -e FLEET_EVAL_TEAM_CONFIG=/evaluation/missing-team.json \
             -v "$result_dir:/results" \
-            dsh-fleet-evaluation:ci 'profile smoke' 2>&1)
+            dsh-fleet-evaluation:baseline 'profile smoke' 2>&1)
           status=$?
           set -e
           printf '%s\n' "$output"

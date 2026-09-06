@@ -29,6 +29,8 @@
     "lib/**/*.d.ts",
     "harmony/**/*.cjs",
     "evaluation/**/*.md",
+    "evaluation/**/*.mjs",
+    "evaluation/**/*.Dockerfile",
     "evaluation/**/*.sh",
     "evaluation/**/*.yml",
     "skills/**/*.md",

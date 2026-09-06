@@ -28,12 +28,12 @@ RUN pnpm --filter @dsh-agent-fleet/core \
     && mkdir -p /opt/fleet-package \
     && pnpm pack --pack-destination /opt/fleet-package
 
-ENV DSH_HOME=/opt/dsh-profile
-RUN dsh --profile headless --dump-config >/dev/null \
-    && dsh plugin --profile headless add /opt/fleet-package/dsh-agent-fleet-0.2.0.tgz --allow-build=dsh-harmony \
-    && dsh --profile headless --patch /opt/fleet-source/evaluation/headless.patch.yml --dump-config > /tmp/evaluation-profile.yml \
-    && grep -q 'name: dsh-agent-fleet/evaluation' /tmp/evaluation-profile.yml \
-    && grep -q 'name: dsh-agent-fleet' /tmp/evaluation-profile.yml
+ENV DSH_HOME=/opt/dsh-profile \
+    DSH_FLEET_PACKAGE=/opt/fleet-package/dsh-agent-fleet-0.2.0.tgz \
+    DSH_FLEET_PATCH=/opt/fleet-source/evaluation/headless.patch.yml \
+    DSH_FLEET_VERIFY_OUTPUT=/tmp/evaluation-profile.yml
+RUN chmod 0755 /opt/fleet-source/evaluation/install-headless-profile.sh \
+    && /opt/fleet-source/evaluation/install-headless-profile.sh
 
 FROM ${NODE_IMAGE} AS runtime
 
@@ -47,11 +47,19 @@ COPY --from=builder /opt/dsh-profile /opt/dsh-profile
 COPY --from=builder /opt/fleet-package /opt/fleet-package
 COPY evaluation/headless.patch.yml /opt/dsh-evaluation/headless.patch.yml
 COPY evaluation/run-headless.sh /usr/local/bin/dsh-fleet-evaluation
+COPY evaluation/check-runtime.sh /usr/local/bin/dsh-fleet-evaluation-check
 
-RUN chmod 0755 /usr/local/bin/dsh-fleet-evaluation \
+RUN chmod 0755 /usr/local/bin/dsh-fleet-evaluation /usr/local/bin/dsh-fleet-evaluation-check \
     && useradd --create-home --uid 10001 evaluator \
     && mkdir -p /workspace /results /run/dsh-home \
     && chown -R evaluator:evaluator /workspace /results /run/dsh-home
+
+ARG FLEET_REVISION=unknown
+LABEL org.opencontainers.image.title="DSH Fleet evaluation baseline" \
+      org.opencontainers.image.description="Reusable headless DSH and Fleet runtime for isolated benchmark episodes" \
+      org.opencontainers.image.revision="${FLEET_REVISION}" \
+      io.deepseek-harness.evaluation.baseline="1" \
+      io.deepseek-harness.version="${DSH_VERSION}"
 
 USER evaluator
 WORKDIR /workspace

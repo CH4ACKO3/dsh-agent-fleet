@@ -11,6 +11,7 @@ Build a thin image on a host that already has the official ALE base image:
 context=$(mktemp -d)
 cp integrations/agents-last-exam/Dockerfile "$context/Dockerfile"
 cp evaluation/headless.patch.yml "$context/headless.patch.yml"
+cp evaluation/install-headless-profile.sh "$context/install-headless-profile.sh"
 cp examples/frontal-team/teams/coding-small.json "$context/coding-small.json"
 pnpm run build
 pnpm pack --pack-destination "$context"
