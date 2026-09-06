@@ -2973,7 +2973,7 @@ grid-column: 2;
 
 .dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-main {
 min-width: 0;
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
   grid-column: 1;
   grid-row: 1;
@@ -3038,6 +3038,12 @@ order: 4;
 
 .dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-message-state {
 align-self: flex-end;
+}
+
+.dsh-fleet-panel-agent-message-row[data-self="true"] .dsh-fleet-chat-comments {
+box-sizing: border-box;
+  width: 100%;
+  align-self: stretch;
 }
 
 .dsh-fleet-panel-agent-readonly {
@@ -5100,6 +5106,27 @@ margin-top: 0;
 
 .dsh-fleet-panel-resource-markdown > :last-child {
 margin-bottom: 0;
+}
+
+.dsh-fleet-panel-resource-code {
+box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  min-height: 100%;
+  overflow: auto;
+}
+
+.dsh-fleet-panel-resource-code > .dsh-code-render {
+box-sizing: border-box;
+  width: 100%;
+  min-width: max-content;
+  min-height: 100%;
+  margin: 0;
+  border-radius: 10px;
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
 }
 
 .dsh-fleet-panel-activity-row {

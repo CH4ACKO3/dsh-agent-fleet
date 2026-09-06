@@ -1571,8 +1571,79 @@ export function fleetResourcePreviewKind(resource: Pick<FleetPanelResource, 'nam
   if (mediaType?.startsWith('text/') === true
     || ['application/json', 'application/ld+json', 'application/xml', 'application/yaml', 'application/x-yaml'].includes(mediaType ?? '')
     || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(name)
-    || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(path)) return 'text'
+    || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(path)
+    || fleetResourceCodeLanguage(resource) !== undefined) return 'text'
   return undefined
+}
+
+const FLEET_CODE_LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = {
+  bash: 'shellscript',
+  c: 'c',
+  cc: 'cpp',
+  cjs: 'javascript',
+  cpp: 'cpp',
+  cs: 'csharp',
+  css: 'css',
+  cts: 'typescript',
+  cxx: 'cpp',
+  diff: 'diff',
+  go: 'go',
+  h: 'c',
+  hh: 'cpp',
+  hpp: 'cpp',
+  htm: 'html',
+  html: 'html',
+  hxx: 'cpp',
+  java: 'java',
+  js: 'javascript',
+  jsx: 'jsx',
+  lean: 'lean',
+  mjs: 'javascript',
+  mts: 'typescript',
+  patch: 'diff',
+  py: 'python',
+  pyi: 'python',
+  rs: 'rust',
+  sh: 'shellscript',
+  sql: 'sql',
+  ts: 'typescript',
+  tsx: 'tsx',
+  zsh: 'shellscript',
+}
+
+const FLEET_CODE_LANGUAGE_BY_MEDIA_TYPE: Readonly<Record<string, string>> = {
+  'application/javascript': 'javascript',
+  'application/json': 'json',
+  'application/ld+json': 'json',
+  'application/typescript': 'typescript',
+  'application/x-httpd-php': 'php',
+  'text/css': 'css',
+  'text/html': 'html',
+  'text/javascript': 'javascript',
+  'text/jsx': 'jsx',
+  'text/typescript': 'typescript',
+  'text/x-c': 'c',
+  'text/x-c++src': 'cpp',
+  'text/x-diff': 'diff',
+  'text/x-go': 'go',
+  'text/x-java-source': 'java',
+  'text/x-python': 'python',
+  'text/x-rust': 'rust',
+  'text/x-shellscript': 'shellscript',
+  'text/x-sql': 'sql',
+  'text/yaml': 'yaml',
+}
+
+export function fleetResourceCodeLanguage(
+  resource: Pick<FleetPanelResource, 'name' | 'path' | 'mediaType'>,
+): string | undefined {
+  const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
+  if (mediaType !== undefined && FLEET_CODE_LANGUAGE_BY_MEDIA_TYPE[mediaType] !== undefined) {
+    return FLEET_CODE_LANGUAGE_BY_MEDIA_TYPE[mediaType]
+  }
+  const fileName = (resource.name || resource.path.split(/[\\/]/u).pop() || resource.path).toLowerCase()
+  const extension = /\.([^.\/\\]+)$/u.exec(fileName)?.[1]
+  return extension === undefined ? undefined : FLEET_CODE_LANGUAGE_BY_EXTENSION[extension]
 }
 
 export function formatBytes(bytes: number): string {
@@ -1745,10 +1816,16 @@ export function ResourceContentPreview({ owner, resource, content, loading, erro
   }
   const previewOwner: FleetPanelResourcePreviewOwner = { panel: owner, resource: previewResource }
   const source = jsx(ResourceSourcePreview, { body: content.body, wrap: wrapSource })
+  const codeLanguage = fleetResourceCodeLanguage(previewResource)
   const rendered = owner.renderPanelSlot(
     FLEET_PANEL_SLOTS.resourcePreview,
     previewOwner as unknown as Record<string, unknown>,
-    { entryKey: content.kind === 'markdown' ? 'text/markdown' : content.mediaType ?? 'text/plain', fallback: source },
+    {
+      entryKey: content.kind === 'markdown'
+        ? 'text/markdown'
+        : codeLanguage === undefined ? content.mediaType ?? 'text/plain' : 'code',
+      fallback: source,
+    },
   )
   return jsx('div', {
     className: 'dsh-fleet-panel-resource-preview',
@@ -1916,8 +1993,9 @@ export function ResourceHistoryView({ owner, resource, history, historyTruncated
   })
 }
 
-export function MarkdownRendererUnavailableView({ label }: {
+function RendererUnavailableView({ label, renderer }: {
   readonly label: string
+  readonly renderer: 'Markdown' | 'code'
 }): ReactElement {
   const rendererLink = jsx('a', {
     className: 'dsh-fleet-panel-resource-renderer-link',
@@ -1929,7 +2007,10 @@ export function MarkdownRendererUnavailableView({ label }: {
   return jsx('span', {
     className: 'dsh-fleet-panel-resource-view-unavailable',
     children: jsx(FleetInfoHint, {
-      label: panelText(`${label}视图不可用，需要安装 Markdown 渲染器`, `${label} view is unavailable; install the Markdown renderer`),
+      label: panelText(
+        `${label}视图不可用，需要安装${renderer === 'Markdown' ? ' Markdown' : '代码'}渲染器`,
+        `${label} view is unavailable; install the ${renderer} renderer`,
+      ),
       title: panelText(`${label}视图不可用`, `${label} view unavailable`),
       trigger: (triggerProps: HoverHintTriggerProps) => jsx('button', {
         ...triggerProps,
@@ -1946,12 +2027,25 @@ export function MarkdownRendererUnavailableView({ label }: {
   })
 }
 
+export function MarkdownRendererUnavailableView({ label }: {
+  readonly label: string
+}): ReactElement {
+  return jsx(RendererUnavailableView, { label, renderer: 'Markdown' })
+}
+
 export function ResourceDetailMain({ owner, resource }: {
   readonly owner: FleetPanelPaneOwner
   readonly resource: FleetPanelResource
 }): ReactElement {
+  const previewKind = fleetResourcePreviewKind(resource)
+  const isMarkdown = previewKind === 'markdown'
+  const isCode = previewKind === 'text' && fleetResourceCodeLanguage(resource) !== undefined
+  const hasRenderedView = isMarkdown || isCode
+  const renderedViewAvailable = isMarkdown
+    ? owner.markdownRendererAvailable
+    : isCode && owner.codeRendererAvailable
   const [view, setView] = useState<'content' | 'history'>('content')
-  const [contentMode, setContentMode] = useState<FleetResourceContentMode>(() => owner.markdownRendererAvailable ? 'rendered' : 'source')
+  const [contentMode, setContentMode] = useState<FleetResourceContentMode>(() => renderedViewAvailable ? 'rendered' : 'source')
   const [wrapSource, setWrapSource] = useState(true)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const [attempt, setAttempt] = useState(0)
@@ -1963,7 +2057,11 @@ export function ResourceDetailMain({ owner, resource }: {
   const [revisionLoading, setRevisionLoading] = useState(false)
   const [revisionError, setRevisionError] = useState<string>()
   const [revisionAttempt, setRevisionAttempt] = useState(0)
-  const previewKind = fleetResourcePreviewKind(resource)
+
+  useEffect(() => {
+    setView('content')
+    setContentMode(renderedViewAvailable ? 'rendered' : 'source')
+  }, [renderedViewAvailable, resource.id])
 
   useEffect(() => {
     setSelectedRevisionId(undefined)
@@ -2065,8 +2163,7 @@ export function ResourceDetailMain({ owner, resource }: {
       jsx(OpenFleetPath, { owner, path: resource.path, label: panelText('本地文件', 'Local file'), appearance: 'link' }),
     ],
   })
-  const isMarkdown = previewKind === 'markdown'
-  const sourceControlsVisible = view === 'content' && (!isMarkdown || contentMode !== 'rendered')
+  const sourceControlsVisible = view === 'content' && (!hasRenderedView || contentMode !== 'rendered')
   const selectContentMode = (mode: FleetResourceContentMode): void => {
     setContentMode(mode)
     setView('content')
@@ -2074,17 +2171,23 @@ export function ResourceDetailMain({ owner, resource }: {
   const viewSwitch = jsxs('div', {
     className: 'dsh-fleet-panel-resource-view-switch',
     role: 'group',
-    'aria-label': isMarkdown ? panelText('Markdown 文件视图', 'Markdown file view') : panelText('文件视图', 'File view'),
+    'aria-label': isMarkdown
+      ? panelText('Markdown 文件视图', 'Markdown file view')
+      : isCode ? panelText('代码文件视图', 'Code file view') : panelText('文件视图', 'File view'),
     children: [
-      isMarkdown && !owner.markdownRendererAvailable
-        ? jsx(MarkdownRendererUnavailableView, { label: panelText('渲染', 'Rendered') })
+      hasRenderedView && !renderedViewAvailable
+        ? isMarkdown
+          ? jsx(MarkdownRendererUnavailableView, { label: panelText('渲染', 'Rendered') })
+          : jsx(RendererUnavailableView, { label: panelText('高亮', 'Highlighted'), renderer: 'code' })
         : jsx('button', {
             type: 'button',
-            'aria-pressed': view === 'content' && (!isMarkdown || contentMode === 'rendered'),
-            onClick: () => { selectContentMode(isMarkdown ? 'rendered' : 'source') },
-            children: isMarkdown ? panelText('渲染', 'Rendered') : panelText('内容', 'Content'),
+            'aria-pressed': view === 'content' && (!hasRenderedView || contentMode === 'rendered'),
+            onClick: () => { selectContentMode(hasRenderedView ? 'rendered' : 'source') },
+            children: isMarkdown
+              ? panelText('渲染', 'Rendered')
+              : isCode ? panelText('高亮', 'Highlighted') : panelText('内容', 'Content'),
           }),
-      isMarkdown && jsx('button', {
+      hasRenderedView && jsx('button', {
         type: 'button',
         'aria-pressed': view === 'content' && contentMode === 'source',
         onClick: () => { selectContentMode('source') },
@@ -2153,7 +2256,7 @@ export function ResourceDetailMain({ owner, resource }: {
   })
   const preview = jsx(ResourceContentPreview, {
     owner, resource, content, loading, error,
-    mode: isMarkdown ? contentMode : 'source',
+    mode: hasRenderedView ? contentMode : 'source',
     wrapSource,
     onRetry: () => { setAttempt(current => current + 1) },
   })
@@ -2162,16 +2265,18 @@ export function ResourceDetailMain({ owner, resource }: {
     meta,
     actions,
     owner,
-    bodyClassName: view === 'content' && isMarkdown
+    bodyClassName: view === 'content' && hasRenderedView
       ? 'dsh-fleet-panel-detail-scroll dsh-fleet-panel-resource-scroll'
       : undefined,
     children: view === 'content'
-      ? isMarkdown
+      ? hasRenderedView
         ? jsx(PanelMessageLog, {
             conversationKey: `${owner.snapshot.teamId}:resource:${resource.id}`,
             messageCount: 0,
             resizable: contentMode !== 'compare',
-            resizeLabel: panelText('调整 Markdown 阅读宽度', 'Resize Markdown reading width'),
+            resizeLabel: isMarkdown
+              ? panelText('调整 Markdown 阅读宽度', 'Resize Markdown reading width')
+              : panelText('调整代码阅读宽度', 'Resize code reading width'),
             initialScroll: 'top',
             children: jsx('div', {
               className: 'dsh-fleet-panel-resource-content',

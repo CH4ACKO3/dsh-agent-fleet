@@ -18,6 +18,7 @@ import {
   fleetNativeContextNodeKey,
   fleetPanelTeamRunControls,
   fleetPermissionGroupCapabilities,
+  fleetResourceCodeLanguage,
   fleetResourcePreviewKind,
   groupFleetActivity,
   groupFleetMessageThreads,
@@ -872,6 +873,13 @@ describe('Fleet resource previews', () => {
     expect(fleetResourcePreviewKind({ name: 'notes', path: '/workspace/notes', mediaType: 'text/markdown; charset=utf-8' })).toBe('markdown')
     expect(fleetResourcePreviewKind({ name: 'settings.json', path: '/workspace/settings.json' })).toBe('text')
     expect(fleetResourcePreviewKind({ name: 'brief.pdf', path: '/workspace/brief.pdf', mediaType: 'application/pdf' })).toBeUndefined()
+  })
+
+  it('recognizes code files and selects a syntax-highlighting language', () => {
+    expect(fleetResourcePreviewKind({ name: 'worker.ts', path: '/workspace/src/worker.ts' })).toBe('text')
+    expect(fleetResourceCodeLanguage({ name: 'worker.ts', path: '/workspace/src/worker.ts' })).toBe('typescript')
+    expect(fleetResourceCodeLanguage({ name: 'server', path: '/workspace/server', mediaType: 'text/x-python' })).toBe('python')
+    expect(fleetResourceCodeLanguage({ name: 'notes.txt', path: '/workspace/notes.txt' })).toBeUndefined()
   })
 })
 

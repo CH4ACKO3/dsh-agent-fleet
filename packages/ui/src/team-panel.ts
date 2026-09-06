@@ -1419,6 +1419,7 @@ export interface FleetPanelPaneOwner {
   readonly sessionId: string
   readonly fleet: FleetPanelSnapshot
   readonly markdownRendererAvailable: boolean
+  readonly codeRendererAvailable: boolean
   readonly snapshot: FleetPanelTeamSnapshot
   readonly activeItem: string
   readonly selectItem: (item: string) => void
@@ -1476,6 +1477,7 @@ export interface FleetPanelHomeOwner {
   readonly sessionId: string
   readonly fleet: FleetPanelSnapshot
   readonly markdownRendererAvailable: boolean
+  readonly codeRendererAvailable: boolean
   readonly focusedTeamId?: string
   readonly selectTeam: (teamId: string) => void
   readonly openTeamMessages: (teamId: string) => void
@@ -1540,6 +1542,7 @@ interface FleetTeamPanelProps {
   readonly sessionId: string
   readonly source?: FleetPanelSource
   readonly markdownRendererAvailable: boolean
+  readonly codeRendererAvailable: boolean
   readonly renderSlot: FleetPanelRenderSlot
   readonly useSessions: FleetSnapshotSelectorHook
   readonly t: (key: string, values?: Readonly<Record<string, unknown>>) => string
@@ -2062,6 +2065,7 @@ export function FleetTeamPanel({
   sessionId,
   source,
   markdownRendererAvailable,
+  codeRendererAvailable,
   renderSlot,
   useSessions,
   nativeContext,
@@ -2556,6 +2560,7 @@ export function FleetTeamPanel({
     sessionId,
     fleet: effectiveSnapshot,
     markdownRendererAvailable,
+    codeRendererAvailable,
     ...(homeTeamId === null ? {} : { focusedTeamId: homeTeamId }),
     selectTeam,
     openTeamMessages,
@@ -3327,6 +3332,7 @@ import {
   FleetReceiptMemberPopover,
   FleetPersistedMemberTrace,
   AgentContextMain,
+  fleetResourceCodeLanguage,
   fleetResourcePreviewKind,
 } from './pane-body.js'
 export {
@@ -3368,6 +3374,7 @@ export {
   MarkdownRendererUnavailableView,
   formatBytes,
   resourceFileName,
+  fleetResourceCodeLanguage,
   fleetResourcePreviewKind,
 } from './pane-body.js'
 
@@ -6383,6 +6390,18 @@ interface FleetRenderEngineResourcePreviewProps extends FleetPanelResourcePrevie
   readonly markdownRenderer: FleetMarkdownRenderer
 }
 
+interface FleetCodeRenderer {
+  render(request: { readonly code: string; readonly language?: string }): {
+    readonly html: string
+    readonly language: string | null
+    readonly highlighted: boolean
+  }
+}
+
+interface FleetRenderEngineCodePreviewProps extends FleetPanelResourcePreviewOwner {
+  readonly codeRenderer: FleetCodeRenderer
+}
+
 interface FleetDiffEngine {
   diff(input: {
     readonly kind: 'files'
@@ -6561,6 +6580,22 @@ function FleetRenderEngineResourcePreview({ resource, markdownRenderer }: FleetR
   return jsx('div', {
     className: 'dsh-fleet-rendered-message dsh-fleet-panel-resource-markdown',
     dangerouslySetInnerHTML: { __html: html },
+  })
+}
+
+function FleetRenderEngineCodePreview({ resource, codeRenderer }: FleetRenderEngineCodePreviewProps): ReactElement {
+  const rendered = useMemo(() => {
+    const language = fleetResourceCodeLanguage(resource)
+    return codeRenderer.render({
+      code: resource.body ?? '',
+      ...(language === undefined ? {} : { language }),
+    })
+  }, [codeRenderer, resource.body, resource.mediaType, resource.name, resource.path])
+  return jsx('div', {
+    className: 'dsh-fleet-panel-resource-code',
+    'data-highlighted': rendered.highlighted ? 'true' : 'false',
+    ...(rendered.language === null ? {} : { 'data-language': rendered.language }),
+    dangerouslySetInnerHTML: { __html: rendered.html },
   })
 }
 
@@ -6893,6 +6928,7 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
       sessionId,
       source,
       markdownRendererAvailable: ctx.get?.('markdownRenderer') !== undefined,
+      codeRendererAvailable: ctx.get?.('codeRenderer') !== undefined,
       nativeContext,
     }),
   }, FleetTeamPanel))
@@ -6909,6 +6945,14 @@ export async function apply(ctx: FleetPanelClientContext): Promise<() => Promise
       key: 'text/markdown',
       inject: () => ({ markdownRenderer: rendererCtx.markdownRenderer }),
     }, FleetRenderEngineResourcePreview))
+  })
+
+  ctx.inject<{ readonly codeRenderer: FleetCodeRenderer }>(['codeRenderer'], rendererCtx => {
+    rendererCtx.slots.inject(FLEET_PANEL_SLOTS.resourcePreview, () => rendererCtx.slots.register({
+      name: FLEET_PANEL_SLOTS.resourcePreview,
+      key: 'code',
+      inject: () => ({ codeRenderer: rendererCtx.codeRenderer }),
+    }, FleetRenderEngineCodePreview))
   })
 
   ctx.inject<{ readonly diffEngine: FleetDiffEngine; readonly diffRenderer: FleetDiffRenderer }>(

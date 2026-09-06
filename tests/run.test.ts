@@ -3040,7 +3040,9 @@ describe('FleetRunService', () => {
   it('reads registered Markdown resources on demand for the Web preview', async () => {
     const { root, configPath } = fixture()
     const planPath = join(root, 'team-plan.md')
+    const codePath = join(root, 'worker.ts')
     writeFileSync(planPath, '# Current plan\n\n- Verify the preview.\n')
+    writeFileSync(codePath, 'export const ready = true\n')
     const { service, launcher, disconnect } = setup(root)
     const run = await service.create(launcher as unknown as Agent, {
       configPath,
@@ -3052,6 +3054,11 @@ describe('FleetRunService', () => {
       id: 'team-plan',
       path: planPath,
       label: 'Current plan',
+    })
+    resources.addResource(String(launcher.id), {
+      id: 'worker-code',
+      path: codePath,
+      label: 'worker.ts',
     })
     const revision = resources.recordRevision(
       run.members[0]?.sessionId ?? String(launcher.id),
@@ -3077,6 +3084,11 @@ describe('FleetRunService', () => {
         before: '# Draft\n',
         after: '# Current plan\n\n- Verify the preview.\n',
       },
+    })
+    await expect(service.readResourcePreview(run.id, 'worker-code')).resolves.toMatchObject({
+      id: 'worker-code',
+      kind: 'text',
+      body: 'export const ready = true\n',
     })
 
     const oversized = resources.recordRevision(

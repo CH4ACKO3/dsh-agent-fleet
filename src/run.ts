@@ -1928,6 +1928,8 @@ const SHARED_FILE_UI_REFRESH_MS = 5_000
  */
 const SHARED_FILE_MTIME_TOLERANCE_MS = 10
 
+const RESOURCE_CODE_FILE_PATTERN = /\.(?:bash|c|cc|cjs|cpp|cs|css|cts|cxx|diff|go|h|hh|hpp|htm|html|hxx|java|js|jsx|lean|mjs|mts|patch|py|pyi|rs|sh|sql|ts|tsx|zsh)$/u
+
 function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kind'] | undefined {
   const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
   const name = (resource.label ?? basename(resource.path)).toLowerCase()
@@ -1939,7 +1941,9 @@ function resourcePreviewKind(resource: FleetResource): FleetResourcePreview['kin
   if (mediaType?.startsWith('text/') === true
     || ['application/json', 'application/ld+json', 'application/xml', 'application/yaml', 'application/x-yaml'].includes(mediaType ?? '')
     || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(name)
-    || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(path)) return 'text'
+    || /\.(?:txt|json|jsonl|ya?ml|toml|csv|tsv|xml)$/u.test(path)
+    || RESOURCE_CODE_FILE_PATTERN.test(name)
+    || RESOURCE_CODE_FILE_PATTERN.test(path)) return 'text'
   return undefined
 }
 
