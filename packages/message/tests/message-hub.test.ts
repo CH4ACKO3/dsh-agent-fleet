@@ -313,6 +313,29 @@ describe('MessageHub', () => {
     expect(hub.pendingWakeups(member.id)).toContainEqual(expect.objectContaining({ id: mentioned.messageId }))
   })
 
+  it('applies Inbox Task exclusions to mentioned Channel messages', () => {
+    const lead = new FakeAgent('lead')
+    const assistant = new FakeAgent('assistant')
+    const agents = new Map([lead, assistant].map(agent => [agent.id, agent]))
+    const hub = new MessageHub({
+      get: id => agents.get(id),
+      participantIds: () => [...agents.keys()],
+      list: () => [...agents.values()],
+    }, {
+      excludeInboxTask: participantId => participantId === assistant.id,
+    })
+
+    hub.send(lead, {
+      to: '#general',
+      text: '@assistant This is mirrored by another durable task.',
+      mentions: ['@assistant'],
+      delivery: 'wakeup',
+    })
+
+    expect(hub.unreadSummary(assistant.id).unreadMessages).toBe(1)
+    expect(hub.taskUnreadSummary(assistant.id)).toEqual({ unreadMessages: 0, unreadChars: 0 })
+  })
+
   it('preserves trusted direct-human delivery while requiring an explicit mention for replies', () => {
     const { hub, lead, reviewer } = setup()
 

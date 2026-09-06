@@ -1739,9 +1739,7 @@ export class MessageHub {
     this.assertOpen()
     const participantId = this.resolveAgent(reference)
     const unread = this.inboxRelevantUnread(participantId).filter(message =>
-      message.conversation.startsWith('#')
-        ? message.mentions.includes(participantId)
-        : true
+      (!message.conversation.startsWith('#') || message.mentions.includes(participantId))
       && this.options.excludeInboxTask?.(participantId, snapshot(message)) !== true)
     return {
       unreadMessages: unread.length,
