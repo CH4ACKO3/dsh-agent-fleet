@@ -3,8 +3,8 @@
 /*                                                                     */
 /*  Aggregates the 6 individual callback parameters from               */
 /*  OpenFleetCollaborationTeamInput into a single interface.           */
-/*  This is Phase 1 of P6: FleetRunService ↔ FleetCollaborationService */
-/*  decoupling (see evidence/p6-decoupling-design.md).                 */
+/*  Keeps FleetRunService and FleetCollaborationService connected      */
+/*  through one explicit dependency rather than parallel callbacks.    */
 /* ------------------------------------------------------------------ */
 
 import type { FleetCoordinationEvent } from '@dsh-agent-fleet/message'

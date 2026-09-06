@@ -202,7 +202,7 @@ describe('FleetSetupService', () => {
     const guide = fixture.service.configurationGuide()
     const template = JSON.parse(guide.configurationTemplate) as Record<string, unknown>
     expect(template).toMatchObject({
-      core: { name: '', positioning: '', members: [] },
+      core: { name: '', positioning: '', assistant: {}, members: [] },
       modules: {
         'dsh-agent-fleet/message': { defaultChannel: { id: 'main', name: 'Main' } },
       },

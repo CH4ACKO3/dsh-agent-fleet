@@ -350,7 +350,7 @@ export class FleetSetupService {
     const modules = this.configuration.guideModules()
     return {
       configurationTemplate: JSON.stringify({
-        core: { name: '', positioning: '', members: [] },
+        core: { name: '', positioning: '', assistant: {}, members: [] },
         modules: Object.fromEntries(modules.map(module => [module.id, module.defaultValue])),
       }),
       modules: modules.map(module => ({ id: module.id, description: module.description })),
