@@ -82,6 +82,9 @@ import {
   fleetMemberCanAccessChannel,
   fleetMemberCanContact,
 } from './member-view.js'
+import { BudgetService } from './budget/service.js'
+import type { BudgetStore } from './budget/service.js'
+import { BudgetGuard } from './budget/guard.js'
 import {
   FLEET_TASK_STATE_NAMESPACE,
   fleetTaskToolDetail,
@@ -148,88 +151,18 @@ export interface FleetRunAssistant {
   readonly status?: 'idle' | 'running' | 'error' | 'offline' | 'paused'
 }
 
-export type FleetBudgetMode = 'tokens' | 'cost'
-
-export interface FleetBudgetModelRate {
-  readonly provider: string
-  readonly model: string
-  /** Token mode only. An omitted multiplier is exactly 1x. */
-  readonly multiplier?: number
-  /** Cost mode prices in USD per one million tokens. */
-  readonly inputUsdPerMillion?: number
-  readonly outputUsdPerMillion?: number
-  readonly cacheReadUsdPerMillion?: number
-  readonly cacheWriteUsdPerMillion?: number
-}
-
-export interface FleetBudgetModelUsage {
-  readonly provider: string
-  readonly model: string
-  /** Weighted tokens in token mode, micro-USD in cost mode. */
-  readonly charged: number
-  readonly inputTokens: number
-  readonly outputTokens: number
-  readonly cacheReadTokens: number
-  readonly cacheWriteTokens: number
-  readonly reasoningTokens: number
-  readonly calls: number
-  readonly unmeteredCalls: number
-}
-
-export interface FleetBudgetAccount {
-  /** Weighted tokens in token mode, micro-USD in cost mode. */
-  readonly limit?: number
-  readonly startedAt: string
-  /** Weighted tokens in token mode, micro-USD in cost mode. */
-  readonly used: number
-  readonly inputTokens: number
-  readonly outputTokens: number
-  readonly cacheReadTokens: number
-  readonly cacheWriteTokens: number
-  readonly reasoningTokens: number
-  readonly calls: number
-  readonly unmeteredCalls: number
-  readonly models: FleetBudgetModelUsage[]
-}
-
-export interface FleetTeamBudgetState {
-  readonly mode: FleetBudgetMode
-  readonly rates: FleetBudgetModelRate[]
-  readonly team: FleetBudgetAccount
-  readonly members: FleetBudgetMemberAccount[]
-}
-
-export interface FleetBudgetMemberAccount extends FleetBudgetAccount {
-  readonly memberId: string
-  readonly name?: string
-  readonly role?: string
-  readonly color?: string
-  readonly assistant?: boolean
-}
-
-export type FleetBudgetAccountState = 'unlimited' | 'normal' | 'warning' | 'danger' | 'exhausted'
-
-export interface FleetBudgetAccountSnapshot extends FleetBudgetAccount {
-  readonly remaining?: number
-  readonly state: FleetBudgetAccountState
-}
-
-export interface FleetParticipantBudgetSnapshot extends FleetBudgetAccountSnapshot {
-  readonly memberId: string
-  readonly name: string
-  readonly role: string
-  readonly color?: string
-  readonly assistant: boolean
-  readonly active: boolean
-}
-
-export interface FleetTeamBudgetSnapshot {
-  readonly mode: FleetBudgetMode
-  readonly rates: FleetBudgetModelRate[]
-  readonly configuredModels: readonly { readonly provider: string; readonly model: string }[]
-  readonly team: FleetBudgetAccountSnapshot
-  readonly members: readonly FleetParticipantBudgetSnapshot[]
-}
+export type {
+  FleetBudgetMode,
+  FleetBudgetModelRate,
+  FleetBudgetModelUsage,
+  FleetBudgetAccount,
+  FleetTeamBudgetState,
+  FleetBudgetMemberAccount,
+  FleetBudgetAccountState,
+  FleetBudgetAccountSnapshot,
+  FleetParticipantBudgetSnapshot,
+  FleetTeamBudgetSnapshot,
+} from './budget.js'
 
 export interface FleetRunRecord {
   readonly id: string
@@ -1223,203 +1156,32 @@ const WORKSPACE_DISCOVERY_IGNORED_DIRECTORIES = new Set([
   '.fleet', '.git', '.hg', '.svn', '.cache', '.lake', '.venv',
   '__pycache__', 'lib', 'node_modules', 'venv',
 ])
-
-function emptyBudgetAccount(startedAt: string, limit?: number): FleetBudgetAccount {
-  return {
-    ...(limit === undefined ? {} : { limit }),
-    startedAt,
-    used: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    reasoningTokens: 0,
-    calls: 0,
-    unmeteredCalls: 0,
-    models: [],
-  }
-}
-
-function budgetAccountSnapshot(account: FleetBudgetAccount): FleetBudgetAccountSnapshot {
-  if (account.limit === undefined) return { ...account, state: 'unlimited' }
-  const remaining = Math.max(0, account.limit - account.used)
-  return {
-    ...account,
-    remaining,
-    state: remaining === 0
-      ? 'exhausted'
-      : account.used >= account.limit * 0.9
-        ? 'danger'
-        : account.used >= account.limit * 0.7
-          ? 'warning'
-          : 'normal',
-  }
-}
-
-function budgetMemberAccount(state: FleetTeamBudgetState | undefined, memberId: string): FleetBudgetMemberAccount | undefined {
-  return state?.members.find(account => account.memberId === memberId)
-}
-
-function replaceBudgetMember(
-  members: readonly FleetBudgetMemberAccount[],
-  memberId: string,
-  account: FleetBudgetAccount,
-  identity?: Pick<FleetBudgetMemberAccount, 'name' | 'role' | 'color' | 'assistant'>,
-): FleetBudgetMemberAccount[] {
-  const current = members.find(candidate => candidate.memberId === memberId)
-  const previousIdentity = current === undefined ? {} : {
-    ...(current.name === undefined ? {} : { name: current.name }),
-    ...(current.role === undefined ? {} : { role: current.role }),
-    ...(current.color === undefined ? {} : { color: current.color }),
-    ...(current.assistant === undefined ? {} : { assistant: current.assistant }),
-  }
-  const next = { ...account, memberId, ...previousIdentity, ...identity }
-  return current !== undefined
-    ? members.map(candidate => candidate.memberId === memberId ? next : candidate)
-    : [...members, next]
-}
-
-function budgetMemberIdentity(
-  record: FleetRunRecord,
-  memberId: string,
-): Pick<FleetBudgetMemberAccount, 'name' | 'role' | 'color' | 'assistant'> | undefined {
-  const member = record.members.find(candidate => candidate.name === memberId)
-  if (member !== undefined) return {
-    name: member.displayName ?? member.name,
-    role: member.role,
-    ...(member.color === undefined ? {} : { color: member.color }),
-    assistant: false,
-  }
-  const assistant = record.assistants.find(candidate => candidate.view.id === memberId)?.view
-  return assistant === undefined ? undefined : {
-    name: assistant.name,
-    role: assistant.role,
-    ...(assistant.color === undefined ? {} : { color: assistant.color }),
-    assistant: true,
-  }
-}
-
-function resetBudgetMemberAccount(
-  account: FleetBudgetMemberAccount,
-  startedAt: string,
-  preserveLimit: boolean,
-): FleetBudgetMemberAccount {
-  return {
-    ...emptyBudgetAccount(startedAt, preserveLimit ? account.limit : undefined),
-    memberId: account.memberId,
-    ...(account.name === undefined ? {} : { name: account.name }),
-    ...(account.role === undefined ? {} : { role: account.role }),
-    ...(account.color === undefined ? {} : { color: account.color }),
-    ...(account.assistant === undefined ? {} : { assistant: account.assistant }),
-  }
-}
-
-interface FleetBudgetCharge {
-  readonly provider: string
-  readonly model: string
-  readonly usage: TokenUsage | null
-}
-
-function budgetUsage(event: SessionEvent): FleetBudgetCharge | undefined {
-  if (event.type === 'assistant/message') {
-    const source = event.data.message.source
-    if (source === undefined) return undefined
-    return {
-      provider: source.provider,
-      model: source.model,
-      usage: event.data.usage ?? null,
-    }
-  }
-  if (event.type === 'compaction/summary') {
-    return { provider: event.data.provider, model: event.data.model, usage: event.data.usage ?? null }
-  }
-  return undefined
-}
-
-function budgetRate(
-  rates: readonly FleetBudgetModelRate[],
-  provider: string,
-  model: string,
-): FleetBudgetModelRate | undefined {
-  return rates.find(rate => rate.provider === provider && rate.model === model)
-}
-
-function rawBudgetTokens(usage: TokenUsage): number {
-  return usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
-}
-
-function chargedBudgetUsage(state: FleetTeamBudgetState, charge: FleetBudgetCharge): number {
-  if (charge.usage === null) return 0
-  const rate = budgetRate(state.rates, charge.provider, charge.model)
-  if (state.mode === 'tokens') return Math.ceil(rawBudgetTokens(charge.usage) * (rate?.multiplier ?? 1))
-  if (rate?.inputUsdPerMillion === undefined || rate.outputUsdPerMillion === undefined
-    || rate.cacheReadUsdPerMillion === undefined || rate.cacheWriteUsdPerMillion === undefined) {
-    throw new Error(`Fleet cost budget requires prices for ${charge.provider} / ${charge.model}`)
-  }
-  return Math.round(
-    charge.usage.inputTokens * rate.inputUsdPerMillion
-    + charge.usage.outputTokens * rate.outputUsdPerMillion
-    + (charge.usage.cacheReadTokens ?? 0) * rate.cacheReadUsdPerMillion
-    + (charge.usage.cacheWriteTokens ?? 0) * rate.cacheWriteUsdPerMillion,
-  )
-}
-
-function addModelBudgetUsage(
-  models: readonly FleetBudgetModelUsage[],
-  charge: FleetBudgetCharge,
-  charged: number,
-): FleetBudgetModelUsage[] {
-  const current = models.find(item => item.provider === charge.provider && item.model === charge.model)
-  const usage = charge.usage
-  const next: FleetBudgetModelUsage = {
-    provider: charge.provider,
-    model: charge.model,
-    charged: (current?.charged ?? 0) + charged,
-    inputTokens: (current?.inputTokens ?? 0) + (usage?.inputTokens ?? 0),
-    outputTokens: (current?.outputTokens ?? 0) + (usage?.outputTokens ?? 0),
-    cacheReadTokens: (current?.cacheReadTokens ?? 0) + (usage?.cacheReadTokens ?? 0),
-    cacheWriteTokens: (current?.cacheWriteTokens ?? 0) + (usage?.cacheWriteTokens ?? 0),
-    reasoningTokens: (current?.reasoningTokens ?? 0) + (usage?.reasoningTokens ?? 0),
-    calls: (current?.calls ?? 0) + 1,
-    unmeteredCalls: (current?.unmeteredCalls ?? 0) + (usage === null ? 1 : 0),
-  }
-  return current === undefined
-    ? [...models, next]
-    : models.map(item => item.provider === charge.provider && item.model === charge.model ? next : item)
-}
-
-function addBudgetUsage(
-  state: FleetTeamBudgetState,
-  account: FleetBudgetAccount,
-  charge: FleetBudgetCharge,
-): FleetBudgetAccount {
-  const charged = chargedBudgetUsage(state, charge)
-  if (charge.usage === null) {
-    return {
-      ...account,
-      calls: account.calls + 1,
-      unmeteredCalls: account.unmeteredCalls + 1,
-      models: addModelBudgetUsage(account.models, charge, charged),
-    }
-  }
-  const usage = charge.usage
-  const inputTokens = usage.inputTokens
-  const outputTokens = usage.outputTokens
-  const cacheReadTokens = usage.cacheReadTokens ?? 0
-  const cacheWriteTokens = usage.cacheWriteTokens ?? 0
-  const reasoningTokens = usage.reasoningTokens ?? 0
-  return {
-    ...account,
-    used: account.used + charged,
-    inputTokens: account.inputTokens + inputTokens,
-    outputTokens: account.outputTokens + outputTokens,
-    cacheReadTokens: account.cacheReadTokens + cacheReadTokens,
-    cacheWriteTokens: account.cacheWriteTokens + cacheWriteTokens,
-    reasoningTokens: account.reasoningTokens + reasoningTokens,
-    calls: account.calls + 1,
-    models: addModelBudgetUsage(account.models, charge, charged),
-  }
-}
+import {
+  addBudgetUsage,
+  addModelBudgetUsage,
+  budgetAccountSnapshot,
+  budgetMemberAccount,
+  budgetMemberIdentity,
+  budgetRate,
+  budgetRemaining,
+  budgetErrorMessage,
+  budgetOutputUnit,
+  budgetUsage,
+  chargedBudgetUsage,
+  emptyBudgetAccount,
+  rawBudgetTokens,
+  replaceBudgetMember,
+  resetBudgetMemberAccount,
+} from "./budget.js"
+import type {
+  FleetBudgetMode,
+  FleetBudgetModelRate,
+  FleetBudgetAccount,
+  FleetTeamBudgetState,
+  FleetBudgetMemberAccount,
+  FleetTeamBudgetSnapshot,
+  FleetBudgetAccountSnapshot,
+} from "./budget.js"
 
 interface FleetArchiveManifest {
   readonly format: typeof FLEET_ARCHIVE_FORMAT
@@ -2294,10 +2056,11 @@ export class FleetRunService {
     release(): void
   }>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
-  private readonly budgetGuardAgents = new WeakSet<Agent>()
   private readonly pausingTeams = new Map<string, Promise<FleetRunRecord>>()
   private readonly pausingMembers = new Map<string, Promise<FleetRunMember>>()
   private readonly ownerMemberResumes = new Map<string, Promise<void>>()
+  private readonly budgetService: BudgetService
+  private readonly budgetGuard: BudgetGuard
   private readonly ownerTaskWakeStates = new Map<string, OwnerTaskWakeState>()
   private readonly ownerTaskWakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly pendingAssistantKickoffs = new Map<string, PendingAssistantKickoff>()
@@ -2330,14 +2093,30 @@ export class FleetRunService {
     this.authorization = options.authorization
     this.configuration = options.configuration ?? new FleetConfigurationRegistry()
     this.turnReminders = options.turnReminders ?? DEFAULT_FLEET_TURN_REMINDERS
+    this.budgetService = new BudgetService({
+      requireRecord: (runId, projectRoot) => this.requireRecord(runId, projectRoot),
+      requireMutableRecord: (runId, projectRoot) => this.requireMutableRecord(runId, projectRoot),
+      replaceRecord: (runId, change) => this.replaceRecord(runId, change),
+      appendEvent: (runId, type, data, opts) => this.appendEvent(runId, type, data, opts),
+      memberViews: runId => this.memberViews(runId),
+      participants: record => this.participants(record),
+      requireFleetPermission: (record, caller, permission) => this.requireFleetPermission(record, caller, permission, true),
+      describeRecord: record => this.describeRecord(record),
+    })
+    this.budgetGuard = new BudgetGuard({
+      budgetTargetForSession: sessionId => this.budgetTargetForSession(sessionId),
+      budgetRemaining: (record, member) => this.budgetRemaining(record, member),
+      budgetError: (record, member, scope) => this.budgetError(record, member, scope),
+      budgetOutputUnit: (state, provider, model) => this.budgetOutputUnit(state, provider, model),
+    })
     const liveAgents = (this.ctx.agents as typeof this.ctx.agents & { list?: () => Agent[] }).list?.() ?? []
     for (const agent of liveAgents) {
       this.bindParticipantInbox(agent)
-      this.bindBudgetGuard(agent)
+      this.budgetGuard.bind(agent)
     }
     this.ctx.on('agent/created', ({ agent }) => {
       this.bindParticipantInbox(agent)
-      this.bindBudgetGuard(agent)
+      this.budgetGuard.bind(agent)
     })
     this.loadPersistedTeams()
   }
@@ -3311,180 +3090,11 @@ export class FleetRunService {
   }
 
   teamBudget(runId: string): FleetTeamBudgetSnapshot {
-    const record = this.requireRecord(runId)
-    const state = record.budget
-    const mode = state?.mode ?? 'tokens'
-    const rates = state?.rates ?? []
-    const team = budgetAccountSnapshot(state?.team ?? emptyBudgetAccount(record.startedAt))
-    const memberViews = new Map(this.memberViews(record.id).map(view => [view.id, view]))
-    const participants = [
-      ...record.members.map(member => {
-        const view = memberViews.get(member.name)
-        const memberColor = member.color ?? view?.color
-        return {
-          memberId: member.name,
-          name: member.displayName ?? view?.name ?? member.name,
-          role: view?.role ?? member.role,
-          ...(memberColor === undefined ? {} : { color: memberColor }),
-          assistant: false,
-          active: true,
-        }
-      }),
-      ...record.assistants.map(assistant => ({
-        memberId: assistant.view.id,
-        name: assistant.view.name,
-        role: assistant.view.role,
-        ...(assistant.view.color === undefined ? {} : { color: assistant.view.color }),
-        assistant: true,
-        active: true,
-      })),
-    ]
-    const participantIds = new Set(participants.map(participant => participant.memberId))
-    const historicalParticipants = (state?.members ?? [])
-      .filter(account => !participantIds.has(account.memberId) && (account.used > 0 || account.calls > 0))
-      .map(account => ({
-        memberId: account.memberId,
-        name: account.name ?? account.memberId,
-        role: account.role ?? '',
-        ...(account.color === undefined ? {} : { color: account.color }),
-        assistant: account.assistant ?? false,
-        active: false,
-      }))
-    const configuredModels = [...new Map(
-      [...this.describeRecord(record).members, ...this.describeRecord(record).assistants.map(assistant => assistant.view)]
-        .flatMap(actor => actor.provider === undefined || actor.model === undefined
-          ? []
-          : [[`${actor.provider}\u0000${actor.model}`, { provider: actor.provider, model: actor.model }] as const]),
-    ).values()]
-    return {
-      mode,
-      rates,
-      configuredModels,
-      team,
-      members: [...participants, ...historicalParticipants].map(participant => ({
-        ...budgetAccountSnapshot(
-          budgetMemberAccount(state, participant.memberId) ?? emptyBudgetAccount(team.startedAt),
-        ),
-        ...participant,
-      })),
-    }
+    return this.budgetService.teamBudget(runId)
   }
 
   configureBudget(caller: Agent, input: ConfigureFleetBudgetInput): FleetTeamBudgetSnapshot {
-    let record = this.requireMutableRecord(input.runId, caller.session.header.cwd)
-    this.requireFleetPermission(record, caller, 'team.manage')
-    const changingLimit = input.limit !== undefined
-    const resetting = input.reset === true
-    const changingAccounting = input.accounting !== undefined
-    if (Number(changingLimit) + Number(resetting) + Number(changingAccounting) !== 1) {
-      throw new Error('Fleet budget update must change exactly one of its limit, cycle, or accounting mode')
-    }
-    if (input.limit !== undefined && input.limit !== null
-      && (!Number.isSafeInteger(input.limit) || input.limit <= 0)) {
-      throw new Error('Fleet budget limit must be a positive safe integer or null')
-    }
-    const now = new Date().toISOString()
-    const current = record.budget ?? { mode: 'tokens', rates: [], team: emptyBudgetAccount(now), members: [] }
-    if (input.accounting !== undefined) {
-      if (input.scope !== 'team' || input.member !== undefined) {
-        throw new Error('Fleet budget accounting is configured for the whole Team')
-      }
-      const rates: FleetBudgetModelRate[] = input.accounting.rates.map((rate, index): FleetBudgetModelRate => {
-        const provider = rate.provider.trim()
-        const model = rate.model.trim()
-        if (provider === '' || model === '') throw new Error(`Fleet budget rate ${String(index + 1)} requires provider and model`)
-        if (input.accounting?.mode === 'tokens') {
-          if (rate.multiplier !== undefined && (!Number.isFinite(rate.multiplier) || rate.multiplier <= 0)) {
-            throw new Error(`Fleet token multiplier for ${provider} / ${model} must be positive`)
-          }
-          return { provider, model, ...(rate.multiplier === undefined || rate.multiplier === 1 ? {} : { multiplier: rate.multiplier }) }
-        }
-        const prices = [rate.inputUsdPerMillion, rate.outputUsdPerMillion, rate.cacheReadUsdPerMillion, rate.cacheWriteUsdPerMillion]
-        if (prices.some(price => price === undefined || !Number.isFinite(price) || price < 0)) {
-          throw new Error(`Fleet cost budget requires four non-negative prices for ${provider} / ${model}`)
-        }
-        return {
-          provider,
-          model,
-          inputUsdPerMillion: rate.inputUsdPerMillion!,
-          outputUsdPerMillion: rate.outputUsdPerMillion!,
-          cacheReadUsdPerMillion: rate.cacheReadUsdPerMillion!,
-          cacheWriteUsdPerMillion: rate.cacheWriteUsdPerMillion!,
-        }
-      })
-      const keys = rates.map(rate => `${rate.provider}\u0000${rate.model}`)
-      if (new Set(keys).size !== keys.length) throw new Error('Fleet budget rates must use unique provider and model pairs')
-      if (input.accounting.mode === 'cost') {
-        const configured = this.describeRecord(record)
-        const missing = [...configured.members, ...configured.assistants.map(assistant => assistant.view)]
-          .filter(actor => actor.provider !== undefined && actor.model !== undefined)
-          .filter(actor => !keys.includes(`${actor.provider}\u0000${actor.model}`))
-          .map(actor => `${actor.provider} / ${actor.model}`)
-        if (missing.length > 0) throw new Error(`Fleet cost budget is missing prices for ${[...new Set(missing)].join(', ')}`)
-      }
-      const modeChanged = current.mode !== input.accounting.mode
-      const budget: FleetTeamBudgetState = modeChanged
-        ? {
-            mode: input.accounting.mode,
-            rates,
-            team: emptyBudgetAccount(now),
-            members: current.members.map(account => resetBudgetMemberAccount(account, now, false)),
-          }
-        : { ...current, rates }
-      record = this.replaceRecord(record.id, { budget })
-      this.appendEvent(record.id, 'budget_accounting_configured', {
-        mode: budget.mode,
-        models: rates.map(rate => ({ provider: rate.provider, model: rate.model })),
-        ...(modeChanged ? { reset: true } : {}),
-      })
-      return this.teamBudget(record.id)
-    }
-    let budget: FleetTeamBudgetState
-    let member: string | undefined
-    if (input.scope === 'team') {
-      if (input.member !== undefined) throw new Error('Team budget update cannot name a member')
-      if (resetting) {
-        budget = {
-          ...current,
-          team: emptyBudgetAccount(now, current.team.limit),
-          members: current.members.map(account => resetBudgetMemberAccount(account, now, true)),
-        }
-      } else {
-        const { limit: _currentLimit, ...account } = current.team
-        budget = {
-          ...current,
-          team: {
-            ...account,
-            ...(input.limit === null ? {} : { limit: input.limit }),
-          },
-        }
-      }
-    } else {
-      member = input.member?.trim()
-      if (member === undefined || member === '') throw new Error('Member budget update requires a member')
-      if (!this.participants(record).some(participant => participant.name === member)) {
-        throw new Error(`unknown Fleet member ${member}`)
-      }
-      const currentAccount = budgetMemberAccount(current, member) ?? emptyBudgetAccount(now)
-      let account: FleetBudgetAccount
-      if (resetting) account = emptyBudgetAccount(now, currentAccount.limit)
-      else {
-        const { limit: _currentLimit, ...withoutLimit } = currentAccount
-        account = {
-          ...withoutLimit,
-          ...(input.limit === null ? {} : { limit: input.limit }),
-        }
-      }
-      budget = { ...current, members: replaceBudgetMember(current.members, member, account, budgetMemberIdentity(record, member)) }
-    }
-    record = this.replaceRecord(record.id, { budget })
-    this.appendEvent(record.id, resetting ? 'budget_reset' : 'budget_configured', {
-      scope: input.scope,
-      ...(member === undefined ? {} : { member }),
-      ...(resetting || input.limit === null ? {} : { limit: input.limit }),
-      ...(input.limit === null ? { unlimited: true } : {}),
-    })
-    return this.teamBudget(record.id)
+    return this.budgetService.configureBudget(caller, input)
   }
 
   configureTeamSettings(caller: Agent, input: ConfigureFleetTeamSettingsInput): FleetTeamSettingsSnapshot {
@@ -5041,7 +4651,7 @@ export class FleetRunService {
       ? this.collaboration.require(record.id)
       : this.requireRuntime(record.id)
     if (isTerminal(record.status)) throw new Error(`Fleet team ${record.id} is ${record.status}`)
-    this.bindBudgetGuard(caller)
+    this.budgetGuard.bind(caller)
 
     const callerId = String(caller.id)
     const autoJoinChannels = parseTeamTemplate(
@@ -9191,101 +8801,19 @@ export class FleetRunService {
     readonly remaining?: number
     readonly exhaustedScope?: 'team' | 'member'
   } {
-    const team = record.budget?.team
-    const participant = budgetMemberAccount(record.budget, member)
-    const teamRemaining = team?.limit === undefined
-      ? undefined
-      : Math.max(0, team.limit - team.used)
-    const memberRemaining = participant?.limit === undefined
-      ? undefined
-      : Math.max(0, participant.limit - participant.used)
-    if (teamRemaining === 0) return { remaining: 0, exhaustedScope: 'team' }
-    if (memberRemaining === 0) return { remaining: 0, exhaustedScope: 'member' }
-    if (teamRemaining === undefined) return memberRemaining === undefined ? {} : { remaining: memberRemaining }
-    if (memberRemaining === undefined) return { remaining: teamRemaining }
-    return { remaining: Math.min(teamRemaining, memberRemaining) }
+    return budgetRemaining(record.budget, member)
   }
 
   private budgetError(record: FleetRunRecord, member: string, scope: 'team' | 'member'): Error {
-    return new Error(scope === 'team'
-      ? `Fleet Team ${record.name} budget is exhausted; increase its limit or start a new budget cycle before another model call`
-      : `Fleet member ${member} budget is exhausted; increase its limit or reset that member budget before another model call`)
+    return new Error(budgetErrorMessage(record.name, member, scope))
   }
 
   private budgetOutputUnit(state: FleetTeamBudgetState, provider: string, model: string): number {
-    const rate = budgetRate(state.rates, provider, model)
-    if (state.mode === 'tokens') return rate?.multiplier ?? 1
-    if (rate?.inputUsdPerMillion === undefined || rate.outputUsdPerMillion === undefined
-      || rate.cacheReadUsdPerMillion === undefined || rate.cacheWriteUsdPerMillion === undefined) {
-      throw new Error(`Fleet cost budget requires prices for ${provider} / ${model}`)
-    }
-    return rate.outputUsdPerMillion
-  }
-
-  private bindBudgetGuard(agent: Agent): void {
-    if (this.budgetGuardAgents.has(agent)) return
-    const agentCtx = (agent as Agent & { readonly ctx?: Context }).ctx
-    if (agentCtx === undefined) return
-    this.budgetGuardAgents.add(agent)
-    agentCtx.on('agent/request', async (_payload, next) => {
-      const target = this.budgetTargetForSession(String(agent.id))
-      if (target === undefined) return next()
-      const before = this.budgetRemaining(target.record, target.member)
-      if (before.exhaustedScope !== undefined) {
-        throw this.budgetError(target.record, target.member, before.exhaustedScope)
-      }
-      const resolved = await next()
-      const latest = this.budgetTargetForSession(String(agent.id))
-      if (latest === undefined) return resolved
-      const budget = this.budgetRemaining(latest.record, latest.member)
-      if (budget.exhaustedScope !== undefined) {
-        throw this.budgetError(latest.record, latest.member, budget.exhaustedScope)
-      }
-      const state = latest.record.budget
-      if (state === undefined) return resolved
-      const outputUnit = this.budgetOutputUnit(state, resolved.provider, resolved.model)
-      if (budget.remaining === undefined) return resolved
-      if (outputUnit === 0) return resolved
-      const affordableOutputTokens = Math.max(1, Math.floor(budget.remaining / outputUnit))
-      return {
-        ...resolved,
-        maxTokens: Math.min(resolved.maxTokens ?? affordableOutputTokens, affordableOutputTokens),
-      }
-    })
+    return budgetOutputUnit(state, provider, model)
   }
 
   private recordBudgetUsage(record: FleetRunRecord, member: string, event: SessionEvent): void {
-    const charge = budgetUsage(event)
-    if (charge === undefined) return
-    const startedAt = new Date(event.time).toISOString()
-    const current = record.budget ?? { mode: 'tokens', rates: [], team: emptyBudgetAccount(startedAt), members: [] }
-    const currentMember = budgetMemberAccount(current, member) ?? emptyBudgetAccount(startedAt)
-    const team = addBudgetUsage(current, current.team, charge)
-    const participant = addBudgetUsage(current, currentMember, charge)
-    this.replaceRecord(record.id, {
-      budget: {
-        ...current,
-        team,
-        members: replaceBudgetMember(current.members, member, participant, budgetMemberIdentity(record, member)),
-      },
-    })
-    const transitions = [
-      { scope: 'team' as const, before: budgetAccountSnapshot(current.team), after: budgetAccountSnapshot(team) },
-      { scope: 'member' as const, before: budgetAccountSnapshot(currentMember), after: budgetAccountSnapshot(participant) },
-    ]
-    for (const transition of transitions) {
-      const crossedWarning = (transition.after.state === 'warning' || transition.after.state === 'danger')
-        && transition.before.state !== 'warning' && transition.before.state !== 'danger'
-        && transition.before.state !== 'exhausted'
-      const crossedExhaustion = transition.after.state === 'exhausted' && transition.before.state !== 'exhausted'
-      if (!crossedWarning && !crossedExhaustion) continue
-      this.appendEvent(record.id, crossedExhaustion ? 'budget_exhausted' : 'budget_warning', {
-        scope: transition.scope,
-        ...(transition.scope === 'member' ? { member } : {}),
-        used: transition.after.used,
-        limit: transition.after.limit,
-      })
-    }
+    this.budgetService.recordBudgetUsage(record, member, event)
   }
 
   private bindParticipantInbox(agent: Agent): void {
