@@ -1,10 +1,11 @@
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  exportFleetEvaluationState,
   fleetEvaluationConfiguration,
   superviseFleetEvaluationRun,
 } from '../src/evaluation.js'
@@ -168,6 +169,24 @@ describe('Fleet evaluation supervision', () => {
 })
 
 describe('Fleet evaluation package profile', () => {
+  it('exports flushed sessions and the exact Team state as evaluation evidence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fleet-evaluation-state-'))
+    const dshHome = join(root, 'dsh-home')
+    const output = join(root, 'results')
+    const team = runRecord({ id: 'team-evaluation' })
+    mkdirSync(join(dshHome, 'sessions', 'workspace', 'session-1'), { recursive: true })
+    writeFileSync(join(dshHome, 'sessions', 'workspace', 'session-1', 'session.jsonl.zstd'), 'session')
+    mkdirSync(join(dshHome, 'dsh-agent-fleet', 'teams', team.id), { recursive: true })
+    writeFileSync(join(dshHome, 'dsh-agent-fleet', 'teams', team.id, 'events.jsonl'), '{}\n')
+    writeFileSync(join(dshHome, 'dsh-agent-fleet', 'teams', `${team.id}.json`), '{}\n')
+
+    exportFleetEvaluationState(team, output, dshHome)
+
+    expect(existsSync(join(output, 'dsh-sessions', 'workspace', 'session-1', 'session.jsonl.zstd'))).toBe(true)
+    expect(existsSync(join(output, 'fleet-state', team.id, 'events.jsonl'))).toBe(true)
+    expect(existsSync(join(output, 'fleet-state', `${team.id}.json`))).toBe(true)
+  })
+
   it('ships a patch that replaces the stock single-Agent headless runner', () => {
     const patch = readFileSync(resolve('evaluation/headless.patch.yml'), 'utf8')
     const packageJson = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {

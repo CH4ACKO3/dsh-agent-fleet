@@ -74,5 +74,14 @@ The builder compiles only the Fleet host and its four internal runtime
 packages. Web client, Lark, Git UI, and inspector attachments are intentionally
 outside the evaluation image build graph.
 
+The runtime stage includes Git and Python 3 as a small baseline coding
+toolchain. Benchmark-specific compilers, provers, browsers, and datasets should
+still be added by a scenario image derived from this base rather than installed
+during an episode.
+
+Alongside the summary files, a completed episode exports the flushed DSH
+sessions to `dsh-sessions/` and the exact Team journal/state to `fleet-state/`.
+These directories are evaluation evidence and must remain outside Git.
+
 See `docs/architecture/evaluation-runtime.md` for the complete design and
 [`BRANCH_BOUNDARY.md`](./BRANCH_BOUNDARY.md) for the concrete migration list.

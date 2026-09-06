@@ -38,7 +38,10 @@ RUN dsh --profile headless --dump-config >/dev/null \
 FROM ${NODE_IMAGE} AS runtime
 
 ARG DSH_VERSION=0.1.1-rc.2
-RUN npm install --global "@deepseek-ai/dsh@${DSH_VERSION}"
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates git python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global "@deepseek-ai/dsh@${DSH_VERSION}"
 
 COPY --from=builder /opt/dsh-profile /opt/dsh-profile
 COPY --from=builder /opt/fleet-package /opt/fleet-package

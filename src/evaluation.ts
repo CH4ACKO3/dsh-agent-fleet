@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -338,6 +339,27 @@ function writeDurableOutputs(
   )
 }
 
+export function exportFleetEvaluationState(
+  run: FleetRunRecord,
+  outputDirectory: string,
+  dshHome = process.env.DSH_HOME,
+): void {
+  if (dshHome === undefined || dshHome.trim().length === 0) return
+  const sessions = join(dshHome, 'sessions')
+  if (existsSync(sessions)) {
+    cpSync(sessions, join(outputDirectory, 'dsh-sessions'), { recursive: true, force: true })
+  }
+  const teams = join(dshHome, 'dsh-agent-fleet', 'teams')
+  const teamDirectory = join(teams, run.id)
+  const teamIndex = join(teams, `${run.id}.json`)
+  const exported = join(outputDirectory, 'fleet-state')
+  if (existsSync(teamDirectory) || existsSync(teamIndex)) mkdirSync(exported, { recursive: true })
+  if (existsSync(teamDirectory)) {
+    cpSync(teamDirectory, join(exported, run.id), { recursive: true, force: true })
+  }
+  if (existsSync(teamIndex)) cpSync(teamIndex, join(exported, `${run.id}.json`), { force: true })
+}
+
 async function flushFleetSessions(ctx: FleetEvaluationContext, run: FleetRunRecord): Promise<void> {
   const sessionIds = new Set([
     ...run.members.map(member => member.sessionId),
@@ -396,6 +418,7 @@ export async function executeFleetEvaluation(
     }
     await flushFleetSessions(ctx, outcome.run)
     writeDurableOutputs(ctx.fleetRuns, outcome, configuration)
+    exportFleetEvaluationState(outcome.run, configuration.outputDirectory)
     writeStatus(configuration, startedAt, 'artifacts_flushed', {
       run: outcome.run,
       exitCode: outcome.exitCode,

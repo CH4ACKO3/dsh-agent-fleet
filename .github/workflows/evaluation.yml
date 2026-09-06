@@ -25,6 +25,10 @@ jobs:
         run: python -m compileall -q integrations/agents-last-exam/dsh_fleet
       - name: Build the isolated evaluation image
         run: docker build --file evaluation/runtime.Dockerfile --tag dsh-fleet-evaluation:ci .
+      - name: Verify the baseline coding toolchain
+        run: |
+          docker run --rm --entrypoint sh dsh-fleet-evaluation:ci -lc \
+            'python3 --version && git --version'
       - name: Verify the Team-aware runner owns headless completion
         shell: bash
         run: |
