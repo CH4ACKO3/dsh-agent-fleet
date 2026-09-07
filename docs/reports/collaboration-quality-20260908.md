@@ -115,3 +115,48 @@ HorizonMath 首次启动报 `deps.messages.taskUnreadSummary is not a function`�
 部署作者继而确认旧 provider overlay 同版本安装复用了过期 bundled 依赖，改为整体替换 Fleet 包目录后错误消失。没有在通用代码退回旧 unread API，因为这既掩盖部署不一致，也会损失本轮已验证的消息行为。
 
 随后 178 毫秒 `bootstrap_incomplete` 的真实事件为 provider `NO_ADAPTER`。部署作者把仅有 evaluation runner 的 patch 与已有 provider patch 合并；本子任务在服务器最新 `dsh-horizonmath-fleet:20260908` 无网络临时容器中独立解析了最终 YAML：共四条 overlay，原 `headless-runner` 被禁用，仅插入一个 `fleet-evaluation-runner`，`llm-pi-ai` 注册 `memorax`，另有一条 `agent-default-model` 覆盖，没有重复插入。未根据快速失败猜测或修改 `followup/whenIdle` 调度，仍需以新运行实际模型事件确认端到端恢复。
+
+最终独立读取 `runs/horizonmath-mzv-provider-fixed/mzv_reduction_zeta_3_3_3/attempt-001/results`：模型已实际执行，并在开始后约 **186 秒**调用 `fleet_run start` 创建 Work；总计 **300,108 毫秒**后按共享期限导出 `timed_out / 124`，Team 为 paused，Work 仍 running。本轮不是成功完成的基准成绩。
+
+导出证据的计数如下：
+
+| 项目 | 实测 |
+| --- | --- |
+| 团队事件 | 50 |
+| 协作消息 | 2，均为 core-engineer 与 quality-engineer 之间的私聊；频道正文消息为 0 |
+| 系统通知 | 8：4 个 owner-task-list wakeup，4 个 sole-active quiet FYI |
+| Inbox 事件 | 4：2 次 delivered、2 次 read；最终 4 个成员/助手 Inbox 均 dormant，未读数为 0 |
+| 持久任务 | 9：4 Inbox、1 根 composite、3 Goal、1 Reply |
+| 完成状态 | 推导 Goal、实现 Goal 与 Reply 已完成；验证 Goal 和根 composite 仍 running |
+| 团队计量 | 45 次已计量模型调用，另 1 次 unmetered；input 94,741、output 30,103、cache read 776,960 tokens |
+| 启动助手计量 | 11 次调用，input 27,469、output 18,931、cache read 209,664 tokens |
+
+团队 `used=901804` 包含 cache-read，不能当作全额新生成 token 或货币费用。助手还创建了一个普通 DSH subagent，它有独立轨迹但没有出现在这份 Team 成员用量表中；这份 Team 统计不能冒充本次容器全部调用总成本。
+
+助手实际工具顺序为 `read → subagent → str_replace_editor → read → bash → job_output → list_agents → send_message → str_replace_editor → fleet_run`。其中 `bash` 对助手不可用，返回 `UNKNOWN_TOOL`；把 subagent ID 当成 job ID 查询也失败。三个实际 Team 成员随后使用了 `fleet_task`、`fleet_goal`、`fleet_inbox`、`fleet_send`、`fleet_reply` 及文件/命令工具。该题的主要可见延误在启动助手先自行推导、调用普通子代理并重写题面；没有证据把这次超时归因于频道刷屏。
+
+据此仅收紧 `src/evaluation.ts` 的评测启动指令：题面角色属于执行成员，助手读取任务后直接创建有 owner、依赖与验收条件的初始 DAG，复用权威任务路径；求解、代码与验证交给现有 Team，启动前不创建普通 subagent，成功后结束启动回合。保留 standard preset 与普通产品工具权限。`evaluation.test.ts` 与 `auto-bootstrap.test.ts` 合计 **24/24** 通过；这些回归只验证运行与拼接链未被破坏，不能证明新指令已改善模型服从率或基准成功率，后续需要同题同预算实测。
+
+最后复核服务器长跑桥接配置：server-base 的 bridge 路径和端口环境会继承到 generic generation 镜像；controller 向后代明确传 provider、模型与 API 配置，并通过既有服务器 env 文件传凭据；ALE 的官方 checkout 与绝对解释器链接目标另有只读 Compose 挂载。课程的 train 反馈在 train 阶段结束时单独导出，validation/test 结果只留宿主 ledger；Agent 挂载仍为单代 `/training-feedback`，没有发现新代码把 sealed episodes 暴露给训练代。后台 bridge 尚无专门 readiness/存活门槛，因此已要求部署作者检查 bridge 日志和真实模型请求，网页可访问本身不证明模型端点正常。本子任务没有为这个尚未实测的可能性扩大修改范围。
+
+## 追加：长跑终态与预算边界审查
+
+后续只读审查发现终态退出与自动重启策略的冲突，已立即提交演化作者处理。审查时 `container-controller.mjs` 使用 `Promise.race`，任一控制子进程正常退出就终止另一个并退出 0；已有 state 非 running 时则退出 1。Compose 配置 `restart: unless-stopped`，不是仅失败重试：已经进入长期监控的控制器正常退出也会被重启。Docker 文档同时说明重启策略需容器已成功运行至少 10 秒，因此不能无条件断言每种冷启动失败都会无限重启；长跑终态仍需要明确静置，而非靠进程退出表达永久完成。[Docker 官方重启策略](https://docs.docker.com/engine/containers/start-containers-automatically/)
+
+更直接的预算缺口是：`startCandidate` 已拒绝 `nextGeneration > maxGenerations`，正常路径通常不会产生第 max+1 代；因此 curriculum 的 `stable.number > maxGenerations` 退出条件并不能终止预算已耗尽的运行。失败候选也会消耗 nextGeneration，而稳定代编号可能始终低于上限。最后稳定代及 guardian 若只失去控制进程，仍可能继续运行；supervisor 的 SIGTERM 当前只关闭 watcher 和 monitors，不能等价于停止代容器。
+
+建议修复范围是可信控制面的终态处理：预算用尽后等待已分配候选的明确接受/拒绝及本代课程终结，持久保存停止原因，停止本次 run 的代容器并保留证据；controller 对 stopped/failed/budget_exhausted 安静驻留，等待显式恢复或退出信号，不反复 init/启动，并在状态与健康元数据中区分运行、停止和需处理的失败。本子任务未改这些跨作者文件，最终采纳和回归结果须以演化报告为准。
+
+## 追加：首代自动停止后的模型证据
+
+只读复核服务器 `runs/evolution-init-corrected/generations/g0001/archive/dsh-context.tar.gz`。使用已驻留 controller 内的 Node 解析归档，按 `zstdDecompressSync(..., {info:true})` 返回的实际消耗字节逐帧推进，避免只解出第一帧 session header 后误报“没有响应”。此过程未启动新容器或模型调用，输出限定为 ID、事件/工具类别、计量与错误代码。
+
+- 归档共 14 个 session，7 个有实际模型响应；合计 **75 个唯一序号的 assistant/message**，75 个均有 usage。归档累计 input **227,858**、output **19,236**、cache-read **2,870,016** tokens，不能把 cache-read 与新生成量混为一项费用。
+- 正式 Team `team_51de55c6-23cb-4649-b75c-e903b02d9854` 有 7 名成员，但这 7 个 session 都没有模型响应。活跃 session 是启动助手（37 次）以及它新建的 6 个普通 DSH subagent（合计 38 次）。正式 Team 的归档状态为 idle、Work 缺失，事件没有 `work_started`。
+- 实际工具调用记录 100 条：read 42、bash 22、glob 17、subagent 6、write 6、grep 2、fleet_run 2、edit 1、fleet_send 1、fleet_task 1。工具错误记录 11 条：`UNKNOWN_TOOL` 5、`FS_NOT_FOUND` 3、`FS_NOT_OBSERVED` 2，以及 1 条无结构化 code 的错误结果。
+- 助手的两次 `fleet_run` 分别是 create 和 list，从未调用 start。create 被“当前 Session 已绑定现有 Team 前台助手，创建新 Team 需独立 Session”的保护拒绝；list 成功。5 次 UNKNOWN_TOOL 是助手调用 bash 4 次、write 1 次。这是启动职责执行不正确的证据，不能描述成正式 Team 已完成演化任务。
+- 最终读取的宿主 state 为 stopped，g0001 的 phase 为 stopped，源码提交 `1fb7fa4eec05a31229f92ee8122cc995154eab6e`；停止时间为 `2026-09-07T21:29:01.420Z`。驻留控制器的终态快照为 stopped、reason=existing_stopped、needsAttention=false。演化作者此前观察到预算耗尽原因，后续驻留启动可能更新了 reason；两者应按时间区分，不能用当前字段反推原始停止原因。
+
+这些证据支持“服务器 provider 确实返回了模型响应，首代归档并停止，终态控制器驻留”的基础设施验收。它们不支持“正式 Fleet Team 完成一代递归改进”或“训练/保留集能力提升”的结论；启动助手仍绕过正式 Team，应作为后续明确的流程验收缺口保留。
+
+根据这份归档的确定性行为证据，最后仅增强 `src/auto-bootstrap.ts` 的通用自动启动消息：明确 Team 已由宿主创建且助手已经连接；不重复 create、不用普通 subagent 模拟现有成员；必要读取与确认成员后直接以权威任务路径调用 `fleet_run start`，把调研、求解、实现、验证交给 Team 的 Goal；启动成功即结束本启动回合。该变更与 evaluation 的更具体职责说明一致，没有改普通工具权限、成员能力或非自动启动消息。再次运行现有 auto-bootstrap 与 evaluation 回归，**24/24** 通过；未额外付费重跑，不宣称提示修改已提高模型服从率或端到端成功率。
