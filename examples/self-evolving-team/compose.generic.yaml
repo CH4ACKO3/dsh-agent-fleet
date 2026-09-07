@@ -1,0 +1,14 @@
+services:
+  dsh:
+    build:
+      dockerfile: generic.Dockerfile
+    env_file:
+      - ${SELF_EVOLVE_PROVIDER_ENV_FILE:-/dev/null}
+    environment:
+      FLEET_AUTO_PROVIDER: ${FLEET_MODEL_PROVIDER:-deepseek}
+      FLEET_AUTO_MODEL: ${FLEET_MODEL_NAME:-deepseek-chat}
+      FLEET_MODEL_PROVIDER: ${FLEET_MODEL_PROVIDER:-deepseek}
+      FLEET_MODEL_NAME: ${FLEET_MODEL_NAME:-deepseek-chat}
+      FLEET_MODEL_API: ${FLEET_MODEL_API:-openai-completions}
+      FLEET_MODEL_BASE_URL: ${FLEET_MODEL_BASE_URL:-https://api.deepseek.com/v1}
+      FLEET_MODEL_API_KEY_ENV: ${FLEET_MODEL_API_KEY_ENV:-DEEPSEEK_API_KEY}

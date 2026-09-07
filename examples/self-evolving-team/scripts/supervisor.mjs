@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 import { HOST_GENERATION_MARKER, advancePromotionWindow, assertCandidateSourceSnapshot, authorizeRequest, stripHostGenerationFooter, verifyRequest } from './protocol.mjs'
+import { isWithin, loadCurriculum } from './curriculum.mjs'
 
 const execFileAsync = promisify(execFile)
 const generationMonitors = new Map()
@@ -114,6 +115,8 @@ async function run(command, args, options = {}) {
       env: options.env ?? process.env,
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
+      timeout: options.timeoutMs ?? 900000,
+      killSignal: 'SIGTERM',
     })
     return { stdout: result.stdout.trim(), stderr: result.stderr.trim() }
   } catch (error) {
@@ -137,6 +140,7 @@ function composeEnvironment(state, generation) {
     SELF_EVOLVE_REPOSITORY: state.repository,
     SELF_EVOLVE_GENERATION: generation.id,
     SELF_EVOLVE_TEAM_CONFIG: generation.teamConfigPath,
+    SELF_EVOLVE_TRAINING_EXPORT: join(state.stateDirectory, 'curriculum-feedback', generation.id),
     FLEET_PACKAGE_PATH: generation.packagePath,
     FLEET_PATCHOULI_PACKAGE_PATH: generation.patchouliPackagePath,
     FLEET_SOURCE_COMMIT: generation.sourceCommit,
@@ -150,6 +154,7 @@ function composeEnvironment(state, generation) {
 }
 
 function generationExampleRoot(state, generation) {
+  if (state.curriculum !== undefined) return state.exampleRoot
   return generation.exampleRoot ?? state.exampleRoot
 }
 
@@ -181,6 +186,8 @@ async function waitForPath(path, timeoutMs, label) {
 }
 
 function scheduleSupervisorHandoff(stateDirectory, state, generation) {
+  // Research evaluators and Docker authority stay frozen outside the evolving Agent.
+  if (state.curriculum !== undefined) return
   const id = randomUUID()
   const script = join(generationExampleRoot(state, generation), 'scripts', 'supervisor.mjs')
   if (!existsSync(script)) throw new Error(`Promoted generation supervisor is missing: ${script}`)
@@ -294,13 +301,47 @@ async function emit(stateDirectory, state, generationIdValue, type, data = {}) {
   return event
 }
 
-async function resolveCommit(sourceRoot, ref) {
-  const { stdout } = await run('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd: sourceRoot })
+async function isolatedContainer(state, args) {
+  const directory = join(state.stateDirectory, 'build-containers')
+  mkdirSync(directory, { recursive: true })
+  const cidfile = join(directory, `${randomUUID()}.cid`)
+  try {
+    return await run('docker', ['run', '--rm', '--init', '--cidfile', cidfile,
+      '--label', `io.deepseek-harness.evolution.build=${state.name}`, ...args])
+  } finally {
+    if (existsSync(cidfile)) {
+      const id = readFileSync(cidfile, 'utf8').trim()
+      if (/^[a-f0-9]{64}$/.test(id)) await run('docker', ['rm', '-f', id], { timeoutMs: 60000 }).catch(() => undefined)
+      rmSync(cidfile, { force: true })
+    }
+  }
+}
+
+async function workspaceGit(state, workspace, args, extraVolumes = []) {
+  if (state?.curriculum === undefined || !isWithin(join(state.stateDirectory, 'generations'), workspace)) return run('git', args, { cwd: workspace })
+  // Git hooks, filters and fsmonitor are executable configuration in an evolving checkout.
+  return isolatedContainer(state, ['--cpus', String(state.resources.cpus), '--memory', state.resources.memory,
+    '--workdir', '/workspace', '--volume', `${workspace}:/workspace`, ...extraVolumes.flatMap(volume => ['--volume', volume]),
+    '--entrypoint', 'git', state.curriculum.buildImage, '-c', 'safe.directory=/workspace', ...args])
+}
+
+async function resolveCommit(sourceRoot, ref, state) {
+  const { stdout } = await workspaceGit(state, sourceRoot, ['rev-parse', '--verify', `${ref}^{commit}`])
   return stdout
 }
 
 async function recordGenerationCommit(state, sourceWorkspace, generationIdValue, sourceCommit) {
   const branch = `generations/${generationIdValue}`
+  if (state.curriculum !== undefined && isWithin(join(state.stateDirectory, 'generations'), sourceWorkspace)) {
+    const directory = join(state.stateDirectory, 'imports', generationIdValue)
+    mkdirSync(directory, { recursive: true })
+    const exportRef = `refs/fleet-export/${generationIdValue}`
+    await workspaceGit(state, sourceWorkspace, ['update-ref', exportRef, sourceCommit])
+    await workspaceGit(state, sourceWorkspace, ['bundle', 'create', '/exports/source.bundle', exportRef], [`${directory}:/exports`])
+    // A bundle is inert Git object data. No untrusted repository config/hooks execute on the host.
+    await run('git', ['--git-dir', state.repository, 'fetch', '--no-tags', join(directory, 'source.bundle'), `${exportRef}:refs/heads/${branch}`])
+    return branch
+  }
   await run('git', [
     'push', state.repository,
     `${sourceCommit}:refs/heads/${branch}`,
@@ -308,15 +349,11 @@ async function recordGenerationCommit(state, sourceWorkspace, generationIdValue,
   return branch
 }
 
-async function resolveCandidateSourceSnapshot(sourceWorkspace, sourceRef) {
-  const { stdout: statusBefore } = await run('git', ['status', '--porcelain', '--untracked-files=all'], {
-    cwd: sourceWorkspace,
-  })
-  const sourceCommit = await resolveCommit(sourceWorkspace, sourceRef)
-  const headCommit = await resolveCommit(sourceWorkspace, 'HEAD')
-  const { stdout: statusAfter } = await run('git', ['status', '--porcelain', '--untracked-files=all'], {
-    cwd: sourceWorkspace,
-  })
+async function resolveCandidateSourceSnapshot(sourceWorkspace, sourceRef, state) {
+  const { stdout: statusBefore } = await workspaceGit(state, sourceWorkspace, ['status', '--porcelain', '--untracked-files=all'])
+  const sourceCommit = await resolveCommit(sourceWorkspace, sourceRef, state)
+  const headCommit = await resolveCommit(sourceWorkspace, 'HEAD', state)
+  const { stdout: statusAfter } = await workspaceGit(state, sourceWorkspace, ['status', '--porcelain', '--untracked-files=all'])
   assertCandidateSourceSnapshot({
     status: [statusBefore, statusAfter].filter(Boolean).join('\n'),
     sourceCommit,
@@ -326,15 +363,13 @@ async function resolveCandidateSourceSnapshot(sourceWorkspace, sourceRef) {
 }
 
 async function publishCandidateReadySource(state, candidate, payload) {
-  const { stdout: status } = await run('git', ['status', '--porcelain', '--untracked-files=all'], {
-    cwd: candidate.workspace,
-  })
+  const { stdout: status } = await workspaceGit(state, candidate.workspace, ['status', '--porcelain', '--untracked-files=all'])
   if (status) throw new Error(`Candidate ${candidate.id} workspace must be clean before ready:\n${status}`)
   const sourceRef = typeof payload?.sourceRef === 'string' && payload.sourceRef.trim()
     ? payload.sourceRef.trim()
     : 'HEAD'
-  const sourceCommit = await resolveCommit(candidate.workspace, sourceRef)
-  const headCommit = await resolveCommit(candidate.workspace, 'HEAD')
+  const sourceCommit = await resolveCommit(candidate.workspace, sourceRef, state)
+  const headCommit = await resolveCommit(candidate.workspace, 'HEAD', state)
   if (sourceCommit !== headCommit) {
     throw new Error(`Candidate ready source ${sourceCommit} does not match workspace HEAD ${headCommit}`)
   }
@@ -364,7 +399,7 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       : 'candidate team configuration',
   )
   const sourceWorkspace = options.sourceWorkspace ?? state.sourceRoot
-  const sourceCommit = await resolveCommit(sourceWorkspace, sourceRef)
+  const sourceCommit = await resolveCommit(sourceWorkspace, sourceRef, state)
   mkdirSync(generationRoot, { recursive: true })
   const gitBranch = await recordGenerationCommit(state, sourceWorkspace, id, sourceCommit)
   await run('git', [
@@ -378,23 +413,36 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
     await run('git', ['config', 'core.autocrlf', 'true'], { cwd: workspace })
     const excludePath = join(workspace, '.git', 'info', 'exclude')
     writeFileSync(excludePath, `${readFileSync(excludePath, 'utf8')}\n.self-evolve/\n`, 'utf8')
-    await run('pnpm', ['install', '--frozen-lockfile'], { cwd: workspace })
-    await run('pnpm', ['build'], { cwd: workspace })
-    await run('git', ['add', '-u'], { cwd: workspace })
-    await run('git', ['diff', '--cached', '--exit-code', '--stat'], { cwd: workspace })
-    mkdirSync(join(generationRoot, 'packages'), { recursive: true })
-    await run('pnpm', ['pack', '--pack-destination', join(generationRoot, 'packages')], { cwd: workspace })
-    await run('pnpm', [
-      '--filter', 'dsh-agent-fleet-patchouli',
-      'pack', '--pack-destination', join(generationRoot, 'packages'),
-    ], { cwd: workspace })
     const packageDirectory = join(generationRoot, 'packages')
+    mkdirSync(packageDirectory, { recursive: true })
+    const packageCommand = async args => {
+      if (state.curriculum === undefined) return run('pnpm', args, { cwd: workspace })
+      // Package scripts are evolving code: they must not execute with host Docker/data access.
+      return isolatedContainer(state, [
+        '--cpus', String(state.resources.cpus), '--memory', state.resources.memory,
+        '--workdir', '/workspace', '--volume', `${workspace}:/workspace`,
+        '--volume', `${packageDirectory}:/packages`, '--entrypoint', 'pnpm',
+        state.curriculum.buildImage, ...args.map(value => value === packageDirectory ? '/packages' : value),
+      ])
+    }
+    await packageCommand(['install', '--frozen-lockfile'])
+    await packageCommand(['build'])
+    await workspaceGit(state, workspace, ['add', '-u'])
+    await workspaceGit(state, workspace, ['diff', '--cached', '--exit-code', '--stat'])
+    await packageCommand(['pack', '--pack-destination', packageDirectory])
+    await packageCommand([
+      '--filter', 'dsh-agent-fleet-patchouli',
+      'pack', '--pack-destination', packageDirectory,
+    ])
     const packageNames = readdirSync(packageDirectory).filter(name => name.endsWith('.tgz'))
     const packageName = packageNames.find(name => /^dsh-agent-fleet-\d/.test(name))
     const patchouliPackageName = packageNames.find(name => name.startsWith('dsh-agent-fleet-patchouli-'))
     if (packageName === undefined) throw new Error('pnpm pack did not produce a Fleet package')
     if (patchouliPackageName === undefined) throw new Error('pnpm pack did not produce a Fleet Patchouli package')
     const bootstrapDirectory = join(workspace, '.self-evolve')
+    if (state.curriculum !== undefined && existsSync(bootstrapDirectory)) {
+      throw new Error('Candidate source/build must not create the reserved .self-evolve runtime directory')
+    }
     mkdirSync(bootstrapDirectory, { recursive: true })
     if (options.parent !== undefined) {
       const inheritedSource = join(state.generations[options.parent].workspace, '.self-evolve', 'inherited')
@@ -418,6 +466,12 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       `- 控制命令：node /opt/self-evolve/scripts/generation-control.mjs`,
       '- 可以在候选 bootstrap 中改进下一代的工作方式；如需调整角色或团队提示词，复制并修改 `.self-evolve/team.local.json`，再向 `start-candidate` 传入 `--team-config <absolute-file>`。',
       '- 需要动作的代际事件会自动唤醒团队助理；`watch` 只用于人工诊断，不要按时间轮询。',
+      ...(state.curriculum === undefined ? [] : [
+        '- 本轮启用固定训练课程。成为稳定代后，先由平台工程师运行 `node /opt/self-evolve/scripts/training-feedback.mjs` 等待本代训练反馈，再由团队分析失败与协作成本、完成独立审查并改进代码、提交下一代。候选自检阶段无需等待训练。',
+        '- 训练反馈位于只读挂载 `/training-feedback/feedback.json`，只使用其中的训练结果；每代至少形成一条可检验的改进假设与对应证据。验证/测试由宿主隔离执行，不获取题目或成绩，不据此选择候选。',
+        '- 课程模式的宿主 supervisor、Docker 模板、数据划分和评测器由宿主固定；对这些文件的改动只作为待审建议，不自动获得宿主执行权限。',
+        '- `.self-evolve` 是只读宿主状态。修改团队配置时先复制到 `evidence/next-team.json`，修改该副本并通过 `start-candidate --team-config` 提交；不要改写只读原件。',
+      ]),
       '',
     ].join('\n'), 'utf8')
     const token = randomBytes(32).toString('hex')
@@ -518,6 +572,8 @@ async function compose(state, generation, args) {
     '--project-directory', exampleRoot,
     '-f', join(exampleRoot, 'compose.yaml'),
     '-f', join(exampleRoot, 'compose.source.yaml'),
+    ...(state.genericRuntime ? ['-f', join(exampleRoot, 'compose.generic.yaml')] : []),
+    ...(state.curriculum ? ['-f', join(exampleRoot, 'compose.research.yaml')] : []),
     ...args,
   ], { cwd: exampleRoot, env: composeEnvironment(state, generation) })
 }
@@ -748,6 +804,7 @@ function stopGenerationMonitors() {
 }
 
 async function launchGeneration(stateDirectory, state, generation, options = {}) {
+  mkdirSync(join(stateDirectory, 'curriculum-feedback', generation.id), { recursive: true })
   state.generations[generation.id] = generation
   state.eventSequences[generation.id] ??= 0
   writeState(stateDirectory, state)
@@ -841,6 +898,14 @@ async function cleanupOldGenerations(stateDirectory, state) {
 }
 
 async function startCandidate(stateDirectory, state, request) {
+  if (state.curriculum !== undefined) {
+    const ledgerPath = join(stateDirectory, 'curriculum', 'ledger.json')
+    const training = existsSync(ledgerPath) ? JSON.parse(readFileSync(ledgerPath, 'utf8')).generations[state.stable] : undefined
+    if (!training?.trainingComplete || training.sourceCommit !== state.generations[state.stable].sourceCommit) {
+      throw new Error('This generation must complete its host-owned training episodes before starting a candidate')
+    }
+    if (state.nextGeneration > state.curriculum.maxGenerations) throw new Error('The configured generation budget has been reached')
+  }
   const payload = request.payload ?? {}
   const sourceRef = requiredText(payload.sourceRef, 'candidate sourceRef')
   const bootstrap = payload.bootstrap?.content
@@ -848,7 +913,7 @@ async function startCandidate(stateDirectory, state, request) {
   let candidate = state.candidate === null ? undefined : state.generations[state.candidate]
   if (candidate === undefined) {
     const stable = state.generations[state.stable]
-    const sourceCommit = await resolveCandidateSourceSnapshot(stable.workspace, sourceRef)
+    const sourceCommit = await resolveCandidateSourceSnapshot(stable.workspace, sourceRef, state)
     const number = state.nextGeneration
     state.nextGeneration += 1
     candidate = await prepareGeneration(state, number, sourceCommit, bootstrapContent, {
@@ -1150,14 +1215,21 @@ async function stopRun(stateDirectory) {
     if (generation.cleanedAt !== undefined) continue
     generation.phase = 'retiring'
     writeState(stateDirectory, state)
-    await stopGeneration(state, generation, { removeVolumes: true }).catch(() => undefined)
+    try {
+      await stopGeneration(state, generation, { removeVolumes: true })
+    } catch (error) {
+      generation.phase = 'retirement_failed'
+      generation.retirementFailure = error instanceof Error ? error.message : String(error)
+      writeState(stateDirectory, state)
+      continue
+    }
     if (generation.image !== undefined) {
       await run('docker', ['image', 'rm', generation.image]).catch(() => undefined)
       generation.imageCleanedAt = new Date().toISOString()
     }
     generation.phase = 'stopped'
   }
-  state.status = 'stopped'
+  state.status = Object.values(state.generations).some(generation => generation.phase === 'retirement_failed') ? 'stop_failed' : 'stopped'
   state.guardian = null
   state.candidate = null
   state.stoppedAt = new Date().toISOString()
@@ -1206,6 +1278,20 @@ async function initialize(args) {
     eventSequences: {},
     processedRequests: [],
     status: 'running',
+    genericRuntime: args['generic-runtime'] === true,
+  }
+  if (args.curriculum !== undefined) {
+    const originalConfig = requiredAbsolute(args.curriculum, '--curriculum')
+    const curriculum = loadCurriculum(originalConfig, stateDirectory)
+    const configPath = join(stateDirectory, 'curriculum', 'config.json')
+    // Absolute manifest paths survive copying the immutable configuration into run state.
+    const config = JSON.parse(readFileSync(originalConfig, 'utf8'))
+    for (const benchmark of config.benchmarks) benchmark.manifest = resolve(dirname(originalConfig), benchmark.manifest)
+    atomicJson(configPath, config)
+    const controllerRoot = join(stateDirectory, 'controller')
+    cpSync(exampleRoot, controllerRoot, { recursive: true })
+    state.exampleRoot = controllerRoot
+    state.curriculum = { configPath, buildImage: requiredText(args['build-image'] ?? 'dsh-fleet-evolution-controller:20260908', '--build-image'), maxGenerations: curriculum.maxGenerations }
   }
   const generation = await prepareGeneration(
     state,
@@ -1250,7 +1336,7 @@ async function main() {
   throw new Error('Usage: supervisor <init|serve|status|stop> --state <absolute-directory> [options]')
 }
 
-main().catch(error => {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {
   process.stderr.write(`self-evolution supervisor: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
   process.exitCode = 1
 })

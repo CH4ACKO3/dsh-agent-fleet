@@ -1,0 +1,42 @@
+# Linux host only: absolute paths must be identical inside/outside the controller.
+# This trusted controller alone receives Docker authority; Agent generations do not.
+name: ${SELF_EVOLVE_CONTROLLER_PROJECT:-fleet-evolution-controller}
+services:
+  controller:
+    build:
+      context: ../..
+      dockerfile: examples/self-evolving-team/controller.Dockerfile
+    image: ${SELF_EVOLVE_CONTROLLER_IMAGE:-dsh-fleet-evolution-controller:20260908}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 120s
+    hostname: fleet-evolution-controller
+    cpus: 2
+    mem_limit: 2g
+    environment:
+      SELF_EVOLVE_STATE: ${SELF_EVOLVE_STATE:?absolute state path required}
+      SELF_EVOLVE_SOURCE: ${SELF_EVOLVE_SOURCE:?absolute source path required}
+      SELF_EVOLVE_REF: ${SELF_EVOLVE_REF:-evaluation}
+      SELF_EVOLVE_CURRICULUM: ${SELF_EVOLVE_CURRICULUM:?absolute host curriculum file required}
+      SELF_EVOLVE_BUILD_IMAGE: ${SELF_EVOLVE_CONTROLLER_IMAGE:-dsh-fleet-evolution-controller:20260908}
+      SELF_EVOLVE_BASE_IMAGE: ${SELF_EVOLVE_BASE_IMAGE:-dsh-fleet-evolution-base:20260908}
+      SELF_EVOLVE_HOST_PORT: ${SELF_EVOLVE_HOST_PORT:-4120}
+      SELF_EVOLVE_CPUS: ${SELF_EVOLVE_CPUS:-4}
+      SELF_EVOLVE_MEMORY: ${SELF_EVOLVE_MEMORY:-8g}
+      SELF_EVOLVE_PROVIDER_ENV_FILE: ${SELF_EVOLVE_PROVIDER_ENV_FILE:-/dev/null}
+      FLEET_MODEL_PROVIDER: ${FLEET_MODEL_PROVIDER:-deepseek}
+      FLEET_MODEL_NAME: ${FLEET_MODEL_NAME:-deepseek-chat}
+      FLEET_MODEL_API: ${FLEET_MODEL_API:-openai-completions}
+      FLEET_MODEL_BASE_URL: ${FLEET_MODEL_BASE_URL:-https://api.deepseek.com/v1}
+      FLEET_MODEL_API_KEY_ENV: ${FLEET_MODEL_API_KEY_ENV:-DEEPSEEK_API_KEY}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SELF_EVOLVE_STATE}:${SELF_EVOLVE_STATE}
+      - ${SELF_EVOLVE_SOURCE}:${SELF_EVOLVE_SOURCE}:ro
+      - ${SELF_EVOLVE_BENCHMARK_ROOT:?absolute trusted benchmark root required}:${SELF_EVOLVE_BENCHMARK_ROOT}:ro
+    healthcheck:
+      test: ["CMD", "node", "/opt/controller/scripts/container-controller.mjs", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30m

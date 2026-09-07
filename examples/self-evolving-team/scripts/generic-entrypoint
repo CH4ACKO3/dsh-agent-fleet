@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+profile_dir="$DSH_HOME/profiles/web"
+mkdir -p "$DSH_HOME" /workspace /data/.patchouli
+chmod 0700 /data/.patchouli
+if [ ! -f "$DSH_HOME/node_modules/dsh-harmony-bootstrap/installation.json" ]; then
+  npm_config_global=true npm_config_prefix=/usr/local node /usr/local/lib/node_modules/dsh-harmony/scripts/postinstall.cjs
+fi
+if [ ! -f "$profile_dir/.fleet-generic-ready" ]; then
+  dsh plugin --profile web install
+  printf 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  dsh-harmony: true\n' > "$profile_dir/pnpm-workspace.yaml"
+  pnpm --dir "$profile_dir" add --force \
+    dsh-harmony@0.8.10 the-binding-of-dsh@0.1.7 \
+    /opt/dsh/plugins/dsh-agent-fleet.tgz /opt/dsh/plugins/dsh-agent-fleet-patchouli.tgz \
+    dsh-patchouli@0.1.6 dsh-patchouli-native-context-service@0.1.6
+  node /opt/self-evolve/scripts/configure-generic-profile.mjs "$profile_dir/package.json" "$profile_dir/cordis.patch.yml"
+  touch "$profile_dir/.fleet-generic-ready"
+fi
+node /opt/dsh/tcp-proxy.mjs &
+exec dsh web --host 127.0.0.1 --port "$DSH_PORT" --no-open --trusted-host "$DSH_TRUSTED_HOST" "$DSH_TRUSTED_HOST_ALT"

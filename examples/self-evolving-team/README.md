@@ -1,5 +1,33 @@
 # Fleet 自我迭代蓝绿团队
 
+## 固定课程与服务器部署（2026-09-08）
+
+新课程模式在每个稳定代执行训练抽样，将题目、解答、有限轨迹和评分导出到 `/training-feedback` 只读挂载，然后由团队分析流程、修改自身并提交下一代。验证和密封测试分别按代数周期执行，只留在宿主 `curriculum/episodes` 中，不参与候选晋升。记录的是软件与流程迭代；不能据此声称模型权重完成训练。
+
+宿主 `--curriculum FILE` 开启此模式。`curriculum.example.json` 展示多 benchmark 接口；它是配置模板，必须换成服务器真实路径、明确分区和可用的逐代镜像构建。四个 ALE 场景等小样本必须显式指定 `split`，否则固定 hash 可能产生空验证集；四题只可用于编排冒烟。离线 HorizonMath 数值题缺官方 compliance judge 时应保留 indeterminate，先使用有完整离线评分的 construction/benchmark 子集验证编排。
+
+每个 benchmark 的宿主命令接收 `--job` JSON，返回 `result.json`，至少包含 `status: completed`、有限数值 `score`、`taskId`、`split`、`sourceCommit` 和 `feedback`。`buildCommand` 由宿主固定，支持 `{source}`、`{commit}`、`{generation}`、`{image}`；镜像 revision 必须匹配冻结 commit。不能给旧镜像换标签冒充新代。
+
+Linux 服务器上构建公开依赖的控制器和通用运行底座：
+
+```sh
+docker build -f examples/self-evolving-team/controller.Dockerfile -t dsh-fleet-evolution-controller:20260908 .
+docker build -f examples/self-evolving-team/base.Dockerfile -t dsh-fleet-evolution-base:20260908 .
+```
+
+在仓库外创建部署 env 文件，指定 `SELF_EVOLVE_STATE`、`SELF_EVOLVE_SOURCE`、`SELF_EVOLVE_REF`（固定 commit）、`SELF_EVOLVE_CURRICULUM`、`SELF_EVOLVE_BENCHMARK_ROOT`、`SELF_EVOLVE_PROVIDER_ENV_FILE`。所有路径必须在宿主与控制器容器内完全一致。模型用 `FLEET_MODEL_PROVIDER`、`FLEET_MODEL_NAME`、`FLEET_MODEL_API`、`FLEET_MODEL_BASE_URL`、`FLEET_MODEL_API_KEY_ENV` 配置；凭据来自服务器自己的 provider env 文件，且该文件应位于显式挂载的 benchmark 根目录中。通用底座不包含私有 provider 包。
+
+```sh
+docker compose --env-file /absolute/private/deployment.env -f examples/self-evolving-team/compose.controller.yaml up -d --build
+docker compose --env-file /absolute/private/deployment.env -f examples/self-evolving-team/compose.controller.yaml logs --tail 100
+```
+
+控制器自动初始化缺失的 run；已有 `running` 状态则恢复监听和课程任务。`stopped/failed/stop_failed` 状态保留证据并要求宿主诊断，不静默重新开始。课程已完成的 episode 不重跑，失败最多重试两次；缺官方分数不会变成通过。停止控制器与停止整轮不同：Compose `down` 只停止控制器；完整收尾需先在控制器内执行 `node /opt/controller/scripts/supervisor.mjs stop --state <state>`，确认成功后再 `down`。
+
+课程模式冻结宿主 supervisor/Compose 模板，候选只获得无 Docker socket 的 Agent 与构建环境。`.self-evolve` 的宿主身份与交接文件只读；修改团队模板应先复制到 `evidence/next-team.json` 后通过控制命令提交。Git hooks、filters、fsmonitor 也在隔离构建容器内处理，宿主只导入 bundle。训练/验证/测试数据 seal 包含题目正文，改题需要新 run。`retainGenerations` 只回收本 run 记录的旧镜像与冻结源码快照，保留 ledger、Git 历史与密封证据。
+
+验证：`node --test tests/self-evolution-curriculum.test.mjs`。部署与剩余限制见 `docs/reports/evolution-runtime-20260908.md`；真实 provider 首代与 ALE 原生 runner 尚需单独验收，控制器健康不代表完成模型训练或能力提升。
+
 这个示例从内置“中型软件工程团队”派生一个持续改进团队。每一代 DSH/Fleet 运行在独立 Docker Compose 项目、数据卷和完整 Git clone 中；宿主监督器是唯一拥有 Docker 生命周期权限的进程。
 
 它解决的不是“让 Agent 自由重写并重启自己”，而是保证下面这条链始终成立：

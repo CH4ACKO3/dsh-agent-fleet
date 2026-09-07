@@ -5,6 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${SELF_EVOLVE_BASE_IMAGE:-local/deepseek-harness-fleet:dev-baseline-db42baa}
     image: ${SELF_EVOLVE_IMAGE:-local/dsh-agent-fleet-self-evolve:latest}
     pull_policy: never
     restart: "no"
@@ -26,7 +28,7 @@ services:
       DSH_TRUSTED_HOST: 127.0.0.1:${SELF_EVOLVE_HOST_PORT}
       DSH_TRUSTED_HOST_ALT: localhost:${SELF_EVOLVE_HOST_PORT}
       FLEET_SOURCE_COMMIT: ${FLEET_SOURCE_COMMIT:?FLEET_SOURCE_COMMIT is required}
-      DEEPSEEK_FLASH_API_KEY: ${DEEPSEEK_FLASH_API_KEY:?DEEPSEEK_FLASH_API_KEY is required}
+      DEEPSEEK_FLASH_API_KEY: ${DEEPSEEK_FLASH_API_KEY:-}
       FLEET_AUTO_BOOTSTRAP_ID: ${FLEET_AUTO_BOOTSTRAP_ID:?FLEET_AUTO_BOOTSTRAP_ID is required}
       FLEET_AUTO_TEAM_CONFIG: /opt/self-evolve/team.local.json
       FLEET_AUTO_BOOTSTRAP_TASK: /workspace/.self-evolve/bootstrap.md
@@ -42,6 +44,10 @@ services:
       - dsh-data:/data
       - patchouli-data:/data/.patchouli
       - workspace-node-modules:/workspace/node_modules
+      - type: bind
+        source: ${SELF_EVOLVE_TRAINING_EXPORT:?host-owned feedback path required}
+        target: /training-feedback
+        read_only: true
       - type: bind
         source: ${SELF_EVOLVE_WORKSPACE:?SELF_EVOLVE_WORKSPACE must be an absolute host path}
         target: /workspace

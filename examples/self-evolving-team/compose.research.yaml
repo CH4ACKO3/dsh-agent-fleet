@@ -1,0 +1,13 @@
+services:
+  dsh:
+    environment:
+      FLEET_AUTO_READY_FILE: /data/fleet-bootstrap-ready.json
+    healthcheck:
+      test: ["CMD-SHELL", "if test -f /data/fleet-bootstrap-ready.json.error.json; then exit 1; fi; test -f /data/fleet-bootstrap-ready.json && node -e \"fetch('http://127.0.0.1:3081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+    volumes:
+      # Host manifests/tokens/handoffs cannot be replaced with Agent-created symlinks.
+      # The separately mounted control queue below this path retains its existing protocol permissions.
+      - type: bind
+        source: ${SELF_EVOLVE_WORKSPACE}/.self-evolve
+        target: /workspace/.self-evolve
+        read_only: true

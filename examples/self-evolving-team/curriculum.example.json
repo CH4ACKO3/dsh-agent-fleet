@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "seed": "fleet-rsi-20260908-v1",
+  "samplePerBenchmark": 2,
+  "validationEvery": 5,
+  "testEvery": 20,
+  "maxGenerations": 100,
+  "maxAttempts": 2,
+  "retainGenerations": 2,
+  "timeoutMs": 3600000,
+  "intervalMs": 5000,
+  "benchmarks": [
+    {
+      "id": "horizonmath",
+      "manifest": "/data/zzr/dsh-benchmarks/horizonmath/manifest.json",
+      "image": "dsh-fleet-evaluation:{commit}",
+      "buildCommand": ["docker", "build", "--file", "/data/zzr/dsh-agent-fleet-evaluation-20260908/source/evaluation/runtime.Dockerfile", "--build-arg", "FLEET_REVISION={commit}", "--tag", "{image}", "{source}"],
+      "command": ["python3", "/data/zzr/dsh-agent-fleet-evaluation-20260908/evaluation/batch-run.py", "--job", "{job}"]
+    },
+    {
+      "id": "ale",
+      "manifest": "/data/zzr/dsh-benchmarks/ale/manifest.json",
+      "image": "ale-fleet:{commit}",
+      "deploymentNote": "Supply an ALE-native image actually built from this source commit, and expose its official runner/dependencies to the trusted controller before enabling this benchmark.",
+      "command": ["python3", "/data/zzr/dsh-agent-fleet-evaluation-20260908/evaluation/batch-run.py", "--job", "{job}"]
+    }
+  ]
+}
