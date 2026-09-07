@@ -2,6 +2,9 @@
 # Mount the interpreter tree too: the ALE venv's Python is an absolute symlink.
 services:
   controller:
+    # Linux host networking preserves native ALE's localhost:<published CUA port>.
+    # Only the trusted Docker controller shares the host network, never the Agent.
+    network_mode: host
     volumes:
       - ${SELF_EVOLVE_ALE_ROOT:?official ALE checkout required}:${SELF_EVOLVE_ALE_ROOT}:ro
       - ${SELF_EVOLVE_ALE_PYTHON_ROOT:?pinned uv interpreter tree required}:${SELF_EVOLVE_ALE_PYTHON_ROOT}:ro

@@ -26,7 +26,9 @@ docker compose --env-file /absolute/private/deployment.env -f examples/self-evol
 
 课程模式冻结宿主 supervisor/Compose 模板，候选只获得无 Docker socket 的 Agent 与构建环境。`.self-evolve` 的宿主身份与交接文件只读；修改团队模板应先复制到 `evidence/next-team.json` 后通过控制命令提交。Git hooks、filters、fsmonitor 也在隔离构建容器内处理，宿主只导入 bundle。训练/验证/测试数据 seal 包含题目正文，改题需要新 run。`retainGenerations` 只回收本 run 记录的旧镜像与冻结源码快照，保留 ledger、Git 历史与密封证据。
 
-验证：`node --test evaluation/curriculum.test.mjs`。部署与剩余限制见 `docs/reports/evolution-runtime-20260908.md`；真实 provider 首代与 ALE 原生 runner 尚需单独验收，控制器健康不代表完成模型训练或能力提升。
+服务器现有 ALE 可额外叠加 `compose.controller.ale.yaml`；它只读挂载官方 runner 与 uv Python，并为可信 controller 启用 Linux host 网络，使 native ALE 的 localhost 动态 CUA 端口可达。Agent 容器不继承此网络权限。
+
+验证：`node --test evaluation/*.test.mjs`。服务器首代已获得真实 provider 响应、完成两项有界训练任务调度并自动停止；两项均未取得有效成绩，正式 Fleet Team 仍未进入工作闭环。ALE host 网络连通性 fixture 已通过，完整 episode 未复跑。具体状态、精确版本、日志和恢复入口见 `docs/reports/evolution-runtime-20260908.md`；控制器健康不代表学习成功或能力提升。
 
 以下原有说明描述未传入 `--curriculum` 的 legacy 自迭代模式。课程模式以顶部的冻结宿主控制面、只读 `.self-evolve`、隔离 Git/构建和密封评测规则为准，候选对 Dockerfile/Compose/supervisor 的修改只作为待审建议。
 

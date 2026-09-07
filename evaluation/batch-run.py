@@ -8,6 +8,7 @@ import math
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -24,6 +25,83 @@ def write_json(path: Path, value: dict):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def checked_episode_path(root: Path, path: Path) -> Path:
+    """Reject links and escapes before reading evidence from an ended episode."""
+    root = root.absolute()
+    path = path.absolute()
+    relative = path.relative_to(root)
+    current = root
+    for part in (None, *relative.parts):
+        if part is not None:
+            current /= part
+        if current.is_symlink():
+            raise ValueError("symlink evidence path")
+    resolved = path.resolve(strict=True)
+    resolved.relative_to(root.resolve(strict=True))
+    return resolved
+
+
+def normalize_ale_evidence(output: Path) -> dict:
+    """Export only the unique episode's explicit Fleet evidence, never raw sessions."""
+    evidence = {"copied": [], "rejected": {}}
+    official = output / "official"
+    if not official.exists() and not official.is_symlink():
+        return evidence
+    try:
+        checked_episode_path(output, official)
+        sources = []
+        for directory, children, _ in os.walk(official, followlinks=False):
+            if Path(directory).name == "origin_log" and "dsh-fleet" in children:
+                sources.append(Path(directory) / "dsh-fleet")
+            children[:] = [name for name in children if not (Path(directory) / name).is_symlink()]
+        if len(sources) != 1:
+            evidence["sourceStatus"] = "missing" if not sources else "ambiguous"
+            return evidence
+        source = checked_episode_path(output, sources[0])
+        destination = output / "results"
+        if destination.is_symlink():
+            raise ValueError("symlink results directory")
+        destination.mkdir(exist_ok=True)
+        checked_episode_path(output, destination)
+    except (OSError, ValueError):
+        evidence["sourceStatus"] = "unsafe"
+        return evidence
+    evidence["sourceStatus"] = "unique"
+    for relative, target, limit in (("dsh-fleet-task.md", "task.md", 64 * 1024),
+                                     ("dsh-fleet-evaluation/events.jsonl", "events.jsonl", 64 * 1024),
+                                     ("dsh-fleet-evaluation/answer.txt", "answer.txt", 32 * 1024)):
+        path = source / relative
+        if not path.exists() and not path.is_symlink():
+            continue
+        try:
+            path = checked_episode_path(output, path)
+            if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_size > limit:
+                raise ValueError("not a bounded regular file")
+            with path.open("rb") as stream:
+                content = stream.read(limit + 1)
+            if len(content) > limit:
+                raise ValueError("evidence exceeds size limit")
+            decoded = content.decode("utf-8")
+            if not decoded.strip() or "\0" in decoded:
+                raise ValueError("empty or binary evidence")
+            if target == "events.jsonl" and any(not isinstance(json.loads(line), dict) for line in decoded.splitlines() if line.strip()):
+                raise ValueError("events must be JSON objects")
+            target_path = destination / target
+            if target_path.is_symlink():
+                raise ValueError("symlink evidence destination")
+            temporary = destination / (target + "." + uuid.uuid4().hex + ".tmp")
+            try:
+                with temporary.open("xb") as stream:
+                    stream.write(content)
+                temporary.replace(target_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            evidence["copied"].append(target)
+        except (OSError, ValueError):
+            evidence["rejected"][target] = "unsafe_or_invalid"
+    return evidence
 
 
 def run(command: list[str], log: Path, timeout: float, cwd: Path | None = None, env: dict[str, str] | None = None) -> int:
@@ -122,7 +200,7 @@ def ale(job: dict, output: Path) -> dict:
     environment_file = output / "environment.yaml"
     environment_file.write_text(yaml.safe_dump(environment))
     config.update(environment=str(environment_file), concurrency=1, auto_resume=False, max_attempts=1,
-                  cleanup_mode="delete", wall_time_s=int(job.get("timeoutMs", 3600000) / 1000),
+                  cleanup_mode="delete", wall_time_s=math.ceil(job.get("timeoutMs", 3600000) / 1000) + 30,
                   output={"root": str(output / "official")})
     if not Path(config["agent"]).is_absolute():
         config["agent"] = str((source.parent / config["agent"]).resolve())
@@ -150,14 +228,15 @@ def ale(job: dict, output: Path) -> dict:
     exit_code = run(command, output / "agent.log", job.get("timeoutMs", 3600000) / 1000 + 120, cwd=root, env=environment_vars)
     if job.get("dryRun"):
         return {"status": "dry_run" if exit_code == 0 else "failed", "exitCode": exit_code}
+    evidence = normalize_ale_evidence(output)
     result_files = list((output / "official").rglob("eval_result.json"))
     if exit_code == 0 and len(result_files) == 1:
         result = json.loads(result_files[0].read_text())
         score = result.get("score")
         if result.get("eval_status") == "success" and type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 1:
-            return {"status": "completed", "score": score, "feedback": {"evalStatus": result.get("eval_status")}}
+            return {"status": "completed", "score": score, "feedback": {"evalStatus": result.get("eval_status"), "evidence": evidence}}
     return {"status": "timeout" if exit_code == 124 else "failed", "exitCode": exit_code,
-            "feedback": {"errorType": "missing_or_ambiguous_official_result"}}
+            "feedback": {"errorType": "missing_or_ambiguous_official_result", "evidence": evidence}}
 
 
 def execute_job(job: dict) -> dict:

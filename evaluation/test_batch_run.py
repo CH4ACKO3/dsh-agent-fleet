@@ -15,6 +15,82 @@ spec.loader.exec_module(batch)
 
 
 class BatchTests(unittest.TestCase):
+    def test_ale_evidence_exports_only_unique_fleet_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "official/run/origin_log/dsh-fleet"
+            evaluation = source / "dsh-fleet-evaluation"
+            evaluation.mkdir(parents=True)
+            (source / "dsh-fleet-task.md").write_text("actual task")
+            (evaluation / "events.jsonl").write_text('{"type":"work_started"}\n')
+            (evaluation / "answer.txt").write_text("actual answer")
+            (source / "rawsession.jsonl").write_text("private raw session")
+            (root / "official/events.jsonl").write_text("native ALE events")
+            evidence = batch.normalize_ale_evidence(root)
+            self.assertEqual(evidence["sourceStatus"], "unique")
+            self.assertEqual(set(evidence["copied"]), {"task.md", "events.jsonl", "answer.txt"})
+            self.assertEqual((root / "results/task.md").read_text(), "actual task")
+            self.assertEqual((root / "results/events.jsonl").read_text(), '{"type":"work_started"}\n')
+            self.assertEqual(len(list((root / "results").iterdir())), 3)
+
+    def test_ale_evidence_rejects_ambiguous_sources_and_does_not_use_native_events(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for run in ("one", "two"):
+                source = root / "official" / run / "origin_log/dsh-fleet"
+                source.mkdir(parents=True)
+                (source / "dsh-fleet-task.md").write_text(run)
+            self.assertEqual(batch.normalize_ale_evidence(root)["sourceStatus"], "ambiguous")
+            self.assertFalse((root / "results").exists())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "official/run/origin_log/dsh-fleet"
+            source.mkdir(parents=True)
+            (source / "dsh-fleet-task.md").write_text("actual task")
+            (root / "official/events.jsonl").write_text('{"type":"native_only"}\n')
+            self.assertEqual(batch.normalize_ale_evidence(root)["copied"], ["task.md"])
+            self.assertFalse((root / "results/events.jsonl").exists())
+
+    def test_ale_evidence_rejects_oversize_and_invalid_events(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "official/run/origin_log/dsh-fleet"
+            evaluation = source / "dsh-fleet-evaluation"
+            evaluation.mkdir(parents=True)
+            (source / "dsh-fleet-task.md").write_bytes(b"a" * (64 * 1024 + 1))
+            (evaluation / "answer.txt").write_bytes(b"a" * (32 * 1024 + 1))
+            (evaluation / "events.jsonl").write_text("not JSON\n")
+            evidence = batch.normalize_ale_evidence(root)
+            self.assertEqual(evidence["copied"], [])
+            self.assertEqual(set(evidence["rejected"]), {"task.md", "events.jsonl", "answer.txt"})
+
+    def test_ale_evidence_rejects_path_escape_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "episode"
+            source = root / "official/run/origin_log/dsh-fleet"
+            source.mkdir(parents=True)
+            outside = parent / "heldout.txt"
+            outside.write_text("heldout")
+            with self.assertRaises(ValueError):
+                batch.checked_episode_path(root, outside)
+            try:
+                (source / "dsh-fleet-task.md").symlink_to(outside)
+            except OSError:
+                self.skipTest("symlink creation unavailable")
+            evidence = batch.normalize_ale_evidence(root)
+            self.assertEqual(evidence["copied"], [])
+            self.assertIn("task.md", evidence["rejected"])
+            (source / "dsh-fleet-task.md").unlink()
+            (source / "dsh-fleet-evaluation").symlink_to(parent, target_is_directory=True)
+            (parent / "answer.txt").write_text("heldout answer")
+            evidence = batch.normalize_ale_evidence(root)
+            self.assertIn("answer.txt", evidence["rejected"])
+            self.assertFalse((root / "results/answer.txt").exists())
+            (root / "results").rmdir()
+            (root / "results").symlink_to(parent, target_is_directory=True)
+            self.assertEqual(batch.normalize_ale_evidence(root)["sourceStatus"], "unsafe")
+
     def test_ale_env_file_is_literal_and_forwarded(self):
         try:
             import yaml
@@ -30,9 +106,12 @@ class BatchTests(unittest.TestCase):
             output = root / "output"
             output.mkdir()
             with patch.object(batch, "run", return_value=0) as execute:
-                result = batch.ale({"task": {"experiment": str(root / "experiment.yaml")}, "envFile": str(secret), "dryRun": True}, output)
+                result = batch.ale({"task": {"experiment": str(root / "experiment.yaml"), "agentPatch": "/opt/test.patch.yml"},
+                                    "envFile": str(secret), "dryRun": True, "timeoutMs": 300001}, output)
             self.assertEqual(result["status"], "dry_run")
             self.assertEqual(execute.call_args.kwargs["env"]["MODEL_TOKEN"], "literal$(not-a-command)")
+            self.assertEqual(yaml.safe_load((output / "experiment.yaml").read_text())["wall_time_s"], 331)
+            self.assertEqual(yaml.safe_load((output / "agent.yaml").read_text())["config"]["timeout_ms"], 300001)
 
     def test_timeout_terminates_child(self):
         with tempfile.TemporaryDirectory() as temporary:

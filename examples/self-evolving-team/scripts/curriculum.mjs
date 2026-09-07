@@ -210,7 +210,9 @@ function exportTrainingEvidence(task, output, exportRoot, key) {
   mkdirSync(directory, { recursive: true })
   const files = []
   const inputs = [
-    ...(task.task ? [{ root: dirname(task.task), path: task.task, name: 'task.md', limit: 64000 }] : []),
+    task.task
+      ? { root: dirname(task.task), path: task.task, name: 'task.md', limit: 64000 }
+      : { root: output, path: join(output, 'results', 'task.md'), name: 'task.md', limit: 64000 },
     { root: output, path: join(output, 'results', 'answer.txt'), name: 'answer.txt', limit: 32000 },
     { root: output, path: join(output, 'results', 'events.jsonl'), name: 'events.jsonl', limit: 64000 },
     { root: output, path: join(output, 'workspace', 'solution.py'), name: 'solution.py', limit: 32000 },
