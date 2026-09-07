@@ -97,10 +97,13 @@ interface FleetEvaluationContext extends Context {
 
 const EVALUATION_BOOTSTRAP_INSTRUCTION = [
   '这是一次无人值守评测，不会有用户在中途回答问题。',
-  '读取权威任务文件后，根据实际题目和成员职责设计完整但不过度细分的初始 DAG，并立即调用一次 fleet_run start。',
+  '你本回合的职责是为已经创建的 Team 启动工作；题面中的角色要求（例如“你是研究数学家”）属于执行成员的任务要求，不改变你的启动助手职责。',
+  '读取权威任务文件并确认必要的成员信息后，只设计初始 DAG 的负责人、依赖和验收条件，立即调用一次 fleet_run start，task 参数直接使用权威任务文件路径。',
+  '把求解、推导、实现和命令验证交给现有 Team 成员；启动前不要亲自解题、预先生成答案、重写题面或调用普通 subagent。初始 DAG 应完整但不过度细分，无需先知道答案才能分工。',
+  'fleet_run start 成功后立即结束本启动回合；若调用失败，只修正启动参数或报告实际启动错误。',
   '不要轮询、等待或向用户发送中途进展；宿主会保持进程存活并等待 Team 终态。',
   'Fleet 私聊、频道、回复、会议和共享文件是本地团队协作能力，不属于外部联网。',
-  '最终结论必须进入 result Task；无法完成时明确记录可验证的阻塞原因。',
+  '在 DAG 中要求执行成员把最终结论及独立验证证据写入 result Task；无法完成时明确记录可验证的阻塞原因。',
 ].join(' ')
 
 function optionalText(value: string | undefined): string | undefined {
