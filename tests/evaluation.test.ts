@@ -297,24 +297,11 @@ describe('Fleet evaluation package profile', () => {
     expect(existsSync(join(output, 'fleet-state', `${team.id}.json`))).toBe(true)
   })
 
-  it('ships a patch that replaces the stock single-Agent headless runner', () => {
-    const patch = readFileSync(resolve('evaluation/headless.patch.yml'), 'utf8')
+  it('exports the generic runner without enabling it from the default entry', () => {
     const packageJson = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {
       exports: Record<string, unknown>
-      files: string[]
     }
-    expect(patch).toContain('id: headless-runner')
-    expect(patch).toContain('disabled: true')
-    expect(patch).toContain('name: dsh-agent-fleet/evaluation')
     expect(packageJson.exports).toHaveProperty('./evaluation')
-    expect(packageJson.files).toContain('evaluation/**/*.yml')
-  })
-
-  it('keeps the ALE launcher free of model-driven polling', () => {
-    const deployer = readFileSync(resolve('integrations/agents-last-exam/dsh_fleet/deployer.py'), 'utf8')
-    expect(deployer).toContain('FLEET_EVAL_TEAM_CONFIG')
-    expect(deployer).toContain('FLEET_EVAL_TIMEOUT_MS')
-    expect(deployer).not.toContain('fleet_run wait')
-    expect(deployer).not.toContain('_launcher_prompt')
+    expect(readFileSync(resolve('src/index.ts'), 'utf8')).not.toContain('./evaluation.js')
   })
 })
