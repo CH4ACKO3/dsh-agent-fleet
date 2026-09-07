@@ -84,8 +84,8 @@ export const DEFAULT_FLEET_TURN_REMINDERS: FleetTurnReminderLists = {
       id: 'audience-scope', cooldownTurns: 5,
       tools: ['fleet_send', 'fleet_reply'], keywords: ['channel', 'private', '频道', '私聊'],
       text: localized(
-        'Use private messages for one or a few members; post to a Channel only when its whole audience needs the content.',
-        '只需一人或少数成员处理时使用私聊；仅当整个频道都需要时才发到频道。',
+        'Use private messages for narrow dependencies. Share one concise Channel update when a decision, blocker, or verified result changes work for its whole audience; otherwise keep the evidence in the owning Task.',
+        '窄依赖使用私聊。决策、阻塞或已验证结果影响全频道工作时，发布一条简短更新；其他证据留在所属 Task。',
       ),
     },
     {

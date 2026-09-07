@@ -171,7 +171,7 @@ export function installMessageTools(
       parameters: {
         to: { type: 'string', required: true, description: options.directReplyByDefault ? 'Use @fleet-name or @agent-id for a private response request, #channel for Team-visible history, or meeting:id. A unique bare member name or id is normalized to a private target.' : 'Use @fleet-name or @agent-id for private one-member work, #channel for a Team-visible broadcast, or meeting:id. A unique bare member name or id is normalized to a private target. A direct target delivers the full message but creates no Reply Task unless that recipient is also mentioned in the text or mentions parameter.' },
         message: { type: 'string', required: true, description: 'Self-contained message text.' },
-        mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets, merged with valid @Name or @member-id mentions parsed from the text. A direct message may mention only its recipient.' },
+        mentions: { type: 'array', items: { type: 'string' }, description: 'Optional structural Reply Task targets, merged with valid @Name or @member-id mentions in prose. Code spans, fenced code, quoted lines, and escaped mentions are reference text, not response requests. A direct message may mention only its recipient.' },
         reply_mode: { type: 'string', enum: ['required', 'optional'], description: 'For foreground assistants, direct messages default to required. Set optional only when no response is wanted.' },
         reply_to: { type: 'string', description: 'Stable Fleet message id in the same conversation.' },
         resources: { type: 'array', items: { type: 'string' }, description: 'Resource ids supplied by the Resources module.' },

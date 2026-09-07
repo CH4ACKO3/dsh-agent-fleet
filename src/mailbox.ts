@@ -50,9 +50,12 @@ interface UserRoute {
   readonly conversationId: string
 }
 
+const MAX_RECENT_INBOUND_MESSAGES = 4_096
+
 export class FleetMailboxService implements FleetMailboxPort {
   private readonly listeners = new Set<(message: FleetMailboxGatewayOutbound) => Promise<void>>()
   private readonly routes = new Map<string, UserRoute>()
+  private readonly recentInbound = new Set<string>()
   private readonly stopCoordination: () => void
   private closed = false
 
@@ -69,16 +72,34 @@ export class FleetMailboxService implements FleetMailboxPort {
     const payload = parseUserMessage(message.payload)
     const run = this.resolveRun(payload.teamId)
     const assistant = resolveAssistant(run, payload.assistantId)
-    this.routes.set(routeKey(run.id, assistant.view.id), {
+    const messageKey = JSON.stringify([
+      message.connector, payload.externalUserId, payload.conversationId, payload.messageId,
+      run.id, assistant.view.id,
+    ])
+    if (this.recentInbound.has(messageKey)) return
+    const route = routeKey(run.id, assistant.view.id)
+    const previousRoute = this.routes.get(route)
+    this.routes.set(route, {
       connector: message.connector,
       conversationId: payload.conversationId,
     })
-    this.runs.sendUserConversationMessage({
-      runId: run.id,
-      to: `@${assistant.view.id}`,
-      text: payload.text,
-      delivery: 'wakeup',
-    })
+    this.recentInbound.add(messageKey)
+    try {
+      this.runs.sendUserConversationMessage({
+        runId: run.id,
+        to: `@${assistant.view.id}`,
+        text: payload.text,
+        delivery: 'wakeup',
+      })
+    } catch (error) {
+      this.recentInbound.delete(messageKey)
+      if (previousRoute === undefined) this.routes.delete(route)
+      else this.routes.set(route, previousRoute)
+      throw error
+    }
+    if (this.recentInbound.size > MAX_RECENT_INBOUND_MESSAGES) {
+      this.recentInbound.delete(this.recentInbound.values().next().value!)
+    }
   }
 
   onOutbound(listener: (message: FleetMailboxGatewayOutbound) => Promise<void>): () => void {
@@ -91,6 +112,7 @@ export class FleetMailboxService implements FleetMailboxPort {
     this.closed = true
     this.stopCoordination()
     this.routes.clear()
+    this.recentInbound.clear()
     this.listeners.clear()
   }
 
@@ -109,7 +131,8 @@ export class FleetMailboxService implements FleetMailboxPort {
   private coordination(runId: string, event: FleetCoordinationEvent): void {
     if (this.closed || event.type !== 'message' || event.message.conversation !== `@fleet-user:${runId}`) return
     const run = this.runs.status(runId)
-    const assistant = run.assistants.find(candidate => candidate.sessionId === event.message.from)
+    const assistant = run.assistants.find(candidate =>
+      candidate.view.id === event.message.from || candidate.sessionId === event.message.from)
     if (assistant === undefined) return
     const route = this.routes.get(routeKey(runId, assistant.view.id))
     if (route === undefined) return
