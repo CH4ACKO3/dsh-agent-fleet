@@ -1,3 +1,6 @@
+# Container entrypoints must remain executable after a Windows checkout.
 *.sh text eol=lf
 *.py text eol=lf
+**/Dockerfile text eol=lf
 *.Dockerfile text eol=lf
+examples/**/scripts/dsh-container-entrypoint text eol=lf

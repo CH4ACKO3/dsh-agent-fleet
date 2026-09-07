@@ -6,6 +6,8 @@ coverage/
 .fleet/
 docs/local/
 *.log
+__pycache__/
+*.py[cod]
 .env
 .env.*
 !.env.example
