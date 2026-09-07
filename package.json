@@ -18,6 +18,10 @@
       "types": "./lib/client/index.d.ts",
       "default": "./lib/client.js"
     },
+    "./evaluation": {
+      "types": "./lib/evaluation.d.ts",
+      "default": "./lib/evaluation.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

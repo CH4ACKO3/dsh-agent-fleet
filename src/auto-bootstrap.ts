@@ -22,6 +22,8 @@ export interface FleetAutoBootstrapConfiguration {
   readonly provider?: string
   readonly model?: string
   readonly maxTokens?: number
+  /** Additional host-owned instruction appended to the one bootstrap message. */
+  readonly bootstrapInstruction?: string
   readonly controlDirectory?: string
   readonly generation?: string
 }
@@ -404,6 +406,10 @@ function bootstrapMessage(configuration: FleetAutoBootstrapConfiguration): strin
   return [
     '[Fleet automatic bootstrap]',
     `按 ${configuration.taskPath} 开始任务。`,
+    ...(configuration.bootstrapInstruction === undefined ? [] : [
+      '[Fleet host instruction]',
+      configuration.bootstrapInstruction,
+    ]),
     ...(roleInstruction === undefined ? [] : ['[Fleet generation role]', roleInstruction]),
     ...(manifest === undefined ? [] : ['[Fleet generation state]', `宿主数据：${JSON.stringify(manifest)}`]),
     '这是由宿主监督器注入的一次性启动指令。请读取该文件，以实际团队成员的职责设计初始 DAG，并调用一次 fleet_run start；不要把固定流程从模板反推到任务中。',

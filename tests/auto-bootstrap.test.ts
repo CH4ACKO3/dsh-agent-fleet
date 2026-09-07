@@ -57,6 +57,7 @@ describe('Fleet automatic bootstrap', () => {
       agentPreset: 'standard',
       readyFile: join(workspace, '.self-evolve', 'ready.json'),
       provider: 'provider', model: 'model', maxTokens: 4096,
+      bootstrapInstruction: 'Evaluation host instruction.',
       controlDirectory: join(root, 'control'), generation: 'g0001',
     }
     const eventDirectory = join(configuration.controlDirectory, 'events', configuration.generation)
@@ -107,6 +108,7 @@ describe('Fleet automatic bootstrap', () => {
     expect(started).toHaveBeenCalledWith(agent)
     expect(followup).toHaveBeenCalledOnce()
     expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('你是候选代，不是稳定代')
+    expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('Evaluation host instruction.')
     expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('不得选择新的改进主题')
     expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('不能只用 Vote 表态后结束工作')
     expect(followup.mock.calls[0]?.[0]?.content?.[0]?.text).toContain('"sourceCommit":"abc123"')
