@@ -14,6 +14,7 @@
       "id": "horizonmath",
       "manifest": "/data/zzr/dsh-agent-fleet-evaluation-20260908/curriculum-config/horizonmath-offline.json",
       "image": "dsh-fleet-generation-horizonmath:{commit}",
+      "auxiliaryImages": ["dsh-fleet-generation-common:{commit}", "dsh-fleet-generation-ale:{commit}"],
       "buildCommand": ["node", "/data/zzr/dsh-agent-fleet-evaluation-20260908/source/evaluation/build-generation-image.mjs", "--source", "{source}", "--commit", "{commit}", "--benchmark", "horizonmath", "--image", "{image}"],
       "command": ["python3", "/data/zzr/dsh-agent-fleet-evaluation-20260908/source/evaluation/batch-run.py", "--job", "{job}"]
     },
@@ -21,6 +22,7 @@
       "id": "ale",
       "manifest": "/data/zzr/dsh-agent-fleet-evaluation-20260908/curriculum-config/ale.json",
       "image": "dsh-fleet-generation-ale:{commit}",
+      "auxiliaryImages": ["dsh-fleet-generation-common:{commit}"],
       "buildCommand": ["node", "/data/zzr/dsh-agent-fleet-evaluation-20260908/source/evaluation/build-generation-image.mjs", "--source", "{source}", "--commit", "{commit}", "--benchmark", "ale", "--image", "{image}"],
       "command": ["python3", "/data/zzr/dsh-agent-fleet-evaluation-20260908/source/evaluation/batch-run.py", "--job", "{job}"]
     }

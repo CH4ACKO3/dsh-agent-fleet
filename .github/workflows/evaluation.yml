@@ -32,7 +32,7 @@ jobs:
           python -m pip install 'PyYAML==6.0.2'
           python -m unittest discover -s integrations/horizonmath -p 'test_*.py'
           python -m unittest discover -s evaluation -p 'test_*.py'
-          node --test evaluation/curriculum.test.mjs evaluation/build-generation-image.test.mjs
+          node --test evaluation/*.test.mjs
       - name: Build the isolated evaluation image
         run: |
           docker build --file evaluation/runtime.Dockerfile \
@@ -43,7 +43,6 @@ jobs:
           docker run --rm --entrypoint dsh-fleet-evaluation-check \
             dsh-fleet-evaluation:baseline
           node evaluation/run-container.mjs --help
-          node --test evaluation/run-container.test.mjs evaluation/profile.test.mjs
       - name: Build and verify the optional rootless DinD overlay
         run: |
           docker build --file evaluation/dind.Dockerfile \

@@ -41,6 +41,7 @@ export function loadCurriculum(path, stateDirectory) {
     ids.add(input.id)
     if (!Array.isArray(input.command) || !input.command.length || input.command.some(value => typeof value !== 'string') || !input.command.includes('{job}')) throw new Error(`${input.id}: command argv must include a standalone {job}`)
     if (input.buildCommand !== undefined && (!Array.isArray(input.buildCommand) || !input.buildCommand.length || input.buildCommand.some(value => typeof value !== 'string'))) throw new Error(`${input.id}: buildCommand must be an argv array`)
+    if (input.auxiliaryImages !== undefined && (!Array.isArray(input.auxiliaryImages) || input.auxiliaryImages.some(value => typeof value !== 'string' || !value))) throw new Error(`${input.id}: auxiliaryImages must contain explicit image templates`)
     const manifest = realpathSync(resolve(dirname(path), input.manifest))
     if (isWithin(join(stateDirectory, 'generations'), manifest)) throw new Error('manifests must remain outside generation workspaces')
     const bytes = readFileSync(manifest, 'utf8')
@@ -243,6 +244,7 @@ export async function runGeneration(config, state, generation, dependencies = {}
   }
   await execute(['git', '-C', frozen, 'checkout', '--detach', generation.sourceCommit])
   entry.images ??= {}
+  entry.auxiliaryImages ??= {}
   for (const benchmark of config.benchmarks) {
     if (!benchmark.image) continue
     const image = benchmark.image.replaceAll('{commit}', generation.sourceCommit).replaceAll('{generation}', generation.id)
@@ -251,6 +253,7 @@ export async function runGeneration(config, state, generation, dependencies = {}
       const build = benchmark.buildCommand.map(value => Object.entries(replacements).reduce((text, [key, replacement]) => text.replaceAll(key, replacement), value))
       await execute(build, { timeoutMs: config.jobTimeoutMs, signal: dependencies.signal })
       entry.images[benchmark.id] = image
+      entry.auxiliaryImages[benchmark.id] = (benchmark.auxiliaryImages ?? []).map(value => value.replaceAll('{commit}', generation.sourceCommit).replaceAll('{generation}', generation.id))
       atomicJson(ledgerPath, ledger)
     }
   }
@@ -313,11 +316,12 @@ export async function pruneCurriculum(config, state, execute = command) {
   const active = new Set([state.stable, state.guardian, state.candidate].filter(Boolean))
   const completed = Object.entries(ledger.generations).filter(([, generation]) => generation.finishedAt).sort(([a], [b]) => b.localeCompare(a))
   const keep = new Set([...active, ...completed.slice(0, config.retainGenerations ?? 2).map(([id]) => id)])
-  const keptImages = new Set([...keep].flatMap(id => Object.values(ledger.generations[id]?.images ?? {})))
+  const imagesFor = generation => [...Object.values(generation?.images ?? {}), ...Object.values(generation?.auxiliaryImages ?? {}).flat()]
+  const keptImages = new Set([...keep].flatMap(id => imagesFor(ledger.generations[id])))
   for (const [id, generation] of completed) {
     if (keep.has(id) || generation.prunedAt) continue
     try {
-      for (const image of new Set(Object.values(generation.images ?? {}))) {
+      for (const image of new Set(imagesFor(generation))) {
         if (!keptImages.has(image)) await execute(['docker', 'image', 'rm', image], { timeoutMs: 60000 })
       }
       const snapshots = join(root, 'snapshots')
@@ -332,6 +336,13 @@ export async function pruneCurriculum(config, state, execute = command) {
     } catch (error) { generation.cleanupFailure = error.message }
   }
   atomicJson(ledgerPath, ledger)
+}
+
+export function curriculumBudgetExhausted(config, state, entry, evaluatedGeneration = state.stable) {
+  if (state.stable !== evaluatedGeneration) return false
+  if (state.candidate || !(state.nextGeneration > config.maxGenerations)) return false
+  const episodes = Object.values(entry?.episodes ?? {})
+  return episodes.length > 0 && episodes.every(episode => episode.status === 'completed' || episode.attempts >= config.maxAttempts)
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -350,12 +361,16 @@ export async function main(argv = process.argv.slice(2)) {
   try {
     do {
       const current = readJson(join(stateDirectory, 'state.json'))
-      if (current.status === 'stopped' || abort.signal.aborted) break
+      if (current.status !== 'running' || abort.signal.aborted) break
       const generation = current.generations[current.stable]
       if (generation && generation.phase === 'stable') {
-        if (generation.number > config.maxGenerations) break
-        await runGeneration(config, current, generation, { signal: abort.signal })
-        await pruneCurriculum(config, readJson(join(stateDirectory, 'state.json')))
+        const entry = await runGeneration(config, current, generation, { signal: abort.signal })
+        const latest = readJson(join(stateDirectory, 'state.json'))
+        await pruneCurriculum(config, latest)
+        if (curriculumBudgetExhausted(config, latest, entry, generation.id)) {
+          atomicJson(join(stateDirectory, 'curriculum', 'completion.json'), { reason: 'generation_budget_exhausted', generation: generation.id, sourceCommit: generation.sourceCommit, completedAt: new Date().toISOString() })
+          break
+        }
       }
       if (once) break
       await new Promise(resolvePromise => {

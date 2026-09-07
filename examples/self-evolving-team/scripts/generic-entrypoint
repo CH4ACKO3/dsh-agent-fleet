@@ -16,5 +16,8 @@ if [ ! -f "$profile_dir/.fleet-generic-ready" ]; then
   node /opt/self-evolve/scripts/configure-generic-profile.mjs "$profile_dir/package.json" "$profile_dir/cordis.patch.yml"
   touch "$profile_dir/.fleet-generic-ready"
 fi
+if [ -n "${FLEET_PROVIDER_BRIDGE:-}" ]; then
+  node "$FLEET_PROVIDER_BRIDGE" > /data/provider-bridge.log 2>&1 &
+fi
 node /opt/dsh/tcp-proxy.mjs &
 exec dsh web --host 127.0.0.1 --port "$DSH_PORT" --no-open --trusted-host "$DSH_TRUSTED_HOST" "$DSH_TRUSTED_HOST_ALT"

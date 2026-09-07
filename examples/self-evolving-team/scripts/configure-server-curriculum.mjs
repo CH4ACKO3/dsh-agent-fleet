@@ -30,6 +30,7 @@ export function configureServer(root) {
     timeoutMs: 1800000, jobTimeoutMs: 3000000, intervalMs: 5000,
     benchmarks: ['ale', 'horizonmath'].map(id => ({
       id, manifest: manifests[id], image: `dsh-fleet-generation-${id}:{commit}`,
+      auxiliaryImages: ['dsh-fleet-generation-common:{commit}', ...(id === 'horizonmath' ? ['dsh-fleet-generation-ale:{commit}'] : [])],
       buildCommand: ['node', join(root, 'source', 'evaluation', 'build-generation-image.mjs'), '--source', '{source}', '--commit', '{commit}', '--benchmark', id, '--image', '{image}'],
       command: ['python3', join(root, 'source', 'evaluation', 'batch-run.py'), '--job', '{job}'],
       runtime: { envFile: join(root, 'secrets', 'provider.env'), graderImage: 'dsh-horizonmath-grader:3259167b263e', cpus: 4, memory: '8g' },
@@ -41,6 +42,16 @@ export function configureServer(root) {
   const configPath = join(directory, 'curriculum.json')
   const encoded = `${JSON.stringify(config, null, 2)}\n`
   writeFileSync(configPath, encoded)
+  const deployment = {
+    SELF_EVOLVE_STATE: join(root, 'runs', 'evolution-server'), SELF_EVOLVE_SOURCE: join(root, 'seed-final'), SELF_EVOLVE_REF: 'HEAD',
+    SELF_EVOLVE_CURRICULUM: configPath, SELF_EVOLVE_BENCHMARK_ROOT: root,
+    SELF_EVOLVE_PROVIDER_ENV_FILE: join(root, 'secrets', 'provider.env'),
+    SELF_EVOLVE_BASE_IMAGE: 'dsh-fleet-evolution-server-base:20260908',
+    SELF_EVOLVE_ALE_ROOT: '/data/zzr/frontal-team/ale', SELF_EVOLVE_ALE_PYTHON_ROOT: '/home/zzr/.local/share/uv/python',
+    FLEET_MODEL_PROVIDER: 'memorax', FLEET_MODEL_NAME: 'deepseek-v4-flash', FLEET_MODEL_API: 'openai-responses',
+    FLEET_MODEL_BASE_URL: 'http://127.0.0.1:3082/v1', FLEET_MODEL_API_KEY_ENV: 'DEEPSEEK_FLASH_API_KEY',
+  }
+  writeFileSync(join(directory, 'deployment.env'), `${Object.entries(deployment).map(([key, value]) => `${key}=${value}`).join('\n')}\n`, { mode: 0o600 })
   return { configPath, sha256: createHash('sha256').update(encoded).digest('hex'), benchmarks: { ale: { train: 2, validation: 1, test: 1 }, horizonmath: Object.fromEntries(['train', 'validation', 'test'].map(split => [split, eligible.filter(task => task.split === split).length])) } }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

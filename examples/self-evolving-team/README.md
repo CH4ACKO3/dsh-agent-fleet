@@ -26,7 +26,9 @@ docker compose --env-file /absolute/private/deployment.env -f examples/self-evol
 
 课程模式冻结宿主 supervisor/Compose 模板，候选只获得无 Docker socket 的 Agent 与构建环境。`.self-evolve` 的宿主身份与交接文件只读；修改团队模板应先复制到 `evidence/next-team.json` 后通过控制命令提交。Git hooks、filters、fsmonitor 也在隔离构建容器内处理，宿主只导入 bundle。训练/验证/测试数据 seal 包含题目正文，改题需要新 run。`retainGenerations` 只回收本 run 记录的旧镜像与冻结源码快照，保留 ledger、Git 历史与密封证据。
 
-验证：`node --test tests/self-evolution-curriculum.test.mjs`。部署与剩余限制见 `docs/reports/evolution-runtime-20260908.md`；真实 provider 首代与 ALE 原生 runner 尚需单独验收，控制器健康不代表完成模型训练或能力提升。
+验证：`node --test evaluation/curriculum.test.mjs`。部署与剩余限制见 `docs/reports/evolution-runtime-20260908.md`；真实 provider 首代与 ALE 原生 runner 尚需单独验收，控制器健康不代表完成模型训练或能力提升。
+
+以下原有说明描述未传入 `--curriculum` 的 legacy 自迭代模式。课程模式以顶部的冻结宿主控制面、只读 `.self-evolve`、隔离 Git/构建和密封评测规则为准，候选对 Dockerfile/Compose/supervisor 的修改只作为待审建议。
 
 这个示例从内置“中型软件工程团队”派生一个持续改进团队。每一代 DSH/Fleet 运行在独立 Docker Compose 项目、数据卷和完整 Git clone 中；宿主监督器是唯一拥有 Docker 生命周期权限的进程。
 
@@ -51,12 +53,12 @@ docker compose --env-file /absolute/private/deployment.env -f examples/self-evol
 - 容器只读挂载代际裸仓库，不获得宿主 Git 凭据，也不挂载主仓库的 `.git`。本代可以 commit，但不能直接修改 `main` 或其他代的分支；跨代导入只由宿主监督器完成。
 - 下一代从该代 Git commit 中构建被测 Fleet 包，因此运行时代码与其中的系统提示词修改都会进入候选。监督器在健康检查通过后还会比对宿主构建产物与容器内 Fleet、Fleet Patchouli 包的 SHA-256；任一不一致都直接判为启动失败，避免候选用旧包完成虚假验收。
 - 稳定代默认先积累 2–4 个边界清楚且各自完成独立审查的改进，再对组合后的提交做一次集成检查并启动一个候选；改进可以相关或无关。高风险隔离、紧急基座修复或资源不足时可以单项成代，但应记录原因，避免代际交接固定成本长期高于实际改进成本。
-- 候选使用自己冻结提交中的 Compose、Dockerfile、代际客户端和团队模板，因此基座修改可以在下一代被实际验证；但候选容器没有 Docker 权限，也不能替换当前宿主 supervisor。只有候选自证、稳定代批准并完成晋升后，旧 supervisor 才通过双阶段交接把请求监听权交给新稳定代脚本，失败时继续留任。
+- 仅非课程（legacy）模式的候选使用自己冻结提交中的 Compose、Dockerfile、代际客户端和团队模板，因此基座修改可以在下一代被实际验证；但候选容器没有 Docker 权限，也不能替换当前宿主 supervisor。只有候选自证、稳定代批准并完成晋升后，旧 supervisor 才通过双阶段交接把请求监听权交给新稳定代脚本，失败时继续留任。
 - 同时只有一个候选，整个窗口最多三代：一个 Docker 休眠的保障代、一个活跃稳定代、一个活跃候选代。候选只能为自己提交 `ready` 或 `reject`；只有稳定代能 `start-candidate`、`destroy-candidate` 或 `promote`。
 - 晋升必须同时满足候选自证和稳定代批准。晋升时先把旧稳定代 checkpoint 并暂停为保障代，再让候选成为活跃稳定代；只有新稳定代以后成功启动、验收并晋升自己的候选，自己成为新保障代后，更老保障代才会被归档并删除。这样候选不仅要证明“能启动”，还要证明“能把链路传给下下代”。拒绝、异常退出和整轮停止走同一归档清理路径。已退休代默认只保留最近两代的工作区供诊断，更旧的由监督器按明确代路径回收；Git 历史、上下文归档和事件不随工作区回收而丢失。
 - 晋升请求中的 handoff 会被宿主复制到新稳定代的 `.self-evolve/inherited/<父代>-handoff.md`，同时生成带来源代、目标代、提交与晋升时间的 `inherited.json`；启动再下一代时宿主会继续复制这条运行时托付链，不要求 Agent 用 `git add -f` 才能维持连续性。它用于容器内显式托付，不依赖聊天记录或记忆召回是否命中。
 - `candidate.ready`、`candidate.failed`、`generation.promoted`、恢复和清理异常等需要动作的状态机事件由 Fleet 自动 bootstrap 组件按持久游标投递给本代助理；CLI `watch` 只保留为诊断入口。
-- 每次晋升后，宿主 supervisor 会通过 ready/activate 双阶段交接切换到新稳定代提交中的 supervisor 脚本；旧 supervisor 在继任进程确认可启动前持续持有请求监听权。
+- 仅非课程（legacy）模式在每次晋升后，宿主 supervisor 会通过 ready/activate 双阶段交接切换到新稳定代提交中的 supervisor 脚本；旧 supervisor 在继任进程确认可启动前持续持有请求监听权。
 - 控制请求使用每代独立的 HMAC 身份。密钥写入本代工作区内只供控制客户端读取的文件，避免 Agent 工具执行环境过滤自定义环境变量后失效；包含其他代密钥的监督器状态文件不挂载到容器。
 - `dsh-patchouli` 提供持久记忆与原生上下文索引，`dsh-agent-fleet-patchouli` 提供 Team 语义适配。Patchouli 数据不在父子代之间共享写入：候选启动前由监督器复制父代卷，淘汰候选不会污染稳定代记忆，晋升后候选副本成为下一代来源。Git 提交和显式交接文件仍是版本与恢复的权威来源，记忆服务只是检索加速层。
 

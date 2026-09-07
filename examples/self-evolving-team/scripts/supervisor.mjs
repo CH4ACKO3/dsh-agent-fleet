@@ -318,7 +318,7 @@ async function isolatedContainer(state, args) {
 }
 
 async function workspaceGit(state, workspace, args, extraVolumes = []) {
-  if (state?.curriculum === undefined || !isWithin(join(state.stateDirectory, 'generations'), workspace)) return run('git', args, { cwd: workspace })
+  if (state?.curriculum === undefined || !isWithin(join(state.stateDirectory, 'generations'), workspace)) return run('git', ['-c', `safe.directory=${workspace}`, '-c', `safe.directory=${join(workspace, '.git')}`, ...args], { cwd: workspace })
   // Git hooks, filters and fsmonitor are executable configuration in an evolving checkout.
   return isolatedContainer(state, ['--cpus', String(state.resources.cpus), '--memory', state.resources.memory,
     '--workdir', '/workspace', '--volume', `${workspace}:/workspace`, ...extraVolumes.flatMap(volume => ['--volume', volume]),
@@ -342,10 +342,10 @@ async function recordGenerationCommit(state, sourceWorkspace, generationIdValue,
     await run('git', ['--git-dir', state.repository, 'fetch', '--no-tags', join(directory, 'source.bundle'), `${exportRef}:refs/heads/${branch}`])
     return branch
   }
-  await run('git', [
+  await workspaceGit(state, sourceWorkspace, [
     'push', state.repository,
     `${sourceCommit}:refs/heads/${branch}`,
-  ], { cwd: sourceWorkspace })
+  ])
   return branch
 }
 
@@ -444,6 +444,8 @@ async function prepareGeneration(state, number, sourceRef, bootstrapContent, opt
       throw new Error('Candidate source/build must not create the reserved .self-evolve runtime directory')
     }
     mkdirSync(bootstrapDirectory, { recursive: true })
+    // The parent runtime bind is read-only; Docker needs this nested RW mountpoint to exist already.
+    mkdirSync(join(bootstrapDirectory, 'control'), { recursive: true })
     if (options.parent !== undefined) {
       const inheritedSource = join(state.generations[options.parent].workspace, '.self-evolve', 'inherited')
       if (existsSync(inheritedSource)) {
@@ -1255,7 +1257,12 @@ async function initialize(args) {
   }
   mkdirSync(join(stateDirectory, 'control', 'requests'), { recursive: true })
   const repository = join(stateDirectory, 'repository.git')
-  await run('git', ['clone', '--bare', '--no-hardlinks', sourceRoot, repository], { cwd: stateDirectory })
+  const sourceGitConfig = join(stateDirectory, 'trusted-source.gitconfig')
+  const quoteGitPath = value => `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
+  writeFileSync(sourceGitConfig, `[safe]\n\tdirectory = ${quoteGitPath(sourceRoot)}\n\tdirectory = ${quoteGitPath(join(sourceRoot, '.git'))}\n`, { mode: 0o600 })
+  // Local clone's upload-pack process may not inherit command-line -c settings.
+  // This run-local protected config trusts only the explicitly selected source.
+  await run('git', ['clone', '--bare', '--no-hardlinks', sourceRoot, repository], { cwd: stateDirectory, env: { ...process.env, GIT_CONFIG_GLOBAL: sourceGitConfig } })
   const state = {
     schemaVersion: 3,
     name: requiredText(args.name ?? `self-evolve-${randomUUID().slice(0, 8)}`, '--name'),
