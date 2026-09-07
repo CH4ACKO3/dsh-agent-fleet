@@ -406,13 +406,16 @@ function bootstrapMessage(configuration: FleetAutoBootstrapConfiguration): strin
   return [
     '[Fleet automatic bootstrap]',
     `按 ${configuration.taskPath} 开始任务。`,
+    'Team 已由宿主创建，你已作为该 Team 的启动助手连接。不要再次调用 fleet_run create，也不要用普通 subagent 创建另一组成员来代替现有 Team。任务文件中的执行者角色描述不改变你本回合的启动职责。',
     ...(configuration.bootstrapInstruction === undefined ? [] : [
       '[Fleet host instruction]',
       configuration.bootstrapInstruction,
     ]),
     ...(roleInstruction === undefined ? [] : ['[Fleet generation role]', roleInstruction]),
     ...(manifest === undefined ? [] : ['[Fleet generation state]', `宿主数据：${JSON.stringify(manifest)}`]),
-    '这是由宿主监督器注入的一次性启动指令。请读取该文件，以实际团队成员的职责设计初始 DAG，并调用一次 fleet_run start；不要把固定流程从模板反推到任务中。',
+    '这是由宿主监督器注入的一次性启动指令。只做启动所需的任务读取和现有成员确认，将资料调研、求解、实现及验证作为 Goal 交给现有 Team 成员，不在启动前亲自完成。',
+    '依据实际题目和成员职责，设计包含负责人、依赖及验收条件的完整但不过度细分的初始 DAG，立即调用一次 fleet_run start；task 参数直接使用上面的权威任务文件路径，不先重写题面，也不要把固定流程从模板反推到任务中。',
+    'fleet_run start 成功后立即结束本启动回合，让现有 Team 执行；若调用失败，只修正启动参数或报告实际启动错误，不用另建 Team 或普通 subagent 绕过失败。',
   ].join('\n\n')
 }
 
