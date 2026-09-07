@@ -35,7 +35,7 @@ function runRecord(overrides: Partial<FleetRunRecord> = {}): FleetRunRecord {
 }
 
 describe('FleetMailboxService', () => {
-  it('routes a connected user message to the Team assistant and its reply back to the connector', async () => {
+  it.each(['assistant-session', 'team-assistant'])('routes replies from assistant identity %s back to the connector', async from => {
     const run = runRecord()
     let coordination: ((runId: string, event: FleetCoordinationEvent) => void) | undefined
     const sendUserConversationMessage = vi.fn()
@@ -77,7 +77,7 @@ describe('FleetMailboxService', () => {
         sequence: 1,
         kind: 'text',
         conversation: '@fleet-user:team-1',
-        from: 'assistant-session',
+        from,
         fromName: 'Maya',
         text: '正在进行。',
         resources: [],
@@ -95,6 +95,67 @@ describe('FleetMailboxService', () => {
         text: '正在进行。',
       },
     })
+  })
+
+  it('deduplicates connector retries without suppressing different conversations or messages', async () => {
+    const run = runRecord()
+    const send = vi.fn()
+    const mailbox = new FleetMailboxService({
+      list: () => [run], status: () => run, sendUserConversationMessage: send,
+      subscribeCoordination: () => () => {},
+    })
+    const inbound = {
+      connector: 'lark-bot',
+      payload: {
+        kind: 'user-message', externalUserId: 'user-1', conversationId: 'room-1',
+        messageId: 'message-1', text: 'Check progress.',
+      },
+    }
+    const signal = new AbortController().signal
+    await mailbox.receive(inbound, signal)
+    await mailbox.receive(inbound, signal)
+    expect(send).toHaveBeenCalledTimes(1)
+    await mailbox.receive({ ...inbound, payload: { ...inbound.payload, messageId: 'message-2' } }, signal)
+    await mailbox.receive({ ...inbound, payload: { ...inbound.payload, conversationId: 'room-2' } }, signal)
+    await mailbox.receive({ ...inbound, connector: 'other-connector' }, signal)
+    expect(send).toHaveBeenCalledTimes(4)
+  })
+
+  it('rolls back failed routing and allows the same inbound message to be retried', async () => {
+    const run = runRecord()
+    let coordination: ((runId: string, event: FleetCoordinationEvent) => void) | undefined
+    const send = vi.fn()
+    const mailbox = new FleetMailboxService({
+      list: () => [run], status: () => run, sendUserConversationMessage: send,
+      subscribeCoordination: listener => { coordination = listener; return () => {} },
+    })
+    const outbound = vi.fn(async () => {})
+    mailbox.onOutbound(outbound)
+    const inbound = {
+      connector: 'lark-bot',
+      payload: {
+        kind: 'user-message', externalUserId: 'user-1', conversationId: 'room-1',
+        messageId: 'message-1', text: 'Check progress.',
+      },
+    }
+    const signal = new AbortController().signal
+    await mailbox.receive(inbound, signal)
+    const next = { ...inbound, payload: { ...inbound.payload, conversationId: 'room-2' } }
+    send.mockImplementationOnce(() => { throw new Error('temporarily unavailable') })
+    await expect(mailbox.receive(next, signal)).rejects.toThrow('temporarily unavailable')
+    coordination?.(run.id, {
+      type: 'message', message: {
+        id: 'reply-1', sequence: 1, kind: 'text', conversation: '@fleet-user:team-1',
+        from: 'team-assistant', text: 'Result for the accepted request.',
+        resources: [], mentions: [], delivery: 'quiet', createdAt: '2026-09-08T00:00:00Z',
+      },
+    })
+    expect(outbound).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ conversationId: 'room-1' }),
+    }))
+    await mailbox.receive(next, signal)
+    await mailbox.receive(next, signal)
+    expect(send).toHaveBeenCalledTimes(3)
   })
 
   it('requires an explicit Team when several active assistants are available', async () => {

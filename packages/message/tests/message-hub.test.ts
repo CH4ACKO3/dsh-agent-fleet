@@ -90,6 +90,81 @@ function setup(): {
 }
 
 describe('MessageHub', () => {
+  it('drains an older dependency even when new Channel activity arrives between bounded reads', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const dependency = hub.send(lead, { to: '@reviewer', text: 'old dependency', delivery: 'quiet' })
+    hub.send(qa, { to: '#general', text: 'new channel activity', delivery: 'quiet' })
+    const first = hub.readInbox(reviewer, 5)
+    expect(first.messages).toEqual([expect.objectContaining({
+      id: dependency.messageId, text: 'old d', readRange: { start: 0, end: 5, total: 14 },
+    })])
+    hub.send(qa, { to: '#general', text: 'another channel update', delivery: 'quiet' })
+    const second = hub.readInbox(reviewer, 9)
+    expect(second.messages).toEqual([expect.objectContaining({
+      id: dependency.messageId, text: 'ependency', readRange: { start: 5, end: 14, total: 14 },
+    })])
+    expect(second).toMatchObject({ hasMore: true, remainingUnread: 2 })
+    expect(hub.receipt(dependency.messageId).readParticipantIds).toContain(reviewer.id)
+    expect(hub.readInbox(reviewer).messages.map(message => message.text))
+      .toEqual(['new channel activity', 'another channel update'])
+  })
+
+  it('does not create Reply Tasks from code examples, quoted history, or escaped mentions', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: 'Example: `@reviewer inspect`.\n``@qa `example` only``\n'
+        + '```text\n@reviewer historical request\n```\n'
+        + '~~~text\n@qa historical request\n~~~\n'
+        + '> @reviewer quoted old request\nEscaped: \\@qa reference.',
+      delivery: 'quiet',
+    })
+    expect(hub.getMessage(reviewer, sent.messageId).mentions).toEqual([])
+    expect(hub.pendingRequiredReplies(reviewer.id)).toEqual([])
+    expect(hub.pendingRequiredReplies(qa.id)).toEqual([])
+    expect(hub.unreadSummary(reviewer.id).unreadMessages).toBe(1)
+    expect(hub.taskUnreadSummary(reviewer.id).unreadMessages).toBe(0)
+  })
+
+  it('keeps prose and structural mentions actionable beside quoted examples', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: '`@reviewer example`\n@reviewer inspect the actual change.\n> @qa old text',
+      mentions: ['@qa'],
+      delivery: 'quiet',
+    })
+    expect(hub.getMessage(reviewer, sent.messageId).mentions).toEqual(['qa', 'reviewer'])
+    expect(hub.pendingRequiredReply(reviewer.id)?.id).toBe(sent.messageId)
+    expect(hub.pendingRequiredReply(qa.id)?.id).toBe(sent.messageId)
+  })
+
+  it('keeps a long fence open past shorter markers and resumes mentions after its actual end', () => {
+    const { hub, lead, reviewer, qa } = setup()
+    const sent = hub.send(lead, {
+      to: '#general',
+      text: '````text\n```\n@qa example\n````\n@reviewer handle the actual request.',
+      delivery: 'quiet',
+    })
+    expect(hub.getMessage(reviewer, sent.messageId).mentions).toEqual(['reviewer'])
+    expect(hub.pendingRequiredReply(qa.id)).toBeUndefined()
+    expect(hub.pendingRequiredReply(reviewer.id)?.id).toBe(sent.messageId)
+  })
+
+  it('does not invent quoted-text reply obligations after restoring history', () => {
+    const first = setup()
+    const events: Parameters<MessageHub['restore']>[0][number][] = []
+    first.hub.onEvent(event => { events.push(event) })
+    first.hub.send(first.lead, {
+      to: '#general', text: '> @reviewer archived discussion\n`@qa sample`', delivery: 'quiet',
+    })
+    const restored = setup()
+    restored.hub.restore(events)
+    expect(restored.hub.pendingRequiredReplies('reviewer')).toEqual([])
+    expect(restored.hub.pendingRequiredReplies('qa')).toEqual([])
+    expect(restored.hub.unreadSummary('reviewer').unreadMessages).toBe(1)
+  })
+
   it('aggregates unread messages across conversations into one bounded inbox read', () => {
     const { hub, lead, reviewer, qa } = setup()
     hub.send(lead, { to: '@reviewer', text: 'Direct request.', delivery: 'quiet' })

@@ -1,5 +1,6 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
+import { isEscapedMention, mentionProse } from './mentions.js'
 
 import type {
   AgentDirectory,
@@ -630,7 +631,7 @@ export class MessageHub {
     }
   }
 
-  /** Consume the newest unread messages across every visible conversation in one bounded batch. */
+  /** Drain oldest unread work first so Channel bursts cannot starve earlier dependencies. */
   readInbox(sender: MessageAgent, maxChars = 12_000): ReadMessagesResult {
     this.assertOpen()
     sender = this.requireParticipant(sender)
@@ -638,21 +639,10 @@ export class MessageHub {
       throw new Error('maxChars must be an integer from 1 through 12000')
     }
     const unread = this.inboxRelevantUnread(sender.id)
-    const selected: FleetMessage[] = []
-    let selectedChars = 0
-    for (let index = unread.length - 1; index >= 0; index -= 1) {
-      const message = unread[index]
-      if (message === undefined) continue
-      const unreadChars = message.text.length - this.readThrough(sender.id, message.id)
-      if (selected.length > 0 && selectedChars + unreadChars > maxChars) break
-      selected.unshift(message)
-      selectedChars += Math.min(unreadChars, maxChars)
-      if (selectedChars >= maxChars) break
-    }
     const page: ReadMessagesResult['messages'][number][] = []
     let remaining = maxChars
     let changed = false
-    for (const message of selected) {
+    for (const message of unread) {
       if (remaining === 0) break
       const total = message.text.length
       const current = this.readThrough(sender.id, message.id)
@@ -2343,6 +2333,7 @@ export class MessageHub {
   }
 
   private textMentions(text: string): string[] {
+    const prose = mentionProse(text)
     const references = new Map<string, string>()
     for (const participantId of this.agents.participantIds()) {
       for (const reference of [participantId, this.agents.displayName?.(participantId)]) {
@@ -2357,8 +2348,9 @@ export class MessageHub {
       .sort((left, right) => right.length - left.length)
       .map(escapeRegularExpression)
     const matcher = new RegExp(`@(?:${alternatives.join('|')})(?=$|[\\s,.;:!?，。；：！？、）)\\]】}])`, 'giu')
-    return [...text.matchAll(matcher)].flatMap(match => {
-      const previous = match.index === 0 ? '' : text[match.index - 1] ?? ''
+    return [...prose.matchAll(matcher)].flatMap(match => {
+      if (isEscapedMention(prose, match.index)) return []
+      const previous = match.index === 0 ? '' : prose[match.index - 1] ?? ''
       if (/[A-Za-z0-9._%+-]/u.test(previous)) return []
       const participantId = references.get(match[0].slice(1).toLocaleLowerCase())
       return participantId === undefined ? [] : [participantId]
