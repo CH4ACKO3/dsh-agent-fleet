@@ -15,6 +15,25 @@ spec.loader.exec_module(batch)
 
 
 class BatchTests(unittest.TestCase):
+    def test_ale_env_file_is_literal_and_forwarded(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML required for native ALE adapter tests")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "env.yaml").write_text("snapshots: {}")
+            (root / "agent.yaml").write_text("harness: example")
+            (root / "experiment.yaml").write_text(yaml.safe_dump({"agent": str(root / "agent.yaml"), "environment": str(root / "env.yaml")}))
+            secret = root / "provider.env"
+            secret.write_text("# comment\n\nMODEL_TOKEN=literal$(not-a-command)\n")
+            output = root / "output"
+            output.mkdir()
+            with patch.object(batch, "run", return_value=0) as execute:
+                result = batch.ale({"task": {"experiment": str(root / "experiment.yaml")}, "envFile": str(secret), "dryRun": True}, output)
+            self.assertEqual(result["status"], "dry_run")
+            self.assertEqual(execute.call_args.kwargs["env"]["MODEL_TOKEN"], "literal$(not-a-command)")
+
     def test_timeout_terminates_child(self):
         with tempfile.TemporaryDirectory() as temporary:
             result = batch.run([sys.executable, "-c", "import time; time.sleep(60)"], Path(temporary) / "log", 0.05)

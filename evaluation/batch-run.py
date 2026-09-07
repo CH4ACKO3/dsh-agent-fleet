@@ -26,13 +26,13 @@ def write_json(path: Path, value: dict):
     temporary.replace(path)
 
 
-def run(command: list[str], log: Path, timeout: float, cwd: Path | None = None) -> int:
+def run(command: list[str], log: Path, timeout: float, cwd: Path | None = None, env: dict[str, str] | None = None) -> int:
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     if CANCELLED.is_set():
         return 130
     with log.open("wb") as stream:
-        process = subprocess.Popen(command, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT, start_new_session=os.name != "nt")
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stream, stderr=subprocess.STDOUT, start_new_session=os.name != "nt")
         deadline = time.monotonic() + timeout
         try:
             while not CANCELLED.is_set() and time.monotonic() < deadline:
@@ -138,7 +138,16 @@ def ale(job: dict, output: Path) -> dict:
     command = [str(root / ".venv/bin/python"), "-m", "ale_run", "run", str(config_file), "--disable-resume"]
     if job.get("dryRun"):
         command += ["--dry-run"]
-    exit_code = run(command, output / "agent.log", job.get("timeoutMs", 3600000) / 1000 + 120, cwd=root)
+    environment_vars = os.environ.copy()
+    if job.get("envFile"):
+        for line in Path(job["envFile"]).read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            name, separator, value = line.partition("=")
+            if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError("ALE env-file requires plain KEY=VALUE entries")
+            environment_vars[name] = value
+    exit_code = run(command, output / "agent.log", job.get("timeoutMs", 3600000) / 1000 + 120, cwd=root, env=environment_vars)
     if job.get("dryRun"):
         return {"status": "dry_run" if exit_code == 0 else "failed", "exitCode": exit_code}
     result_files = list((output / "official").rglob("eval_result.json"))
