@@ -260,13 +260,40 @@ export async function superviseFleetEvaluationRun(input: {
   readonly timeoutMs: number
   readonly onWorkStarted?: (run: FleetRunRecord) => void | Promise<void>
 }): Promise<FleetEvaluationOutcome> {
-  await input.assistantAgent.whenIdle()
-  let current = input.runs.status(input.run.id, input.projectRoot)
-  if (current.work?.status === 'running') {
-    await input.onWorkStarted?.(current)
-    current = await waitForFleetEvaluationWork(input.runs, current, input.projectRoot, input.timeoutMs)
+  const expiresAt = Date.now() + input.timeoutMs
+  const expired = new Error('Fleet evaluation deadline expired')
+  const stopWaiting = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { reject(expired) }, input.timeoutMs)
+  })
+  let current = input.run
+  try {
+    await Promise.race([input.assistantAgent.whenIdle(), deadline])
+    current = input.runs.status(input.run.id, input.projectRoot)
+    if (current.work?.status === 'running') {
+      await Promise.race([input.onWorkStarted?.(current), deadline])
+      current = await Promise.race([
+        waitForFleetEvaluationWork(input.runs, current, input.projectRoot,
+          Math.max(0, expiresAt - Date.now()), stopWaiting.signal),
+        deadline,
+      ])
+    }
+    if (Date.now() >= expiresAt) throw expired
+    return terminalOutcome(current)
+  } catch (error) {
+    if (error !== expired) throw error
+    // A bootstrap that never becomes idle is still a timeout, even without Work.
+    // Keep the last known Team if preservation cannot read the current state.
+    try { current = input.runs.status(input.run.id, input.projectRoot) } catch {}
+    return {
+      phase: 'timed_out', exitCode: 124, run: current,
+      answer: 'Fleet evaluation timed out during bootstrap or Team work.',
+    }
+  } finally {
+    clearTimeout(timer)
+    stopWaiting.abort()
   }
-  return terminalOutcome(current)
 }
 
 export function waitForFleetEvaluationWork(
@@ -274,27 +301,43 @@ export function waitForFleetEvaluationWork(
   run: FleetRunRecord,
   projectRoot: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<FleetRunRecord> {
-  if (run.work?.status !== 'running' || run.status === 'failed') return Promise.resolve(run)
-  return new Promise(resolvePromise => {
-    let settled = false
+  if (run.work?.status !== 'running' || run.status === 'failed' || signal?.aborted) return Promise.resolve(run)
+  return new Promise((resolvePromise, reject) => {
+    type Result = { readonly run: FleetRunRecord } | { readonly error: unknown }
+    let result: Result | undefined
+    let subscribing = true
     let latest = run
-    let unsubscribe = (): void => {}
-    const finish = (value: FleetRunRecord): void => {
-      if (settled) return
-      settled = true
+    let unsubscribe: (() => void) | undefined
+    const complete = (): void => {
       clearTimeout(timer)
-      unsubscribe()
-      resolvePromise(value)
+      signal?.removeEventListener('abort', abort)
+      try { unsubscribe?.() } catch (error) { reject(error); return }
+      if (result !== undefined && 'error' in result) reject(result.error)
+      else if (result !== undefined) resolvePromise(result.run)
+    }
+    const finish = (value: Result): void => {
+      if (result !== undefined) return
+      result = value
+      // A subscription may invoke inspect before returning its disposer.
+      if (!subscribing) complete()
     }
     const inspect = (): void => {
-      if (settled) return
-      latest = runs.status(run.id, projectRoot)
-      if (latest.work?.status !== 'running' || latest.status === 'failed') finish(latest)
+      if (result !== undefined) return
+      try {
+        latest = runs.status(run.id, projectRoot)
+        if (latest.work?.status !== 'running' || latest.status === 'failed') finish({ run: latest })
+      } catch (error) { finish({ error }) }
     }
-    const timer = setTimeout(() => { finish(latest) }, timeoutMs)
-    unsubscribe = runs.subscribeChanges(inspect)
-    inspect()
+    const abort = (): void => { finish({ run: latest }) }
+    const timer = setTimeout(abort, timeoutMs)
+    signal?.addEventListener('abort', abort, { once: true })
+    try { unsubscribe = runs.subscribeChanges(inspect) }
+    catch (error) { result = { error } }
+    subscribing = false
+    if (result !== undefined) complete()
+    else inspect()
   })
 }
 

@@ -2,12 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   exportFleetEvaluationState,
   fleetEvaluationConfiguration,
   superviseFleetEvaluationRun,
+  waitForFleetEvaluationWork,
 } from '../src/evaluation.js'
 import type { FleetRunRecord } from '../src/run.js'
 
@@ -68,6 +69,115 @@ describe('Fleet evaluation configuration', () => {
 })
 
 describe('Fleet evaluation supervision', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('times out a bootstrap that never becomes idle even when it never creates Work', async () => {
+    vi.useFakeTimers()
+    const idle = runRecord()
+    const subscribeChanges = vi.fn()
+    const outcome = superviseFleetEvaluationRun({
+      runs: { status: () => idle, subscribeChanges } as never,
+      run: idle, assistantAgent: { whenIdle: () => new Promise(() => {}) } as never,
+      projectRoot: idle.projectRoot, timeoutMs: 100,
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(outcome).resolves.toMatchObject({ phase: 'timed_out', exitCode: 124, run: idle })
+    expect(subscribeChanges).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('charges bootstrap time to the same deadline as Team work and releases the subscription', async () => {
+    vi.useFakeTimers()
+    const running = runRecord({
+      status: 'running',
+      work: { id: 'work-1', taskPath: resolve('task.md'), status: 'running', startedAt: '2026-09-06T00:00:01.000Z' },
+    })
+    const unsubscribe = vi.fn()
+    const subscribeChanges = vi.fn(() => unsubscribe)
+    const settled = vi.fn()
+    const outcome = superviseFleetEvaluationRun({
+      runs: { status: () => running, subscribeChanges } as never,
+      run: running,
+      assistantAgent: { whenIdle: () => new Promise(resolveIdle => { setTimeout(resolveIdle, 60) }) } as never,
+      projectRoot: running.projectRoot, timeoutMs: 100,
+    })
+    void outcome.then(settled)
+    await vi.advanceTimersByTimeAsync(60)
+    expect(subscribeChanges).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(39)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(outcome).resolves.toMatchObject({ phase: 'timed_out', exitCode: 124 })
+    expect(unsubscribe).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('bounds an asynchronous work-start hook by the shared deadline', async () => {
+    vi.useFakeTimers()
+    const running = runRecord({
+      status: 'running',
+      work: { id: 'work-1', taskPath: resolve('task.md'), status: 'running', startedAt: '2026-09-06T00:00:01.000Z' },
+    })
+    const subscribeChanges = vi.fn()
+    const outcome = superviseFleetEvaluationRun({
+      runs: { status: () => running, subscribeChanges } as never,
+      run: running, assistantAgent: { whenIdle: async () => {} } as never,
+      projectRoot: running.projectRoot, timeoutMs: 100,
+      onWorkStarted: () => new Promise(() => {}),
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(outcome).resolves.toMatchObject({ phase: 'timed_out', exitCode: 124 })
+    expect(subscribeChanges).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('disposes a subscription that synchronously reports completion before returning its disposer', async () => {
+    vi.useFakeTimers()
+    const running = runRecord({
+      work: { id: 'work-1', taskPath: resolve('task.md'), status: 'running', startedAt: '2026-09-06T00:00:01.000Z' },
+    })
+    const finished = { ...running, work: { ...running.work!, status: 'finished' as const } }
+    const unsubscribe = vi.fn()
+    const result = await waitForFleetEvaluationWork({
+      status: () => finished,
+      subscribeChanges: (listener: () => void) => { listener(); return unsubscribe },
+    } as never, running, running.projectRoot, 100)
+    expect(result).toBe(finished)
+    expect(unsubscribe).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('rejects subscription setup errors and clears their deadline', async () => {
+    vi.useFakeTimers()
+    const running = runRecord({
+      work: { id: 'work-1', taskPath: resolve('task.md'), status: 'running', startedAt: '2026-09-06T00:00:01.000Z' },
+    })
+    await expect(waitForFleetEvaluationWork({
+      status: () => running,
+      subscribeChanges: () => { throw new Error('subscription unavailable') },
+    } as never, running, running.projectRoot, 100)).rejects.toThrow('subscription unavailable')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('turns callback inspection errors into a rejected wait and disposes the listener', async () => {
+    vi.useFakeTimers()
+    const running = runRecord({
+      work: { id: 'work-1', taskPath: resolve('task.md'), status: 'running', startedAt: '2026-09-06T00:00:01.000Z' },
+    })
+    let listener: (() => void) | undefined
+    const unsubscribe = vi.fn()
+    const status = vi.fn(() => running)
+    const result = waitForFleetEvaluationWork({
+      status, subscribeChanges: (callback: () => void) => { listener = callback; return unsubscribe },
+    } as never, running, running.projectRoot, 100)
+    const rejected = expect(result).rejects.toThrow('Team unavailable')
+    status.mockImplementationOnce(() => { throw new Error('Team unavailable') })
+    expect(() => listener?.()).not.toThrow()
+    await rejected
+    expect(unsubscribe).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('waits for Team work in host code after the assistant bootstrap turn', async () => {
     const running = runRecord({
       status: 'running',
