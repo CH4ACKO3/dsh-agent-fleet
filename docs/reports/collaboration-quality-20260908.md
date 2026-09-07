@@ -70,3 +70,48 @@ node node_modules/vitest/vitest.mjs run packages/message/tests tests/mailbox.tes
 - 发言量下降后是否出现遗漏共享决策、重复实现、冲突修改或无法复现实验结果。
 
 旧报告中的候选晋升率属于工程验收记录；晋升次数、代数、代码变更量与协作消息降低都不能直接替代独立保留题上的能力提升证据。
+
+## 追加：评测宿主 deadline 修复与交叉审查
+
+主任务进一步发现 `superviseFleetEvaluationRun` 原先先无限等待助手 `whenIdle()`，之后才给 Work 启动计时器。若助手 bootstrap 卡住，内层永远没有超时结果，只能靠 Docker 外层强杀，评测状态与证据来不及导出。
+
+本子任务已修 `src/evaluation.ts`：bootstrap、工作开始回调与 Work 等待共用从监督入口启动的一份 deadline；bootstrap 未创建 Work 也明确返回 `timed_out / 124`。超时后释放 Work 订阅，保留最后可读的团队状态。`waitForFleetEvaluationWork` 支持停止信号，处理订阅注册时同步回调先于 disposer 返回的竞态，并把订阅/状态读取异常转为可观察的 Promise 失败并清理计时器。
+
+新增 6 项测试覆盖挂起 bootstrap、bootstrap 已消耗预算、挂起 work-start 回调、同步订阅完成、注册异常和异步事件检查异常。执行：
+
+```text
+node node_modules/vitest/vitest.mjs run --dir tests tests/evaluation.test.ts
+node node_modules/typescript/bin/tsc -p tsconfig.package.json --noEmit
+```
+
+结果：评测文件 17/17 通过，主机类型检查通过。临时主分支 worktree 存在仓库内时，未限定 `--dir tests` 的 Vitest 可能同时搜索该副本；报告采用限定目录后的结果，避免重复计算测试数量。
+
+此外独立审查向对应作者提出了以下修复项（最终采纳状态以主报告和各作者验证为准，本子任务未越界修改它们）：ALE 失败退出仍凭结果文件判完成；grader 固定名称清理可能误删预存容器；resume 身份缺少实际输入内容哈希；group 标识可能掩盖跨 split 重复题；外层强杀绕过 Docker 清理；候选源码路径与实际评测镜像必须绑定；宿主向 Agent 可写目录导出训练摘要需要拒绝符号链接逃逸。
+
+## 追加：第二轮部署链复核
+
+复核运行 `node --test tests/self-evolution-curriculum.test.mjs evaluation/run-container.test.mjs`：共 19 项，17 通过、2 项 Linux 权限与符号链接测试在 Windows 跳过，无失败。确认回归覆盖了 invocation label 找回未写 cidfile 的已创建容器，以及清理未能验证时不能报告运行成功。
+
+阅读最新实现确认已处理的路径：ALE 非零退出与不确定评分不再计作完成；grader 按 cidfile 的实例 ID 清理；batch 已有取消信号和子进程 finally 清理；输入正文/image hash 加入 resume 身份；相同正文即使不同 group 也不能跨分区；训练反馈写入宿主独立目录后只读提供给 Agent，测试循环的结果不会进入训练摘要。
+
+同时把以下可部署性发现发给各作者继续处理；此处记录审查时状态，不能替代其最终部署验收：
+
+- controller 镜像最初缺 PyYAML，ALE 官方 Python/venv 路径也可能不在 Compose 的挂载范围，必须验证控制器内部真正能调用 runner。
+- 初版课程示例没有候选 image/buildCommand，与新加入的源码提交绑定校验冲突。
+- 四个 ALE 场景在默认固定 seed 下恰好形成两 train、两 test、零 validation，初始化必然失败；小集合需要明确冻结分区，不应依赖随机碰运气。
+- batch 内层最多等待 45 秒清理，curriculum 当时只给 15 秒后强杀；需要统一父子进程与 Compose 宽限时间。
+- PID/hostname 锁不能区分容器重启后的 PID 复用；空 `.running` 锁在独立批测中也尚不能自动恢复。
+- 候选工作区的 `.git/config` 可被候选脚本或 Agent 修改；宿主随后运行 Git 的过滤器/fsmonitor 可能执行候选命令。仅把 pnpm 放在容器内不构成完整宿主执行边界。
+- 官方 HorizonMath 对数值已正确的答案还需要模型 compliance judge；离线无凭据 grader 会返回 indeterminate。严格训练完成门槛会因此阻塞推进。无 judge 的初始课程应显式选可离线权威评分的题型，不能把不确定结果改成通过。
+
+没有运行利用载荷，也没有修改其他作者负责的部署文件。以上问题通过源码路径、配置与确定性分区计算定位；服务器侧实际修复与验证以主报告最终记录为准。
+
+后续复核更新：演化作者已补 `python3-yaml`；上层终止宽限改为 curriculum 60 秒、Compose 120 秒；锁加入 Linux `/proc` 进程出生标识；对 Agent 可写仓库的 Git 命令改在隔离容器执行并用 bundle 导入宿主库；候选包构建增加 15 分钟默认期限和实例 cid 清理。复跑 curriculum **10/10**（含 PID 复用与运行时修改题目新测试）、HorizonMath adapter **3/3**，supervisor `node --check` 通过。这些源码与本机验证不代替服务器真实容器中的依赖、挂载和模型端点验收。
+
+## 追加：真实部署失败的独立诊断
+
+HorizonMath 首次启动报 `deps.messages.taskUnreadSummary is not a function`。本子任务检查调用链：`collaboration.ts` 直接实例化 `@dsh-agent-fleet/message` 的 `MessageHub` 并传入 task sync，没有替换为 mock 或删除方法。对本机打包产物与服务器 common baseline 的真实导入分别验证：后者从 `/opt/dsh-profile/profiles/headless/node_modules/dsh-agent-fleet/node_modules/@dsh-agent-fleet/message/lib/index.js` 解析；`hub.js` 的 SHA-256 均为 `cc49eac7ab72ac7b6de7fe0a3eb091261aece967238d38de2a6ad309782da480`，原型方法存在。
+
+部署作者继而确认旧 provider overlay 同版本安装复用了过期 bundled 依赖，改为整体替换 Fleet 包目录后错误消失。没有在通用代码退回旧 unread API，因为这既掩盖部署不一致，也会损失本轮已验证的消息行为。
+
+随后 178 毫秒 `bootstrap_incomplete` 的真实事件为 provider `NO_ADAPTER`。部署作者把仅有 evaluation runner 的 patch 与已有 provider patch 合并；本子任务在服务器最新 `dsh-horizonmath-fleet:20260908` 无网络临时容器中独立解析了最终 YAML：共四条 overlay，原 `headless-runner` 被禁用，仅插入一个 `fleet-evaluation-runner`，`llm-pi-ai` 注册 `memorax`，另有一条 `agent-default-model` 覆盖，没有重复插入。未根据快速失败猜测或修改 `followup/whenIdle` 调度，仍需以新运行实际模型事件确认端到端恢复。

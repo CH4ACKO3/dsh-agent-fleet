@@ -53,4 +53,11 @@ integrations/agents-last-exam/cuhksz/scenario.sh score data-pipeline
 
 `run all`, `dry-run all`, and `score all` operate on all four scenarios in the order shown by `list`. A fresh run
 uses ALE's `--disable-resume`; prior outputs and the currently open container are left untouched. The helper first
-uses `DEEPSEEK_FLASH_API_KEY` from the environment and otherwise reads the existing local DSH credential reference.
+uses the server's `DEEPSEEK_FLASH_API_KEY` environment or the server-only file specified by `ALE_ENV_FILE`.
+Its default is `/data/zzr/dsh-agent-fleet-evaluation-20260908/secrets/provider.env`. Local credentials are not transferred.
+
+For bounded parallel execution, attempt records, content-checked resume and explicit train/validation/test assignments,
+generate a manifest with `cuhksz/batch-manifest.py` and use the shared `evaluation/batch-run.py` controller. The server
+overlay recipe `server-overlay.Dockerfile` reuses an existing provider-enabled ALE image while replacing the full
+bundled Fleet package from the common baseline. See `docs/reports/benchmarks-server-20260908.md` for actual deployment
+paths, startup fixes and current limitations.

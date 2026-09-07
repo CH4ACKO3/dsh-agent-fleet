@@ -9,3 +9,13 @@ outputs
 coverage
 *.tgz
 *.log
+.env
+.env.*
+**/.env
+**/.env.*
+**/__pycache__
+.codex
+.agents
+integrations/agents-last-exam/agent-memorax.yaml
+integrations/agents-last-exam/agent-deepseek.yaml
+integrations/agents-last-exam/memorax-headless.patch.yml

@@ -1,0 +1,7 @@
+# Explicit adapter for the existing cuhksz106_zzr ALE checkout and its pinned uv Python.
+# Mount the interpreter tree too: the ALE venv's Python is an absolute symlink.
+services:
+  controller:
+    volumes:
+      - ${SELF_EVOLVE_ALE_ROOT:?official ALE checkout required}:${SELF_EVOLVE_ALE_ROOT}:ro
+      - ${SELF_EVOLVE_ALE_PYTHON_ROOT:?pinned uv interpreter tree required}:${SELF_EVOLVE_ALE_PYTHON_ROOT}:ro

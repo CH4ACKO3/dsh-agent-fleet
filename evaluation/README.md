@@ -1,5 +1,45 @@
 # Fleet evaluation baseline
 
+## Batch and curriculum execution
+
+`batch-run.py` runs real ALE or HorizonMath tasks with bounded concurrency, resource limits, separate attempt
+directories, infrastructure-only retries and content-checked resume. Use Python 3.10+; native ALE additionally
+requires PyYAML, normally provided by the official ALE virtual environment.
+
+```sh
+python3 evaluation/batch-run.py --help
+python3 integrations/agents-last-exam/cuhksz/batch-manifest.py --output /srv/benchmarks/ale-manifest.json
+python3 evaluation/batch-run.py --manifest /srv/benchmarks/ale-manifest.json \
+  --output /srv/benchmarks/runs/ale-001 --parallel 2 --cpus 4 --memory 8g --timeout-ms 3600000
+# Add --resume to the exact same invocation after interruption.
+```
+
+ALE's manifest records its official checkout revision and four existing computing-math scenarios, with explicit
+train/validation/test assignments. It preserves native staging and scoring. On `cuhksz106_zzr`, use
+`/data/zzr/frontal-team/ale/repo/.venv/bin/python` and export the existing server credential before execution.
+The new server deployment root is `/data/zzr/dsh-agent-fleet-evaluation-20260908`.
+
+For HorizonMath setup, real data provenance and scoring limitations, see
+[its integration README](../integrations/horizonmath/README.md). `--job JOB.json` implements the host curriculum
+protocol; generation jobs require a frozen-source image with a matching `org.opencontainers.image.revision`.
+An abandoned `.running` lock requires operator inspection. Full machine-crash recovery is not automatic.
+
+Run regression checks with `python3 -m unittest discover -s evaluation -p 'test_*.py'` and
+`python3 -m unittest discover -s integrations/horizonmath -p 'test_*.py'`.
+
+The launcher enforces a host deadline in addition to the Fleet runtime timeout.
+`--grace-ms` defaults to 30000 for evidence export. Interrupted or timed-out
+episodes are removed using their recorded container ID or a unique invocation
+label. A failed cleanup cannot produce a successful exit code. `--keep-container`
+retains normally stopped episodes for debugging, but does not retain timed-out
+or interrupted episodes. Resource limits and input files are checked before launch.
+
+On Linux, a new `--run-root` is private (0700). Its generated `workspace` and
+`results` children allow the image's non-root UID to write; the private parent
+prevents other host users from traversing them. An existing run root must already
+be private. Explicit `--workspace`/`--results` paths keep their existing permissions
+and must be writable by the image user. Do not mount the private parent into Agents.
+
 This directory contains the reusable evaluation control plane. The Team runtime and
 generic lifecycle APIs remain in the root package; benchmark adapters,
 containers, fixed dependency matrices, and scenario overlays belong here or in
@@ -104,6 +144,10 @@ see other host paths unless the launcher is given an additional mount. The outer
 container's CPU, memory, and network boundaries remain the episode-wide ceiling.
 Docker's rootless DinD image still requires a privileged outer container, so use
 this profile only on a dedicated evaluation host or Docker Desktop VM.
+Ubuntu 24.04 and newer may additionally restrict unprivileged user namespaces;
+the host needs an appropriate rootlesskit AppArmor profile. Image CI uses an
+Ubuntu 22.04 runner for DinD rather than changing the host's security settings.
+See [Docker's rootless troubleshooting](https://docs.docker.com/engine/security/rootless/troubleshoot/).
 
 For a conventional benchmark image, inherit the control plane and add only the
 domain layer:

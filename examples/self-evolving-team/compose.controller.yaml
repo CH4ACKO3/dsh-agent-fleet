@@ -13,6 +13,8 @@ services:
     hostname: fleet-evolution-controller
     cpus: 2
     mem_limit: 2g
+    env_file:
+      - ${SELF_EVOLVE_PROVIDER_ENV_FILE:-/dev/null}
     environment:
       SELF_EVOLVE_STATE: ${SELF_EVOLVE_STATE:?absolute state path required}
       SELF_EVOLVE_SOURCE: ${SELF_EVOLVE_SOURCE:?absolute source path required}

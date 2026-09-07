@@ -11,6 +11,7 @@ REMOTE_CONFIG_ROOT=${ALE_CONFIG_ROOT:-/data/zzr/frontal-team/ale/run-configs/dsh
 REMOTE_BUILD_ROOT=${ALE_BUILD_ROOT:-/data/zzr/frontal-team/ale/dsh-fleet-build-0.2.0}
 REMOTE_OUTPUT_ROOT=${ALE_OUTPUT_ROOT:-/data/zzr/frontal-team/ale/runs-dsh-fleet-scenarios}
 IMAGE=${ALE_DSH_FLEET_IMAGE:-ale-ubuntu22-dsh-fleet:0.2.0}
+REMOTE_ENV_FILE=${ALE_ENV_FILE:-/data/zzr/dsh-agent-fleet-evaluation-20260908/secrets/provider.env}
 
 usage() {
   cat <<'EOF'
@@ -62,26 +63,12 @@ list_scenarios() {
   printf '%-20s %s\n' ranking-recovery 'Ranking-node feature-parity incident recovery'
 }
 
-load_api_key() {
-  if [[ -n "${DEEPSEEK_FLASH_API_KEY:-}" ]]; then
-    printf '%s' "$DEEPSEEK_FLASH_API_KEY"
-    return
-  fi
-  node --input-type=module - "$HOME/.dsh/.credentials.yaml" <<'EOF'
-import fs from 'node:fs'
-import YAML from 'yaml'
-const credentials = YAML.parse(fs.readFileSync(process.argv[2], 'utf8'))
-const value = credentials?.refs?.DEEPSEEK_FLASH_API_KEY
-if (!value) throw new Error('DEEPSEEK_FLASH_API_KEY is absent from DSH credentials')
-process.stdout.write(String(value))
-EOF
-}
-
 sync_remote() {
   local build_context
   build_context=$(mktemp -d)
   cp "$INTEGRATION_DIR/Dockerfile" "$build_context/Dockerfile"
   cp "$REPO_ROOT/evaluation/headless.patch.yml" "$build_context/headless.patch.yml"
+  cp "$REPO_ROOT/evaluation/install-headless-profile.sh" "$build_context/install-headless-profile.sh"
   cp "$REPO_ROOT/examples/frontal-team/teams/coding-small.json" "$build_context/coding-small.json"
   (cd "$REPO_ROOT" && pnpm run build && pnpm pack --pack-destination "$build_context")
   ssh "$REMOTE_HOST" "mkdir -p '$ALE_ROOT/ale_run/agents/dsh_fleet' '$REMOTE_CONFIG_ROOT' '$REMOTE_BUILD_ROOT' '$REMOTE_OUTPUT_ROOT'"
@@ -100,10 +87,8 @@ build_image() {
 run_ale() {
   local scenario=$1
   local mode=$2
-  local key
-  key=$(load_api_key)
-  printf '%s\n' "$key" | ssh "$REMOTE_HOST" \
-    "IFS= read -r DEEPSEEK_FLASH_API_KEY; export DEEPSEEK_FLASH_API_KEY; cd '$ALE_ROOT'; .venv/bin/python -m ale_run run '$REMOTE_CONFIG_ROOT/$scenario.yaml' $mode"
+  ssh "$REMOTE_HOST" \
+    "set -a; if test -f '$REMOTE_ENV_FILE'; then . '$REMOTE_ENV_FILE'; fi; set +a; cd '$ALE_ROOT'; .venv/bin/python -m ale_run run '$REMOTE_CONFIG_ROOT/$scenario.yaml' $mode"
 }
 
 dry_run_one() {
