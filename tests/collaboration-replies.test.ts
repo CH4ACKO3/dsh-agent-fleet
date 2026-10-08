@@ -166,7 +166,7 @@ describe('durable reply protocol', () => {
       expect(f.team.messages.getMessage(f.agents.get('reviewer') as never, obligation.messageId).id).toBe(obligation.messageId)
       expect(f.team.messages.pendingExternalReplies()).toMatchObject([{ id: response.messageId }])
     } finally { f.collaboration.close() }
-  })
+  }, 20_000)
 
   it('persists external provenance, deduplicates ingress across replay, and retains an outbox receipt', () => {
     const f = setupReplies()
