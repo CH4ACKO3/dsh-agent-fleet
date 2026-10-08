@@ -157,7 +157,7 @@ describe('FleetAssistantRuntime', () => {
       'atomically creates the zero-owner root and all initial Goal/Vote stages',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'rejection completes it with a negative acceptance result',
+      'the settled cohort wakes the coordinator to decide the next action',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'do not post a separate kickoff message',
@@ -167,7 +167,7 @@ describe('FleetAssistantRuntime', () => {
       'only the recipient\'s exact identity from the current roster in the message text',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
-      'Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state',
+      'Only a domain handler, deterministic timeout fallback, or the fenced `fleet_resolve` path writes a stable state',
     )
     expect(FLEET_ASSISTANT_SYSTEM_PROMPT).toContain(
       'Fleet already claimed for this turn. Do not call `fleet_reconcile claim` again',
@@ -318,7 +318,7 @@ describe('resident Fleet assistants', () => {
     const live = { id: 'session-live' } as Agent
     const resumed = {
       id: 'session-resumed',
-      session: { header: { agentPreset: 'standard' }, events: [] },
+      session: { header: { agentPreset: 'standard' }, snapshotEvents: () => [] },
     } as unknown as Agent
     const dispose = vi.fn(() => Promise.resolve())
     const mount = vi.fn(() => Promise.resolve())
@@ -328,7 +328,7 @@ describe('resident Fleet assistants', () => {
     } as unknown as Context
     let resumedPublished = false
     const resume = vi.fn(async (options: ResumeAgentOptions) => {
-      await options.setup?.(resumedCtx)
+      await options.setup?.(resumedCtx, resumed)
       resumedPublished = true
       return { agent: resumed, dispose }
     })
@@ -401,7 +401,7 @@ describe('resident Fleet assistants', () => {
         get: () => undefined,
         resume: vi.fn(async (options: ResumeAgentOptions) => {
           if (String(options.resumeSessionId) === 'session-missing') throw new Error('Session is unavailable')
-          await options.setup?.({ agent: available, get: () => undefined } as unknown as Context)
+          await options.setup?.({ get: () => undefined } as unknown as Context, available)
           return { agent: available, dispose: () => Promise.resolve() }
         }),
       },

@@ -571,8 +571,52 @@ describe('FleetTaskBoard v6', () => {
     }).stableState.kind).toBe('completed')
   })
 
-  it('settles a rejected planned review as a terminal negative result without a coordinator turn', () => {
+  it('rejects root Work pause atomically after rejection and preserves model-authored rework', () => {
     const board = new FleetTaskBoard(directory)
+    const plan = board.createCompositePlan('agent-lead', {
+      title: 'Execution work', coordinator: 'lead', rootWorkId: 'work-pause',
+      stages: [{ key: 'review', kind: 'vote', title: 'Independent review', description: 'Check the candidate', owners: ['qa'] }],
+    })
+    const review = plan.stages.get('review')!
+    board.castVote('agent-qa', review.id, 'reject', 'Candidate does not solve the requested target')
+    const attemptId = board.claim('agent-lead', plan.task.id).activeReconcile!.attemptId!
+    const before = board.state()
+    expect(() => board.settleOutcome('agent-lead', plan.task.id, {
+      attemptId, progress: 'Keep an unsuccessful result for later.', outcome: 'pause',
+      childOps: [{ kind: 'goal', title: 'Must not leak', owners: ['reviewer'] }],
+    })).toThrow('root Work cannot be paused')
+    expect(board.state()).toEqual(before)
+    expect(() => board.settle('agent-lead', plan.task.id, {
+      attemptId, progress: 'Install an eventual pause.', next: { kind: 'running', reason: 'Wait',
+        reconcilers: [reconciler('lead', undefined, { onTimeout: { kind: 'paused', reason: 'No progress' } })] },
+    })).toThrow('cannot time out into pause')
+    expect(board.state()).toEqual(before)
+    board.settleOutcome('agent-lead', plan.task.id, { attemptId, progress: 'Try another route.', outcome: 'continue',
+      childOps: [{ kind: 'goal', title: 'Alternative route', owners: ['reviewer'] }] })
+    const followup = board.state().tasks.find(task => task.title === 'Alternative route')!
+    board.submitGoal('agent-reviewer', followup.id, { kind: 'complete', reason: 'Still no valid candidate; evidence retained.' })
+    const ending = board.claim('agent-lead', plan.task.id).activeReconcile!.attemptId!
+    expect(board.settleOutcome('agent-lead', plan.task.id, {
+      attemptId: ending, progress: 'End the unsuccessful attempt honestly.', outcome: 'cancel',
+    }).stableState.kind).toBe('cancelled')
+    expect(board.get('agent-lead', review.id).domain).toMatchObject({ outcome: 'reject' })
+    board.close()
+  })
+
+  it('retains ordinary subtask pause and host board pause', () => {
+    const board = new FleetTaskBoard(directory)
+    const parent = board.create('agent-lead', { title: 'Ordinary parent', assignees: ['lead'] })
+    const child = board.create('agent-lead', { title: 'Wait for user', parentId: parent.id, assignees: ['lead'] })
+    const attemptId = board.claim('agent-lead', child.id).activeReconcile!.attemptId!
+    expect(board.settleOutcome('agent-lead', child.id, {
+      attemptId, progress: 'External input is needed.', outcome: 'pause',
+    }).stableState.kind).toBe('paused')
+    expect(() => board.pause()).not.toThrow()
+    board.close()
+  })
+
+  it('preserves rejected review across restart and lets the coordinator author successive cohorts', () => {
+    let board = new FleetTaskBoard(directory)
     const plan = board.createCompositePlan('agent-lead', {
       title: 'Planned release', coordinator: 'lead', rootWorkId: 'work-1',
       stages: [
@@ -604,14 +648,118 @@ describe('FleetTaskBoard v6', () => {
     expect(board.ownerTasks('qa').map(task => task.id)).toContain(review.id)
     board.castVote('agent-qa', review.id, 'reject', 'Supplier normalization is incorrect.')
 
-    expect(board.get('agent-lead', root.id)).toMatchObject({
-      stableState: {
-        kind: 'completed',
-        reason: expect.stringContaining('rejected acceptance'),
-        result: expect.stringContaining('Acceptance rejected'),
-      },
+    expect(board.get('agent-lead', root.id).stableState.kind).toBe('running')
+    expect(board.readyTasks('lead').map(task => task.id)).toEqual([root.id])
+    expect(board.state().tasks).toHaveLength(3) // No framework-authored repair tasks.
+    const abandoned = board.claim('agent-lead', root.id).activeReconcile!.attemptId!
+    const persisted = board.state()
+    board.close()
+    board = new FleetTaskBoard(directory)
+    board.restore(persisted)
+    const choose = (progress: string, childOps: Parameters<FleetTaskBoard['settleOutcome']>[2]['childOps']) => {
+      const attemptId = board.claim('agent-lead', root.id).activeReconcile!.attemptId!
+      return board.settleOutcome('agent-lead', root.id, { attemptId, progress, outcome: 'continue', childOps })
+    }
+    expect(() => board.settleOutcome('agent-lead', root.id, {
+      attemptId: abandoned, progress: 'Stale attempt.', outcome: 'cancel',
+    })).toThrow('is no longer current')
+    choose('Investigate before deciding how to repair.', [
+      { kind: 'goal', title: 'Investigate', owners: ['qa'] },
+    ])
+    const investigation = board.state().tasks.find(task => task.title === 'Investigate')!
+    board.submitGoal('agent-qa', investigation.id, { kind: 'complete', reason: 'Cause isolated.' })
+    const investigated = board.claim('agent-lead', root.id).activeReconcile!.attemptId!
+    expect(() => board.settleOutcome('agent-lead', root.id, {
+      attemptId: investigated, progress: 'Investigation alone is not approval.', outcome: 'complete',
+    })).toThrow('requires an approved Vote child')
+    board.settleOutcome('agent-lead', root.id, {
+      attemptId: investigated, progress: 'Repair then review.', outcome: 'continue', childOps: [
+        { kind: 'goal', key: 'repair', title: 'Chosen repair', owners: ['reviewer'] },
+        { kind: 'vote', title: 'Second review', channel: '#main', statement: 'Accept repaired artifact.', voters: ['qa'], dependencies: ['repair'] },
+      ],
     })
-    expect(board.readyTasks('lead')).toEqual([])
+    const repair = board.state().tasks.find(task => task.title === 'Chosen repair')!
+    const second = board.state().tasks.find(task => task.title === 'Second review')!
+    expect(board.get('agent-lead', root.id).stableState.kind).toBe('running')
+    expect(board.ownerTasks('qa')).toEqual([])
+    board.submitGoal('agent-reviewer', repair.id, { kind: 'complete', reason: 'Repaired.', result: 'candidate-2' })
+    board.castVote('agent-qa', second.id, 'reject', 'Another criterion fails.')
+    choose('Use independent parallel checks for the next attempt.', [
+      { kind: 'goal', key: 'revision', title: 'New approach', owners: ['lead'] },
+      { kind: 'vote', title: 'Correctness', channel: '#main', statement: 'Check correctness.', voters: ['qa'], dependencies: ['revision'] },
+      { kind: 'vote', title: 'Compatibility', channel: '#main', statement: 'Check compatibility.', voters: ['reviewer'], dependencies: ['revision'] },
+    ])
+    const revision = board.state().tasks.find(task => task.title === 'New approach')!
+    board.submitGoal('agent-lead', revision.id, { kind: 'complete', reason: 'Revised.', result: 'candidate-3' })
+    for (const [title, actor] of [['Correctness', 'agent-qa'], ['Compatibility', 'agent-reviewer']]) {
+      board.castVote(actor!, board.state().tasks.find(task => task.title === title)!.id, 'approve', 'Verified independently.')
+    }
+    expect(board.get('agent-lead', root.id).stableState.kind).toBe('running')
+    const accepted = board.claim('agent-lead', root.id).activeReconcile!.attemptId!
+    expect(board.settleOutcome('agent-lead', root.id, {
+      attemptId: accepted, progress: 'Current evidence passes.', outcome: 'complete', result: 'candidate-3',
+    }).stableState).toMatchObject({ kind: 'completed', result: 'candidate-3' })
+    for (const id of [review.id, second.id]) expect(board.get('agent-lead', id).domain).toMatchObject({ outcome: 'reject' })
+    board.close()
+  })
+
+  it('lets the coordinator explicitly stop after rejection without manufacturing repair work', () => {
+    const board = new FleetTaskBoard(directory)
+    const plan = board.createCompositePlan('agent-lead', {
+      title: 'Review evidence', coordinator: 'lead', stages: [
+        { key: 'review', kind: 'vote', title: 'Review', owners: ['qa'] },
+      ],
+    })
+    board.castVote('agent-qa', plan.stages.get('review')!.id, 'reject', 'No viable candidate within budget.')
+    const attemptId = board.claim('agent-lead', plan.task.id).activeReconcile!.attemptId!
+    expect(board.settleOutcome('agent-lead', plan.task.id, {
+      attemptId, progress: 'Remaining budget cannot support another attempt.', outcome: 'cancel',
+    }).stableState.kind).toBe('cancelled')
+    expect(board.state().tasks).toHaveLength(2)
+    board.close()
+  })
+
+  it('does not let a later approved Vote hide a rejected Vote in the same cohort', () => {
+    const board = new FleetTaskBoard(directory)
+    const root = board.create('agent-lead', { title: 'Gated work', assignees: ['lead'], decision: 'vote' })
+    board.settleOutcome('agent-lead', root.id, {
+      attemptId: board.claim('agent-lead', root.id).activeReconcile!.attemptId!,
+      progress: 'Independent criteria.', outcome: 'continue', childOps: [
+        { kind: 'vote', title: 'First', channel: '#main', statement: 'Check A.', voters: ['qa'] },
+        { kind: 'vote', title: 'Second', channel: '#main', statement: 'Check B.', voters: ['reviewer'] },
+      ],
+    })
+    const first = board.state().tasks.find(task => task.title === 'First')!
+    const second = board.state().tasks.find(task => task.title === 'Second')!
+    board.castVote('agent-qa', first.id, 'reject', 'A failed.')
+    board.castVote('agent-reviewer', second.id, 'approve', 'B passed.')
+    const attemptId = board.claim('agent-lead', root.id).activeReconcile!.attemptId!
+    expect(() => board.settleOutcome('agent-lead', root.id, {
+      attemptId, progress: 'One approval cannot override rejection.', outcome: 'complete',
+    })).toThrow('approval from every Vote')
+    board.close()
+  })
+
+  it('keeps the original root deadline when the coordinator chooses follow-up work', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-16T12:00:00Z'))
+    const board = new FleetTaskBoard(directory)
+    board.activate()
+    const plan = board.createCompositePlan('agent-lead', {
+      title: 'Bounded work', coordinator: 'lead', timeoutAt: '2026-09-16T12:00:10Z', stages: [
+        { key: 'review', kind: 'vote', title: 'Review', owners: ['qa'] },
+      ],
+    })
+    board.castVote('agent-qa', plan.stages.get('review')!.id, 'reject', 'Try a different approach.')
+    board.settleOutcome('agent-lead', plan.task.id, {
+      attemptId: board.claim('agent-lead', plan.task.id).activeReconcile!.attemptId!,
+      progress: 'Try within the remaining time.', outcome: 'continue', childOps: [
+        { kind: 'goal', title: 'Explore', owners: ['reviewer'] },
+      ],
+    })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(board.get('agent-lead', plan.task.id).stableState.kind).toBe('blocked')
+    board.close()
   })
 
   it('completes a successful planned root without a coordinator turn', () => {
@@ -751,10 +899,8 @@ describe('FleetTaskBoard v6', () => {
       kind: 'block', reason: 'External acknowledgement channel is unavailable.',
     })
 
-    expect(board.get('agent-lead', plan.task.id).stableState).toMatchObject({
-      kind: 'blocked', reason: expect.stringContaining('Acknowledge kickoff'),
-    })
-    expect(board.readyTasks('lead')).toEqual([])
+    expect(board.get('agent-lead', plan.task.id).stableState.kind).toBe('running')
+    expect(board.readyTasks('lead').map(task => task.id)).toEqual([plan.task.id])
   })
 
   it('blocks a multi-owner Goal on a concrete owner blocker', () => {
@@ -791,6 +937,26 @@ describe('FleetTaskBoard v6', () => {
     expect(board.get('agent-lead', goal.id).stableState).toMatchObject({
       kind: 'blocked', reason: 'Goal deadline 2026-08-21T00:00:10.000Z elapsed.',
     })
+    board.close()
+  })
+
+  it('rejects stale Goal, Vote and plan deadlines without persisting a partial plan', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-14T12:00:00Z'))
+    const board = new FleetTaskBoard(directory)
+    for (const timeoutAt of ['2026-01-01T00:00:00Z', '2026-09-14T12:00:00Z']) {
+      expect(() => board.createGoal('agent-lead', { title: 'Expired', timeoutAt })).toThrow('must be in the future')
+      expect(() => board.createVote('agent-lead', {
+        statement: 'Expired review', channel: '#main', voters: ['qa'], timeoutAt,
+      })).toThrow('must be in the future')
+      expect(() => board.createCompositePlan('agent-lead', {
+        title: 'Invalid plan', coordinator: 'lead', stages: [
+          { key: 'valid', title: 'Valid first stage', owners: ['lead'] },
+          { key: 'stale', title: 'Stale second stage', owners: ['reviewer'], dependencies: ['valid'], timeoutAt },
+        ],
+      })).toThrow('must be in the future')
+      expect(board.state().tasks).toEqual([])
+    }
     board.close()
   })
 
@@ -858,8 +1024,27 @@ describe('FleetTaskBoard v6', () => {
     installGoalTools(ctx, board, authorize)
     installVoteTools(ctx, board, authorize)
     installReconcileTools(ctx, board, authorize)
-    expect(registered.map(tool => tool.name)).toEqual(['fleet_task', 'fleet_goal', 'fleet_vote', 'fleet_reconcile'])
+    expect(registered.map(tool => tool.name)).toEqual(['fleet_task', 'fleet_goal', 'fleet_vote', 'fleet_reconcile', 'fleet_resolve'])
     expect(registered.find(tool => tool.name === 'fleet_task')?.parameters.properties.action?.enum).toEqual(['list', 'owner_list', 'get'])
+  })
+
+  it('requires complete resolution arguments and preserves attempt fencing through fleet_resolve', async () => {
+    const board = new FleetTaskBoard(directory)
+    const registered: any[] = []
+    const ctx = { tools: { register: (tool: any) => { registered.push(tool); return () => {} } } } as never
+    installReconcileTools(ctx, board, () => true)
+    const tool = registered.find(t => t.name === 'fleet_resolve')
+    expect(tool.parameters.required).toEqual(expect.arrayContaining(['id', 'attempt_id', 'progress', 'outcome']))
+    const task = board.create('agent-lead', { title: 'Resolve through strict tool', assignees: ['lead'] })
+    const attempt = board.claim('agent-lead', task.id).activeReconcile!.attemptId!
+    const exec = { agent: { id: 'agent-lead' } }
+    const args = { id: task.id, attempt_id: attempt, progress: 'Checked the result.', outcome: 'complete', result: 'Done.' }
+    await expect(tool.execute({ ...args, attempt_id: 'stale' }, exec)).rejects.toThrow()
+    expect(board.get('agent-lead', task.id).activeReconcile?.attemptId).toBe(attempt)
+    await tool.execute(args, exec)
+    expect(board.get('agent-lead', task.id).stableState.kind).toBe('completed')
+    await expect(tool.execute(args, exec)).rejects.toThrow()
+    board.close()
   })
 
   it('keeps model-visible Task views bounded while durable interaction history grows', () => {

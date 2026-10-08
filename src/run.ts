@@ -6,6 +6,7 @@ import {
   createReadStream,
   existsSync,
   fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -31,13 +32,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-compaction'
+import { recoverFleetContext, FLEET_RECOVERY_DEFAULT_TIMEOUT_MS } from './context-recovery.js'
+import { contextCeilingDirectiveText } from './context-checkpoint.js'
+export { contextCeilingDirectiveText } from './context-checkpoint.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { FleetCore, RuntimeRequestConfig } from '@dsh-agent-fleet/core'
 import type {
   FleetMemberStatusBoard,
@@ -85,6 +90,14 @@ import {
 import { BudgetService } from './budget/service.js'
 import type { BudgetStore } from './budget/service.js'
 import { BudgetGuard } from './budget/guard.js'
+import {
+  createFleetContextCeilingState,
+  evaluateFleetContextCeiling,
+  observeFleetContextTokens,
+  resetFleetContextEpoch,
+  type FleetContextCeilingPolicy,
+  type FleetContextCeilingState,
+} from './context-ceiling.js'
 import {
   FLEET_TASK_STATE_NAMESPACE,
   fleetTaskToolDetail,
@@ -563,6 +576,10 @@ function stableCoordinationEvent(
     } }
   } else if (coordination.type === 'pin') {
     data = { ...coordination, pin: { ...coordination.pin, pinnedBy: stable(coordination.pin.pinnedBy) } }
+  } else if (coordination.type === 'reply_handoff') {
+    data = { ...coordination, from: stable(coordination.from), to: stable(coordination.to) }
+  } else if (coordination.type === 'external_delivered') {
+    data = coordination
   } else if (coordination.type === 'system_notification') {
     data = { ...coordination, agentId: stable(coordination.agentId) }
   } else {
@@ -1035,6 +1052,8 @@ export interface AttachAssistantInput {
   readonly prompt?: string
   readonly provider?: string
   readonly model?: string
+  readonly reasoningEffort?: string
+  readonly maxTokens?: number
   readonly toolGroups?: readonly FleetMemberToolGroup[]
   readonly permissions?: readonly FleetMemberPermission[]
   readonly contacts?: FleetMemberContacts
@@ -1771,6 +1790,7 @@ function persona(template: TeamTemplate, member: FleetMemberView): string {
 
 async function installMemberTools(
   childCtx: Context,
+  child: Agent,
   runtime: FleetCollaborationTeam,
   member: string,
   exposeHostFleetTools = false,
@@ -1787,21 +1807,26 @@ async function installMemberTools(
       .split(/[\s,]+/u)
       .map(name => name.trim())
       .filter(name => /^[a-z][a-z0-9_-]*$/u.test(name))
-    const removeNativeRestrictions = scope.tools.restrict({
-      deny: [...new Set(['subagent', ...configuredHostToolDeny])],
-    })
+    const deniedNativeTools = new Set(['subagent', 'subagent_fork', ...configuredHostToolDeny])
+    // Modern DSH rejects unknown restriction names; profiles may omit native
+    // spawning tools. A guard also covers tools registered after member setup.
+    const installedDenied = [...deniedNativeTools].filter(name => scope.tools.get(name) !== undefined)
+    const removeNativeRestrictions = installedDenied.length > 0
+      ? scope.tools.restrict({ deny: installedDenied }) : () => {}
     const removeFleetTools = runtime.installTools(scope, member, { exposeHostFleetTools })
+    const removeNativeGuard = scope.tools.guard(execution => deniedNativeTools.has(execution.name)
+      ? `Native tool ${execution.name} is unavailable inside a formal Fleet member` : undefined)
     return () => {
+      removeNativeGuard()
       removeFleetTools()
       removeNativeRestrictions()
     }
   })
   if (source !== undefined) {
-    if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
     await runtime.events.serial('fleet/member/setup', {
       member,
       source,
-      agent: childCtx.agent,
+      agent: child,
       ctx: childCtx,
     })
   }
@@ -1912,7 +1937,8 @@ function isExplicitWaitCall(name: string, rawArguments: string): boolean {
 
 const NETWORK_RECOVERY_INITIAL_DELAY_MS = 30_000
 const NETWORK_RECOVERY_MAX_DELAY_MS = 5 * 60_000
-const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
+const NETWORK_FAILURE_CODES = new Set(['TRANSPORT', 'TIMEOUT', 'STREAM_CLOSED'])
+const BOOTSTRAP_NETWORK_MAX_ATTEMPTS = 3
 const PROTOCOL_RECOVERY_MAX_ATTEMPTS = 2
 const RETRIABLE_PROTOCOL_FAILURE = /\bmalformed_tool_protocol\b/iu
 const RESOURCE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
@@ -2015,6 +2041,13 @@ interface OwnerTaskWakeState {
 
 const REPLY_OWNER_RETRY_DELAYS_MS = [5_000, 15_000, 60_000, 5 * 60_000] as const
 
+// The owner-task list is only re-sent while some Task it lists is still unconsumed, and a repeat
+// with an unchanged fingerprint carries no new information, so its ladder grows far past the reply
+// path's 5-minute terminal rung (30 min at the last rung). Every fingerprinted state change still
+// wakes immediately. Reply wakes keep REPLY_OWNER_RETRY_DELAYS_MS, because promptness there is a
+// reply-contract obligation rather than mere liveness.
+const OWNER_TASK_WAKE_DELAYS_MS = [5_000, 15_000, 60_000, 300_000, 900_000, 1_800_000] as const
+
 function isRetriableProtocolFailure(error: { readonly code: string; readonly message: string }): boolean {
   return error.code === 'PI_AI_ERROR' && RETRIABLE_PROTOCOL_FAILURE.test(error.message)
 }
@@ -2033,6 +2066,10 @@ export class FleetRunService {
   private readonly resumingRunIds = new Set<string>()
   private readonly networkRecoveries = new Map<string, NetworkRecovery>()
   private readonly protocolRecoveries = new Map<string, ProtocolRecovery>()
+  private readonly evaluationBootstrapRecoveredRunIds = new Set<string>()
+  private readonly evaluationBootstrapNetworkRecoveries = new Map<string, {
+    sessionId: string; attempt: number; failureSequence: number; cancel: (() => void) | undefined
+  }>()
   private readonly memberToolActivity = new Map<string, MemberToolActivity>()
   private readonly waitingSessionIds = new Set<string>()
   private readonly abnormalSessionIds = new Set<string>()
@@ -2050,6 +2087,7 @@ export class FleetRunService {
   private readonly memberLastSharedTurns = new Map<string, number>()
   private readonly memberVisibilityReviewedTurns = new Map<string, number>()
   private readonly visibilityReminderStates = new Map<string, VisibilityReminderState>()
+  private readonly contextCeilingStates = new Map<string, FleetContextCeilingState>()
   private readonly activeParticipantStates = new Map<string, TeamActiveParticipantState>()
   private readonly turnReminderLastShown = new Map<string, Map<FleetTurnReminderSlot, Map<string, number>>>()
   private readonly turnStartReminderTurns = new Map<string, number>()
@@ -2061,6 +2099,7 @@ export class FleetRunService {
   }>()
   private readonly receiptBoundAgents = new WeakSet<Agent>()
   private readonly pausingTeams = new Map<string, Promise<FleetRunRecord>>()
+  private readonly evaluationLifecycleTeams = new Set<string>()
   private readonly pausingMembers = new Map<string, Promise<FleetRunMember>>()
   private readonly ownerMemberResumes = new Map<string, Promise<void>>()
   private readonly budgetService: BudgetService
@@ -2127,18 +2166,18 @@ export class FleetRunService {
 
   private async setupFormalMember(
     childCtx: Context,
+    child: Agent,
     runtime: FleetCollaborationTeam,
     member: string,
     source: 'create' | 'resume',
   ): Promise<void> {
-    if (childCtx.agent === undefined) throw new Error('Fleet member setup requires ctx.agent')
     childCtx.on('agent/turn-stopping', ({ agent, turn }) => {
       this.memberTurnStopping(agent, turn)
     })
-    childCtx.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
-      return this.preStepReminderDecision(childCtx.agent!, await next())
+    childCtx.on('agent/pre-step', async (payload, next: () => Promise<PreStepDecision>) => {
+      return this.preStepReminderDecision(child, await next(), payload.signal)
     })
-    await installMemberTools(childCtx, runtime, member, false, source)
+    await installMemberTools(childCtx, child, runtime, member, false, source)
   }
 
   subscribeChanges(listener: () => void): () => void {
@@ -2392,7 +2431,7 @@ export class FleetRunService {
             ? {}
             : { reasoningEffort: ReasoningEffortId(member.reasoningEffort) }),
           ...(memberMaxTokens === undefined ? {} : { maxTokens: memberMaxTokens }),
-          setup: childCtx => this.setupFormalMember(childCtx, runtime, member.id, 'create'),
+          setup: (childCtx, child) => this.setupFormalMember(childCtx, child, runtime, member.id, 'create'),
         })
         created.push(member.id)
         runtime.memberIdsByName.set(member.id, agent.id)
@@ -2432,6 +2471,8 @@ export class FleetRunService {
         prompt: template.assistant.prompt,
         ...(template.assistant.provider === undefined ? {} : { provider: template.assistant.provider }),
         ...(template.assistant.model === undefined ? {} : { model: template.assistant.model }),
+        ...(template.assistant.reasoningEffort === undefined ? {} : { reasoningEffort: template.assistant.reasoningEffort }),
+        ...(template.assistant.maxTokens === undefined ? {} : { maxTokens: template.assistant.maxTokens }),
         toolGroups: template.assistant.toolGroups,
         permissions: template.assistant.permissions,
         contacts: template.assistant.contacts,
@@ -2540,7 +2581,9 @@ export class FleetRunService {
           key: 'delivery', kind: 'goal', title: 'Deliver the Fleet work item',
           description: acceptedTask, owners: [rootOwner.name], dependencies: [],
         }]
-    const plan = runtime.tasks.createCompositePlan(rootOwner.sessionId, {
+    // Preserve the actual plan author. A ready-stage owner coordinates progress,
+    // but must not become the Vote initiator merely by appearing first in the DAG.
+    const plan = runtime.tasks.createCompositePlan(String(launcher.id), {
       title: `Fleet work ${workId}`,
       description: acceptedTask,
       coordinator: rootOwner.name,
@@ -2701,7 +2744,7 @@ export class FleetRunService {
             ...memberTemplate,
             name: member.displayName ?? memberTemplate.name,
           }),
-          setup: childCtx => this.setupFormalMember(childCtx, runtime, member.name, 'resume'),
+          setup: (childCtx, child) => this.setupFormalMember(childCtx, child, runtime, member.name, 'resume'),
           ...memberAgentOptions,
         })
         runtime.memberIdsByName.set(member.name, resumed.id)
@@ -2739,7 +2782,7 @@ export class FleetRunService {
             role: memberTemplate.role,
             cwd: record.projectRoot,
             persona: persona(effectiveTemplate, memberTemplate),
-            setup: childCtx => this.setupFormalMember(childCtx, runtime, memberTemplate.id, 'create'),
+            setup: (childCtx, child) => this.setupFormalMember(childCtx, child, runtime, memberTemplate.id, 'create'),
             ...memberAgentOptions,
           })
           const member: FleetRunMember = {
@@ -2964,9 +3007,15 @@ export class FleetRunService {
     caller: Agent,
     execution: { readonly name: string; readonly arguments: unknown },
   ): string | undefined {
-    if (!assistantToolCrossesExecutionBoundary(execution.name, execution.arguments)) return undefined
     const record = this.assistantTeamForSession(String(caller.id))
     if (record === undefined) return undefined
+    // A personal-execution lease does not authorize helpers outside the Team's
+    // roster, Tasks, budget accounting, or lifecycle. Guard at call time too:
+    // DSH may register native delegation tools after Fleet has been installed.
+    if (execution.name === 'subagent' || execution.name === 'subagent_fork') {
+      return `[Fleet non-retryable tool route] ${execution.name} is unavailable to a Fleet assistant. Delegate through formal Fleet members and Tasks; personal take_over does not authorize native subagents.`
+    }
+    if (!assistantToolCrossesExecutionBoundary(execution.name, execution.arguments)) return undefined
     const assistant = record.assistants.find(candidate => candidate.sessionId === String(caller.id))
     const interaction = assistant === undefined
       ? undefined
@@ -3003,6 +3052,15 @@ export class FleetRunService {
 
   resourceStore(runId: string): FleetResources {
     return this.requireRuntime(runId).resources
+  }
+
+  /** Read-only evidence remains available after the Team runtime is released. */
+  resourceSnapshot(runId: string): FleetResource[] {
+    const record = this.requireRecord(runId)
+    const runtime = this.collaboration.get(record.id)
+    return structuredClone(runtime === undefined
+      ? this.collaborationState(record, this.storedEvents(record)).resources
+      : runtime.resources.listResources())
   }
 
   memberStatusBoard(runId: string): FleetMemberStatusBoard {
@@ -3617,7 +3675,7 @@ export class FleetRunService {
         cwd: record.projectRoot,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'create'),
+        setup: (childCtx, child) => this.setupFormalMember(childCtx, child, runtime, view.id, 'create'),
       })
       created = true
       runtime.attachMember(agent.id, view)
@@ -3706,7 +3764,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona(effectiveTemplate, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'resume'),
+        setup: (childCtx, child) => this.setupFormalMember(childCtx, child, runtime, view.id, 'resume'),
       })
       if (resumed.id === member.sessionId) runtime.attachMember(resumed.id, view)
       else runtime.rebindMember(member.sessionId, resumed.id, view)
@@ -3735,7 +3793,7 @@ export class FleetRunService {
           role: currentView.role,
           persona: persona({ ...template, members: this.effectiveMemberViews(record) }, currentView),
           ...this.memberRuntimeOptions(record, currentView),
-          setup: childCtx => this.setupFormalMember(childCtx, runtime, currentView.id, 'resume'),
+          setup: (childCtx, child) => this.setupFormalMember(childCtx, child, runtime, currentView.id, 'resume'),
         })
         if (restored.id === member.sessionId) runtime.attachMember(restored.id, currentView)
         else runtime.rebindMember(member.sessionId, restored.id, currentView)
@@ -4082,9 +4140,35 @@ export class FleetRunService {
     return operation
   }
 
+  /** Host-owned scope: no model tool exposes this capability or its release. */
+  protectEvaluationLifecycle(runId: string): { pause(caller: Agent): Promise<FleetRunRecord>; release(): void } {
+    this.requireMutableRecord(runId)
+    if (this.evaluationLifecycleTeams.has(runId)) throw new Error('Fleet evaluation lifecycle is already protected')
+    this.evaluationLifecycleTeams.add(runId)
+    let active = true
+    return {
+      pause: async caller => {
+        if (!active) throw new Error('Fleet evaluation lifecycle protection was released')
+        return this.pauseTeamOperation(caller, runId)
+      },
+      release: () => {
+        if (!active) return
+        active = false
+        this.evaluationLifecycleTeams.delete(runId)
+      },
+    }
+  }
+
+  private assertAgentPauseAllowed(runId: string): void {
+    if (this.evaluationLifecycleTeams.has(runId)) {
+      throw new Error('Agents cannot pause an unattended Fleet evaluation Team or member. Do not use pause/resume to trigger task wakeups; inspect task prerequisites and member state. Only the evaluation host or an external operator controls pauses.')
+    }
+  }
+
   async pauseTeam(caller: Agent, runId?: string): Promise<FleetRunRecord> {
     const record = this.requireMutableRecord(runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    this.assertAgentPauseAllowed(record.id)
     if (record.continuous === true
       && record.assistants.some(assistant => assistant.sessionId === String(caller.id))) {
       throw new Error('the assistant for a continuous Fleet Team cannot pause its own Team; use an external operator or host lifecycle transition')
@@ -4350,6 +4434,7 @@ export class FleetRunService {
   async pauseMember(caller: Agent, runId: string, memberName: string): Promise<FleetRunMember> {
     const record = this.requireMutableRecord(runId, caller.session.header.cwd)
     this.requireFleetPermission(record, caller, 'team.manage')
+    this.assertAgentPauseAllowed(record.id)
     return this.pauseMemberOperation(caller, record.id, memberName)
   }
 
@@ -4406,7 +4491,7 @@ export class FleetRunService {
         runtime.resources.release(member.sessionId)
         activeMember = { ...member, sessionId: rotated.id }
         this.replaceRecord(record.id, {
-          members: record.members.map(candidate => candidate.name === member.name ? activeMember : candidate),
+          members: this.requireRecord(record.id).members.map(candidate => candidate.name === member.name ? activeMember : candidate),
         })
         this.appendEvent(record.id, 'member_session_rotated', {
           member: member.name,
@@ -4422,7 +4507,7 @@ export class FleetRunService {
     runtime.detachMember(activeMember.sessionId)
     const paused: FleetRunMember = { ...activeMember, status: 'paused' }
     this.replaceRecord(record.id, {
-      members: record.members.map(candidate => candidate.name === member.name ? paused : candidate),
+      members: this.requireRecord(record.id).members.map(candidate => candidate.name === member.name ? paused : candidate),
     })
     this.appendEvent(record.id, 'member_paused', paused)
     return structuredClone(paused)
@@ -4472,7 +4557,7 @@ export class FleetRunService {
         role: view.role,
         persona: persona({ ...template, members: this.effectiveMemberViews(record) }, view),
         ...this.memberRuntimeOptions(record, view),
-        setup: childCtx => this.setupFormalMember(childCtx, runtime, view.id, 'resume'),
+        setup: (childCtx, child) => this.setupFormalMember(childCtx, child, runtime, view.id, 'resume'),
       })
       const resumedAgent = this.ctx.agents.get(SessionId(resumed.id))
       if (member.status === 'paused' && resumedAgent !== undefined) {
@@ -4728,6 +4813,8 @@ export class FleetRunService {
       ...((input.model ?? caller.options.model) === undefined
         ? {}
         : { model: input.model ?? caller.options.model }),
+      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+      ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
       toolGroups: input.toolGroups === undefined ? ['messages', 'status', 'resources'] : [...input.toolGroups],
       permissions: input.permissions === undefined ? [] : [...input.permissions],
       contacts: input.contacts === undefined
@@ -4784,7 +4871,7 @@ export class FleetRunService {
     assistant: FleetRunAssistant,
     agent: Agent,
   ): Promise<void> {
-    const input = agent.session.events.findLast(event =>
+    const input = agent.session.snapshotEvents().findLast(event =>
       event.type === 'user/message' && event.data.source?.kind === 'user')
     if (input?.type !== 'user/message') return
     const tasks = this.collaboration.get(record.id)?.tasks
@@ -4814,7 +4901,7 @@ export class FleetRunService {
     context.on('agent/turn-stopping', ({ agent: stoppingAgent, turn }) => {
       this.memberTurnStopping(stoppingAgent, turn)
     })
-    context.on('agent/pre-step', async (_payload, next: () => Promise<PreStepDecision>) => {
+    context.on('agent/pre-step', async (payload, next: () => Promise<PreStepDecision>) => {
       const decision = await next()
       if (decision.kind === 'reject') return decision
       const record = this.assistantTeamForSession(String(agent.id))
@@ -4840,7 +4927,7 @@ export class FleetRunService {
         }
       }
       if (hasDirectUserInput) await this.loadTeamMembersForAssistantInput(agent, record.id)
-      return this.preStepReminderDecision(agent, decision)
+      return this.preStepReminderDecision(agent, decision, payload.signal)
     })
     context.on('system-prompt/assemble', async (_assembly, _assembleContext, next) => {
       const assembly = await next()
@@ -5165,7 +5252,7 @@ export class FleetRunService {
     }
   }
 
-  sendUserConversationMessage(input: SendFleetConversationMessageInput, caller?: Agent): SendMessageResult {
+  sendUserConversationMessage(input: SendFleetConversationMessageInput & { readonly external?: import('@dsh-agent-fleet/message').FleetExternalSource }, caller?: Agent): SendMessageResult {
     const record = this.requireMutableRecord(input.runId)
     const subject = { kind: 'external' as const, id: `fleet-user:${record.id}` }
     this.authorization?.require({
@@ -5187,9 +5274,18 @@ export class FleetRunService {
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
       ...(input.resources === undefined ? {} : { resources: input.resources }),
       ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
-    })
+    }, input.external)
     this.reconcileOwnerTasks(record.id, caller)
     return result
+  }
+
+  pendingMailboxReplies(): Array<{ runId: string; message: FleetMessage }> {
+    return this.collaboration.entries().flatMap(([runId, runtime]) =>
+      runtime.messages.pendingExternalReplies().map(message => ({ runId, message })))
+  }
+
+  acknowledgeMailboxReply(runId: string, messageId: string): void {
+    this.requireRuntime(runId).messages.acknowledgeExternalReply(messageId)
   }
 
   uploadResource(caller: Agent, input: UploadFleetResourceInput): FleetResource {
@@ -5516,8 +5612,9 @@ export class FleetRunService {
   }
 
   private currentOpenTurn(agent: Agent): number | undefined {
-    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-      const event = agent.session.events[index]
+    const events = agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
       if (event?.type === 'turn/end') return undefined
       if (event?.type === 'turn/start') return event.data.turn
     }
@@ -5589,8 +5686,9 @@ export class FleetRunService {
 
   private recentTurnReminderTools(agent: Agent, turn: number): string[] {
     const tools: string[] = []
-    for (let index = agent.session.events.length - 1; index >= 0 && tools.length < 8; index -= 1) {
-      const event = agent.session.events[index]
+    const events = agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0 && tools.length < 8; index -= 1) {
+      const event = events[index]
       if (event?.type === 'turn/start' && event.data.turn < turn - 2) break
       if (event?.type === 'tool/call' && !tools.includes(event.data.name)) tools.push(event.data.name)
     }
@@ -5625,8 +5723,9 @@ export class FleetRunService {
     const turn = this.currentOpenTurn(agent)
     if (turn === undefined || this.turnStartReminderTurns.get(sessionId) === turn) return decision
     this.turnStartReminderTurns.set(sessionId, turn)
-    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-      const event = agent.session.events[index]
+    const events = agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
       if (event?.type === 'turn/start') break
       if (event?.type === 'tool/call' || event?.type === 'tool/result' || event?.type === 'assistant/message') {
         return decision
@@ -5650,8 +5749,9 @@ export class FleetRunService {
     const previousSequence = this.toolResultReminderSequences.get(sessionId) ?? -1
     const callNames = new Map<string, string>()
     const results: Array<{ readonly sequence: number; readonly callId: string; readonly text: string }> = []
-    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-      const event = agent.session.events[index]
+    const events = agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
       if (event?.type === 'turn/start') break
       if (event?.type === 'tool/call') callNames.set(String(event.data.callId), event.data.name)
       if (event?.type !== 'tool/result' || event.seq <= previousSequence) continue
@@ -5675,16 +5775,19 @@ export class FleetRunService {
     return reminder === undefined ? decision : this.appendTurnReminder(decision, 'tool-result', reminder)
   }
 
-  private preStepReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision {
+  private async preStepReminderDecision(agent: Agent, decision: PreStepDecision, signal?: AbortSignal): Promise<PreStepDecision> {
     if (decision.kind === 'reject') return decision
-    const withTurnStart = this.turnStartReminderDecision(agent, decision)
+    const withCeiling = await this.contextCeilingPreStepDecision(agent, decision, signal)
+    if (withCeiling.kind === 'reject') return withCeiling
+    const withTurnStart = this.turnStartReminderDecision(agent, withCeiling)
     if (withTurnStart.kind === 'reject') return withTurnStart
     return this.toolResultReminderDecision(agent, withTurnStart)
   }
 
   private turnHasDirectOutput(agent: Agent, turn: number): boolean {
-    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-      const event = agent.session.events[index]
+    const events = agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
       if (event?.type === 'turn/start' && event.data.turn < turn) break
       if (event?.type !== 'assistant/message'
         || event.data.turn !== turn
@@ -5696,8 +5799,9 @@ export class FleetRunService {
 
   private turnDirectOutputText(agent: Agent, turn: number): string {
     const output: string[] = []
-    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-      const event = agent.session.events[index]
+    const events = agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
       if (event?.type === 'turn/start' && event.data.turn < turn) break
       if (event?.type !== 'assistant/message'
         || event.data.turn !== turn
@@ -5722,6 +5826,109 @@ export class FleetRunService {
     return created
   }
 
+  private contextCeilingStateFor(sessionId: string): FleetContextCeilingState {
+    const existing = this.contextCeilingStates.get(sessionId)
+    if (existing !== undefined) return existing
+    const created = createFleetContextCeilingState()
+    this.contextCeilingStates.set(sessionId, created)
+    return created
+  }
+
+  /**
+   * Pre-call context maintenance: preserve progress, then compact while keeping Work active.
+   *
+   * Only a decision taken before a call can bound that call's charge, and this decision reads
+   * only the already-observed input context, never the token budget, so a budget state with no
+   * remaining-token signal cannot disable it. Sessions that are not bound to a live Fleet run
+   * are never touched.
+   */
+  private async contextCeilingPreStepDecision(agent: Agent, decision: PreStepDecision, signal?: AbortSignal): Promise<PreStepDecision> {
+    if (decision.kind === 'reject') return decision
+    const sessionId = String(agent.id)
+    const entry = this.collaboration.entries().find(([runId, runtime]) =>
+      runtime.memberNamesById.has(sessionId) && !this.dormantRunIds.has(runId),
+    )
+    if (entry === undefined) return decision
+    const [runId, runtime] = entry
+    const record = this.records.get(runId)
+    const member = runtime.memberNamesById.get(sessionId)
+    if (record === undefined || member === undefined) return decision
+    const formalMember = record.members.some(candidate => candidate.name === member)
+    const foregroundAssistant = record.assistants.some(candidate => candidate.view.id === member)
+    if (!formalMember && !foregroundAssistant) return decision
+    const message = parseFleetMessageConfiguration(this.moduleConfiguration(record.id, FLEET_MESSAGE_MODULE))
+    if (message.memberContextCeilingTokens <= 0) return decision
+    const policy: FleetContextCeilingPolicy = {
+      growthTokens: message.memberContextCeilingTokens,
+      softRungs: message.memberContextCeilingSoftRungs,
+      cooldownMs: message.memberContextCeilingCooldownMs,
+    }
+    const state = this.contextCeilingStateFor(sessionId)
+    const rung = evaluateFleetContextCeiling(state, policy, Date.now())
+    if (rung.kind === 'proceed') return decision
+    if (rung.kind === 'soft') {
+      // Observability path: the firing is durable Team evidence without touching accounting.
+      this.appendEvent(runId, 'member_context_ceiling_wrap_up', {
+        member,
+        sessionId,
+        growthTokens: rung.growthTokens,
+        intervalTokens: rung.intervalTokens,
+        softRungs: policy.softRungs,
+      })
+      return this.appendContextCeilingDirective(decision, rung.growthTokens, rung.intervalTokens)
+    }
+    this.appendEvent(runId, 'member_context_recovery_started', {
+      member, sessionId, growthTokens: rung.growthTokens, intervalTokens: rung.intervalTokens,
+      reason: 'configured_context_growth_limit', timeoutMs: FLEET_RECOVERY_DEFAULT_TIMEOUT_MS,
+    })
+    const compaction = agent.ctx.get('compaction')
+    const recovery = await recoverFleetContext({
+      signal,
+      onRetry: event => { this.appendEvent(runId, 'member_context_recovery_retry', { member, sessionId, ...event }) },
+      ...(compaction === undefined ? {} : { compact: async (abort: AbortSignal) => {
+        // The forced-reduction API also serves our local growth ceiling, which can
+        // be below provider pressure. This is not a provider overflow diagnosis.
+        const result = await compaction.compactIfNeeded(agent, 'context-overflow', abort)
+        // A native tool-result prune may itself reset this epoch without a summary.
+        return result !== null || state.hardRungAt === undefined
+      } }),
+    })
+    if (recovery.status === 'cancelled') return { kind: 'reject' }
+    const current = this.records.get(runId)
+    if (current === undefined || isTerminal(current.status) || current.status === 'paused') return { kind: 'reject' }
+    if (recovery.status === 'recovered') {
+      resetFleetContextEpoch(state)
+      this.appendEvent(runId, 'member_context_recovery_completed', { member, sessionId })
+      return decision
+    }
+    const error = `Fleet context recovery failed for ${member}: ${recovery.error}`
+    this.appendEvent(runId, 'member_context_recovery_failed', { member, sessionId, error })
+    // Close the outstanding Work before cancelling turns. Otherwise the host and
+    // owner-task scheduler would wait forever for an Agent that cannot make a call.
+    this.setTerminal(runId, error, sessionId)
+    return { kind: 'reject' }
+  }
+
+  private appendContextCeilingDirective(
+    decision: Exclude<PreStepDecision, { readonly kind: 'reject' }>,
+    growthTokens: number,
+    intervalTokens: number,
+  ): PreStepDecision {
+    const text = contextCeilingDirectiveText(growthTokens, intervalTokens)
+    return {
+      ...decision,
+      messages: [...decision.messages, createUserMessage({
+        content: [{ type: 'text', text }],
+        source: {
+          kind: 'plugin',
+          plugin: 'dsh-agent-fleet',
+          form: 'snapshot',
+          sections: [{ name: 'system-reminder:context-ceiling', text }],
+        },
+      })],
+    }
+  }
+
   private memberTurnStopping(agent: Agent, turn: number): void {
     const sessionId = String(agent.id)
     if (this.memberVisibilityReviewedTurns.get(sessionId) === turn) return
@@ -5737,6 +5944,7 @@ export class FleetRunService {
     if (!formalMember && !foregroundAssistant) return
     if (formalMember) this.commitReplyTurnOutput(runId, runtime, member, agent, turn)
     this.memberVisibilityReviewedTurns.set(sessionId, turn)
+    if (formalMember && this.completedWorkNeedsNoVisibilityReminder(record, runtime)) return
     if (!this.turnHasDirectOutput(agent, turn)) return
     const reminder = this.visibilityReminderState(sessionId)
     if (this.memberLastSharedTurns.get(sessionId) === turn) {
@@ -5774,8 +5982,8 @@ export class FleetRunService {
     runtime.messages.sendSystemNotification(sessionId, {
       kind: 'visibility_reminder',
       text: reminderText,
-      // A visibility reminder must never create another model turn merely to
-      // acknowledge the reminder. It becomes context for the next organic turn.
+      // Quiet context does not wake idle agents, but can extend an active turn.
+      // Accepted Work roots with no remaining obligations are excluded above.
       delivery: 'quiet',
       coalesceKey: `visibility-reminder:${sessionId}`,
     })
@@ -5822,6 +6030,9 @@ export class FleetRunService {
     }
     if (event.type === 'assistant/message') {
       const tokens = inputContextTokens(event.data.usage)
+      // The pre-call ceiling consumes the same already-observed signal as the turn-end
+      // reminder, so both controls agree on what the session actually paid for.
+      if (tokens !== undefined) observeFleetContextTokens(this.contextCeilingStateFor(sessionId), tokens)
       if (tokens !== undefined) {
         const reminder = this.visibilityReminderState(sessionId)
         reminder.latestContextTokens = Math.max(reminder.latestContextTokens, tokens)
@@ -5838,6 +6049,7 @@ export class FleetRunService {
       reminder.awaitingPostCompactionBaseline = true
       reminder.reminderCount = 0
       reminder.detailedReminderSent = false
+      resetFleetContextEpoch(this.contextCeilingStateFor(sessionId))
     }
     const formalMember = record.members.some(candidate => candidate.name === member)
     const foregroundAssistant = record.assistants.some(assistant => assistant.view.id === member)
@@ -5876,7 +6088,6 @@ export class FleetRunService {
       && event.type === 'assistant/message' && event.data.interrupted !== true) {
       this.commitReplyTurnOutput(runId, runtime, member, agent, event.data.turn)
     }
-    if (event.type === 'assistant/chunk') return
     for (const listener of [...this.traceChangeListeners]) listener(runId, member)
     if (event.type !== 'turn/end') return
     const reason = event.data.reason
@@ -5990,7 +6201,7 @@ export class FleetRunService {
         'Fleet already claimed this ReconcileAttempt for the current turn. Do not call fleet_reconcile claim.',
         task.description,
         readyReason,
-        `Work only this ReconcileAttempt. Inspect every current cohort result before deciding. Before the turn ends, call fleet_reconcile action="resolve", id="${task.id}", attempt_id="${reconcile.attemptId}", progress="...", and outcome="continue|complete|block|pause|cancel". The id is the Task id, not the attempt or reconciler id. Use continue only with atomic child_ops; Goal/Vote operations may use keys and later operations may depend on earlier keys. Fleet derives the cohort and next trigger. A terminal acceptance Vote is already final; do not invent remediation unless explicitly requested as new work.`,
+        `Work only this ReconcileAttempt. Inspect every current cohort result before deciding. Before the turn ends, call fleet_resolve id="${task.id}", attempt_id="${reconcile.attemptId}", progress="...", and outcome="continue|complete|block|pause|cancel". The id is the Task id, not the attempt or reconciler id. Use continue only with atomic child_ops; Goal/Vote operations may use keys and later operations may depend on earlier keys. Fleet derives the cohort and next trigger. A rejected Vote ends that review round, not the opportunity to continue this work. Within the remaining budget, decide and author any follow-up DAG from the evidence, or cancel/block with a concrete reason. Preserve earlier decisions; complete gated work only after the current cohort completes and every current Vote approves.`,
       ].filter(Boolean).join('\n\n'),
       delivery: 'wakeup',
       coalesceKey: `assigned-task:${task.id}`,
@@ -6018,7 +6229,17 @@ export class FleetRunService {
       this.clearOwnerTaskWake(participant.sessionId)
       return false
     }
-    const fingerprint = tasks.map(task => `${task.id}:${String(task.stateVersion)}`).join('|')
+    // The fingerprint decides whether a repeat wake can carry new information. It therefore covers
+    // every field the wake payload or the wake decision actually reads - Task state version,
+    // stable-state kind, inbox unread volume and the current ReconcileAttempt id - so a list whose
+    // content changed is never treated as a redundant repeat and always wakes immediately.
+    const fingerprint = tasks.map(task => [
+      task.id,
+      String(task.stateVersion),
+      task.stableState.kind,
+      task.domain.kind === 'inbox' ? String(task.domain.unreadMessages) : '',
+      task.activeReconcile?.attemptId ?? '',
+    ].join(':')).join('|')
     const replyWake = tasks[0]?.domain.kind === 'reply'
     const previousWake = this.ownerTaskWakeStates.get(participant.sessionId)
     let wakeState: OwnerTaskWakeState = previousWake?.fingerprint === fingerprint
@@ -6036,7 +6257,13 @@ export class FleetRunService {
       this.ownerTaskWakeStates.set(participant.sessionId, wakeState)
     }
     if (wakeState.active) return false
-    if (replyWake && wakeState.nextEligibleAt > Date.now()) {
+    // An unchanged fingerprint means this exact owner-task list was already delivered and the turn
+    // ended without consuming it. Re-sending it immediately carries no new information, so repeats
+    // follow the same bounded ladder as the reply path; the first wake of a fingerprint is immediate.
+    // Liveness is preserved: the scheduled timer re-wakes at nextEligibleAt, and any Task state
+    // change or new message changes the fingerprint above, while ready ReconcileAttempts keep using
+    // the ungated assigned-task path, so those still wake immediately.
+    if (wakeState.nextEligibleAt > Date.now()) {
       this.scheduleOwnerTaskWake(runId, participant.sessionId, wakeState.nextEligibleAt)
       return false
     }
@@ -6086,6 +6313,7 @@ export class FleetRunService {
       member: participant.name,
       reason: 'owner_task_list',
       tasks: tasks.map(task => task.id),
+      wakeups: wakeState.wakeups,
     })
     return true
   }
@@ -6114,18 +6342,11 @@ export class FleetRunService {
       this.clearOwnerTaskWake(sessionId)
       return false
     }
-    const conversations = new Set(replies.map(task => task.domain.kind === 'reply' ? task.domain.conversation : ''))
-    if (conversations.size !== 1) return false
-    const target = replies.at(-1)
-    if (target?.domain.kind !== 'reply') return false
+    // Native output has no explicit task id: it is safe only for one exact obligation.
+    if (replies.length !== 1) return false
+    const target = replies[0]!
     try {
-      const source = runtime.messages.getMessage(agent, target.domain.messageId)
-      const messageId = runtime.messages.reply(agent, { messageId: source.id, text: output }).messageId
-      for (const task of replies) {
-        if (task.domain.kind !== 'reply') continue
-        runtime.messages.completeRequiredReply(sessionId, task.domain.messageId)
-        runtime.tasks.recordReply(sessionId, task.id, messageId)
-      }
+      const { messageId } = runtime.replies.answer(agent, { id: target.id, content: output })
       this.memberLastSharedTurns.set(sessionId, turn)
       this.clearOwnerTaskWake(sessionId)
       this.appendEvent(runId, 'reply_auto_committed', {
@@ -6146,11 +6367,14 @@ export class FleetRunService {
   private finishOwnerTaskWakeTurn(sessionId: string): void {
     const state = this.ownerTaskWakeStates.get(sessionId)
     if (state?.active !== true) return
-    const delayIndex = Math.min(Math.max(0, state.wakeups - 1), REPLY_OWNER_RETRY_DELAYS_MS.length - 1)
+    // An unchanged fingerprint means the previous payload carried no new information, so the repeat
+    // is delayed; the timer in scheduleOwnerTaskWake keeps the obligation live, so this bounds
+    // information-free volume without removing the unattended-convergence guarantee. Reply wakes
+    // keep the short reply ladder, where promptness is a contract obligation.
+    const ladder = state.replyWake ? REPLY_OWNER_RETRY_DELAYS_MS : OWNER_TASK_WAKE_DELAYS_MS
+    const delayIndex = Math.min(Math.max(0, state.wakeups - 1), ladder.length - 1)
     state.active = false
-    state.nextEligibleAt = state.replyWake
-      ? Date.now() + REPLY_OWNER_RETRY_DELAYS_MS[delayIndex]!
-      : 0
+    state.nextEligibleAt = Date.now() + ladder[delayIndex]!
   }
 
   private scheduleOwnerTaskWake(runId: string, sessionId: string, at: number): void {
@@ -6286,6 +6510,25 @@ export class FleetRunService {
       || task.stableState.kind === 'cancelled')
   }
 
+  private completedWorkNeedsNoVisibilityReminder(
+    record: FleetRunRecord,
+    runtime: FleetCollaborationTeam,
+  ): boolean {
+    if (record.status !== 'running' || record.work?.status !== 'running') return false
+    const root = runtime.tasks.state().tasks.find(task => task.id === record.work?.rootTaskId)
+    if (root === undefined || root.stableState.kind !== 'completed') return false
+    const rootWorkId = root.domain.kind === 'composite' || root.domain.kind === 'goal'
+      ? root.domain.rootWorkId
+      : undefined
+    if (rootWorkId !== record.work.id
+      || !this.workTasksAreSettled(this.workRelatedTasks(runtime, root.id), root.id)
+      || this.hasLiveGoal(runtime)) return false
+    return record.members.every(member =>
+      runtime.tasks.runningFor(member.name).length === 0
+      && runtime.tasks.readyTasks(member.name).length === 0
+      && runtime.tasks.ownerTasks(member.name).length === 0)
+  }
+
   private workMembersAreIdle(record: FleetRunRecord, tasks: readonly FleetProjectTask[]): boolean {
     const formalMembers = new Set(record.members.map(member => member.name))
     const owners = new Set(tasks.flatMap(task => [
@@ -6309,14 +6552,24 @@ export class FleetRunService {
       ? root.domain.rootWorkId
       : undefined
     if (rootWorkId !== record.work.id
-      || (root.stableState.kind !== 'completed' && root.stableState.kind !== 'blocked')
-      || !this.workTasksAreSettled(related, root.id)
-      || !this.workMembersAreIdle(record, related)) return
+      || (root.stableState.kind !== 'completed' && root.stableState.kind !== 'blocked' && root.stableState.kind !== 'cancelled')
+      // A failed plan must cancel active turns; waiting for those turns first
+      // lets an already blocked Work consume its entire episode budget.
+      || (root.stableState.kind === 'completed'
+        && (!this.workTasksAreSettled(related, root.id) || !this.workMembersAreIdle(record, related)))) return
+    if (root.stableState.kind !== 'completed') {
+      runtime.tasks.cancelUnsettledDescendants(root.id, `Work ended: ${root.stableState.reason}`)
+      // Task events may have completed the Work while cancelling descendants.
+      if (this.records.get(runId)?.work?.status !== 'running') return
+    }
     const coordinator = root.assignees[0] ?? root.owners[0]?.member
-    const callerId = record.members.find(member => member.name === coordinator)?.sessionId ?? record.launcherSessionId
+    // This is a system transition, not the coordinator finishing its own turn.
+    // An unsuccessful ending must cancel every active producer, including its coordinator.
+    const callerId = root.stableState.kind !== 'completed' ? '$system'
+      : record.members.find(member => member.name === coordinator)?.sessionId ?? record.launcherSessionId
     this.finishWork(
       record,
-      root.stableState.kind === 'completed' ? 'finished' : 'blocked',
+      root.stableState.kind === 'completed' ? 'finished' : root.stableState.kind,
       root.stableState.kind === 'completed'
         ? root.stableState.result ?? root.stableState.reason
         : root.stableState.reason,
@@ -6462,6 +6715,8 @@ export class FleetRunService {
         return false
       }
       if (assistant.status === 'paused'
+        || (this.evaluationBootstrapNetworkRecoveries.get(runId)?.sessionId === assistant.sessionId
+          && this.evaluationBootstrapNetworkRecoveries.get(runId)?.cancel !== undefined)
         || this.ctx.agents.get(SessionId(assistant.sessionId))?.status !== 'idle'
         || this.assistantHasLiveInteraction(runtime, assistant.view.id)
         || this.budgetRemaining(record, assistant.view.id).exhaustedScope !== undefined) return false
@@ -6668,6 +6923,7 @@ export class FleetRunService {
     this.memberLastSharedTurns.delete(agentId)
     this.memberVisibilityReviewedTurns.delete(agentId)
     this.visibilityReminderStates.delete(agentId)
+    this.contextCeilingStates.delete(agentId)
     this.turnReminderLastShown.delete(agentId)
     this.turnStartReminderTurns.delete(agentId)
     this.toolResultReminderSequences.delete(agentId)
@@ -6691,6 +6947,94 @@ export class FleetRunService {
     return runtime.tasks.runningFor(member).length > 0
       || runtime.tasks.readyTasks(member).length > 0
       || runtime.tasks.ownerTasks(member).length > 0
+  }
+
+  /** Host evaluation only: bounded recovery before any Work exists. */
+  retryEvaluationBootstrap(
+    agent: Agent,
+    runId: string,
+    input: { readonly notBefore: number; readonly signal?: AbortSignal },
+  ): boolean | Promise<boolean> {
+    const record = this.records.get(runId)
+    const sessionId = String(agent.id)
+    const assistant = record?.assistants.find(candidate => candidate.sessionId === sessionId)
+    if (input.signal?.aborted || !Number.isFinite(input.notBefore) || input.notBefore < 0
+      || record === undefined || assistant === undefined || record.work !== undefined
+      || !this.canAutoContinueTeam(record) || this.autoContinuationPaused(record, assistant.view.id)
+      || agent.status !== 'idle'
+      || this.budgetRemaining(record, assistant.view.id).exhaustedScope !== undefined) return false
+    // A later input or turn invalidates an earlier failure. Do not scan backwards
+    // for any matching historical error in a restored assistant Session.
+    const latest = agent.session.snapshotEvents().findLast(event =>
+      event.type === 'turn/start' || event.type === 'turn/end' || event.type === 'user/message')
+    if (latest?.type !== 'turn/end' || !Number.isFinite(latest.time) || latest.time < input.notBefore || latest.time > Date.now()) return false
+    const reason = latest.data.reason
+    if (reason.kind === 'error' && NETWORK_FAILURE_CODES.has(reason.error.code)) {
+      const previous = this.evaluationBootstrapNetworkRecoveries.get(runId)
+      if (previous && (previous.sessionId !== sessionId || previous.failureSequence >= latest.seq
+        || previous.attempt >= BOOTSTRAP_NETWORK_MAX_ATTEMPTS)) return false
+      const attempt = (previous?.attempt ?? 0) + 1
+      const delayMs = NETWORK_RECOVERY_INITIAL_DELAY_MS * 2 ** (attempt - 1)
+      const recovery = { sessionId, attempt, failureSequence: latest.seq, cancel: undefined as (() => void) | undefined }
+      this.evaluationBootstrapNetworkRecoveries.set(runId, recovery)
+      this.appendEvent(runId, 'evaluation_bootstrap_network_recovery_scheduled', {
+        member: assistant.view.id, sessionId, attempt, delayMs, code: reason.error.code, failureSequence: latest.seq,
+      })
+      return new Promise<boolean>(resolveRecovery => {
+        const finish = (retry: boolean): void => {
+          clearTimeout(timer)
+          input.signal?.removeEventListener('abort', cancel)
+          recovery.cancel = undefined
+          const current = this.records.get(runId)
+          const newest = agent.session.snapshotEvents().findLast(event =>
+            event.type === 'turn/start' || event.type === 'turn/end' || event.type === 'user/message')
+          if (!retry || input.signal?.aborted || !current || current.work !== undefined
+            || !this.canAutoContinueTeam(current) || this.autoContinuationPaused(current, assistant.view.id)
+            || !current.assistants.some(value => value.sessionId === sessionId)
+            || agent.status !== 'idle' || newest?.seq !== latest.seq
+            || this.budgetRemaining(current, assistant.view.id).exhaustedScope !== undefined) {
+            resolveRecovery(false); return
+          }
+          this.appendEvent(runId, 'evaluation_bootstrap_network_recovery', {
+            member: assistant.view.id, sessionId, attempt, code: reason.error.code, failureSequence: latest.seq,
+          })
+          agent.followup(createUserMessage({
+            source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+            content: [{ type: 'text', text: [
+              `[Fleet evaluation network recovery: attempt ${attempt}/${BOOTSTRAP_NETWORK_MAX_ATTEMPTS}]`,
+              `The previous model request failed with ${reason.error.code}. This existing Team still has no Work.`,
+              'Inspect durable Team/Task state and any completed tool effects before continuing the original bootstrap. Reuse existing evidence and discard unfinished tool arguments. Do not repeat external actions. Call fleet_run start with your task-specific DAG only if no Work exists; do not create another Team.',
+              'The host retains the original episode deadline and model output limit. After starting Work, finish this bootstrap turn.',
+            ].join('\n\n') }],
+          }))
+          resolveRecovery(true)
+        }
+        const cancel = (): void => { finish(false) }
+        const timer = setTimeout(() => { finish(true) }, delayMs)
+        recovery.cancel = cancel
+        input.signal?.addEventListener('abort', cancel, { once: true })
+        if (input.signal?.aborted) cancel()
+      })
+    }
+    const protocolFailure = reason.kind === 'error' && isRetriableProtocolFailure(reason.error)
+    if ((!protocolFailure && reason.kind !== 'max-tokens') || this.evaluationBootstrapRecoveredRunIds.has(runId)) return false
+    const detail = reason.kind === 'error' ? clippedProgressText(reason.error.message, 1_000) : 'Bootstrap output was truncated by the configured max-tokens limit.'
+    this.evaluationBootstrapRecoveredRunIds.add(runId)
+    this.appendEvent(runId, protocolFailure ? 'evaluation_bootstrap_protocol_recovery' : 'evaluation_bootstrap_token_recovery', {
+      member: assistant.view.id, sessionId, attempt: 1,
+      failureSequence: latest.seq, failureTurn: latest.data.turn,
+      reason: detail,
+    })
+    agent.followup(createUserMessage({
+      source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
+      content: [{ type: 'text', text: [
+        '[Fleet evaluation bootstrap recovery: attempt 1/1]',
+        `${detail} The host confirms that this Team has no Work yet.`,
+        'Continue only the existing bootstrap task in this same Team. Read the authoritative task file from the original bootstrap instruction, inspect durable Team/Task state, reuse any partial initial DAG, and call fleet_run start only if no Work exists.',
+        'Discard unfinished draft tool arguments. Use a short initial DAG with concise stage descriptions; delegate source edits, feedback analysis, memory and verification to formal members. Do not solve the task yourself or replay external actions. After successfully starting Team work, end this bootstrap turn; the host retains the original evaluation deadline and model output limit.',
+      ].join('\n\n') }],
+    }))
+    return true
   }
 
   private scheduleProtocolRecovery(runId: string, member: string, agent: Agent, message: string): boolean {
@@ -7573,7 +7917,7 @@ export class FleetRunService {
     const live = this.ctx.agents.get(SessionId(member.sessionId))
     const events: readonly SessionEventLike[] = live === undefined
       ? (await this.requirePersistence().inspect(SessionId(member.sessionId))).events
-      : live.session.events
+      : live.session.snapshotEvents()
     const matching = events.filter(event => event.seq > afterSequence)
     return {
       runId: record.id,
@@ -7642,7 +7986,7 @@ export class FleetRunService {
     const live = this.ctx.agents.get(SessionId(member.sessionId))
     const events: readonly SessionEventLike[] = live === undefined
       ? (await this.requirePersistence().inspect(SessionId(member.sessionId))).events
-      : live.session.events
+      : live.session.snapshotEvents()
     const projected = events.flatMap(event => {
       const item = memberProgressItem(event, options.includeOutputs ?? false, maxChars)
       return item === undefined ? [] : [item]
@@ -7745,7 +8089,7 @@ export class FleetRunService {
       const live = this.ctx.agents.get(SessionId(sessionId))
       const events: readonly SessionEventLike[] = live === undefined
         ? (await this.requirePersistence().inspect(SessionId(sessionId))).events
-        : live.session.events
+        : live.session.snapshotEvents()
       for (let index = events.length - 1; index >= 0; index -= 1) {
         const event = events[index]
         if (event === undefined || event.type === 'assistant/chunk' || event.type === 'session/end-seed') continue
@@ -7832,7 +8176,7 @@ export class FleetRunService {
     const live = this.ctx.agents.get(SessionId(sourceSessionId))
     const events: readonly SessionEventLike[] = live === undefined
       ? (await this.requirePersistence().inspect(SessionId(sourceSessionId))).events
-      : live.session.events
+      : live.session.snapshotEvents()
     const targetIndex = events.findIndex(event => {
       if (typeof event.data !== 'object' || event.data === null) return false
       const data = event.data as { readonly id?: unknown; readonly message?: { readonly id?: unknown } }
@@ -8135,6 +8479,8 @@ export class FleetRunService {
         || this.participants(record).some(member => member.name === view.id && member.sessionId === coordination.agentId)
     }
     if (coordination.type === 'reaction' || coordination.type === 'pin') return true
+    if (coordination.type === 'reply_handoff') return coordination.from === view.id || coordination.to === view.id
+    if (coordination.type === 'external_delivered') return false
 
     const conversation = coordination.message.conversation
     if (conversation.startsWith('#')) return channels.has(conversation.slice(1))
@@ -8157,6 +8503,9 @@ export class FleetRunService {
     }
     this.networkRecoveries.clear()
     this.protocolRecoveries.clear()
+    this.evaluationBootstrapRecoveredRunIds.clear()
+    for (const recovery of this.evaluationBootstrapNetworkRecoveries.values()) recovery.cancel?.()
+    this.evaluationBootstrapNetworkRecoveries.clear()
     for (const timer of this.ownerTaskWakeTimers.values()) clearTimeout(timer)
     this.ownerTaskWakeTimers.clear()
     this.ownerTaskWakeStates.clear()
@@ -8176,6 +8525,7 @@ export class FleetRunService {
     this.memberLastSharedTurns.clear()
     this.memberVisibilityReviewedTurns.clear()
     this.visibilityReminderStates.clear()
+    this.contextCeilingStates.clear()
     this.activeParticipantStates.clear()
     this.turnReminderLastShown.clear()
     this.turnStartReminderTurns.clear()
@@ -8644,11 +8994,12 @@ export class FleetRunService {
           || event.action === 'signaled'
           || event.action === 'updated'
           || event.action === 'completed'
+          || event.action === 'timed_out'
           || event.action === 'cancelled') {
           queueMicrotask(() => {
+            this.finishReadyWork(record.id)
             this.reconcileReadyTasks(record.id)
             this.reconcileOwnerTasks(record.id)
-            this.finishReadyWork(record.id)
             this.signalAssistantInteractionDeliveries(record.id)
             this.signalAssistantTeamIdle(record.id)
           })
@@ -9046,10 +9397,11 @@ export class FleetRunService {
   private lastStoredSequence(record: FleetRunRecord): number {
     const path = join(this.runDirectory(record), 'events.jsonl')
     if (!existsSync(path)) return 0
-    const descriptor = openSync(path, 'r')
+    const descriptor = openSync(path, 'r+')
     try {
       let cursor = fstatSync(descriptor).size
       if (cursor === 0) return 0
+      const size = cursor
       const chunks: Buffer[] = []
       while (cursor > 0) {
         const length = Math.min(64 * 1024, cursor)
@@ -9068,7 +9420,24 @@ export class FleetRunService {
         const newline = tail.lastIndexOf(0x0a, end - 1)
         if (newline >= 0 || cursor === 0) {
           const line = tail.subarray(newline + 1, end).toString('utf8')
-          return line.length === 0 ? 0 : (JSON.parse(line) as StoredFleetEvent).sequence
+          let event: StoredFleetEvent | undefined
+          try {
+            event = line.length === 0 ? undefined : JSON.parse(line) as StoredFleetEvent
+          } catch (error) {
+            // Only an unterminated final record can be a torn append. Completed
+            // or interior corrupt records must still fail instead of losing data.
+            if (tail[tail.length - 1] === 0x0a) throw error
+            const fragment = tail.subarray(newline + 1)
+            const backup = `${path}.incomplete-${randomUUID()}`
+            writeFileSync(backup, fragment, { flag: 'wx' })
+            ftruncateSync(descriptor, size - fragment.length)
+            this.ctx.get('logger')?.warn(`Recovered incomplete Fleet journal tail; saved fragment to ${backup}`)
+            return this.lastStoredSequence(record)
+          }
+          // A complete JSON value without its newline is retained, but must be
+          // delimited before the next append.
+          if (tail[tail.length - 1] !== 0x0a) appendFileSync(path, '\n', 'utf8')
+          return event?.sequence ?? 0
         }
       }
       return 0
@@ -9079,6 +9448,7 @@ export class FleetRunService {
 
   private storedEvents(record: FleetRunRecord): StoredFleetEvent[] {
     const path = join(this.runDirectory(record), 'events.jsonl')
+    this.lastStoredSequence(record)
     return existsSync(path)
       ? parseStoredEvents(readFileSync(path, 'utf8'))
       : []

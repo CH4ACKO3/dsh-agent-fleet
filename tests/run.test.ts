@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 
@@ -19,6 +19,8 @@ import type {
 } from '@dsh-agent-fleet/core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { FleetMailboxService } from '../src/mailbox.js'
+import type { FleetCollaborationTeam } from '../src/collaboration.js'
 import { FleetRunService, installRunTools } from '../src/run.js'
 import type { FleetResourcePreview, FleetRunMember } from '../src/run.js'
 import type { FleetTaskBoard } from '../src/productivity/task.js'
@@ -26,6 +28,7 @@ import { FleetArchiveRegistry } from '../src/archive.js'
 import { FleetAuthorizationService } from '../src/authorization.js'
 import { FleetCollaborationService } from '../src/collaboration.js'
 import { activateResidentFleetAssistants } from '../src/resident-assistants.js'
+import { fleetEvaluationConfiguration, superviseFleetEvaluationRun, writeFleetEvaluationOutputs } from '../src/evaluation.js'
 import { normalizeFleetSetupConfiguration } from '../src/setup.js'
 import type { FleetTurnReminderLists } from '../src/turn-reminders.js'
 
@@ -112,11 +115,11 @@ class FakeAgentContext {
     return next()
   }
 
-  async preStep(messages: UserMessage[]): Promise<PreStepDecision> {
+  async preStep(messages: UserMessage[], agent?: Agent): Promise<PreStepDecision> {
     let next = () => Promise.resolve({ kind: 'enter', messages } as PreStepDecision)
     for (const listener of [...(this.listeners.get('agent/pre-step') ?? [])].reverse()) {
       const following = next
-      next = () => Promise.resolve(listener({}, following) as Promise<PreStepDecision>)
+      next = () => Promise.resolve(listener({ agent, messages, step: 1, signal: new AbortController().signal }, following) as Promise<PreStepDecision>)
     }
     return next()
   }
@@ -157,6 +160,8 @@ class FakeAgent implements RuntimeAgent {
   readonly session: {
     readonly header: { readonly cwd: string }
     readonly events: FakeEvent[]
+    snapshotEvents(): readonly FakeEvent[]
+    requestHeader(): undefined
   }
 
   constructor(
@@ -165,7 +170,7 @@ class FakeAgent implements RuntimeAgent {
     options: { readonly provider?: string; readonly model?: string; readonly maxTokens?: number } = {},
   ) {
     this.options = options
-    this.session = { header: { cwd }, events: [] }
+    this.session = { header: { cwd }, events: [], snapshotEvents() { return [...this.events] }, requestHeader: () => undefined }
   }
 
   cancel(): void {
@@ -496,6 +501,299 @@ function setup(root: string, options?: {
 }
 
 describe('FleetRunService', () => {
+  it.each([false, true])('delivers native external replies through the durable outbox (restart gap=%s)', async restartGap => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+    const mailbox = new FleetMailboxService(first.service)
+    let second: ReturnType<typeof setup> | undefined
+    let replayMailbox: FleetMailboxService | undefined
+    try {
+      await mailbox.receive({ connector: 'lark', payload: { kind: 'user-message', teamId: run.id,
+        externalUserId: 'user', conversationId: 'room-A', messageId: 'external-1', text: 'Say hello' },
+      }, new AbortController().signal)
+      const incoming = first.launcher.messages.find(message => message.source.kind === 'user')!
+      expect(incoming).toBeDefined()
+      const emit = (type: string, data: unknown) => first.service.recordMemberSessionEvent(first.launcher.id,
+        { seq: 1, time: Date.now(), type, data } as unknown as SessionEvent)
+      emit('turn/start', { turn: 1 })
+      emit('user/message', incoming)
+      emit('assistant/message', { turn: 1, interrupted: false,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Hello from Fleet' }] } })
+      if (restartGap) {
+        const runtime = (first.service as unknown as { requireRuntime(id: string): FleetCollaborationTeam }).requireRuntime(run.id)
+        vi.spyOn(runtime.messages, 'commitExternalOutput').mockImplementationOnce(() => { throw new Error('simulated crash after Task snapshot') })
+        expect(() => emit('turn/end', { turn: 1, reason: { kind: 'completed' } })).toThrow('simulated crash')
+      } else emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      mailbox.close()
+      first.disconnect()
+      await first.core.close()
+      second = setup(root)
+      replayMailbox = new FleetMailboxService(second.service)
+      const outbound = vi.fn(async () => {})
+      replayMailbox.onOutbound(outbound)
+      await vi.waitFor(() => expect(outbound).toHaveBeenCalledTimes(1))
+      expect(outbound).toHaveBeenCalledWith({ connector: 'lark',
+        payload: { kind: 'user-message', conversationId: 'room-A', text: 'Hello from Fleet' } })
+      await vi.waitFor(() => expect(second!.service.pendingMailboxReplies()).toEqual([]))
+    } finally {
+      mailbox.close(); replayMailbox?.close()
+      first.disconnect(); await first.core.close()
+      second?.disconnect(); await second?.core.close()
+    }
+  })
+
+  it.each(['parallel-contract', 'after-theory', 'reviewer-first'] as const)('executes the authored %s DAG without inserting stages', async (topology) => {
+    const { root, configPath, taskPath } = fixture()
+    const config = JSON.parse(readFileSync(configPath, 'utf8'))
+    config.core.members = ['math-theorist', 'computational-explorer', 'implementation-integrator', 'independent-auditor']
+      .map(id => ({ ...config.core.members[0], id, name: id }))
+    writeFileSync(configPath, JSON.stringify(config))
+    const { service, launcher, runtime, core, disconnect } = setup(root)
+    const scoped = new FakeAgentContext()
+    launcher.ctx = scoped as unknown as Context
+    try {
+      const run = await service.create(launcher as unknown as Agent, {
+        configPath, projectRoot: root, requiredPaths: [],
+      })
+      expect(run.members.map(member => member.name)).toEqual([
+        'math-theorist', 'computational-explorer', 'implementation-integrator', 'independent-auditor',
+      ])
+      expect(run.assistants).toHaveLength(1)
+      // These are caller-authored fixtures, not evidence of an LLM planning correctly.
+      const stages = [
+          { key: 'theory', kind: 'goal', title: 'Derive structure', description: 'Preserve the mathematical scope.', owners: ['math-theorist'], dependencies: [] },
+          { key: 'search', kind: 'goal', title: 'Explore candidates', description: 'Produce reproducible candidate evidence.', owners: ['computational-explorer'], dependencies: [] },
+          { key: 'check-method', kind: 'goal', title: 'Check admissibility', description: 'Identify task constraints without searching for an answer.', owners: ['independent-auditor'], dependencies: topology === 'after-theory' ? ['theory'] : [] },
+          { key: 'package', kind: 'goal', title: 'Integrate evidence', description: 'Implement the exact task interface.', owners: ['implementation-integrator'], dependencies: ['theory', 'search', 'check-method'] },
+          { key: 'accept', kind: 'vote', title: 'Review the submitted claim', description: 'Independently assess the final artifact and evidence.', owners: ['independent-auditor'], dependencies: ['package'] },
+      ] satisfies NonNullable<Parameters<typeof service.start>[1]['stages']>
+      if (topology === 'reviewer-first') stages.unshift(stages.splice(2, 1)[0]!)
+      const running = service.start(launcher as unknown as Agent, {
+        runId: run.id, taskPath, projectRoot: root, resultStage: 'package', stages,
+      })
+      const board = service.taskBoard(run.id)
+      const children = board.state().tasks.filter(task => task.parentId === running.work?.rootTaskId)
+      const theory = children.find(task => task.title === 'Derive structure')!
+      const search = children.find(task => task.title === 'Explore candidates')!
+      const packaging = children.find(task => task.title === 'Integrate evidence')!
+      const audit = children.find(task => task.title === 'Review the submitted claim')!
+      const preflight = children.find(task => task.title === 'Check admissibility')!
+      const auditor = runtime.get(run.members.find(member => member.name === 'independent-auditor')!.sessionId)!
+      const theorist = runtime.get(run.members.find(member => member.name === 'math-theorist')!.sessionId)!
+      const explorer = runtime.get(run.members.find(member => member.name === 'computational-explorer')!.sessionId)!
+      const integrator = runtime.get(run.members.find(member => member.name === 'implementation-integrator')!.sessionId)!
+      expect(children).toHaveLength(stages.length)
+      const stageIds = new Map(stages.map(stage => [stage.key, children.find(task => task.title === stage.title)!.id]))
+      for (const stage of stages) {
+        expect(children.find(task => task.id === stageIds.get(stage.key))).toMatchObject({
+          owners: stage.owners.map(member => ({ member })),
+          dependencies: stage.dependencies.map(key => stageIds.get(key)),
+          domain: { kind: stage.kind },
+        })
+      }
+      expect(theory.dependencies).toEqual([])
+      expect(search.dependencies).toEqual([])
+      expect(audit).toMatchObject({
+        dependencies: [packaging.id], owners: [{ member: 'independent-auditor' }],
+        domain: { kind: 'vote', initiator: run.assistants[0]!.view.id, voters: ['independent-auditor'] },
+      })
+      await vi.waitFor(() => {
+        expect(theorist.messages.length).toBeGreaterThan(0)
+        expect(explorer.messages.length).toBeGreaterThan(0)
+      })
+      if (topology === 'after-theory') expect(auditor.messages).toHaveLength(0)
+      else await vi.waitFor(() => { expect(auditor.messages.length).toBeGreaterThan(0) })
+      expect(integrator.messages).toHaveLength(0)
+      expect(board.ownerTasks('independent-auditor').map(task => task.id)).not.toContain(audit.id)
+      expect(board.ownerTasks('implementation-integrator').map(task => task.id)).not.toContain(packaging.id)
+      board.submitGoal(theorist.id, theory.id, { kind: 'complete', reason: 'Structure derived.', result: 'theory.md' })
+      await vi.waitFor(() => { expect(auditor.messages.length).toBeGreaterThan(0) })
+      board.submitGoal(auditor.id, preflight.id, { kind: 'complete', reason: 'Contract checked.', result: 'method-checklist.json' })
+      expect(integrator.messages).toHaveLength(0)
+      board.submitGoal(explorer.id, search.id, { kind: 'complete', reason: 'Candidate checked.', result: 'search.json' })
+      await vi.waitFor(() => { expect(integrator.messages.length).toBeGreaterThan(0) })
+      board.submitGoal(integrator.id, packaging.id, { kind: 'complete', reason: 'Candidate packaged.', result: 'solution.py' })
+      // Pending owner-list notifications are coalesced; verify the actual new assignment.
+      await vi.waitFor(() => { expect(auditor.messages.some(message => message.content.some(block =>
+        block.type === 'text' && block.text.includes(audit.id)))).toBe(true) })
+      board.castVote(auditor.id, audit.id, 'reject', 'Expression uses a forbidden approximation.')
+      expect(service.status(run.id).work?.status).toBe('running')
+      expect(board.state().tasks.filter(task => task.parentId === running.work?.rootTaskId)).toHaveLength(stages.length)
+      const coordinator = topology === 'reviewer-first' ? auditor : theorist
+      await vi.waitFor(() => {
+        expect(board.get(coordinator.id, running.work!.rootTaskId!).activeReconcile?.status).toBe('running')
+      })
+      const attemptId = board.get(coordinator.id, running.work!.rootTaskId!).activeReconcile!.attemptId!
+      board.settleOutcome(coordinator.id, running.work!.rootTaskId!, {
+        attemptId, progress: 'No viable alternative within the remaining budget.', outcome: 'cancel',
+      })
+      await expect(service.wait(run.id, 1000)).resolves.toMatchObject({
+        work: { status: 'cancelled' },
+      })
+    } finally {
+      disconnect()
+      await core.close()
+    }
+  })
+
+  it('lets the coordinator end work after a stage deadline and cancels remaining turns', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-14T12:00:00Z'))
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, runtime, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const running = service.start(launcher as unknown as Agent, {
+        runId: run.id, projectRoot: root, taskPath, stages: [
+          { key: 'solve', kind: 'goal', title: 'Bounded solving', description: 'Solve.', owners: ['lead'], dependencies: [], timeoutAt: '2026-09-14T12:00:01Z' },
+          { key: 'audit', kind: 'vote', title: 'Review', description: 'Accept only checked evidence.', owners: ['reviewer'], dependencies: ['solve'] },
+        ],
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      const lead = runtime.get(run.members.find(member => member.name === 'lead')!.sessionId)!
+      lead.status = 'running'
+      service.agentStatusChanged(lead as unknown as Agent)
+      await vi.advanceTimersByTimeAsync(1000)
+      const board = service.taskBoard(run.id)
+      expect(board.get(lead.id, running.work!.rootTaskId!).stableState.kind).toBe('running')
+      // A stage deadline does not consume the host's whole-work budget.
+      // The coordinator chooses to stop here; it could instead author follow-up work.
+      lead.completeTurn()
+      service.agentIdle(lead as unknown as Agent)
+      const attemptId = board.get(lead.id, running.work!.rootTaskId!).activeReconcile!.attemptId!
+      lead.status = 'running'
+      service.agentStatusChanged(lead as unknown as Agent)
+      board.settleOutcome(lead.id, running.work!.rootTaskId!, {
+        attemptId, progress: 'Cannot continue within the remaining budget.', outcome: 'block',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(service.taskBoard(run.id).get(lead.id, running.work!.rootTaskId!).stableState.kind).toBe('blocked')
+      expect(lead.cancelCount).toBeGreaterThan(0)
+      expect(service.status(run.id)).toMatchObject({ status: 'idle', work: { status: 'blocked' } })
+    } finally { disconnect() }
+  })
+
+  it('ends timed-out follow-up work and cancels only its owned unfinished tasks', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-16T12:00:00Z'))
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, runtime, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const running = service.start(launcher as unknown as Agent, {
+        runId: run.id, projectRoot: root, taskPath, stages: [
+          { key: 'review', kind: 'vote', title: 'Initial review', description: 'Check evidence.', owners: ['lead'], dependencies: [] },
+        ],
+      })
+      const lead = runtime.get(run.members.find(member => member.name === 'lead')!.sessionId)!
+      const board = service.taskBoard(run.id)
+      const rootId = running.work!.rootTaskId!
+      const review = board.state().tasks.find(task => task.parentId === rootId)!
+      board.castVote(lead.id, review.id, 'reject', 'More evidence needed.')
+      await vi.advanceTimersByTimeAsync(0)
+      const attemptId = board.get(lead.id, rootId).activeReconcile!.attemptId!
+      board.settle(lead.id, rootId, {
+        attemptId, progress: 'Try bounded follow-up.',
+        childOps: [{ kind: 'goal', title: 'Follow-up', owners: ['lead'] }],
+        next: { kind: 'running', reason: 'Wait for evidence.', reconcilers: [{
+          id: 'join', target: 'lead', priority: 0, retryAfterSeconds: 0, maxWakeups: 3,
+          when: { kind: 'child_count', states: ['completed', 'blocked', 'cancelled'], op: 'eq', value: 'cohort' },
+          timeoutAt: '2026-09-16T12:00:01Z', onTimeout: { kind: 'blocked', reason: 'Work deadline reached.' },
+        }] },
+      })
+      const outside = board.createGoal(lead.id, { title: 'Separate work', owners: ['reviewer'] })
+      lead.status = 'running'
+      service.agentStatusChanged(lead as unknown as Agent)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(service.status(run.id).work).toMatchObject({ status: 'blocked', summary: 'Work deadline reached.' })
+      expect(board.state().tasks.find(task => task.title === 'Follow-up')!.stableState.kind).toBe('cancelled')
+      expect(board.get(lead.id, outside.id).stableState.kind).toBe('running')
+      expect(board.get(lead.id, review.id).domain).toMatchObject({ outcome: 'reject' })
+      expect(lead.cancelCount).toBeGreaterThan(0)
+    } finally { disconnect() }
+  })
+
+  it.each([['member', false], ['assistant', false], ['member', true], ['assistant', true]] as const)(
+    'recovers a %s context ceiling in the same Work and preserves compaction usage (transient failure: %s)', async (participant, transientFailure) => {
+    const { root, configPath, taskPath } = fixture()
+    const config = JSON.parse(readFileSync(configPath, 'utf8'))
+    Object.assign(config.modules['dsh-agent-fleet/message'], { memberContextCeilingTokens: 100, memberContextCeilingSoftRungs: 0 })
+    writeFileSync(configPath, JSON.stringify(config))
+    const { service, runtime, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const work = service.start(launcher as unknown as Agent, { runId: run.id, projectRoot: root, taskPath,
+        stages: [{ key: 'solve', kind: 'goal', title: 'Solve', description: 'Solve the fixture.', owners: ['lead'], dependencies: [] }] }).work!
+      const agent = participant === 'assistant' ? launcher : runtime.get(run.members.find(m => m.name === 'lead')!.sessionId)!
+      let seq = 0
+      const observe = (tokens: number): void => { service.recordMemberSessionEvent(agent.id, {
+        seq: ++seq, time: Date.now(), type: 'assistant/message', data: { turn: 1, step: seq,
+          message: { id: `m${seq}`, role: 'assistant', content: [], source: { provider: 'provider-one', model: 'model-one' } },
+          usage: { inputTokens: tokens, outputTokens: 1 },
+        },
+      } as unknown as SessionEvent) }
+      observe(100); observe(250)
+      const before = service.teamBudget(run.id).team.used
+      let failedOnce = false
+      const compactIfNeeded = vi.fn(async () => {
+        if (transientFailure && !failedOnce) {
+          failedOnce = true
+          throw new Error('DeepSeek API request to https://api.deepseek.com failed')
+        }
+        service.recordMemberSessionEvent(agent.id, { seq: ++seq, time: Date.now(), type: 'compaction/summary',
+          data: { provider: 'provider-one', model: 'model-one', usage: { inputTokens: 10, outputTokens: 5 } },
+        } as unknown as SessionEvent)
+        return { compactionId: 'compact-fixture' }
+      })
+      agent.ctx = { get: () => ({ compactIfNeeded }) } as unknown as Context
+      const step = service as unknown as { preStepReminderDecision(agent: Agent, decision: PreStepDecision): Promise<PreStepDecision> }
+      const input = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Preserve this incoming task.' }] })
+      expect(await step.preStepReminderDecision(agent as unknown as Agent, { kind: 'enter', messages: [input] }))
+        .toMatchObject({ kind: 'enter', messages: expect.arrayContaining([input]) })
+      expect(compactIfNeeded).toHaveBeenCalledWith(agent, 'context-overflow', expect.any(AbortSignal))
+      expect(service.status(run.id).work).toMatchObject({ id: work.id, status: 'running' })
+      expect(service.teamBudget(run.id).team.used).toBe(before + 15)
+      observe(30); observe(40)
+      expect(await step.preStepReminderDecision(agent as unknown as Agent, { kind: 'enter', messages: [] })).toMatchObject({ kind: 'enter' })
+      expect(compactIfNeeded).toHaveBeenCalledTimes(transientFailure ? 2 : 1)
+      service.end(launcher as unknown as Agent, 'Recovered fixture complete.', run.id)
+      await service.wait(run.id, 1_000)
+    } finally { disconnect() }
+  })
+
+  it.each(['unavailable', 'no-range', 'provider-error'] as const)('ends evaluation Work on unrecoverable compaction: %s', async failure => {
+    vi.useFakeTimers()
+    const { root, configPath, taskPath } = fixture()
+    const config = JSON.parse(readFileSync(configPath, 'utf8'))
+    Object.assign(config.modules['dsh-agent-fleet/message'], { memberContextCeilingTokens: 100, memberContextCeilingSoftRungs: 0 })
+    writeFileSync(configPath, JSON.stringify(config))
+    const { service, runtime, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      service.protectEvaluationLifecycle(run.id)
+      service.start(launcher as unknown as Agent, { runId: run.id, projectRoot: root, taskPath,
+        stages: [{ key: 'solve', kind: 'goal', title: 'Solve', description: 'Solve the fixture.', owners: ['lead'], dependencies: [] }] })
+      const agent = runtime.get(run.members.find(m => m.name === 'lead')!.sessionId)!
+      const compactIfNeeded = vi.fn(async () => { if (failure === 'provider-error') throw new Error('fixture provider error'); return null })
+      agent.ctx = { get: () => failure === 'unavailable' ? undefined : { compactIfNeeded } } as unknown as Context
+      for (const [seq, tokens] of [[1, 100], [2, 250]]) service.recordMemberSessionEvent(agent.id, {
+        seq, time: Date.now(), type: 'assistant/message', data: { turn: 1, step: seq,
+          message: { id: `m${seq}`, role: 'assistant', content: [], source: { provider: 'provider-one', model: 'model-one' } },
+          usage: { inputTokens: tokens, outputTokens: 1 },
+        },
+      } as unknown as SessionEvent)
+      const step = service as unknown as { preStepReminderDecision(agent: Agent, decision: PreStepDecision): Promise<PreStepDecision> }
+      expect(await step.preStepReminderDecision(agent as unknown as Agent, { kind: 'enter', messages: [] })).toEqual({ kind: 'reject' })
+      expect(service.status(run.id)).toMatchObject({ status: 'closed', work: { status: 'cancelled', summary: expect.stringContaining('context recovery failed') } })
+      await vi.advanceTimersByTimeAsync(300_000)
+      const outcome = await superviseFleetEvaluationRun({ runs: service, run: service.status(run.id),
+        assistantAgent: launcher as unknown as Agent, projectRoot: root, timeoutMs: 1000 })
+      expect(outcome).toMatchObject({ phase: 'work_failed', exitCode: 3 })
+      expect(compactIfNeeded).toHaveBeenCalledTimes(failure === 'unavailable' ? 0 : 1)
+    } finally { disconnect(); vi.useRealTimers() }
+  })
+
   it('injects turn-start and tool-result reminders with independent slot cooldowns', async () => {
     const { root, configPath } = fixture()
     const reminder = {
@@ -516,9 +814,9 @@ describe('FleetRunService', () => {
     })
     const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
     if (lead === undefined) throw new Error('expected live Fleet lead')
-    const preStep = (messages: UserMessage[]): PreStepDecision => {
+    const preStep = (messages: UserMessage[]): Promise<PreStepDecision> => {
       const hook = service as unknown as {
-        preStepReminderDecision(agent: Agent, decision: PreStepDecision): PreStepDecision
+        preStepReminderDecision(agent: Agent, decision: PreStepDecision): Promise<PreStepDecision>
       }
       return hook.preStepReminderDecision(lead as unknown as Agent, { kind: 'enter', messages })
     }
@@ -528,12 +826,12 @@ describe('FleetRunService', () => {
       content: [{ type: 'text', text: 'Run the check.' }],
     })
 
-    const atStart = preStep([input])
+    const atStart = await preStep([input])
     if (atStart.kind === 'reject') throw new Error('unexpected rejected pre-step')
     expect(atStart.messages.at(-1)?.content).toEqual([
       expect.objectContaining({ type: 'text', text: 'System reminder, no reply: 你是 Lead；使用 中文。' }),
     ])
-    expect(preStep([input])).toMatchObject({ messages: [input] })
+    expect(await preStep([input])).toMatchObject({ messages: [input] })
 
     lead.session.events.push(
       { type: 'tool/call', seq: 2, time: Date.now(), data: { turn: 1, callId: 'call-1', name: 'bash', arguments: '{}' } },
@@ -548,12 +846,12 @@ describe('FleetRunService', () => {
         },
       },
     )
-    const afterTool = preStep([])
+    const afterTool = await preStep([])
     if (afterTool.kind === 'reject') throw new Error('unexpected rejected pre-step')
     expect(afterTool.messages.at(-1)?.content).toEqual([
       expect.objectContaining({ type: 'text', text: 'System reminder, no reply: 你是 Lead；使用 中文。' }),
     ])
-    expect(preStep([])).toMatchObject({ messages: [] })
+    expect(await preStep([])).toMatchObject({ messages: [] })
     disconnect()
   })
 
@@ -621,6 +919,11 @@ describe('FleetRunService', () => {
     const guardReason = (name: string, argumentsValue: unknown = {}) => guards
       .map(guard => guard({ name, arguments: argumentsValue }))
       .find(reason => reason !== undefined)
+    // Tools introduced after assistant installation still cannot bypass the
+    // Fleet roster via native delegation.
+    nativeTools.add('subagent_fork')
+    expect(guardReason('subagent_fork')).toContain('unavailable to a Fleet assistant')
+    expect(guardReason('subagent')).toContain('unavailable to a Fleet assistant')
     expect(guardReason('read', { path: 'README.md' })).toBeUndefined()
     expect(guardReason('bash', { command: 'git status --short' })).toBeUndefined()
     expect(guardReason('write', { path: 'result.txt', content: 'done' })).toContain('not routed')
@@ -632,6 +935,8 @@ describe('FleetRunService', () => {
     })
     expect(activeRestrictions).not.toContainEqual({ deny: ['bash', 'write', 'edit', 'todo_write'] })
     expect(guardReason('write', { path: 'result.txt', content: 'done' })).toBeUndefined()
+    expect(guardReason('subagent_fork')).toContain('unavailable to a Fleet assistant')
+    expect(guardReason('subagent')).toContain('unavailable to a Fleet assistant')
 
     service.recordMemberSessionEvent(launcher.id, {
       seq: 2,
@@ -700,7 +1005,7 @@ describe('FleetRunService', () => {
     const sessionStarted = vi.spyOn(second.service, 'agentSessionStarted')
     const resume = vi.fn(async (options: ResumeAgentOptions) => {
       const agent = second.runtime.add(String(options.resumeSessionId), root)
-      await options.setup?.({ agent, get: () => undefined } as unknown as Context)
+      await options.setup?.({ get: () => undefined } as unknown as Context, agent as unknown as Agent)
       return {
         agent,
         dispose: async () => { second.runtime.agents.delete(agent.id) },
@@ -833,7 +1138,7 @@ describe('FleetRunService', () => {
     expect(request).toContain('budget.team counters for cost reporting')
     expect(request).not.toContain('Build and review the requested change.')
 
-    const decision = await scoped.preStep([incoming])
+    const decision = await scoped.preStep([incoming], launcher as unknown as Agent)
     if (decision.kind !== 'enter') throw new Error('expected step entry')
     const interaction = service.taskBoard(run.id).interactionTask(assistantId)
     expect(interaction).toMatchObject({
@@ -1881,6 +2186,35 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('rejects model pauses throughout a host-protected evaluation, including individual members', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, runtime, disconnect } = setup(root)
+    const caller = launcher as unknown as Agent
+    const run = await service.create(caller, { configPath, projectRoot: root, requiredPaths: [] })
+    const lifecycle = service.protectEvaluationLifecycle(run.id)
+    const before = service.status(run.id)
+    expect(() => service.protectEvaluationLifecycle(run.id)).toThrow('already protected')
+    await expect(service.pauseTeam(caller, run.id)).rejects.toThrow('Agents cannot pause')
+    for (const member of run.members) {
+      await expect(service.pauseMember(caller, run.id, member.name)).rejects.toThrow('Agents cannot pause')
+      const agent = runtime.get(member.sessionId)
+      if (agent === undefined) throw new Error('expected loaded member')
+      await expect(service.pauseTeam(agent as unknown as Agent, run.id)).rejects.toThrow()
+    }
+    await expect(service.pauseMember(caller, run.id, run.assistants[0]!.view.id)).rejects.toThrow('Agents cannot pause')
+    expect(service.status(run.id)).toEqual(before)
+    // Human maintenance and a deadline raised by the host still work.
+    await expect(service.pauseTeamAsExternal(caller, run.id)).resolves.toMatchObject({ status: 'paused' })
+    await service.resumeTeamAsExternal(caller, run.id)
+    await expect(service.pauseTeam(caller, run.id)).rejects.toThrow('Agents cannot pause')
+    await expect(lifecycle.pause(caller)).resolves.toMatchObject({ status: 'paused' })
+    await service.resumeTeamAsExternal(caller, run.id)
+    lifecycle.release(); lifecycle.release()
+    await expect(lifecycle.pause(caller)).rejects.toThrow('was released')
+    await expect(service.pauseTeam(caller, run.id)).resolves.toMatchObject({ status: 'paused' })
+    disconnect()
+  })
+
   it('keeps a continuous Team assistant from closing its own generation', async () => {
     const { root, configPath } = fixture()
     const { service, launcher, disconnect } = setup(root)
@@ -1992,7 +2326,7 @@ describe('FleetRunService', () => {
     expect(leadPersona).toContain('Native subagent spawning is unavailable inside a formal Fleet member')
     expect(leadPersona).toContain('Every granted Fleet capability with at least one authorized action stays directly available')
     expect(leadPersona).toContain('Use only an exact display name or member id from the current reachable roster')
-    expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_reconcile resolve` path writes a stable state')
+    expect(leadPersona).toContain('Only a domain handler, deterministic timeout fallback, or the fenced `fleet_resolve` path writes a stable state')
 
     service.end(launcher as unknown as Agent, 'Display name messaging test complete.', run.id)
     await service.wait(run.id, 1_000)
@@ -2958,7 +3292,10 @@ describe('FleetRunService', () => {
       contacts: { members: [], channels: ['delivery'] },
     })
     const register = vi.fn(() => () => {})
-    const restrict = vi.fn(() => () => {})
+    const restrict = vi.fn((filter: { deny: readonly string[] }) => {
+      if (filter.deny.includes('subagent')) throw new Error('unknown global tool subagent')
+      return () => {}
+    })
     const guard = vi.fn(() => () => {})
     const get = vi.fn((name: string) => name === 'fleet_resurrect' || name.startsWith('joyride_') || name.startsWith('live_') ? { name } : undefined)
     const memberSetup = vi.fn()
@@ -2973,7 +3310,7 @@ describe('FleetRunService', () => {
         callback({ tools: { register, restrict, guard, get } } as unknown as Context)
         return Promise.resolve()
       },
-    } as unknown as Context)
+    } as unknown as Context, setupAgent as unknown as Agent)
     expect(onMemberEvent).toHaveBeenCalledWith('agent/turn-stopping', expect.any(Function))
     expect(restrict).toHaveBeenCalledWith({
       deny: expect.arrayContaining([
@@ -2993,6 +3330,9 @@ describe('FleetRunService', () => {
     const specialToolGuard = guard.mock.calls[0]?.[0] as ((execution: { readonly name: string }) => string | undefined)
     expect(specialToolGuard({ name: 'joyride_act' })).toContain('not permitted')
     expect(specialToolGuard({ name: 'fleet_send' })).toBeUndefined()
+    const nativeToolGuard = guard.mock.calls.at(-1)?.[0] as ((execution: { readonly name: string }) => string | undefined)
+    expect(nativeToolGuard({ name: 'subagent' })).toContain('unavailable')
+    expect(nativeToolGuard({ name: 'subagent_fork' })).toContain('unavailable')
     const residentTools = register.mock.calls.map(call => (call[0] as { name: string }).name)
     expect(residentTools).toEqual(expect.arrayContaining([
       'fleet_inbox', 'fleet_reply', 'fleet_send', 'fleet_channel',
@@ -3035,6 +3375,37 @@ describe('FleetRunService', () => {
     service.end(launcher as unknown as Agent, 'UI-aligned Team test complete.')
     await service.wait(run.id, 1_000)
     disconnect()
+  })
+
+  it('exports failed Work evidence after Team finalization releases the collaboration runtime', async () => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const path = join(root, 'failed-work-notes.txt')
+      writeFileSync(path, 'Incomplete candidate; retain the parent source.')
+      service.resourceStore(run.id).addResource(String(launcher.id), { id: 'notes', path, label: 'Failure evidence' })
+      const before = service.resourceSnapshot(run.id)
+      service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+      service.end(launcher as unknown as Agent, 'Candidate incomplete; reject edits.', run.id)
+      const closed = await service.wait(run.id, 1_000)
+      expect(closed).toMatchObject({ status: 'closed', settled: true })
+      expect(() => service.resourceStore(run.id)).toThrow('not active in this process')
+      expect(service.resourceSnapshot(run.id)).toEqual(expect.arrayContaining(before))
+      const outcome = await superviseFleetEvaluationRun({ runs: service, run: closed,
+        assistantAgent: { whenIdle: async () => {} }, projectRoot: root, timeoutMs: 1_000 })
+      expect(outcome).toMatchObject({ phase: 'work_failed', exitCode: 3 })
+      const configuration = fleetEvaluationConfiguration('task', { FLEET_EVAL_WORKSPACE: root,
+        FLEET_EVAL_TEAM_CONFIG: configPath, FLEET_EVAL_OUTPUT: join(root, 'results') }, root)
+      writeFleetEvaluationOutputs(service, outcome, configuration)
+      expect(readFileSync(join(configuration.outputDirectory, 'answer.txt'), 'utf8')).toContain('reject edits')
+      const artifacts = JSON.parse(readFileSync(join(configuration.outputDirectory, 'artifacts.json'), 'utf8'))
+      expect(artifacts.resources).toContainEqual(expect.objectContaining({ id: 'notes', path, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }))
+      expect(readFileSync(join(configuration.outputDirectory, 'events.jsonl'), 'utf8')).toContain('team_settled')
+      expect(existsSync(join(configuration.outputDirectory, 'usage.json'))).toBe(true)
+      expect(() => service.resourceSnapshot('unknown-team')).toThrow()
+      expect(() => service.resourceStore(run.id)).toThrow('not active in this process')
+    } finally { disconnect() }
   })
 
   it('reads registered Markdown resources on demand for the Web preview', async () => {
@@ -4256,6 +4627,73 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('preserves both member statuses when pauses run concurrently', async () => {
+    const { root, configPath } = fixture()
+    const { service, core, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const names = ['lead', 'reviewer']
+      await Promise.all(names.map(name => service.pauseMemberAsExternal(launcher as unknown as Agent, run.id, name)))
+      expect(service.status(run.id).members.filter(member => names.includes(member.name)))
+        .toEqual(expect.arrayContaining(names.map(name => expect.objectContaining({ name, status: 'paused' }))))
+      const record = JSON.parse(readFileSync(join(root, '.fleet-registry', run.id, 'run.json'), 'utf8'))
+      expect(record.members.filter((member: FleetRunMember) => names.includes(member.name)).every((member: FleetRunMember) => member.status === 'paused')).toBe(true)
+    } finally { disconnect(); await core.close() }
+  })
+
+  it.each(['small', 'large', 'complete'] as const)('recovers a %s unterminated journal tail and continues appending', async kind => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+    first.disconnect()
+    await first.core.close()
+    const directory = join(root, '.fleet-registry', run.id)
+    const eventsPath = join(directory, 'events.jsonl')
+    const original = readFileSync(eventsPath, 'utf8')
+    const tail = kind === 'complete'
+      ? JSON.stringify({ sequence: 123_456, type: 'recovery_probe', createdAt: new Date().toISOString(), data: {} })
+      : `{"sequence":999999,"type":"task.updated","data":"${kind === 'large' ? '文'.repeat(70_000) : ''}`
+    appendFileSync(eventsPath, tail)
+    const second = setup(root)
+    try {
+      expect(second.service.list().map(record => record.id)).toContain(run.id)
+      const recovered = readFileSync(eventsPath, 'utf8')
+      expect(recovered.startsWith(original)).toBe(true)
+      const backups = readdirSync(directory).filter(name => name.startsWith('events.jsonl.incomplete-'))
+      if (kind === 'complete') {
+        expect(recovered).toContain(`${tail}\n`)
+        expect(backups).toHaveLength(0)
+      } else {
+        expect(backups).toHaveLength(1)
+        expect(readFileSync(join(directory, backups[0]!), 'utf8')).toBe(tail)
+        expect(recovered).not.toContain(tail)
+      }
+      const before = recovered.trim().split('\n').map(line => JSON.parse(line))
+      const internal = second.service as unknown as { appendEvent: (runId: string, type: string, data: unknown) => void }
+      internal.appendEvent(run.id, 'recovery_probe', {})
+      const after = readFileSync(eventsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      expect(after.at(-1).sequence).toBe(before.at(-1).sequence + 1)
+      expect(second.service.readTrace(run.id, 0, 1_000).events.length).toBeGreaterThan(0)
+    } finally { second.disconnect(); await second.core.close() }
+  })
+
+  it.each(['tail', 'middle'])('does not silently discard a corrupt completed journal record at the %s', async position => {
+    const { root, configPath } = fixture()
+    const first = setup(root)
+    const run = await first.service.create(first.launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+    first.disconnect()
+    await first.core.close()
+    const path = join(root, '.fleet-registry', run.id, 'events.jsonl')
+    appendFileSync(path, '{broken}\n')
+    if (position === 'middle') appendFileSync(path, `${JSON.stringify({ sequence: 123_456, type: 'recovery_probe', data: {} })}\n`)
+    const original = readFileSync(path, 'utf8')
+    const second = setup(root)
+    try {
+      expect(second.service.list().map(record => record.id)).not.toContain(run.id)
+      expect(readFileSync(path, 'utf8')).toBe(original)
+    } finally { second.disconnect(); await second.core.close() }
+  })
+
   it('skips legacy Session journal entries and reads the final sequence from a large tail event', async () => {
     const { root, configPath } = fixture()
     const { service, core, launcher, disconnect } = setup(root)
@@ -4377,6 +4815,163 @@ describe('FleetRunService', () => {
     }))
     expect(leadStatus()).toBe('running')
     disconnect()
+  })
+
+  describe('visibility reminders at Work completion', () => {
+    async function reviewedWork() {
+      vi.useFakeTimers()
+      const { root, configPath, taskPath } = fixture()
+      const state = setup(root)
+      const { service, runtime, launcher } = state
+      const run = await service.create(launcher as unknown as Agent, {
+        configPath, projectRoot: root, requiredPaths: [],
+      })
+      const lead = runtime.get(run.members.find(member => member.name === 'lead')?.sessionId ?? '')
+      const reviewer = runtime.get(run.members.find(member => member.name === 'reviewer')?.sessionId ?? '')
+      if (lead === undefined || reviewer === undefined) throw new Error('expected live Fleet members')
+      lead.status = 'running'
+      reviewer.status = 'running'
+      const running = service.start(launcher as unknown as Agent, {
+        runId: run.id, taskPath, projectRoot: root,
+        stages: [
+          {
+            key: 'implementation', kind: 'goal', title: 'Implement', description: 'Produce the artifact.',
+            owners: ['lead'], dependencies: [],
+          },
+          {
+            key: 'review', kind: 'vote', title: 'Review', description: 'Verify the artifact independently.',
+            owners: ['reviewer'], dependencies: ['implementation'],
+          },
+        ],
+      })
+      const rootTaskId = running.work?.rootTaskId
+      const board = service.taskBoard(run.id)
+      const implementation = board.state().tasks.find(task => task.parentId === rootTaskId && task.domain.kind === 'goal')
+      const review = board.state().tasks.find(task => task.parentId === rootTaskId && task.domain.kind === 'vote')
+      if (rootTaskId === undefined || implementation === undefined || review === undefined) {
+        throw new Error('expected Work with implementation and acceptance Vote')
+      }
+      await vi.advanceTimersByTimeAsync(0)
+      const opened = new Set<string>()
+      let seq = 100
+      const output = (agent: FakeAgent, contextTokens: number, text: string): void => {
+        if (!opened.has(agent.id)) {
+          const start = { type: 'turn/start', seq: seq++, time: Date.now(), data: { turn: 1 } } as SessionEvent
+          agent.session.events.push(start)
+          service.recordMemberSessionEvent(agent.id, start)
+          opened.add(agent.id)
+        }
+        const event = {
+          type: 'assistant/message', seq: seq++, time: Date.now(),
+          data: {
+            turn: 1, interrupted: false,
+            message: { role: 'assistant', content: [{ type: 'text', text }] },
+            usage: { inputTokens: contextTokens, outputTokens: 32 },
+          },
+        } as unknown as SessionEvent
+        agent.session.events.push(event)
+        service.recordMemberSessionEvent(agent.id, event)
+      }
+      const stop = (agent: FakeAgent): void => {
+        const hook = service as unknown as { memberTurnStopping(agent: Agent, turn: number): void }
+        hook.memberTurnStopping(agent as unknown as Agent, 1)
+      }
+      const accept = async (): Promise<void> => {
+        board.submitGoal(lead.id, implementation.id, { kind: 'complete', reason: 'Implemented.', result: 'Verified artifact.' })
+        board.castVote(reviewer.id, review.id, 'approve', 'Independent checks passed.')
+        lead.completeTurn()
+        service.agentStatusChanged(lead as unknown as Agent)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(board.get(reviewer.id, rootTaskId).stableState.kind).toBe('completed')
+      }
+      // An earlier request in the active review turn establishes the context baseline.
+      output(reviewer, 8_000, 'Inspecting the implementation before the acceptance vote.')
+      return { ...state, run, lead, reviewer, board, rootTaskId, output, stop, accept }
+    }
+
+    it('adds no tail step after acceptance and still waits for the final owner to become idle', async () => {
+      const { service, run, reviewer, output, stop, accept, disconnect } = await reviewedWork()
+      await accept()
+      // Claim existing kickoff/tool-step context before the final response, never after stopping.
+      reviewer.inbox.clear()
+      output(reviewer, 24_000, 'Independent verification passed; the artifact is ready.')
+      const inject = vi.spyOn(reviewer, 'inject')
+      const cancelCount = reviewer.cancelCount
+      let idle = false
+      const settled = reviewer.whenIdle().then(() => { idle = true })
+
+      stop(reviewer)
+      stop(reviewer)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(inject).not.toHaveBeenCalled()
+      expect(reviewer.inbox.nextStep).toEqual([])
+      expect(reviewer.inbox.nextTurn).toEqual([])
+      expect(service.readTrace(run.id, 0, 300).events.filter(event =>
+        event.type === 'coordination.system_notification' && event.data.includes('visibility_reminder'))).toEqual([])
+      expect(reviewer.cancelCount).toBe(cancelCount)
+      expect(idle).toBe(false)
+      expect(service.status(run.id)).toMatchObject({ status: 'running', work: { status: 'running' } })
+
+      // Only permit the idle transition once the stop hook leaves both queues empty.
+      // Calling FakeAgent.completeTurn before these assertions would hide the old extra step.
+      reviewer.completeTurn()
+      service.agentStatusChanged(reviewer as unknown as Agent)
+      await settled
+      await vi.advanceTimersByTimeAsync(0)
+      expect(service.status(run.id)).toMatchObject({ status: 'idle', work: { status: 'finished' } })
+      disconnect()
+    })
+
+    it.each(['unfinished Work', 'another Goal', 'another Reply', 'unread Inbox'] as const)(
+      'keeps the reminder while there is %s',
+      async obligation => {
+        const { service, run, launcher, lead, reviewer, board, output, stop, accept, disconnect } = await reviewedWork()
+        if (obligation !== 'unfinished Work') await accept()
+        if (obligation === 'another Goal') {
+          board.createGoal(lead.id, { title: 'Follow-up still needs evidence', owners: ['lead'] })
+        } else if (obligation === 'another Reply' || obligation === 'unread Inbox') {
+          service.messageHub(run.id).send(launcher, {
+            to: '@lead', delivery: 'quiet',
+            text: obligation === 'another Reply' ? '@lead Confirm the follow-up evidence.' : 'Follow-up evidence for inspection.',
+            ...(obligation === 'another Reply' ? { mentions: ['@lead'] } : {}),
+          })
+          expect(board.ownerTasks('lead').some(task =>
+            task.domain.kind === (obligation === 'another Reply' ? 'reply' : 'inbox'))).toBe(true)
+        }
+        await vi.advanceTimersByTimeAsync(0)
+        reviewer.inbox.clear()
+        output(reviewer, 24_000, 'New verification evidence may help the remaining work.')
+        const inject = vi.spyOn(reviewer, 'inject')
+
+        stop(reviewer)
+        stop(reviewer)
+        expect(inject).toHaveBeenCalledTimes(1)
+        expect(reviewer.inbox.nextStep).toHaveLength(1)
+        expect(reviewer.inbox.nextTurn).toEqual([])
+        expect(reviewer.inbox.nextStep[0]?.source).toMatchObject({
+          kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'snapshot',
+          sections: [expect.objectContaining({ name: `notification:visibility-reminder:${reviewer.id}` })],
+        })
+        expect(reviewer.status).toBe('running')
+        disconnect()
+      },
+    )
+
+    it('preserves foreground assistant reminders after formal tasks complete', async () => {
+      const { launcher, output, stop, accept, disconnect } = await reviewedWork()
+      launcher.status = 'running'
+      output(launcher, 8_000, 'Earlier assistant progress.')
+      await accept()
+      launcher.inbox.clear()
+      output(launcher, 24_000, 'The user still needs the final assistant report.')
+
+      stop(launcher)
+      expect(launcher.inbox.nextStep).toHaveLength(1)
+      expect(launcher.inbox.nextStep[0]?.source).toMatchObject({
+        kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'snapshot',
+      })
+      disconnect()
+    })
   })
 
   it('privately reminds a silent formal member without creating Team messages or a reminder loop', async () => {
@@ -5553,6 +6148,179 @@ describe('FleetRunService', () => {
     disconnect()
   })
 
+  it('recovers a fresh evaluation bootstrap protocol failure once without creating another Team', async () => {
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const notBefore = Date.now()
+      const failure: SessionEvent = {
+        seq: 20, time: notBefore, type: 'turn/end',
+        data: { turn: 1, reason: { kind: 'error', error: { code: 'PI_AI_ERROR', message: 'malformed_tool_protocol: invalid tool call stream' } } },
+      }
+      launcher.session.events.push(failure)
+      service.recordMemberSessionEvent(launcher.id, failure)
+      service.agentIdle(launcher as unknown as Agent)
+      await Promise.resolve()
+      const before = launcher.messages.length
+      expect(service.readTrace(run.id, 0, 300).events.some(event => event.type === 'member_protocol_recovery_deferred')).toBe(true)
+      expect(service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, { notBefore })).toBe(true)
+      expect(launcher.messages).toHaveLength(before + 1)
+      expect(launcher.messages.at(-1)?.content).toEqual([expect.objectContaining({ text: expect.stringContaining('attempt 1/1') })])
+      expect(service.status(run.id).work).toBeUndefined()
+      expect(service.list()).toHaveLength(1)
+      launcher.session.events.push({ ...failure, seq: 21, time: Date.now() })
+      expect(service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, { notBefore })).toBe(false)
+      expect(launcher.messages).toHaveLength(before + 1)
+      expect(service.readTrace(run.id, 0, 300).events.filter(event => event.type === 'evaluation_bootstrap_protocol_recovery')).toEqual([
+        expect.objectContaining({ data: expect.stringContaining('"failureSequence":20') }),
+      ])
+    } finally { disconnect() }
+  })
+
+  it.each(['protocol', 'max-tokens'] as const)('supervises one %s bootstrap recovery through a completed Work', async reason => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, runtime, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const notBefore = Date.now()
+      const failure: SessionEvent = { seq: 20, time: notBefore, type: 'turn/end', data: { turn: 1, reason: reason === 'max-tokens' ? { kind: 'max-tokens' } : { kind: 'error', error: { code: 'PI_AI_ERROR', message: 'malformed_tool_protocol: invalid stream' } } } }
+      launcher.session.events.push(failure)
+      service.recordMemberSessionEvent(launcher.id, failure)
+      const accept = launcher.followup.bind(launcher)
+      launcher.followup = message => {
+        accept(message)
+        launcher.status = 'running'
+        queueMicrotask(() => {
+          const running = service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+          const lead = runtime.get(running.members.find(member => member.name === 'lead')!.sessionId)!
+          settleDefaultCompositeWork(service.taskBoard(run.id), lead.id, running.work!.rootTaskId!, 'complete', 'Bootstrap retry delivered verified Work.')
+          launcher.completeTurn()
+        })
+      }
+      const outcome = await superviseFleetEvaluationRun({
+        runs: service, run, assistantAgent: launcher as unknown as Agent,
+        projectRoot: root, timeoutMs: 1000, bootstrapStartedAt: notBefore,
+        recoverBootstrap: input => service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, input),
+      })
+      expect(outcome).toMatchObject({ phase: 'work_finished', exitCode: 0, run: { id: run.id } })
+      expect(service.list()).toHaveLength(1)
+      expect(service.readTrace(run.id, 0, 300).events.filter(event => event.type === (reason === 'max-tokens' ? 'evaluation_bootstrap_token_recovery' : 'evaluation_bootstrap_protocol_recovery'))).toHaveLength(1)
+    } finally { disconnect() }
+  })
+
+  it.each(['old-error', 'later-input', 'later-turn', 'later-success', 'different-error-code', 'different-error-message'] as const)(
+    'does not reuse stale or unrelated evaluation bootstrap failures (%s)', async scenario => {
+      const { root, configPath } = fixture()
+      const { service, launcher, disconnect } = setup(root)
+      try {
+        const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+        const notBefore = Date.now()
+        launcher.session.events.push({
+          seq: 20, time: scenario === 'old-error' ? notBefore - 1 : notBefore, type: 'turn/end',
+          data: { turn: 1, reason: { kind: 'error', error: {
+            code: scenario === 'different-error-code' ? 'AUTHENTICATION' : 'PI_AI_ERROR',
+            message: scenario === 'different-error-message' ? 'ordinary provider error' : 'malformed_tool_protocol: invalid stream',
+          } } },
+        })
+        if (scenario === 'later-input') launcher.session.events.push({ seq: 21, time: notBefore, type: 'user/message', data: {} })
+        if (scenario === 'later-turn') launcher.session.events.push({ seq: 21, time: notBefore, type: 'turn/start', data: { turn: 2 } })
+        if (scenario === 'later-success') launcher.session.events.push({ seq: 21, time: notBefore, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+        const before = launcher.messages.length
+        expect(service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, { notBefore })).toBe(false)
+        expect(launcher.messages).toHaveLength(before)
+        expect(service.readTrace(run.id, 0, 300).events.some(event => event.type === 'evaluation_bootstrap_protocol_recovery')).toBe(false)
+      } finally { disconnect() }
+    },
+  )
+
+  it.each(['existing-work', 'paused-team', 'aborted'] as const)('refuses evaluation bootstrap recovery for %s', async scenario => {
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      if (scenario === 'existing-work') service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+      if (scenario === 'paused-team') await service.pauseTeam(launcher as unknown as Agent, run.id)
+      const notBefore = Date.now()
+      launcher.session.events.push({ seq: 20, time: notBefore, type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+      const controller = new AbortController()
+      if (scenario === 'aborted') controller.abort()
+      const before = launcher.messages.length
+      expect(service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, { notBefore, signal: controller.signal })).toBe(false)
+      expect(launcher.messages).toHaveLength(before)
+    } finally { disconnect() }
+  })
+
+  it.each(['STREAM_CLOSED', 'TRANSPORT', 'TIMEOUT'])('retries fresh %s bootstraps with bounded backoff and no duplicate failure replay', async code => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      await vi.advanceTimersByTimeAsync(0)
+      launcher.completeTurn()
+      const notBefore = Date.now()
+      const recoveryMessages = () => launcher.messages.filter(message => JSON.stringify(message).includes('[Fleet evaluation network recovery:'))
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        const failure: SessionEvent = { seq: 20 + attempt, time: Date.now(), type: 'turn/end',
+          data: { turn: attempt, reason: { kind: 'error', error: { code, message: 'SSE stream ended without [DONE]' } } } }
+        launcher.session.events.push(failure)
+        service.recordMemberSessionEvent(launcher.id, failure)
+        const retried = service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, { notBefore })
+        if (attempt === 4) { expect(retried).toBe(false); break }
+        expect(service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, { notBefore })).toBe(false)
+        await vi.advanceTimersByTimeAsync(30_000 * 2 ** (attempt - 1) - 1)
+        expect(recoveryMessages()).toHaveLength(attempt - 1)
+        await vi.advanceTimersByTimeAsync(1)
+        await expect(retried).resolves.toBe(true)
+        expect(launcher.messages.at(-1)?.content).toEqual([expect.objectContaining({ text: expect.stringContaining('original episode deadline') })])
+        launcher.completeTurn()
+      }
+      expect(recoveryMessages()).toHaveLength(3)
+      expect(service.status(run.id).work).toBeUndefined()
+      expect(service.list()).toHaveLength(1)
+    } finally { disconnect() }
+  })
+
+  it.each(['aborted', 'later-input', 'existing-work', 'paused-team'] as const)('cancels a pending stream recovery after %s', async scenario => {
+    vi.useFakeTimers()
+    const { root, configPath, taskPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const notBefore = Date.now(), controller = new AbortController()
+      launcher.session.events.push({ seq: 20, time: notBefore, type: 'turn/end', data: { turn: 1,
+        reason: { kind: 'error', error: { code: 'STREAM_CLOSED', message: 'stream ended' } } } })
+      const retry = service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, { notBefore, signal: controller.signal })
+      if (scenario === 'aborted') controller.abort()
+      if (scenario === 'later-input') launcher.session.events.push({ seq: 21, time: Date.now(), type: 'user/message', data: {} })
+      if (scenario === 'existing-work') service.start(launcher as unknown as Agent, { runId: run.id, taskPath, projectRoot: root })
+      if (scenario === 'paused-team') await service.pauseTeam(launcher as unknown as Agent, run.id)
+      await vi.advanceTimersByTimeAsync(30_000)
+      await expect(retry).resolves.toBe(false)
+      expect(launcher.messages.filter(message => JSON.stringify(message).includes('[Fleet evaluation network recovery:'))).toHaveLength(0)
+    } finally { disconnect() }
+  })
+
+  it('does not send a stream recovery after the original evaluation deadline expires', async () => {
+    vi.useFakeTimers()
+    const { root, configPath } = fixture()
+    const { service, launcher, disconnect } = setup(root)
+    try {
+      const run = await service.create(launcher as unknown as Agent, { configPath, projectRoot: root, requiredPaths: [] })
+      const notBefore = Date.now()
+      launcher.session.events.push({ seq: 20, time: notBefore, type: 'turn/end', data: { turn: 1,
+        reason: { kind: 'error', error: { code: 'STREAM_CLOSED', message: 'stream ended' } } } })
+      const outcome = superviseFleetEvaluationRun({ runs: service, run, assistantAgent: launcher as unknown as Agent,
+        projectRoot: root, timeoutMs: 100, bootstrapStartedAt: notBefore,
+        recoverBootstrap: input => service.retryEvaluationBootstrap(launcher as unknown as Agent, run.id, input) })
+      await vi.advanceTimersByTimeAsync(100)
+      await expect(outcome).resolves.toMatchObject({ phase: 'timed_out', exitCode: 124 })
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(launcher.messages.filter(message => JSON.stringify(message).includes('[Fleet evaluation network recovery:'))).toHaveLength(0)
+    } finally { disconnect() }
+  })
+
   it('resets malformed tool protocol retries after valid output', async () => {
     const { root, configPath, taskPath } = fixture()
     const { service, runtime, launcher, disconnect } = setup(root)
@@ -5858,6 +6626,13 @@ describe('FleetRunService', () => {
       service.agentIdle(lead as unknown as Agent)
       await Promise.resolve()
     }
+    // Exhaustion leaves the root's coordination obligation available. End it
+    // explicitly so this fixture still exercises resurrection without any work.
+    const board = service.taskBoard(run.id)
+    const rootId = service.status(run.id).work!.rootTaskId!
+    const pending = board.get(lead.id, rootId)
+    const attemptId = pending.activeReconcile?.attemptId ?? board.claim(lead.id, rootId).activeReconcile!.attemptId!
+    board.settleOutcome(lead.id, rootId, { attemptId, progress: 'End the exhausted attempt.', outcome: 'cancel' })
     expect(() => service.resurrectMember(
       reviewer as unknown as Agent,
       run.id,
@@ -6189,7 +6964,7 @@ describe('FleetRunService', () => {
     if (attemptNotice?.type !== 'text') throw new Error('expected task-attempt notice')
     expect(attemptNotice.text).toContain('Fleet already claimed this ReconcileAttempt')
     expect(attemptNotice.text).toContain('Do not call fleet_reconcile claim')
-    expect(attemptNotice.text).toContain(`action="resolve", id="${task.id}", attempt_id="attempt_`)
+    expect(attemptNotice.text).toContain(`fleet_resolve id="${task.id}", attempt_id="attempt_`)
     expect(attemptNotice.text).toContain('The id is the Task id, not the attempt or reconciler id.')
     expect(service.readTrace(run.id, 0, 200).events).toContainEqual(expect.objectContaining({
       type: 'member_continued',
@@ -6356,13 +7131,31 @@ describe('FleetRunService', () => {
     expect(service.taskBoard(run.id).ownerTasks('lead').map(task => task.id)).not.toContain(rootTaskId)
     expect(service.taskBoard(run.id).ownerTasks('reviewer').map(task => task.id)).toContain(review.id)
     service.taskBoard(run.id).castVote(reviewer.id, review.id, 'reject', 'Independent evidence found a defect.')
-    expect(service.taskBoard(run.id).readyTasks('lead')).toEqual([])
-    expect(service.taskBoard(run.id).get(lead.id, rootTaskId).stableState).toMatchObject({
-      kind: 'completed',
-      result: expect.stringContaining('Acceptance rejected'),
+    const board = service.taskBoard(run.id)
+    expect(board.get(lead.id, rootTaskId).stableState.kind).toBe('running')
+    expect(service.status(run.id).work?.status).toBe('running')
+    expect(() => service.reportAssistantInteraction(launcher as unknown as Agent, {
+      runId: run.id, outcome: 'complete', reason: 'Rejected is not accepted.', report: 'Too early.',
+    })).toThrow('still waits for live Tasks')
+    await vi.waitFor(() => { expect(board.get(lead.id, rootTaskId).activeReconcile?.status).toBe('running') })
+    const attemptId = board.get(lead.id, rootTaskId).activeReconcile!.attemptId!
+    board.settleOutcome(lead.id, rootTaskId, {
+      attemptId, progress: 'Repair the defect and seek fresh acceptance.', outcome: 'continue', childOps: [
+        { kind: 'goal', key: 'repair', title: 'Repair defect', owners: ['lead'] },
+        { kind: 'vote', title: 'Fresh acceptance', channel: '#main', statement: 'Review repaired evidence.', voters: ['reviewer'], dependencies: ['repair'] },
+      ],
+    })
+    const repair = board.state().tasks.find(task => task.title === 'Repair defect')!
+    const acceptance = board.state().tasks.find(task => task.title === 'Fresh acceptance')!
+    board.submitGoal(lead.id, repair.id, { kind: 'complete', reason: 'Defect repaired.', result: 'Repaired artifact.' })
+    board.castVote(reviewer.id, acceptance.id, 'approve', 'Fresh evidence passes.')
+    await vi.waitFor(() => { expect(board.get(lead.id, rootTaskId).activeReconcile?.status).toBe('running') })
+    board.settleOutcome(lead.id, rootTaskId, {
+      attemptId: board.get(lead.id, rootTaskId).activeReconcile!.attemptId!,
+      progress: 'Repaired artifact accepted.', outcome: 'complete', result: 'Repaired artifact.',
     })
     await expect(service.wait(run.id, 1_000)).resolves.toMatchObject({
-      status: 'idle', work: { status: 'finished', summary: expect.stringContaining('Acceptance rejected') },
+      status: 'idle', work: { status: 'finished', summary: 'Repaired artifact.' },
     })
     expect(() => service.reportAssistantInteraction(launcher as unknown as Agent, {
       runId: run.id,
@@ -6751,7 +7544,7 @@ describe('FleetRunService', () => {
     second.disconnect()
   })
 
-  it('backs off after exhausted network retries and wakes members when their model route recovers', async () => {
+  it.each(['TRANSPORT', 'TIMEOUT', 'STREAM_CLOSED'])('backs off after %s and wakes members when their model route recovers', async code => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-22T08:00:00Z'))
     const { root, configPath, taskPath } = fixture()
@@ -6772,7 +7565,7 @@ describe('FleetRunService', () => {
       type: 'turn/end',
       data: {
         turn: seq,
-        reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'connection reset' } },
+        reason: { kind: 'error', error: { code, message: 'connection reset' } },
       },
     })
     const completedTurn = (seq: number): SessionEvent => ({

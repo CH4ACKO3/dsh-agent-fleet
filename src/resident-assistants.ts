@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { resolveSessionPreset } from './agent-preset.js'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
 import type { FleetAssistantRuntime } from './assistant.js'
@@ -17,11 +17,10 @@ function assistantAgentOptions(run: FleetRunRecord, assistant: FleetRunAssistant
   }
 }
 
-async function mountPersistedAgentPreset(ctx: Context): Promise<void> {
+async function mountPersistedAgentPreset(ctx: Context, agent: Agent): Promise<void> {
   const presets = ctx.get('agentPresets', false)
   if (presets === undefined) return
-  if (ctx.agent === undefined) throw new Error('Resident Fleet assistant setup requires ctx.agent')
-  await presets.mount(ctx, resolveSessionPreset(ctx.agent.session))
+  await presets.mount(ctx, resolveSessionPreset(agent.session))
 }
 
 /** Restore persisted Team assistants, then preload each unpaused formal-member roster once. */

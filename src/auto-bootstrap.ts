@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { resolveSessionPreset } from './agent-preset.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
@@ -26,6 +26,7 @@ export interface FleetAutoBootstrapConfiguration {
   readonly bootstrapInstruction?: string
   readonly controlDirectory?: string
   readonly generation?: string
+  readonly unattended?: boolean
 }
 
 interface FleetGenerationManifest {
@@ -78,6 +79,7 @@ interface FleetAutoBootstrapRuns {
   }): Promise<FleetRunRecord>
   agentSessionStarted(agent: Agent): void
   setGenerationEventWait?(runId: string, waitingForCandidate?: string): void
+  protectEvaluationLifecycle?(runId: string): { release(): void }
 }
 
 interface FleetAutoBootstrapAssistant {
@@ -129,6 +131,7 @@ export function fleetAutoBootstrapConfiguration(
     ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(env.FLEET_AUTO_UNATTENDED === '1' ? { unattended: true } : {}),
     ...(controlDirectory === undefined ? {} : {
       controlDirectory: requiredAbsolutePath(controlDirectory, 'SELF_EVOLVE_CONTROL_DIR'),
       generation: generation as string,
@@ -224,6 +227,13 @@ function pendingGenerationControlWait(configuration: FleetAutoBootstrapConfigura
   return latest.type === 'candidate.ready' ? 'promotion' : 'candidate'
 }
 
+function lifecycleEventWait(event: FleetGenerationEvent): string | undefined {
+  const control = event.data?.control as { recipient?: { phase?: string }; candidate?: { id?: string; phase?: string } } | undefined
+  if (control?.recipient?.phase === 'ready') return 'promotion'
+  if (control?.candidate?.phase === 'rejecting') return 'candidate-cleanup'
+  return undefined
+}
+
 function initialGenerationStartedSequence(configuration: FleetAutoBootstrapConfiguration): number | undefined {
   const first = generationEventsAfter(configuration, 0)[0]
   return first?.type === 'generation.started' ? first.sequence : undefined
@@ -236,10 +246,12 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
       const file = value as Record<string, unknown>
       return [key, { name: file.name, path: file.path }]
     }
-    return [key, value]
-  }))).slice(0, 2_000)
+    // Bound prose fields individually. Truncating the serialized object can
+    // cut off the authoritative parent/candidate identity after a long error.
+    return [key, typeof value === 'string' && value.length > 700 ? `${value.slice(0, 700)}…` : value]
+  })))
   const actions: Record<string, string> = {
-    'candidate.ready': '候选代已经被宿主接受并最终确认 ready；本事件就是唯一需要的 ready 确认，不存在另一个 generation.ready。本事件中的 sourceCommit/gitBranch 是当前权威快照，审查者应通过 Git 从该提交读取 evidence，不得因候选容器不可访问而声称证据不可访问。测试数量只能在命令和范围相同时比较；根目录测试与全 workspace 汇总计数不同不是回归。立即建立两个有依赖的单 owner 持久 Goal：先由一名独立审查者从该快照读取候选提交与 evidence，核对测试、记忆继承、协作链和交接能力；再建立平台工程师单 owner 的最终决定 Goal，依赖该审查，负责根据审查终态写交接并实际执行 promote 或 destroy-candidate。两个节点必须在同一次建图时创建，不要等审查结束后再依赖助理被唤醒补建。忽略发生在本事件之前、针对更早 ready 尝试的 request.rejected 或旧审查文件；回复或开工确认不算审查完成。',
+    'candidate.ready': '候选代已经被宿主接受并最终确认 ready；本事件就是唯一需要的 ready 确认，不存在另一个 generation.ready。本事件中的 sourceCommit/gitBranch 是当前权威快照，审查者应通过 Git 从该提交读取 evidence，不得因候选容器不可访问而声称证据不可访问。测试数量只能在命令和范围相同时比较；根目录测试与全 workspace 汇总计数不同不是回归。立即建立两个有依赖的单 owner 持久 Goal：先由一名独立审查者从该快照读取候选提交与 evidence，核对测试、协作链和交接能力；仅在本实验启用外置记忆时检查记忆继承，记忆关闭或未安装时记录不适用，不得为通过自检而启用记忆；再建立平台工程师单 owner 的最终决定 Goal，依赖该审查，负责根据审查终态写交接并实际执行 promote 或 destroy-candidate。两个节点必须在同一次建图时创建，不要等审查结束后再依赖助理被唤醒补建。忽略发生在本事件之前、针对更早 ready 尝试的 request.rejected 或旧审查文件；回复或开工确认不算审查完成。',
     'candidate.failed': '候选代启动失败。立即读取失败证据，清理失败候选，并在修复基座原因后从同一稳定提交重试。',
     'candidate.destroyed': '候选代已销毁。若全局迭代目标仍存在，立即修复已记录原因并启动替代候选。',
     'candidate.self_rejected': '候选代已自我拒绝。立即审查拒绝原因，修复后启动替代候选。',
@@ -249,9 +261,20 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
     'guardian.exited': '保障代异常退出。立即记录保护窗口降级，并在继续晋升前恢复可靠的保障路径。',
     'guardian.retirement_failed': '旧保障代清理失败。立即检查归档与容器/卷清理，不要让遗留资源持续累积。',
     'request.rejected': '一个代际控制请求被宿主拒绝。读取拒绝原因并纠正请求；不要盲目重复同一命令。',
+    'candidate.request_rejected': '候选提交的控制请求被拒绝，本事件自动通知稳定父代。根据宿主当前身份、候选阶段和拒绝原因决定处理方式；候选只有自检与 ready/reject 权限，晋升由父代决定。已有 ready 候选继续按冻结提交审查，不能把这次请求错误当作审查结论或永久停止理由。',
+    'candidate.invalidated': '候选的冻结状态已失效，宿主已归档并终止该候选。父代仍是活跃稳定代，返工窗口已经打开。根据拒绝证据修正源码、配置或交接方式，规划任务并独立复核，再提交替代候选。旧候选的 APPROVE 不能复用到新候选；无需操作员批准返工。',
+    'generation.promotion_interrupted': '上次晋升在提交前中断，宿主已恢复稳定父代。核对当前候选和冻结身份，通过当前审查证据重新提交或返工；这不是已完成晋升，也不是实验结束。',
   }
   const generationStarted = event.type === 'generation.started' ? generationRoleInstruction(data.role) : undefined
-  const action = generationStarted ?? actions[event.type]
+  let action = generationStarted ?? actions[event.type]
+  if (event.type === 'request.rejected') {
+    action += ' 宿主数据 control.parent 和 control.candidate 分别指不同工作树，不能用本机 HEAD 代替候选 sourceCommit。'
+    if (data.disposition === 'archive_candidate_then_parent_rework') {
+      action += ' 冻结候选失效，宿主正在归档清理；等待 candidate.invalidated 自动唤醒后在父代返工，不要修补候选或重试旧 promote。'
+    } else if (lifecycleEventWait(event) === 'promotion') {
+      action += ' 本代仍是已 ready 候选，只有父代可以晋升。保持冻结，后续诊断写到 control.diagnosticDirectory，等待父代事件；不要自行 promote 或在冻结工作树新增交接文件。'
+    }
+  }
   if (action === undefined) return undefined
   return [
     '[Fleet generation lifecycle event]',
@@ -264,7 +287,7 @@ export function fleetGenerationEventInstruction(event: FleetGenerationEvent): st
 
 function generationRoleInstruction(role: unknown): string | undefined {
   if (role === 'candidate') {
-    return '你是候选代，不是稳定代。本次 generation.started 的宿主数据（role、parent、sourceCommit）是当前生命周期的权威状态；仓库内旧代的 request、review、decision 和 handoff 只是历史证据，不表示本代状态，不要追溯或重演已淘汰候选的流程。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动、协作链与跨代记忆自检；用少量单 owner Goal 分配验证和独立复核。复核者应优先复用前置 Goal 产出的可检查证据，只有在证据缺失或相互矛盾时才重跑已验证的全量测试；不要把属于下游平台就绪节点的 readiness、handoff 或 backlog 收尾当作当前复核的缺失。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。初始 DAG 的最后一个节点必须是平台工程师单 owner Goal，依赖独立复核。该节点只有在完成以下不可替代的副作用后才能 complete：提交全部 readiness 证据、确认 git status 干净、实际执行 ready 或 reject（即 generation-control 对应命令），并看到命令返回宿主已接受的最终结果；不能只用 Vote 表态后结束工作。写文档、完成 Fleet Goal、发送 READY 消息或声明正在等待都不等于提交了代际控制请求；请求成功前不得建立等待 Goal、结束工作、暂停或关闭 Team。请求成功后外部事件中继会自动管理等待。'
+    return '你是候选代，不是稳定代。本次 generation.started 的宿主数据（role、parent、sourceCommit）是当前生命周期的权威状态；仓库内旧代的 request、review、decision 和 handoff 只是历史证据，不表示本代状态，不要追溯或重演已淘汰候选的流程。只验证父代冻结提交与交付：确认身份和源码提交，运行构建、相关测试、团队启动与协作链自检；仅在本实验启用外置记忆时检查跨代记忆，记忆关闭或未安装时记录不适用，不得为通过自检而启用记忆；用少量单 owner Goal 分配验证和独立复核。复核者应优先复用前置 Goal 产出的可检查证据，只有在证据缺失或相互矛盾时才重跑已验证的全量测试；不要把属于下游平台就绪节点的 readiness、handoff 或 backlog 收尾当作当前复核的缺失。不得选择新的改进主题、修改产品代码或 backlog 业务项、启动下一候选，也不要让全体成员重新读源码讨论方向。初始 DAG 的最后一个节点必须是平台工程师单 owner Goal，依赖独立复核。该节点只有在完成以下不可替代的副作用后才能 complete：提交全部 readiness 证据、确认 git status 干净、实际执行 ready 或 reject（即 generation-control 对应命令），并看到命令返回宿主已接受的最终结果；不能只用 Vote 表态后结束工作。写文档、完成 Fleet Goal、发送 READY 消息或声明正在等待都不等于提交了代际控制请求；请求成功前不得建立等待 Goal、结束工作、暂停或关闭 Team。请求成功后外部事件中继会自动管理等待。'
   }
   if (role === 'stable') {
     return '你是活跃稳定代。先确认身份、Git 状态和继承材料，再从 backlog 形成一批通常包含 2–4 个边界清楚的实际改进；每项都要有单 owner、可检查提交和作者之外的独立审查，相关或无关均可。整批完成并通过一次组合集成检查前不要启动候选；高风险隔离、紧急基座修复或资源不足时可单项成代，但必须记录原因。'
@@ -284,7 +307,9 @@ export async function deliverPendingFleetGenerationEvents(
   const events = generationEventsAfter(configuration, sequence)
   let waitingForCandidate = marker?.waitingForCandidate
   for (const event of events) {
-    if (event.type === 'candidate.started') {
+    if (event.type === 'candidate.accepted') {
+      waitingForCandidate = 'promotion'
+    } else if (event.type === 'candidate.started') {
       const candidate = event.data?.candidate
       waitingForCandidate = typeof candidate === 'string' && candidate.trim().length > 0
         ? candidate
@@ -293,10 +318,14 @@ export async function deliverPendingFleetGenerationEvents(
       || event.type === 'candidate.failed'
       || event.type === 'candidate.destroyed'
       || event.type === 'candidate.self_rejected'
+      || event.type === 'candidate.invalidated'
+      || event.type === 'candidate.request_rejected'
+      || event.type === 'generation.promotion_interrupted'
       || event.type === 'generation.peer_exited'
       || event.type === 'generation.promoted'
+      || event.type === 'generation.recovered'
       || event.type === 'request.rejected') {
-      waitingForCandidate = undefined
+      waitingForCandidate = lifecycleEventWait(event)
     }
   }
   waitingForCandidate = pendingGenerationControlWait(configuration) ?? waitingForCandidate
@@ -429,12 +458,21 @@ export async function activateFleetAutoBootstrap(
   runs: FleetAutoBootstrapRuns,
   assistant: FleetAutoBootstrapAssistant,
   configuration = fleetAutoBootstrapConfiguration(),
+  prepareAssistant?: (agent: Agent, run: FleetRunRecord) => void | Promise<void>,
 ): Promise<{ readonly run?: FleetRunRecord; dispose(): Promise<void> }> {
   if (configuration === undefined) return { dispose: () => Promise.resolve() }
   assertInputs(configuration)
   const marker = markerPath(configuration)
   const existing = runs.list(configuration.projectRoot)
     .find(run => run.sourceSetupId === `auto-bootstrap:${configuration.id}`)
+  let lifecycle: { release(): void } | undefined
+  const protect = (runId: string): void => {
+    if (configuration.unattended) {
+      if (!runs.protectEvaluationLifecycle) throw new Error('Unattended bootstrap requires host lifecycle protection')
+      lifecycle = runs.protectEvaluationLifecycle(runId)
+    }
+  }
+  if (existing) protect(existing.id)
   if (existsSync(marker)) {
     if (existing === undefined) {
       throw new Error(`Fleet auto bootstrap marker ${marker} refers to a missing Team`)
@@ -443,8 +481,14 @@ export async function activateFleetAutoBootstrap(
       atomicJson(configuration.readyFile, JSON.parse(readFileSync(marker, 'utf8')) as unknown)
     }
     runs.setGenerationEventWait?.(existing.id, readMarker(configuration)?.waitingForCandidate)
+    if (prepareAssistant !== undefined) {
+      const attached = existing.assistants[0]
+      const agent = attached === undefined ? undefined : ctx.agents.get(SessionId(attached.sessionId))
+      if (agent === undefined) throw new Error('Fleet bootstrap assistant is unavailable for host preparation')
+      await prepareAssistant(agent, existing)
+    }
     const relay = startDeferredGenerationEventRelay(ctx, existing, configuration, runs)
-    return { run: existing, dispose: () => relay.dispose() }
+    return { run: existing, dispose: async () => { try { await relay.dispose() } finally { lifecycle?.release() } } }
   }
   if (existing !== undefined) {
     const attached = existing.assistants[0]
@@ -453,6 +497,7 @@ export async function activateFleetAutoBootstrap(
       throw new Error(`Fleet auto bootstrap Team ${existing.id} exists but its assistant is not available`)
     }
     assistant.activate(agent, existing.id, attached.view)
+    await prepareAssistant?.(agent, existing)
     runs.agentSessionStarted(agent)
     agent.followup(createUserMessage({
       source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
@@ -460,7 +505,7 @@ export async function activateFleetAutoBootstrap(
     }))
     writeMarker(configuration, existing, initialGenerationStartedSequence(configuration))
     const relay = startGenerationEventRelay(agent, existing, configuration, runs)
-    return { run: existing, dispose: () => relay.dispose() }
+    return { run: existing, dispose: async () => { try { await relay.dispose() } finally { lifecycle?.release() } } }
   }
 
   let handle: AgentHandle | undefined
@@ -474,11 +519,10 @@ export async function activateFleetAutoBootstrap(
       sessionId: SessionId(randomUUID()),
       meta: { cwd: configuration.projectRoot, agentPreset: configuration.agentPreset },
       agentOptions,
-      async setup(agentCtx) {
+      async setup(agentCtx, agent) {
         const presets = agentCtx.get('agentPresets', false)
         if (presets === undefined) return
-        if (agentCtx.agent === undefined) throw new Error('Fleet auto bootstrap requires ctx.agent')
-        await presets.mount(agentCtx, resolveSessionPreset(agentCtx.agent.session))
+        await presets.mount(agentCtx, resolveSessionPreset(agent.session))
       },
     })
     const run = await runs.create(handle.agent, {
@@ -494,8 +538,10 @@ export async function activateFleetAutoBootstrap(
     if (run.status === 'failed' || run.status === 'closed') {
       throw new Error(run.error ?? run.summary ?? `Fleet auto bootstrap created a ${run.status} Team`)
     }
+    protect(run.id)
     const view = run.assistants.find(candidate => candidate.sessionId === String(handle?.agent.id))?.view
     assistant.activate(handle.agent, run.id, view)
+    await prepareAssistant?.(handle.agent, run)
     runs.agentSessionStarted(handle.agent)
     handle.agent.followup(createUserMessage({
       source: { kind: 'plugin', plugin: 'dsh-agent-fleet', form: 'instructions' },
@@ -507,11 +553,11 @@ export async function activateFleetAutoBootstrap(
     return {
       run,
       dispose: async () => {
-        await relay.dispose()
-        await owned.dispose()
+        try { await relay.dispose(); await owned.dispose() } finally { lifecycle?.release() }
       },
     }
   } catch (error) {
+    lifecycle?.release()
     await handle?.dispose()
     throw error
   }
@@ -522,5 +568,5 @@ export function readFleetAutoBootstrapMarker(configuration: FleetAutoBootstrapCo
 }
 
 export type FleetAutoBootstrapRunService = Pick<FleetRunService,
-  'list' | 'create' | 'agentSessionStarted' | 'setGenerationEventWait'>
+  'list' | 'create' | 'agentSessionStarted' | 'setGenerationEventWait' | 'protectEvaluationLifecycle'>
 export type FleetAutoBootstrapAssistantRuntime = Pick<FleetAssistantRuntime, 'activate'>

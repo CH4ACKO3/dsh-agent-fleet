@@ -67,6 +67,7 @@ export class FleetCore {
   private readonly handles = new Map<string, ManagedAgent>()
   private readonly creatingNames = new Set<string>()
   private readonly rotatingAgentIds = new Set<string>()
+  private readonly stoppingHandles = new Map<ManagedAgent, Promise<FleetAgent>>()
   private sharedRoot: string | undefined
   private closed = false
 
@@ -340,10 +341,15 @@ export class FleetCore {
   }
 
   async rotateManaged(name: string): Promise<FleetAgent | undefined> {
+    this.assertOpen()
     const member = this.requireMember(memberName(name))
     const managed = this.handles.get(member.name)
     if (managed?.archiveId === undefined || this.runtime.rotate === undefined) return undefined
+    if (this.stoppingHandles.has(managed)) return undefined
     const previousId = member.id
+    if (this.rotatingAgentIds.has(previousId)) {
+      throw new Error(`Fleet Agent ${member.name} is already rotating`)
+    }
     this.rotatingAgentIds.add(previousId)
     let handle: RuntimeAgentHandle | undefined
     try {
@@ -355,7 +361,14 @@ export class FleetCore {
       this.rotatingAgentIds.delete(previousId)
     }
     if (handle === undefined) return undefined
-    const updated: MemberRecord = { ...member, id: handle.agent.id }
+    // stop/close may have removed this handle while the runtime was rotating.
+    // A replacement with the same name must not be overwritten either.
+    if (this.closed || this.handles.get(member.name) !== managed || this.stoppingHandles.has(managed)) {
+      await handle.dispose()
+      return undefined
+    }
+    const current = this.requireMember(member.name)
+    const updated: MemberRecord = { ...current, id: handle.agent.id }
     this.members.set(member.name, updated)
     this.memberNamesByAgent.delete(previousId)
     this.memberNamesByAgent.set(updated.id, updated.name)
@@ -364,14 +377,25 @@ export class FleetCore {
   }
 
   async stopManaged(name: string): Promise<FleetAgent> {
+    this.assertOpen()
     const member = this.requireMember(memberName(name))
     const handle = this.handles.get(member.name)
     if (handle === undefined) throw new Error(`Fleet Agent ${member.name} is not managed by Core`)
-    await handle.handle.dispose()
-    this.handles.delete(member.name)
-    this.members.delete(member.name)
-    this.memberNamesByAgent.delete(member.id)
-    return { ...this.describe(member), status: 'offline' }
+    const pending = this.stoppingHandles.get(handle)
+    if (pending !== undefined) return pending
+    // Mark the handle before calling disposal, which can yield or emit events.
+    // Keep it registered until disposal succeeds so failures remain retryable.
+    const operation = Promise.resolve().then(async () => {
+      await handle.handle.dispose()
+      if (this.handles.get(member.name) === handle) {
+        this.handles.delete(member.name)
+        this.members.delete(member.name)
+        this.memberNamesByAgent.delete(member.id)
+      }
+      return { ...this.describe(member), status: 'offline' as const }
+    }).finally(() => { this.stoppingHandles.delete(handle) })
+    this.stoppingHandles.set(handle, operation)
+    return operation
   }
 
   async close(): Promise<void> {

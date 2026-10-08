@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { ModelSelection } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 export type FleetAgentStatus = 'idle' | 'running' | 'offline'
@@ -30,7 +30,7 @@ export interface RuntimeRequestConfig extends ModelSelection {
 
 export interface RotateRuntimeAgentInput {
   readonly archiveId: string
-  readonly setup?: (ctx: Context) => void | Promise<void>
+  readonly setup?: (ctx: Context, agent: Agent) => void | Promise<void>
 }
 
 export interface CreateRuntimeAgentInput {
@@ -43,7 +43,7 @@ export interface CreateRuntimeAgentInput {
   readonly reasoningEffort?: ModelSelection['reasoningEffort']
   readonly maxTokens?: number
   readonly persona?: string
-  readonly setup?: (ctx: Context) => void | Promise<void>
+  readonly setup?: (ctx: Context, agent: Agent) => void | Promise<void>
 }
 
 export interface AgentRuntime {
@@ -88,7 +88,7 @@ export interface CreateFleetAgentInput extends RegisterFleetAgentInput {
   readonly reasoningEffort?: ModelSelection['reasoningEffort']
   readonly maxTokens?: number
   readonly persona?: string
-  readonly setup?: (ctx: Context) => void | Promise<void>
+  readonly setup?: (ctx: Context, agent: Agent) => void | Promise<void>
 }
 
 export interface ResumeRuntimeAgentInput {
@@ -100,7 +100,7 @@ export interface ResumeRuntimeAgentInput {
   readonly reasoningEffort?: ModelSelection['reasoningEffort']
   readonly maxTokens?: number
   readonly persona?: string
-  readonly setup?: (ctx: Context) => void | Promise<void>
+  readonly setup?: (ctx: Context, agent: Agent) => void | Promise<void>
 }
 
 export interface ResumeFleetAgentInput extends CreateFleetAgentInput {

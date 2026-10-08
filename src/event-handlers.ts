@@ -24,6 +24,7 @@ import type {
   FleetTaskBoard,
 } from './productivity/task.js'
 import type { ToolBindingManager } from './tool-binding.js'
+import type { FleetReplies } from './replies.js'
 import type { FleetTeamEventBus } from './team-event-bus.js'
 
 /* ------------------------------------------------------------------ */
@@ -31,6 +32,7 @@ import type { FleetTeamEventBus } from './team-event-bus.js'
 /* ------------------------------------------------------------------ */
 
 export interface ProductiveEventHandlersDependencies {
+  readonly replies: FleetReplies
   /** Aggregated event bus — used for onTask/onSchedule/onCalendar forwarding. */
   readonly eventBus: FleetTeamEventBus
 
@@ -66,6 +68,7 @@ export function createProductiveEventHandlers(deps: ProductiveEventHandlersDepen
   /** Handle one FleetProjectTask event. */
   function onTaskEvent(event: FleetProjectTaskEvent): void {
     eventBus.onTask(event, tasks.state())
+    deps.replies.projectInteractionOutput(event.task)
     if (event.task.domain.kind === 'reply') toolManager.ensureFleetTaskTool(event.task.domain.assignee)
     const initialRequiredTask = event.action === 'created' && event.task.domain.kind === 'reply'
     if (event.task.domain.kind !== 'interaction' && event.task.domain.kind !== 'inbox'
