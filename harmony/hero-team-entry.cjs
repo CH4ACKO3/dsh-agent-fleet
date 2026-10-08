@@ -2,7 +2,7 @@
 
 const { component, element } = require('dsh-harmony-react')
 
-const DSH_CLIENT_VERSION = '^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0'
+const DSH_CLIENT_VERSION = '>=0.1.5-0 <0.1.6-0'
 
 function replaceExactly(context, before, after) {
   const first = context.source.indexOf(before)
@@ -52,60 +52,25 @@ module.exports = [
   {
     id: 'fleet-agent-session-scope',
     description: 'Lets the native session provider scope Fleet Agent context rendering to a member Session.',
-    patches: [
-      {
-        id: 'fleet-agent-session-runtime-face',
-        target: {
-          package: '@deepseek-ai/dsh-client-runtime',
-          version: DSH_CLIENT_VERSION,
-          file: 'lib/client.js',
-        },
-        select: 'SourceFile',
-        expect: 1,
-        apply(context) {
-          replaceExactly(
-            context,
-            'provideInfo: sessions.currentProvideInfo',
-            'provideInfo: sessions.currentProvideInfo,\n\t\t\t\t\t\tresolveInfo: (sessionId) => sessions.provideInfo(sessionId)',
-          )
-        },
-      },
-      {
-        id: 'fleet-agent-session-provider',
-        target: {
-          package: '@deepseek-ai/dsh-client-ui-renderer',
-          version: DSH_CLIENT_VERSION,
-          file: 'lib/client.js',
-        },
-        select: 'SourceFile',
-        expect: 1,
-        apply(context) {
-          replaceExactly(
-            context,
-            `function SessionProvider({ empty, children }) {
-\t\t\tconst info = observableHook(useHost().sessions.provideInfo)((s) => s);
-\t\t\tconst id = info.sessionId;
-\t\t\tif (id === void 0) return (0, react_jsx_runtime.jsx)(react_jsx_runtime.Fragment, { children: empty?.() ?? null });
-\t\t\treturn (0, react_jsx_runtime.jsx)(BindingContext.Provider, {
-\t\t\t\tvalue: info,
-\t\t\t\tchildren: children(id)
-\t\t\t}, id);
-\t\t}`,
-            `function SessionProvider({ empty, children, sessionId }) {
-\t\t\tconst host = useHost();
-\t\t\tconst current = observableHook(host.sessions.provideInfo)((s) => s);
-\t\t\tconst info = sessionId === void 0 ? current : host.sessions.resolveInfo(sessionId);
-\t\t\tconst id = info?.sessionId;
-\t\t\tif (id === void 0) return (0, react_jsx_runtime.jsx)(react_jsx_runtime.Fragment, { children: empty?.() ?? null });
-\t\t\treturn (0, react_jsx_runtime.jsx)(BindingContext.Provider, {
-\t\t\t\tvalue: info,
-\t\t\t\tchildren: children(id)
-\t\t\t}, id);
-\t\t}`,
-          )
-        },
-      },
-    ],
+    target: {
+      package: '@deepseek-ai/dsh-client-ui-renderer',
+      version: DSH_CLIENT_VERSION,
+      file: 'lib/client.js',
+    },
+    select: 'SourceFile',
+    expect: 1,
+    apply(context) {
+      replaceExactly(context,
+        'return renderArea(useScopeBinding(), props);',
+        `const current = useScopeBinding();
+        if (props.sessionId === void 0 && typeof props.children !== "function") return renderArea(current, props);
+        const binding = props.sessionId === void 0 ? current : adapter.resolve(props.sessionId);
+        const children = binding.key === void 0 ? null : typeof props.children === "function" ? props.children(binding.key) : props.children;
+        return (0, react_jsx_runtime.jsx)(ScopeBindingContext.Provider, {
+          value: binding,
+          children: renderArea(binding, { ...props, children })
+        }, binding.key);`);
+    },
   },
   {
     id: 'fleet-native-budget-meter-seat',
@@ -120,8 +85,8 @@ module.exports = [
     apply(context) {
       replaceExactly(
         context,
-        'function InputBar({ useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages, resolveSubmitMode, toggleCommandMenu, stop, command, t, renderSlot, useNotices, useLexicon, useMenuLauncher, useProjection, sessionId, variant, disabled: inert = false, blocked, workspacePickerOpen = false, onRequestWorkspace, placeholder, accessory, overlay, leftItems, rightItems, footer }) {',
-        'function InputBar({ useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages, resolveSubmitMode, toggleCommandMenu, stop, command, t, renderSlot, useNotices, useLexicon, useMenuLauncher, useProjection, sessionId, variant, disabled: inert = false, blocked, workspacePickerOpen = false, onRequestWorkspace, placeholder, accessory, overlay, leftItems, rightItems, usageMeter, footer }) {',
+        'function InputBar({ useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments, retryFileUpload, toggleCommandMenu, stop, command, t, renderSlot, useBusyEnter, useFileUploads, useNotices, useLexicon, useMenuLauncher, useProjection, sessionId, variant, disabled: inert = false, blocked, workspacePickerOpen = false, onRequestWorkspace, placeholder, accessory }) {',
+        'function InputBar({ useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments, retryFileUpload, toggleCommandMenu, stop, command, t, renderSlot, useBusyEnter, useFileUploads, useNotices, useLexicon, useMenuLauncher, useProjection, sessionId, variant, disabled: inert = false, blocked, workspacePickerOpen = false, onRequestWorkspace, placeholder, usageMeter, accessory }) {',
       )
       replaceExactly(
         context,
@@ -158,7 +123,7 @@ module.exports = [
     id: 'fleet-native-agent-chat-view',
     description: 'Shares the native ChatView implementation with the Fleet Agent perspective without replacing its renderer slots.',
     target: {
-      package: '@deepseek-ai/dsh-client-ui-conversation',
+      package: '@deepseek-ai/dsh-client-ui-chat',
       version: DSH_CLIENT_VERSION,
       file: 'lib/client.js',
     },
@@ -204,26 +169,18 @@ module.exports = [
       replaceExactly(
         context,
         `children: active !== void 0 && renderSlot("conversation.view", {
-\t\t\t\t\tinspect,
-\t\t\t\t\tonInspectDone: () => {
-\t\t\t\t\t\tactions.setInspect(null);
-\t\t\t\t\t}
+\t\t\t\t\tviewRequest,
+\t\t\t\t\topenView,
+\t\t\t\t\tcompleteViewRequest: actions.completeViewRequest
 \t\t\t\t}, { only: active.id })`,
         `children: [
-\t\t\t\t\tactive?.id !== "chat" && (0, react_jsx_runtime.jsx)(require("dsh-agent-fleet").FleetNativeChatRuntimePrimer, {
-\t\t\t\t\t\trenderSlot,
-\t\t\t\t\t\tinspect,
-\t\t\t\t\t\tonInspectDone: () => {
-\t\t\t\t\t\t\tactions.setInspect(null);
-\t\t\t\t\t\t}
-\t\t\t\t\t}),
-\t\t\t\t\tactive !== void 0 && renderSlot("conversation.view", {
-\t\t\t\t\t\tinspect,
-\t\t\t\t\t\tonInspectDone: () => {
-\t\t\t\t\t\t\tactions.setInspect(null);
-\t\t\t\t\t\t}
-\t\t\t\t\t}, { only: active.id })
-\t\t\t\t]`,
+          active?.id !== "chat" && (0, react_jsx_runtime.jsx)(require("dsh-agent-fleet").FleetNativeChatRuntimePrimer, {
+            renderSlot, viewRequest, openView, completeViewRequest: actions.completeViewRequest
+          }),
+          active !== void 0 && renderSlot("conversation.view", {
+            viewRequest, openView, completeViewRequest: actions.completeViewRequest
+          }, { only: active.id })
+        ]`,
       )
     },
   },

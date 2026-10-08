@@ -31,6 +31,18 @@ export interface FleetMessageConfiguration {
   readonly collaborationMethod: string
   /** First input-context growth interval for private visibility reminders. Later intervals double. */
   readonly visibilityReminderContextGrowthTokens: number
+  /**
+   * First input-context growth interval for the pre-call member context ceiling. `0` disables the
+   * ceiling. Defaults to `visibilityReminderContextGrowthTokens` so no new constant is invented.
+   */
+  readonly memberContextCeilingTokens: number
+  /** Soft wrap-up rungs admitted before the hard pre-call stop. */
+  readonly memberContextCeilingSoftRungs: number
+  /**
+   * Re-admission cooldown after a hard stop in milliseconds. `0` latches the stop to the current
+   * compaction epoch; a positive value re-admits one rung-crossing per cooldown.
+   */
+  readonly memberContextCeilingCooldownMs: number
 }
 
 export interface FleetResourcesConfiguration {
@@ -76,6 +88,11 @@ export function fleetConfigurationValue(value: unknown, label = 'configuration')
 export function parseFleetMessageConfiguration(value: unknown): FleetMessageConfiguration {
   const input = object(value, FLEET_MESSAGE_MODULE)
   const channel = object(input.defaultChannel, `${FLEET_MESSAGE_MODULE}.defaultChannel`)
+  const visibilityReminderContextGrowthTokens = optionalNonNegativeInteger(
+    input.visibilityReminderContextGrowthTokens,
+    `${FLEET_MESSAGE_MODULE}.visibilityReminderContextGrowthTokens`,
+    16_000,
+  )
   return {
     defaultChannel: {
       id: requiredText(channel.id, `${FLEET_MESSAGE_MODULE}.defaultChannel.id`),
@@ -83,10 +100,21 @@ export function parseFleetMessageConfiguration(value: unknown): FleetMessageConf
     },
     rules: optionalText(input.rules, `${FLEET_MESSAGE_MODULE}.rules`),
     collaborationMethod: optionalText(input.collaborationMethod, `${FLEET_MESSAGE_MODULE}.collaborationMethod`),
-    visibilityReminderContextGrowthTokens: optionalNonNegativeInteger(
-      input.visibilityReminderContextGrowthTokens,
-      `${FLEET_MESSAGE_MODULE}.visibilityReminderContextGrowthTokens`,
-      16_000,
+    visibilityReminderContextGrowthTokens,
+    memberContextCeilingTokens: optionalNonNegativeInteger(
+      input.memberContextCeilingTokens,
+      `${FLEET_MESSAGE_MODULE}.memberContextCeilingTokens`,
+      0,
+    ),
+    memberContextCeilingSoftRungs: optionalNonNegativeInteger(
+      input.memberContextCeilingSoftRungs,
+      `${FLEET_MESSAGE_MODULE}.memberContextCeilingSoftRungs`,
+      1,
+    ),
+    memberContextCeilingCooldownMs: optionalNonNegativeInteger(
+      input.memberContextCeilingCooldownMs,
+      `${FLEET_MESSAGE_MODULE}.memberContextCeilingCooldownMs`,
+      0,
     ),
   }
 }
@@ -143,6 +171,9 @@ export class FleetConfigurationRegistry {
           rules: '',
           collaborationMethod: '',
           visibilityReminderContextGrowthTokens: 16_000,
+          memberContextCeilingTokens: 0,
+          memberContextCeilingSoftRungs: 1,
+          memberContextCeilingCooldownMs: 0,
         },
       },
       parse: parseFleetMessageConfiguration,

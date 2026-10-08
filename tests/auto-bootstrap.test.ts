@@ -58,6 +58,7 @@ describe('Fleet automatic bootstrap', () => {
       readyFile: join(workspace, '.self-evolve', 'ready.json'),
       provider: 'provider', model: 'model', maxTokens: 4096,
       bootstrapInstruction: 'Evaluation host instruction.',
+      unattended: true,
       controlDirectory: join(root, 'control'), generation: 'g0001',
     }
     const eventDirectory = join(configuration.controlDirectory, 'events', configuration.generation)
@@ -70,11 +71,11 @@ describe('Fleet automatic bootstrap', () => {
     const dispose = vi.fn(() => Promise.resolve())
     const agent = {
       id: 'assistant-session', followup,
-      session: { header: { agentPreset: 'standard' }, events: [] },
+      session: { header: { agentPreset: 'standard' }, snapshotEvents: () => [] },
     } as unknown as Agent
     const mount = vi.fn(() => Promise.resolve())
-    const createAgent = vi.fn(async (options: { setup?: (ctx: Context) => unknown }) => {
-      await options.setup?.({ agent, get: (name: string) => name === 'agentPresets' ? { mount } : undefined } as unknown as Context)
+    const createAgent = vi.fn(async (options: { setup?: (ctx: Context, agent: Agent) => unknown }) => {
+      await options.setup?.({ get: (name: string) => name === 'agentPresets' ? { mount } : undefined } as unknown as Context, agent)
       return { agent, dispose }
     })
     const run = {
@@ -84,15 +85,26 @@ describe('Fleet automatic bootstrap', () => {
     const createRun = vi.fn(async () => run)
     const activate = vi.fn()
     const started = vi.fn()
+    const releaseLifecycle = vi.fn()
+    const protectEvaluationLifecycle = vi.fn(() => ({ release: releaseLifecycle }))
+    const prepared = vi.fn(async (preparedAgent, preparedRun) => {
+      expect(preparedAgent).toBe(agent)
+      expect(preparedRun).toBe(run)
+      expect(followup).not.toHaveBeenCalled()
+      expect(started).not.toHaveBeenCalled()
+      expect(protectEvaluationLifecycle).toHaveBeenCalledWith('team-one')
+    })
 
     const result = await activateFleetAutoBootstrap(
       { agents: { create: createAgent, get: vi.fn() } } as unknown as Context,
-      { list: () => [], create: createRun, agentSessionStarted: started } as never,
+      { list: () => [], create: createRun, agentSessionStarted: started, protectEvaluationLifecycle } as never,
       { activate } as never,
       configuration,
+      prepared,
     )
 
     expect(result.run).toBe(run)
+    expect(prepared).toHaveBeenCalledOnce()
     expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
       meta: { cwd: workspace, agentPreset: 'standard' },
       agentOptions: { provider: 'provider', model: 'model', maxTokens: 4096 },
@@ -116,6 +128,7 @@ describe('Fleet automatic bootstrap', () => {
     expect(JSON.parse(readFileSync(configuration.readyFile, 'utf8'))).toMatchObject({ runId: 'team-one' })
     await result.dispose()
     expect(dispose).toHaveBeenCalledOnce()
+    expect(releaseLifecycle).toHaveBeenCalledOnce()
 
     const marker = readFleetAutoBootstrapMarker(configuration) as Record<string, unknown>
     writeFileSync(join(dshHome, 'dsh-agent-fleet', 'auto-bootstrap', 'generation-one.json'), JSON.stringify({
@@ -125,7 +138,7 @@ describe('Fleet automatic bootstrap', () => {
     const setGenerationEventWait = vi.fn()
     const repeated = await activateFleetAutoBootstrap(
       { agents: { create: createAgent, get: vi.fn() } } as unknown as Context,
-      { list: () => [run], create: createRun, agentSessionStarted: started, setGenerationEventWait } as never,
+      { list: () => [run], create: createRun, agentSessionStarted: started, setGenerationEventWait, protectEvaluationLifecycle } as never,
       { activate } as never,
       configuration,
     )
@@ -133,6 +146,8 @@ describe('Fleet automatic bootstrap', () => {
     expect(setGenerationEventWait).toHaveBeenCalledWith('team-one', 'g0002')
     expect(createAgent).toHaveBeenCalledOnce()
     expect(followup).toHaveBeenCalledOnce()
+    await repeated.dispose()
+    expect(releaseLifecycle).toHaveBeenCalledTimes(2)
   })
 
   it('recovers a created Team whose bootstrap delivery marker was not written', async () => {
@@ -235,6 +250,19 @@ describe('Fleet automatic bootstrap', () => {
     expect(readFleetAutoBootstrapMarker(configuration)).not.toHaveProperty('waitingForCandidate')
     await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).resolves.toBe(0)
     expect(followup).toHaveBeenCalledOnce()
+    writeFileSync(join(eventDirectory, '0000000004-started.json'), JSON.stringify({
+      sequence: 4, generation: 'g0002', type: 'candidate.started', createdAt: '2026-09-04T00:02:00Z',
+      data: { candidate: 'g0004' },
+    }))
+    await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
+    expect(readFleetAutoBootstrapMarker(configuration)).toMatchObject({ waitingForCandidate: 'g0004' })
+    writeFileSync(join(eventDirectory, '0000000005-recovered.json'), JSON.stringify({
+      sequence: 5, generation: 'g0002', type: 'generation.recovered', createdAt: '2026-09-04T00:03:00Z',
+      data: { failed: 'g0003', discardedCandidate: 'g0004' },
+    }))
+    await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith('team-two', undefined)
+    expect(readFleetAutoBootstrapMarker(configuration)).not.toHaveProperty('waitingForCandidate')
   })
 
   it('arms the durable wait as soon as lifecycle control is submitted', async () => {
@@ -309,6 +337,72 @@ describe('Fleet automatic bootstrap', () => {
     expect(instruction).toContain('一批通常包含 2–4 个边界清楚的实际改进')
     expect(instruction).toContain('不要因第一项完成就交接')
     expect(instruction).toContain('不要用纯自检或交接文档空转出下一代')
+  })
+
+  it('keeps a ready candidate waiting after a rejected self-promotion and resumes it after host promotion', async () => {
+    const root = temporaryDirectory(), eventDirectory = join(root, 'control/events/g0002')
+    mkdirSync(eventDirectory, { recursive: true })
+    vi.stubEnv('DSH_HOME', join(root, 'dsh'))
+    const configuration = { id: 'ready-wait', projectRoot: root, teamConfigPath: join(root, 'team.json'),
+      taskPath: join(root, 'task.md'), agentPreset: 'standard', controlDirectory: join(root, 'control'), generation: 'g0002' }
+    const followup = vi.fn(), setGenerationEventWait = vi.fn()
+    const agent = { followup } as unknown as Agent, run = { id: 'team-ready' } as never
+    const runs = { setGenerationEventWait } as never
+    const put = (sequence: number, type: string, data: Record<string, unknown> = {}) => writeFileSync(
+      join(eventDirectory, `${String(sequence).padStart(10, '0')}-event.json`),
+      JSON.stringify({ sequence, generation: 'g0002', type, createdAt: new Date().toISOString(), data }))
+    put(1, 'candidate.accepted', { sourceCommit: 'frozen' })
+    await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
+    expect(followup).not.toHaveBeenCalled()
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith(run.id, 'promotion')
+    put(2, 'request.rejected', { requestType: 'generation.promote', error: 'Only stable may promote',
+      control: { recipient: { id: 'g0002', phase: 'ready' }, candidate: { id: 'g0002', sourceCommit: 'frozen' } } })
+    await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith(run.id, 'promotion')
+    expect(followup.mock.calls[0]?.[0].content[0].text).toContain('不要自行 promote')
+    put(3, 'generation.promoted', { previous: 'g0001' })
+    await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith(run.id, undefined)
+  })
+
+  it('retries a failed rejection wake before advancing the cursor and releases parent wait after invalidation', async () => {
+    const root = temporaryDirectory(), eventDirectory = join(root, 'control/events/g0001')
+    mkdirSync(eventDirectory, { recursive: true })
+    vi.stubEnv('DSH_HOME', join(root, 'dsh'))
+    const configuration = { id: 'rejection-retry', projectRoot: root, teamConfigPath: join(root, 'team.json'),
+      taskPath: join(root, 'task.md'), agentPreset: 'standard', controlDirectory: join(root, 'control'), generation: 'g0001' }
+    const followup = vi.fn().mockRejectedValueOnce(new Error('Agent temporarily unavailable')).mockResolvedValue(undefined)
+    const setGenerationEventWait = vi.fn(), agent = { followup } as unknown as Agent
+    const run = { id: 'team-parent' } as never, runs = { setGenerationEventWait } as never
+    writeFileSync(join(eventDirectory, '0000000001-rejected.json'), JSON.stringify({ sequence: 1, generation: 'g0001',
+      type: 'request.rejected', createdAt: new Date().toISOString(), data: { disposition: 'archive_candidate_then_parent_rework',
+        control: { candidate: { id: 'g0002', phase: 'rejecting' } } } }))
+    await expect(deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).rejects.toThrow('temporarily unavailable')
+    expect(readFleetAutoBootstrapMarker(configuration)?.eventSequence).toBeUndefined()
+    await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith(run.id, 'candidate-cleanup')
+    expect(readFleetAutoBootstrapMarker(configuration)?.eventSequence).toBe(1)
+    writeFileSync(join(eventDirectory, '0000000002-invalidated.json'), JSON.stringify({ sequence: 2, generation: 'g0001',
+      type: 'candidate.invalidated', createdAt: new Date().toISOString(), data: { candidate: 'g0002' } }))
+    await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)
+    expect(setGenerationEventWait).toHaveBeenLastCalledWith(run.id, undefined)
+    expect(followup.mock.calls.at(-1)?.[0].content[0].text).toContain('返工窗口已经打开')
+    expect(await deliverPendingFleetGenerationEvents(agent, run, configuration, runs)).toBe(0)
+    expect(followup).toHaveBeenCalledTimes(3)
+  })
+
+  it('treats candidate rejection and interrupted promotion as actionable parent events', () => {
+    for (const type of ['candidate.request_rejected', 'generation.promotion_interrupted']) {
+      expect(fleetGenerationEventInstruction({ sequence: 1, generation: 'g0001', type,
+        createdAt: new Date().toISOString() })).toContain('宿主数据')
+    }
+    const instruction = fleetGenerationEventInstruction({ sequence: 1, generation: 'g0001',
+      type: 'request.rejected', createdAt: new Date().toISOString(), data: {
+        error: 'long workspace change list '.repeat(200),
+        control: { parent: { id: 'g0001' }, candidate: { id: 'g0002', sourceCommit: 'frozen-candidate' } },
+      } })
+    const detail = instruction?.split('宿主数据：')[1]?.split('\n\n')[0]
+    expect(JSON.parse(detail ?? '{}').control.candidate.sourceCommit).toBe('frozen-candidate')
   })
 
   it('tells a freshly started candidate to verify instead of starting stable work', () => {

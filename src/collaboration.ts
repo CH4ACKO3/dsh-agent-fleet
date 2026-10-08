@@ -29,6 +29,7 @@ import type { FleetMemberView } from './member-view.js'
 
 import type { FleetMemberToolGroup } from './member-view.js'
 import { ToolBindingManager } from './tool-binding.js'
+import { FleetReplies } from './replies.js'
 import { createTaskSync } from './task-sync.js'
 import {
   CoordinationEventBridge,
@@ -70,6 +71,7 @@ export interface FleetCollaborationTeam {
   readonly messages: MessageHub
   readonly resources: FleetResources
   readonly memberStatuses: FleetMemberStatusBoard
+  readonly replies: FleetReplies
   readonly tasks: FleetTaskBoard
   readonly scheduler: FleetScheduler
   readonly calendar: FleetCalendar
@@ -88,7 +90,7 @@ export interface FleetCollaborationTeam {
     readonly successor: string
   }): void
   ensureMessageTasks(message: FleetMessage): string[]
-  sendUserMessage(input: SendMessageInput): SendMessageResult
+  sendUserMessage(input: SendMessageInput, external?: FleetMessage['external']): SendMessageResult
   installTools(ctx: Context, member: string, options?: {
     readonly exposeHostFleetTools?: boolean
     readonly toolGroups?: readonly FleetMemberToolGroup[]
@@ -431,6 +433,7 @@ export class FleetCollaborationService {
     const toolBridge: { ensureFleetTaskTool: (member: string) => void } = {
       ensureFleetTaskTool: () => {},
     }
+    const replies = new FleetReplies(messages, tasks, reference => participantName(reference) ?? reference)
     const taskSync = createTaskSync({
       messages,
       tasks,
@@ -470,7 +473,14 @@ export class FleetCollaborationService {
         return undefined
       }
     }, agentId => canManage(agentId, 'calendar'))
-    const eventBridge = new CoordinationEventBridge({ eventBus: input.eventBus, ensureMessageTasks, syncMemberInbox, calendar, memberViews })
+    const eventBridge = new CoordinationEventBridge({
+      eventBus: input.eventBus, ensureMessageTasks, syncMemberInbox, calendar, memberViews,
+      projectReply: message => replies.projectReceipt(message),
+      projectHandoff: event => {
+        const source = messages.messageHistory().find(message => message.id === event.messageId)
+        tasks.handoffReply(event.messageId, event.from, event.to, event.to === source?.from)
+      },
+    })
     const toolManager = new ToolBindingManager({
       teamId: input.id,
       projectRoot: input.projectRoot,
@@ -486,6 +496,7 @@ export class FleetCollaborationService {
       assistantNames,
       ensureMessageTasks,
       hasPendingRequirement,
+      replies,
     })
     const productiveHandlers = createProductiveEventHandlers({
       eventBus: input.eventBus,
@@ -494,6 +505,7 @@ export class FleetCollaborationService {
       calendar,
       toolManager,
       notifyMembers,
+      replies,
     })
     const subs = createEventSubscriptions(
       eventBridge.onCoordinationEvent.bind(eventBridge),
@@ -563,6 +575,10 @@ export class FleetCollaborationService {
         }
       },
       retireMember: ({ agentId, member, successorAgentId, successor }) => {
+        const pending = tasks.ownerTasks(member).filter(task => task.domain.kind === 'reply')
+        for (const task of pending) {
+          if (task.domain.kind === 'reply') messages.handoffReply(task.domain.messageId, member, successor)
+        }
         messages.retireAgent(member, successor)
         memberStatuses.retireMember(member)
         resources.release(agentId)
@@ -571,6 +587,7 @@ export class FleetCollaborationService {
         calendar.retireMember(member, successor)
       },
       ensureMessageTasks,
+      replies,
       removeMemberView: (member) => {
         toolManager.dispose(member)
         const agentId = memberIdsByName.get(member)
@@ -582,9 +599,9 @@ export class FleetCollaborationService {
         assistantNames.delete(member)
         defaultVoterNames.delete(member)
       },
-      sendUserMessage: message => {
+      sendUserMessage: (message, external) => {
         if (message.to.startsWith('#')) messages.connectAgent(user.id, [message.to.slice(1)])
-        return messages.sendHuman(user, message)
+        return messages.sendHuman(user, message, external)
       },
       installTools: (ctx, member, options = {}) => {
         const binding = toolManager.install(ctx, member, {
@@ -614,6 +631,11 @@ export class FleetCollaborationService {
       },
       restore: (state) => {
         messages.restore(state.coordination)
+        // Rebuild obligations and receipts from the same journal used for live
+        // dispatch. A stale Task snapshot must neither lose nor repeat a reply.
+        for (const message of messages.messageHistory()) ensureMessageTasks(message)
+        for (const message of messages.messageHistory()) replies.projectReceipt(message)
+        for (const task of tasks.state().tasks) replies.projectInteractionOutput(task)
         for (const member of memberViews.keys()) {
           syncMemberInbox(member)
         }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import { FleetCore } from '../src/core.js'
@@ -236,5 +236,79 @@ describe('FleetCore', () => {
     await expect(core.rotateManaged('worker')).resolves.toMatchObject({ id: 'worker-hot-segment' })
     expect(core.nameForAgent(created.id)).toBeUndefined()
     expect(core.nameForAgent('worker-hot-segment')).toBe('worker')
+  })
+
+  it.each(['stop', 'close'] as const)('disposes a rotation that finishes after %s', async action => {
+    const { core, runtime, lead } = setup()
+    await core.create(lead, { archiveId: 'archive', name: 'worker', role: 'Worker' })
+    const pending = Promise.withResolvers<RuntimeAgentHandle | undefined>()
+    runtime.rotate = vi.fn(() => pending.promise)
+    const rotating = core.rotateManaged('worker')
+    await expect(core.rotateManaged('worker')).rejects.toThrow('already rotating')
+    if (action === 'stop') await core.stopManaged('worker')
+    else await core.close()
+    const agent = runtime.add('late-rotation')
+    const dispose = vi.fn(async () => { runtime.agents.delete(agent.id) })
+    pending.resolve({ agent, dispose })
+    await expect(rotating).resolves.toBeUndefined()
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(runtime.get(agent.id)).toBeUndefined()
+    if (action === 'stop') expect(core.list()).toEqual([])
+    else expect(() => core.list()).toThrow('stopped')
+  })
+
+  it('does not replace a newly created member when an older rotation completes', async () => {
+    const { core, runtime, lead } = setup()
+    await core.create(lead, { archiveId: 'archive', name: 'worker', role: 'Worker' })
+    const pending = Promise.withResolvers<RuntimeAgentHandle | undefined>()
+    runtime.rotate = () => pending.promise
+    const rotating = core.rotateManaged('worker')
+    await core.stopManaged('worker')
+    const replacement = await core.create(lead, { name: 'worker', role: 'Replacement' })
+    const agent = runtime.add('late-rotation')
+    pending.resolve({ agent, dispose: async () => { runtime.agents.delete(agent.id) } })
+    await rotating
+    expect(core.get('worker').id).toBe(replacement.id)
+    expect(runtime.get(agent.id)).toBeUndefined()
+  })
+
+  it('disposes a completed rotation while the original handle is still stopping', async () => {
+    const { core, runtime, lead } = setup()
+    const disposing = Promise.withResolvers<void>()
+    const create = runtime.create.bind(runtime)
+    runtime.create = async (owner, input) => ({ ...await create(owner, input), dispose: () => disposing.promise })
+    await core.create(lead, { archiveId: 'archive', name: 'worker', role: 'Worker' })
+    const pending = Promise.withResolvers<RuntimeAgentHandle | undefined>()
+    runtime.rotate = () => pending.promise
+    const rotating = core.rotateManaged('worker')
+    const stopping = core.stopManaged('worker')
+    const agent = runtime.add('rotated-while-stopping')
+    const dispose = vi.fn(async () => { runtime.agents.delete(agent.id) })
+    pending.resolve({ agent, dispose })
+    await expect(rotating).resolves.toBeUndefined()
+    expect(dispose).toHaveBeenCalledOnce()
+    disposing.resolve()
+    await stopping
+    expect(core.list()).toEqual([])
+  })
+
+  it('blocks rotation during stop and keeps failed disposal retryable', async () => {
+    const { core, runtime, lead } = setup()
+    const pending = Promise.withResolvers<void>()
+    const create = runtime.create.bind(runtime)
+    const dispose = vi.fn(() => pending.promise)
+    runtime.create = async (owner, input) => ({ ...await create(owner, input), dispose })
+    await core.create(lead, { archiveId: 'archive', name: 'worker', role: 'Worker' })
+    runtime.rotate = vi.fn()
+    const stopping = core.stopManaged('worker')
+    await expect(core.rotateManaged('worker')).resolves.toBeUndefined()
+    expect(runtime.rotate).not.toHaveBeenCalled()
+    const rejected = expect(stopping).rejects.toThrow('dispose failed')
+    pending.reject(new Error('dispose failed'))
+    await rejected
+    expect(core.list()).toHaveLength(1)
+    dispose.mockResolvedValue(undefined)
+    await core.stopManaged('worker')
+    expect(core.list()).toEqual([])
   })
 })

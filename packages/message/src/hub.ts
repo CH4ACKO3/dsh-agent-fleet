@@ -139,6 +139,8 @@ export class MessageHub {
   private readonly history: FleetMessage[] = []
   private readonly pendingWakeupsByAgent = new Map<string, Map<string, FleetMessage>>()
   private readonly requiredRepliesByParticipant = new Map<string, Map<string, FleetMessage>>()
+  private readonly replyHandoffs = new Map<string, Map<string, string>>()
+  private readonly externalDelivered = new Set<string>()
   private readonly observers = new Set<(event: FleetCoordinationEvent) => void>()
   private readonly waiters = new Set<Waiter>()
   private readonly agentRevisions = new Map<string, number>()
@@ -167,6 +169,8 @@ export class MessageHub {
     this.deliveredParticipantsByMessage.clear()
     this.pendingDeliveriesByMessage.clear()
     this.contextDeliveries.clear()
+    this.replyHandoffs.clear()
+    this.externalDelivered.clear()
     this.history.length = 0
     this.pendingWakeupsByAgent.clear()
     this.requiredRepliesByParticipant.clear()
@@ -184,6 +188,10 @@ export class MessageHub {
       if (event.type === 'message') {
         this.rememberMessage(this.normalizeMessage(snapshot(event.message)))
         this.sequence = Math.max(this.sequence, event.message.sequence)
+      } else if (event.type === 'reply_handoff') {
+        this.rememberReplyHandoff(event.messageId, event.from, event.to)
+      } else if (event.type === 'external_delivered') {
+        this.externalDelivered.add(event.messageId)
       } else if (event.type === 'channel') {
         this.channels.set(event.channel.id, snapshot(event.channel))
       } else if (event.type === 'meeting') {
@@ -524,14 +532,98 @@ export class MessageHub {
   }
 
   /** Send host-attested human input while keeping Fleet as the durable message record. */
-  sendHuman(sender: MessageAgent, input: SendMessageInput): SendMessageResult {
-    return this.sendWithOrigin(sender, input, 'user')
+  sendHuman(sender: MessageAgent, input: SendMessageInput, external?: FleetMessage['external']): SendMessageResult {
+    if (external !== undefined) {
+      if (!input.to.startsWith('@')) throw new Error('External input requires a direct recipient')
+      const recipient = this.resolveAgent(input.to)
+      const previous = this.history.find(message => message.origin === 'user'
+        && message.conversation === `@${recipient}` && message.external !== undefined
+        && message.external.connector === external.connector
+        && message.external.conversationId === external.conversationId
+        && message.external.externalUserId === external.externalUserId
+        && message.external.messageId === external.messageId)
+      if (previous !== undefined) return { messageId: previous.id, recipients: 1, delivered: 0, woken: 0 }
+    }
+    return this.sendWithOrigin(sender, input, 'user', external)
+  }
+
+  /** Host-only projections; never exposed as unrestricted Agent tools. */
+  messageHistory(): FleetMessage[] { return this.history.map(snapshot) }
+
+  messageForContext(participant: string, contextMessageId: string): FleetMessage | undefined {
+    const delivery = this.contextDeliveries.get(contextMessageId)
+    if (delivery?.participantId !== this.resolveAgent(participant)) return undefined
+    const message = this.history.find(item => item.id === delivery.messageId)
+    return message === undefined ? undefined : snapshot(message)
+  }
+
+  replyAssignee(messageId: string, original: string): string {
+    return this.replyHandoffs.get(messageId)?.get(original) ?? original
+  }
+
+  handoffReply(messageId: string, from: string, to: string): void {
+    this.assertOpen()
+    from = this.resolveAgent(from)
+    to = this.resolveAgent(to)
+    this.requireKnownParticipant(to)
+    this.requireVisibleMessage(from, messageId)
+    if (this.replyAssignee(messageId, from) === to) return
+    this.rememberReplyHandoff(messageId, from, to)
+    this.emit({ type: 'reply_handoff', messageId, from, to })
+  }
+
+  private rememberReplyHandoff(messageId: string, from: string, to: string): void {
+    const transfers = this.replyHandoffs.get(messageId) ?? new Map<string, string>()
+    for (const [original, current] of transfers) {
+      if (current === from) transfers.set(original, to)
+    }
+    if (!transfers.has(from)) transfers.set(from, to)
+    this.replyHandoffs.set(messageId, transfers)
+  }
+
+  private replyHandoffSource(sender: string, input: SendMessageInput): FleetMessage | undefined {
+    if (input.kind !== 'reply' || input.replyTo === undefined || !this.hasReplyHandoff(input.replyTo, sender)) return undefined
+    const source = this.history.find(message => message.id === input.replyTo)
+    if (source === undefined) return undefined
+    return input.to === (source.conversation.startsWith('@') ? `@${source.from}` : source.conversation) ? source : undefined
+  }
+
+  private hasReplyHandoff(messageId: string, participant: string): boolean {
+    const transfers = this.replyHandoffs.get(messageId)
+    return transfers !== undefined && [...transfers.keys()].some(from => this.replyAssignee(messageId, from) === participant)
+  }
+
+  /** Persist a native response with the exact ingress context that caused it.
+   * This is also used on recovery, when the author may have no live Session. */
+  commitExternalOutput(participant: string, contextMessageId: string, text: string): void {
+    participant = this.resolveAgent(participant)
+    const source = this.messageForContext(participant, contextMessageId)
+    if (source?.external === undefined || text.trim().length === 0) return
+    if (this.history.some(message => message.from === participant && message.replyTo === source.id)) return
+    this.appendMessage(participant, { to: `@${source.from}`, text, replyTo: source.id, delivery: 'quiet' },
+      text.trim(), [], [], [source.from], 'reply')
+  }
+
+  pendingExternalReplies(): FleetMessage[] {
+    return this.history.filter(message => message.external !== undefined
+      && message.origin !== 'user' && message.replyTo !== undefined
+      && !this.externalDelivered.has(message.id)).map(snapshot)
+  }
+
+  acknowledgeExternalReply(messageId: string): void {
+    if (this.externalDelivered.has(messageId)) return
+    if (!this.pendingExternalReplies().some(message => message.id === messageId)) {
+      throw new Error(`Unknown external reply ${messageId}`)
+    }
+    this.emit({ type: 'external_delivered', messageId })
+    this.externalDelivered.add(messageId)
   }
 
   private sendWithOrigin(
     sender: MessageAgent,
     input: SendMessageInput,
     origin?: FleetMessage['origin'],
+    external?: FleetMessage['external'],
   ): SendMessageResult {
     this.assertOpen()
     sender = this.requireParticipant(sender)
@@ -568,7 +660,7 @@ export class MessageHub {
       if (mentions.some(mention => mention !== recipient)) {
         throw new Error('a direct message can only mention its recipient; remove other @mentions, send them separately, or use a Channel when everyone needs the content')
       }
-      return this.sendDirect(sender, { ...input, to: `@${recipient}` }, text, resources, mentions, origin)
+      return this.sendDirect(sender, { ...input, to: `@${recipient}` }, text, resources, mentions, origin, external)
     }
     if (!input.to.startsWith('#')) throw new Error(`invalid Fleet target ${input.to}`)
     return this.sendChannel(sender, input, text, resources, mentions, origin)
@@ -1598,10 +1690,11 @@ export class MessageHub {
     resources: string[],
     mentions: string[],
     origin?: FleetMessage['origin'],
+    external?: FleetMessage['external'],
   ): SendMessageResult {
     const targetId = agentTarget(input.to)
     if (targetId === sender.id) throw new Error('an Agent cannot message itself')
-    this.requireContact(sender.id, targetId)
+    if (this.replyHandoffSource(sender.id, input) === undefined) this.requireContact(sender.id, targetId)
     this.requireKnownParticipant(targetId)
     this.clearPendingWakeups(sender.id, input.to)
     // The @ in a direct target is routing syntax, not a mention. Only trusted
@@ -1615,6 +1708,7 @@ export class MessageHub {
       [targetId],
       input.kind ?? 'text',
       origin,
+      external,
     )
     this.acknowledgeInputsByReply(sender.id, input.to)
     this.removePendingSystemNotification(sender, this.requiredReplyNoticeKey(message))
@@ -1633,7 +1727,11 @@ export class MessageHub {
     mentions: string[],
     origin?: FleetMessage['origin'],
   ): SendMessageResult {
-    const channel = this.requireReadableChannel(sender.id, channelId(input.to))
+    const handoff = this.replyHandoffSource(sender.id, input)
+    const channel = handoff === undefined
+      ? this.requireReadableChannel(sender.id, channelId(input.to))
+      : this.channels.get(channelId(input.to))
+    if (channel === undefined) throw new Error(`unknown channel ${input.to}`)
     if (channel.archived) throw new Error(`channel #${channel.id} is archived`)
     if (wakes(input.delivery) && mentions.length === 0) {
       throw new Error('a Channel follow-up requires at least one explicit mention')
@@ -1652,7 +1750,7 @@ export class MessageHub {
       : undefined
     if (replyRecipient !== undefined) {
       this.requireKnownParticipant(replyRecipient)
-      this.requireContact(sender.id, replyRecipient)
+      if (handoff === undefined) this.requireContact(sender.id, replyRecipient)
       if (!this.canRead(channel, replyRecipient)) {
         throw new Error(`Agent ${replyRecipient} cannot access #${channel.id}`)
       }
@@ -1771,8 +1869,12 @@ export class MessageHub {
     recipientIds: string[],
     kind: FleetMessageKind = 'text',
     origin?: FleetMessage['origin'],
+    external?: FleetMessage['external'],
   ): FleetMessage {
     this.requireReply(sender, input.to, input.replyTo)
+    const parent = input.replyTo === undefined ? undefined : this.history.find(item => item.id === input.replyTo)
+    // Provenance follows only replies to the external user, never team messages.
+    const route = external ?? (input.to.startsWith('@fleet-user:') ? parent?.external : undefined)
     const fromName = this.agents.displayName?.(sender)
     const sequence = ++this.sequence
     const message: FleetMessage = {
@@ -1784,6 +1886,7 @@ export class MessageHub {
       from: sender,
       ...(fromName === undefined ? {} : { fromName }),
       ...(origin === undefined ? {} : { origin }),
+      ...(route === undefined ? {} : { external: snapshot(route) }),
       recipientIds: [...new Set(recipientIds)],
       text,
       ...(input.replyTo === undefined ? {} : { replyTo: input.replyTo }),
@@ -1810,7 +1913,20 @@ export class MessageHub {
     this.historyTextLength += message.text.length
     while (this.history.length > MAX_HISTORY_MESSAGES
       || this.historyTextLength > MAX_HISTORY_TEXT_LENGTH) {
-      const removed = this.history.shift()
+      const index = this.history.findIndex(candidate => {
+        if (candidate.external !== undefined) {
+          if (candidate.origin !== 'user' && !this.externalDelivered.has(candidate.id)) return false
+          if (candidate.origin === 'user' && !this.history.some(reply =>
+            reply.replyTo === candidate.id && this.externalDelivered.has(reply.id))) return false
+        }
+        // A pending obligation pins its source. Keep its receipt beside it so a
+        // lagging Task snapshot can be reconciled without replaying the response.
+        if (candidate.replyTo !== undefined && this.history.some(source => source.id === candidate.replyTo)) return false
+        return candidate.mentions.every(original => this.replyAssignee(candidate.id, original) === candidate.from
+          || this.history.some(reply => reply.replyTo === candidate.id && reply.from === this.replyAssignee(candidate.id, original)))
+      })
+      if (index < 0) break
+      const [removed] = this.history.splice(index, 1)
       if (removed === undefined) break
       this.historyTextLength -= removed.text.length
       this.forgetMessageMetadata(removed.id)
@@ -1877,6 +1993,7 @@ export class MessageHub {
     if (!reply.conversation.startsWith('@')) {
       throw new Error(`reply target ${replyTo} is in another conversation`)
     }
+    if (this.hasReplyHandoff(reply.id, sender) && agentTarget(target) === reply.from) return
     const expected = directConversation(sender, agentTarget(target))
     const actual = directConversation(reply.from, agentTarget(reply.conversation))
     if (expected !== actual) throw new Error(`reply target ${replyTo} is in another conversation`)
@@ -2398,6 +2515,7 @@ export class MessageHub {
   }
 
   private canSeeMessage(agentId: string, message: FleetMessage): boolean {
+    if (this.hasReplyHandoff(message.id, agentId)) return true
     if (message.conversation.startsWith('#')) {
       const channel = this.channels.get(channelId(message.conversation))
       return channel !== undefined && this.canRead(channel, agentId)
@@ -2410,6 +2528,7 @@ export class MessageHub {
 
   private sameConversation(agentId: string, message: FleetMessage, conversation: FleetTarget): boolean {
     if (conversation.startsWith('@')) {
+      if (this.hasReplyHandoff(message.id, agentId) && this.resolveAgent(conversation) === message.from) return true
       if (!message.conversation.startsWith('@')) return false
       return directConversation(agentId, this.resolveAgent(conversation))
         === directConversation(message.from, agentTarget(message.conversation))

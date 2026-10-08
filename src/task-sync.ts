@@ -69,7 +69,10 @@ export function createTaskSync(deps: TaskSyncDependencies): TaskSyncFunctions {
     if (message.kind !== 'text') return []
     const taskIds: string[] = []
     const createdBy = deps.participantName(message.from) ?? message.fromName ?? 'User'
-    for (const assignee of requiredRecipients(message)) {
+    for (const original of requiredRecipients(message)) {
+      const assignee = deps.messages.replyAssignee(message.id, original)
+      if (assignee !== original) deps.tasks.handoffReply(message.id, original, assignee, assignee === message.from)
+      if (assignee === message.from) continue
       if (!deps.memberViews.has(assignee)) continue
       // Foreground assistant input is already represented by its durable
       // Interaction Task. A second Reply Task would compete with that user
@@ -92,8 +95,11 @@ export function createTaskSync(deps: TaskSyncDependencies): TaskSyncFunctions {
   }
 
   const syncMemberInbox = (member: string): void => {
+    const participant = deps.participantName(member)
+    // Transport endpoints also emit read receipts, but do not own Fleet Tasks.
+    if (participant === undefined || !deps.memberViews.has(participant)) return
     const summary = deps.messages.taskUnreadSummary(member)
-    deps.tasks.syncInbox(member, summary.unreadMessages, summary.unreadChars)
+    deps.tasks.syncInbox(participant, summary.unreadMessages, summary.unreadChars)
   }
 
   return {

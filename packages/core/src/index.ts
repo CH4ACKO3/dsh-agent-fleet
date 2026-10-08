@@ -9,7 +9,6 @@ import {
   childSessionMeta,
   resolveChildAgentOptions,
   resolveChildDepth,
-  seedDescriptorTurn,
   snapshotSubagentDescriptor,
 } from '@deepseek-ai/dsh-subagent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -167,9 +166,9 @@ export function apply(ctx: Context): void {
       const requestConfig: RuntimeRequestConfigRef = { current: undefined, assembled: undefined }
       const handle: AgentHandle = await ctx.agents.create({
         sessionId: SessionId(input.id),
-        seed: seedDescriptorTurn(SessionId(input.id), undefined, descriptor),
+        parentAgent: nativeOwner,
         meta: {
-          ...childSessionMeta(nativeOwner, childDepth, 0),
+          ...childSessionMeta(nativeOwner, childDepth, false),
           ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         },
         agentOptions: resolveChildAgentOptions(nativeOwner, {
@@ -177,15 +176,15 @@ export function apply(ctx: Context): void {
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
         }, childDepth),
-        async setup(childCtx) {
-          if (childCtx.agent === undefined) throw new Error('Fleet child Agent setup requires ctx.agent')
-          initializeRuntimeRequestConfig(childCtx.agent, requestConfig, input.reasoningEffort)
+        async setup(childCtx, child) {
+          initializeRuntimeRequestConfig(child, requestConfig, input.reasoningEffort)
           installRuntimeRequestConfig(childCtx, requestConfig)
-          appendDelegatedPolicyOverrides(childCtx.agent.session, delegatedPolicies)
+          child.session.append('subagent/descriptor', descriptor)
+          appendDelegatedPolicyOverrides(child.session, delegatedPolicies)
           applyChildComposition(childCtx, nativeOwner, {
             ...(input.persona === undefined ? {} : { persona: input.persona }),
           })
-          await input.setup?.(childCtx)
+          await input.setup?.(childCtx, child)
         },
       })
       const archiveId = input.archiveId
@@ -217,17 +216,16 @@ export function apply(ctx: Context): void {
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
       }
-      const setup: AgentSetup = async (childCtx) => {
-        if (childCtx.agent === undefined) throw new Error('Fleet child Agent setup requires ctx.agent')
-        initializeRuntimeRequestConfig(childCtx.agent, requestConfig, input.reasoningEffort)
+      const setup: AgentSetup = async (childCtx, child) => {
+        initializeRuntimeRequestConfig(child, requestConfig, input.reasoningEffort)
         installRuntimeRequestConfig(childCtx, requestConfig)
-        if (!childCtx.agent.session.events.some(event => event.type === 'subagent/descriptor')) {
-          childCtx.agent.session.append('subagent/descriptor', descriptor)
+        if (!child.session.snapshotEvents().some(event => event.type === 'subagent/descriptor')) {
+          child.session.append('subagent/descriptor', descriptor)
         }
         applyChildComposition(childCtx, nativeOwner, {
           ...(input.persona === undefined ? {} : { persona: input.persona }),
         })
-        await input.setup?.(childCtx)
+        await input.setup?.(childCtx, child)
       }
       const archiveId = input.archiveId
       const archive = archiveId === undefined ? undefined : sessionArchive(ctx)
@@ -237,7 +235,7 @@ export function apply(ctx: Context): void {
       }
       let handle: AgentHandle
       if (timeline === undefined) {
-        handle = await ctx.agents.resume({ resumeSessionId: SessionId(input.id), agentOptions, setup })
+        handle = await ctx.agents.resume({ resumeSessionId: SessionId(input.id), parentAgent: nativeOwner, agentOptions, setup })
       } else {
         if (archive === undefined || archiveId === undefined) throw new Error('Session Archive disappeared during resume')
         handle = await archive.resume(archiveId, { agentOptions, setup })
@@ -261,9 +259,9 @@ export function apply(ctx: Context): void {
         assembled: undefined,
       }
       const rotated = await archive.rotateIfNeeded(input.archiveId, handle as AgentHandle, {
-        setup: async childCtx => {
+        setup: async (childCtx, child) => {
           installRuntimeRequestConfig(childCtx, requestConfig)
-          await input.setup?.(childCtx)
+          await input.setup?.(childCtx, child)
         },
       })
       return rotated === undefined ? undefined : configurableHandle(rotated.handle, requestConfig)

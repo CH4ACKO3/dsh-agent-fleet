@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { InferValue, JsonValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { FleetMemberDirectory } from '@dsh-agent-fleet/core'
 import { requiredText } from '../validation.js'
 
@@ -939,8 +940,9 @@ export class FleetTaskBoard {
   ensureReplyTask(input: EnsureFleetReplyTaskInput): FleetProjectTask {
     this.assertOpen()
     const assignee = this.resolve(input.assignee)
-    const existing = [...this.tasks.values()].find(task => task.domain.kind === 'reply'
+    const matches = [...this.tasks.values()].filter(task => task.domain.kind === 'reply'
       && task.domain.messageId === input.messageId && task.domain.assignee === assignee)
+    const existing = matches.find(task => task.stableState.kind !== 'cancelled') ?? matches[0]
     if (existing !== undefined) return snapshot(existing)
     const createdBy = requiredText(input.createdBy, 'task creator')
     const task = this.buildTask(createdBy, {
@@ -1099,7 +1101,7 @@ export class FleetTaskBoard {
       priority: 0,
       retryAfterSeconds: 0,
       maxWakeups: 3,
-      ...(input.timeoutAt === undefined ? {} : { timeoutAt: this.date(input.timeoutAt, 'composite timeoutAt') }),
+      ...(input.timeoutAt === undefined ? {} : { timeoutAt: this.futureDeadline(input.timeoutAt, 'composite timeoutAt') }),
       onTimeout: { kind: 'blocked', reason: `Composite Task ${root.id} exhausted its continuation.` },
     }
     const planned: FleetProjectTask = {
@@ -1345,7 +1347,11 @@ export class FleetTaskBoard {
   }
 
   recordReply(callerId: string, id: string, completionMessageId: string): FleetProjectTask {
-    const assignee = this.member(callerId)
+    return this.recordReplyReceipt(this.member(callerId), id, completionMessageId)
+  }
+
+  /** Host journal projection; unlike a tool caller, a stable author may be offline. */
+  recordReplyReceipt(assignee: string, id: string, completionMessageId: string): FleetProjectTask {
     const current = this.requireTask(id)
     if (current.domain.kind !== 'reply') throw new Error(`Fleet task ${id} is not a Reply Task`)
     if (current.domain.assignee !== assignee) throw new Error(`Fleet Reply ${id} belongs to ${current.domain.assignee}`)
@@ -1432,6 +1438,19 @@ export class FleetTaskBoard {
       throw new Error(
         `Fleet task ${id} attempt was created for state version ${reconcile.sourceStateVersion}, not current version ${current.stateVersion}`,
       )
+    }
+    if (input.next.kind === 'paused' && current.parentId === undefined
+      && (current.domain.kind === 'composite' || current.domain.kind === 'goal')
+      && current.domain.rootWorkId !== undefined) {
+      throw new Error('A root Work cannot be paused by a ReconcileAttempt: it would leave the host waiting without a resume trigger. '
+        + 'This attempt remains active. Author follow-up Tasks with outcome=continue, or cancel an unsuccessful Work with its evidence. '
+        + 'Whole-Work pause belongs to the host/operator; review approval is still required for completion.')
+    }
+    if ((input.next.kind === 'running' || input.next.kind === 'dormant') && current.parentId === undefined
+      && (current.domain.kind === 'composite' || current.domain.kind === 'goal')
+      && current.domain.rootWorkId !== undefined
+      && input.next.reconcilers.some(item => item.onTimeout.kind === 'paused')) {
+      throw new Error('A root Work reconciler cannot time out into pause; use an explicit blocked or cancelled outcome.')
     }
     const progress = requiredText(input.progress, 'task reconciliation progress')
     const now = new Date().toISOString()
@@ -1559,6 +1578,7 @@ export class FleetTaskBoard {
       throw new Error('fleet_reconcile outcome continue requires at least one atomic child operation')
     }
     const target = this.member(callerId)
+    const timeoutAt = this.requireTask(id).activeReconcile?.timeoutAt
     const next: FleetTaskStableStateInput = input.outcome === 'continue'
       ? this.runningState(reason, [{
           id: 'continue-after-children',
@@ -1567,6 +1587,7 @@ export class FleetTaskBoard {
           priority: 0,
           retryAfterSeconds: 0,
           maxWakeups: 3,
+          ...(timeoutAt === undefined ? {} : { timeoutAt }),
           onTimeout: { kind: 'blocked', reason: 'Follow-up work exhausted its reconciliation attempts.' },
         }])
       : input.outcome === 'complete'
@@ -1725,6 +1746,33 @@ export class FleetTaskBoard {
     return snapshot(updated)
   }
 
+  handoffReply(messageId: string, from: string, to: string, returnedToRequester = false): void {
+    for (const task of this.tasks.values()) {
+      if (task.domain.kind !== 'reply' || task.domain.messageId !== messageId
+        || task.domain.assignee !== from || this.terminal(task)) continue
+      const merged = [...this.tasks.values()].some(other => other.id !== task.id
+        && other.domain.kind === 'reply' && other.domain.messageId === messageId
+        && other.domain.assignee === to && other.stableState.kind !== 'cancelled')
+      const cancelled = returnedToRequester || merged
+      const updated: FleetProjectTask = {
+        ...task,
+        ...(cancelled ? {
+          stableState: { kind: 'cancelled' as const, cancelledAt: new Date().toISOString(),
+            reason: returnedToRequester
+              ? 'Recipient retired; the reply obligation returned to its original requester.'
+              : 'Reply obligation merged into the successor’s existing obligation for this message.' },
+          stateVersion: task.stateVersion + 1,
+        } : {}),
+        domain: { ...task.domain, assignee: to },
+        owners: this.replaceOwnerMember(task.owners, from, to),
+        assignees: task.assignees.map(member => member === from ? to : member),
+        updatedAt: new Date().toISOString(),
+      }
+      this.replace(updated)
+      this.emit({ action: cancelled ? 'cancelled' : 'updated', task: updated, actor: to })
+    }
+  }
+
   retireMember(member: string, successor: string): void {
     for (const task of [...this.tasks.values()]) {
       if (this.terminal(task)) continue
@@ -1868,6 +1916,31 @@ export class FleetTaskBoard {
     for (const item of changed) this.emit({ action: item.action, task: item.task, actor: member })
     this.evaluateDependents(changed.map(item => item.task.id))
     return changed.map(item => snapshot(item.task))
+  }
+
+  cancelUnsettledDescendants(rootId: string, reason: string): void {
+    this.assertOpen()
+    const root = this.requireTask(rootId)
+    if (root.stableState.kind !== 'blocked' && root.stableState.kind !== 'cancelled') {
+      throw new Error('Only an unsuccessful terminal root may cancel its outstanding descendants')
+    }
+    const detail = requiredText(reason, 'work termination reason')
+    const now = new Date().toISOString()
+    const staged = new Map(this.tasks)
+    const changed = this.descendants(rootId).filter(task => !this.settled(task)).map(current => {
+      const { activeReconcile: _activeReconcile, ...base } = current
+      const task: FleetProjectTask = {
+        ...base,
+        stableState: { kind: 'cancelled', cancelledAt: now, reason: detail },
+        stateVersion: current.stateVersion + 1, updatedAt: now,
+      }
+      staged.set(task.id, task)
+      return task
+    })
+    if (changed.length === 0) return
+    this.commit(staged, changed)
+    for (const task of changed) this.emit({ action: 'cancelled', task, actor: SYSTEM_TARGET })
+    this.evaluateDependents(changed.map(task => task.id))
   }
 
   settleForTeamClose(reason: string): FleetProjectTask[] {
@@ -2088,12 +2161,20 @@ export class FleetTaskBoard {
   }
 
   private timeoutReconciler(id: string, timeoutAt: string, reason: string): FleetTaskReconcilerSpec {
-    const at = this.date(timeoutAt, 'task timeoutAt')
+    const at = this.futureDeadline(timeoutAt, 'task timeoutAt')
     return {
       id, when: { kind: 'at', at }, target: SYSTEM_TARGET, priority: 0,
       retryAfterSeconds: 0, maxWakeups: 1, timeoutAt: at,
       onTimeout: { kind: 'blocked', reason: requiredText(reason, 'task timeout reason') },
     }
+  }
+
+  private futureDeadline(value: string, label: string): string {
+    const at = this.date(value, label)
+    if (new Date(at).getTime() <= Date.now()) {
+      throw new Error(`${label} must be in the future (current UTC: ${new Date().toISOString()}); omit it when the host controls the deadline`)
+    }
+    return at
   }
 
   private reconcileDomain(
@@ -2338,9 +2419,15 @@ export class FleetTaskBoard {
   private assertDecision(current: FleetProjectTask, next: FleetTaskStableState, source: ReadonlyMap<string, FleetProjectTask>): void {
     if (current.decision !== 'vote' || next.kind !== 'completed') return
     const cohort = current.stableState.kind === 'running' ? current.stableState.cohort : []
-    const approved = cohort.map(id => source.get(id)).some(child => child?.domain.kind === 'vote'
-      && child.domain.outcome === 'approve' && child.stableState.kind === 'completed')
-    if (!approved) throw new Error(`Fleet task ${current.id} requires an approved Vote child`)
+    const children = cohort.map(id => this.requireTaskFrom(source, id))
+    const votes = children.filter(child => child.domain.kind === 'vote')
+    if (votes.length === 0 || votes.some(child => child.domain.kind !== 'vote'
+      || child.domain.outcome !== 'approve' || child.stableState.kind !== 'completed')) {
+      throw new Error(`Fleet task ${current.id} requires an approved Vote child and approval from every Vote in the current cohort`)
+    }
+    if (children.some(child => child.stableState.kind !== 'completed')) {
+      throw new Error(`Fleet task ${current.id} still has incomplete current cohort Tasks`)
+    }
   }
 
   private expireReconcile(current: FleetProjectTask, reason: string): FleetProjectTask {
@@ -2456,37 +2543,21 @@ export class FleetTaskBoard {
     if (current.domain.kind !== 'composite' || current.domain.plan === undefined
       || current.stableState.kind !== 'running') return false
     const plan = current.domain.plan
+    const cohort = current.stableState.cohort
+    // The initial plan is immutable history. Later cohorts belong to the
+    // coordinator and must never be settled from the initial plan's results.
+    if (cohort.length !== plan.requiredStageIds.length
+      || plan.requiredStageIds.some(id => !cohort.includes(id))) return false
     const required = plan.requiredStageIds.map(id => this.requireTask(id))
-    if (required.some(task => !this.settled(task))) return false
-    const failed = required.filter(task => task.stableState.kind !== 'completed')
-    if (failed.length > 0) {
-      this.reconcileDomain(current, current.domain, {
-        kind: 'blocked',
-        reason: `Composite plan stopped because required work did not complete: ${failed
-          .map(task => `${task.title} (${task.stableState.kind}): ${task.stableState.reason}`)
-          .join('; ')}`,
-      })
-      return true
-    }
+    // Non-success settles a stage, not the whole work. The existing cohort
+    // trigger gives the coordinator a durable opportunity to choose what next.
+    if (required.some(task => task.stableState.kind !== 'completed')) return false
     const votes = plan.acceptanceVoteIds.map(id => this.requireTask(id))
-    const rejected = votes.filter(task => task.domain.kind === 'vote' && task.domain.outcome === 'reject')
+    if (votes.some(task => task.domain.kind !== 'vote' || task.domain.outcome !== 'approve')) return false
     const result = plan.resultStageId === undefined ? undefined : this.requireTask(plan.resultStageId)
     const resultText = result?.stableState.kind === 'completed'
       ? result.stableState.result ?? result.stableState.reason
       : undefined
-    if (rejected.length > 0) {
-      const rejection = rejected.map(task => `${task.title}: ${task.stableState.reason}`).join('; ')
-      this.reconcileDomain(current, current.domain, {
-        kind: 'completed',
-        reason: `Composite plan concluded with rejected acceptance: ${rejection}`,
-        result: [
-          `Acceptance rejected: ${rejection}`,
-          ...(resultText === undefined ? [] : [`Candidate result: ${resultText}`]),
-        ].join('\n\n'),
-      })
-      return true
-    }
-    if (votes.some(task => task.domain.kind !== 'vote' || task.domain.outcome !== 'approve')) return false
     this.reconcileDomain(current, current.domain, {
       kind: 'completed',
       reason: 'Every required stage completed and every acceptance Vote approved.',
@@ -2860,7 +2931,7 @@ export function installReconcileTools(
   tasks: FleetTaskBoard,
   authorize: (agentId: string, action: string) => boolean,
 ): () => void {
-  return ctx.tools.register(defineTool({
+  const definition = defineTool({
     name: 'fleet_reconcile',
     description: 'Inspect or atomically resolve a reserved ReconcileAttempt. For resolve, choose a high-level outcome; Fleet derives the stable state and continuation trigger. A [Fleet task attempt] notice is already claimed.',
     parameters: {
@@ -2889,7 +2960,7 @@ export function installReconcileTools(
       if (args.action === 'get') return Promise.resolve({ action: 'get', task: fleetTaskToolDetail(tasks.get(callerId, args.id)) })
       if (args.action === 'claim') return Promise.resolve({ action: 'claim', task: fleetTaskToolDetail(tasks.claim(callerId, args.id)) })
       if (args.attempt_id === undefined || args.progress === undefined || (args.outcome === undefined && args.state === undefined)) {
-        throw new Error('fleet_reconcile resolve requires attempt_id, progress, and outcome')
+        throw new Error('Use fleet_resolve with required id, attempt_id, progress and outcome; continue also requires child_ops. No state has changed.')
       }
       if (args.outcome !== undefined) {
         return Promise.resolve({
@@ -2918,7 +2989,24 @@ export function installReconcileTools(
         })),
       })
     },
+  })
+  const disposeLegacy = ctx.tools.register(definition)
+  const disposeResolve = ctx.tools.register(defineTool({
+    name: 'fleet_resolve',
+    description: 'Resolve a claimed Fleet task attempt. You choose the outcome and follow-up DAG. Uses the same authorization, attempt fencing and review gates as fleet_reconcile resolve.',
+    parameters: {
+      id: { type: 'string', required: true, description: 'Exact task_... id from the current task notice.' },
+      attempt_id: { type: 'string', required: true, description: 'Exact current attempt_... id; never reuse an earlier attempt.' },
+      progress: { type: 'string', required: true, description: 'Evidence and progress supporting this decision.' },
+      outcome: { type: 'string', required: true, enum: ['continue', 'complete', 'block', 'pause', 'cancel'] },
+      result: { type: 'string' },
+      owners: { type: 'array', items: { type: 'string' } },
+      child_ops: { type: 'array', items: CHILD_OPERATION_SCHEMA, description: 'Required for continue: atomic follow-up operations chosen by you.' },
+    },
+    output: jsonOutput(RESULT_SCHEMA),
+    execute: (args, exec) => definition.execute({ ...args, action: 'resolve' }, exec) as Promise<{ action: string; task: ReturnType<typeof fleetTaskToolDetail> }>,
   }))
+  return () => { disposeResolve(); disposeLegacy() }
 }
 
 export function installGoalTools(

@@ -15,6 +15,7 @@ import { FleetResources, installResourceTools } from '@dsh-agent-fleet/resources
 import type { FleetAuthorizationService } from './authorization.js'
 import type { FleetMemberToolGroup, FleetMemberView } from './member-view.js'
 import { FLEET_TOOL_CATALOG, fleetToolHasAuthorizedAction } from './tool-discovery.js'
+import type { FleetReplies } from './replies.js'
 import type { FleetTaskBoard } from './productivity/task.js'
 
 /* ------------------------------------------------------------------ */
@@ -55,6 +56,7 @@ export interface ToolBindingDependencies {
   readonly memberNamesById: ReadonlyMap<string, string>
   readonly defaultVoterNames: ReadonlySet<string>
   readonly messages: MessageHub
+  readonly replies: FleetReplies
   readonly tasks: FleetTaskBoard
   readonly memberStatuses: FleetMemberStatusBoard
   readonly resources: FleetResources
@@ -423,7 +425,7 @@ export class ToolBindingManager {
 /* ------------------------------------------------------------------ */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
 const TASK_MESSAGE_OUTPUT = {
   schema: { type: 'object', additionalProperties: true } as const,
@@ -460,6 +462,7 @@ export function installTaskMessageTools(
   deps: {
     readonly messages: MessageHub
     readonly tasks: FleetTaskBoard
+    readonly replies: FleetReplies
   },
 ): () => void {
   const stops: Array<() => void> = []
@@ -521,52 +524,22 @@ export function installTaskMessageTools(
     execute(args, exec) {
       const agent = taskToolCaller(exec.agent, 'fleet_reply')
       const callerId = String(agent.id)
-      const pending = deps.tasks.ownerTasks(callerId).filter(candidate => candidate.domain.kind === 'reply')
-      let task = args.id === undefined ? undefined : pending.find(candidate => candidate.id === args.id)
-      if (task === undefined && args.id !== undefined) {
-        try {
-          const explicit = deps.tasks.get(callerId, args.id)
-          if (explicit.domain.kind === 'reply' && explicit.domain.completionMessageId !== undefined) task = explicit
-        } catch {}
-      }
-      if (task === undefined && pending.length === 1) task = pending[0]
-      if (task === undefined) {
-        if (pending.length === 0) throw new Error('No owned Reply Task is pending; use fleet_send for a new or optional message')
-        throw new Error(`Multiple Reply Tasks are pending; choose one of: ${pending.map(candidate => candidate.id).join(', ')}`)
-      }
+      const task = deps.replies.resolve(callerId, args.id)
       if (task.domain.kind !== 'reply') throw new Error(`Fleet task ${args.id} is not a Reply Task`)
       const domain = task.domain
       const completionInstruction = deps.tasks.interactionTask(callerId) === undefined
         ? `Reply delivered and Reply Task completed. If you accepted work, continue it now and later post the result with fleet_send reply_to="${domain.messageId}". End only when no work remains.`
         : 'Reply delivered and Reply Task completed. Do not repeat or narrate a delivery confirmation. Continue only if the current user Interaction still has unfinished work.'
-      if (domain.completionMessageId !== undefined) {
-        return Promise.resolve(taskMessageResult({
-          action: 'reply',
-          task: fleetTaskToolDetail(task),
-          messageId: domain.completionMessageId,
-          sourceMessageId: domain.messageId,
-          replayed: true,
-          instruction: completionInstruction,
-        }))
-      }
-      if (!deps.tasks.ownerTasks(callerId).some(candidate => candidate.id === task.id)) {
-        throw new Error(`Fleet Reply Task ${args.id} is not owned by the calling member`)
-      }
-      const source = deps.messages.getMessage(agent, domain.messageId)
-      const existing = deps.messages.search(agent, { conversation: domain.replyTarget as never, limit: 100 })
-        .find(message => message.from === domain.assignee && message.replyTo === source.id)
-      const messageId = existing?.id ?? deps.messages.reply(agent, {
-        messageId: source.id,
-        text: args.content,
+      const answered = deps.replies.answer(agent, {
+        ...(args.id === undefined ? {} : { id: args.id }), content: args.content,
         ...(args.resources === undefined ? {} : { resources: args.resources }),
-      }).messageId
-      deps.messages.completeRequiredReply(callerId, source.id)
+      })
       const result = taskMessageResult({
         action: 'reply',
-        messageId,
-        sourceMessageId: domain.messageId,
-        replayed: existing !== undefined,
-        task: fleetTaskToolDetail(deps.tasks.recordReply(callerId, task.id, messageId)),
+        messageId: answered.messageId,
+        sourceMessageId: answered.sourceMessageId,
+        replayed: answered.replayed,
+        task: fleetTaskToolDetail(answered.task),
         instruction: completionInstruction,
       })
       return Promise.resolve(result)

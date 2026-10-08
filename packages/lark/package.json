@@ -48,16 +48,16 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-credentials": ">=0.1.5-rc.2 <0.1.6-0",
     "dsh-agent-fleet": "^0.1.0"
   },
   "dependencies": {
     "@larksuite/channel": "^0.5.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.8 || >=0.1.1-rc.1 <0.1.2-0",
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-credentials": "0.1.5-rc.2",
     "@types/node": "^22.20.0",
     "dsh-agent-fleet": "workspace:*",
     "typescript": "^6.0.3",

@@ -1802,15 +1802,17 @@ interface FleetNativeChatRuntimePrimerProps {
     owner: Readonly<Record<string, unknown>>,
     options: { readonly only: string },
   ) => ReactNode
-  readonly inspect: unknown
-  readonly onInspectDone: () => void
+  readonly viewRequest: unknown
+  readonly openView: (...args: any[]) => void
+  readonly completeViewRequest: (...args: any[]) => void
 }
 
 /** One-frame offscreen native view that captures the authorized ChatView runtime after a direct Fleet restore. */
 export function FleetNativeChatRuntimePrimer({
   renderSlot,
-  inspect,
-  onInspectDone,
+  viewRequest,
+  openView,
+  completeViewRequest,
 }: FleetNativeChatRuntimePrimerProps): ReactElement | null {
   const ready = useSyncExternalStore(
     listener => {
@@ -1825,7 +1827,7 @@ export function FleetNativeChatRuntimePrimer({
     hidden: true,
     'aria-hidden': 'true',
     'data-conversation-scroll': '',
-    children: renderSlot('conversation.view', { inspect, onInspectDone }, { only: 'chat' }),
+    children: renderSlot('conversation.view', { viewRequest, openView, completeViewRequest }, { only: 'chat' }),
   })
 }
 

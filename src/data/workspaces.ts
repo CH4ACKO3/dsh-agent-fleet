@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
 import type { FleetArchiveRegistry, FleetArchiveTeam } from '../archive.js'
 import type { FleetAuthorizationService, FleetEffectiveAuthorization } from '../authorization.js'

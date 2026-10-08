@@ -49,6 +49,7 @@ function setup(archive?: ArchiveStub): {
   created: CreateAgentOptions[]
   resumed: ResumeAgentOptions[]
   resumedSessions: Session[]
+  createdSessions: Session[]
   hooks: { assembly?: AssemblyHook; requests: RequestHook[] }
 } {
   const owner = {
@@ -59,12 +60,12 @@ function setup(archive?: ArchiveStub): {
   const created: CreateAgentOptions[] = []
   const resumed: ResumeAgentOptions[] = []
   const resumedSessions: Session[] = []
+  const createdSessions: Session[] = []
   const hooks: { assembly?: AssemblyHook; requests: RequestHook[] } = { requests: [] }
   let core: FleetCore | undefined
   const childContext = (agent: RuntimeAgent & { session: Session }) => ({
-    agent,
     get: () => undefined,
-    systemPrompt: { context() {}, section() {} },
+    systemPrompt: { context() {}, section() {}, getContextOrder: () => 0, getSectionOrder: () => 0 },
     tools: { restrict() {} },
     on(name: string, listener: unknown) {
       if (name === 'system-prompt/assemble') hooks.assembly = listener as AssemblyHook
@@ -82,14 +83,15 @@ function setup(archive?: ArchiveStub): {
           Session.create(options.sessionId, options.seed),
           options.agentOptions,
         )
-        await options.setup?.(childContext(child))
+        await options.setup?.(childContext(child), child as unknown as Agent)
+        createdSessions.push(child.session)
         return { agent: child, dispose: () => Promise.resolve() }
       },
       async resume(options: ResumeAgentOptions) {
         resumed.push(options)
         const child = runtimeAgent(String(options.resumeSessionId), undefined, options.agentOptions)
         resumedSessions.push(child.session)
-        await options.setup?.(childContext(child))
+        await options.setup?.(childContext(child), child as unknown as Agent)
         return { agent: child, dispose: () => Promise.resolve() }
       },
     },
@@ -105,16 +107,18 @@ function setup(archive?: ArchiveStub): {
   } as unknown as Context
   apply(ctx)
   if (core === undefined) throw new Error('Fleet Core was not provided')
-  return { core, owner, created, resumed, resumedSessions, hooks }
+  return { core, owner, created, createdSessions, resumed, resumedSessions, hooks }
 }
 
 describe('Fleet native subagent metadata', () => {
   it('seeds new members with a durable continuable descriptor', async () => {
-    const { core, owner, created } = setup()
+    const { core, owner, created, createdSessions } = setup()
 
     await core.create(owner, { name: 'reviewer', displayName: 'Grace', role: 'Reviewer' })
 
-    expect(foldSubagentDescriptor(created[0]?.seed ?? [])).toMatchObject({
+    expect(created[0]?.parentAgent).toBe(owner)
+    expect(created[0]?.meta?.isSeeded).toBe(false)
+    expect(foldSubagentDescriptor(createdSessions[0]!.snapshotEvents())).toMatchObject({
       mode: 'continuable',
       provider: 'dsh-agent-fleet',
       label: 'Grace',
@@ -135,7 +139,7 @@ describe('Fleet native subagent metadata', () => {
     })
 
     expect(resumed).toHaveLength(1)
-    expect(foldSubagentDescriptor(resumedSessions[0]?.events ?? [])).toMatchObject({
+    expect(foldSubagentDescriptor(resumedSessions[0]!.snapshotEvents())).toMatchObject({
       mode: 'continuable',
       provider: 'dsh-agent-fleet',
       label: 'Grace',
@@ -189,12 +193,11 @@ describe('Fleet native subagent metadata', () => {
     const archiveResume = vi.fn(async (_logicalId: string, options: ResumeAgentOptions) => {
       const child = runtimeAgent('current-segment')
       await options.setup?.({
-        agent: child,
         get: () => undefined,
-        systemPrompt: { context() {}, section() {} },
+        systemPrompt: { context() {}, section() {}, getContextOrder: () => 0, getSectionOrder: () => 0 },
         tools: { restrict() {} },
         on: () => () => {},
-      } as unknown as Context)
+      } as unknown as Context, child as unknown as Agent)
       return { agent: child, dispose: () => Promise.resolve() } as unknown as AgentHandle
     })
     const { core, owner, resumed } = setup({ attach, find, resume: archiveResume })

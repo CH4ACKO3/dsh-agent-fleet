@@ -26,6 +26,8 @@ export interface CoordinationEventBridgeDependencies {
   readonly eventBus: FleetTeamEventBus
 
   /** Create or ensure Reply Tasks for an incoming message. */
+  readonly projectReply: (message: FleetMessage) => void
+  readonly projectHandoff: (event: Extract<FleetCoordinationEvent, { type: 'reply_handoff' }>) => void
   readonly ensureMessageTasks: (message: FleetMessage) => string[]
 
   /** Sync a member's unread inbox into their Inbox Task. */
@@ -52,8 +54,14 @@ export class CoordinationEventBridge {
   onCoordinationEvent(event: FleetCoordinationEvent): void {
     this.deps.eventBus.onCoordination(event)
 
+    if (event.type === 'reply_handoff') {
+      this.deps.projectHandoff(event)
+      return
+    }
+
     if (event.type === 'message') {
       this.deps.ensureMessageTasks(event.message)
+      this.deps.projectReply(event.message)
       for (const member of this.deps.memberViews.keys()) {
         this.deps.syncMemberInbox(member)
       }

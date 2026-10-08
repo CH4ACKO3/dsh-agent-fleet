@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { FleetRunService } from '../run.js'
 
 export const FLEET_GROUPS_STATE_NAMESPACE = 'authorization-groups'

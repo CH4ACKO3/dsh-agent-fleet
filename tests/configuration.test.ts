@@ -27,6 +27,7 @@ describe('Fleet configuration modules', () => {
   it('defaults visibility reminders to every third eligible turn and allows disabling them', () => {
     const base = builtIns()[FLEET_MESSAGE_MODULE] as Record<string, unknown>
     expect(parseFleetMessageConfiguration(base).visibilityReminderContextGrowthTokens).toBe(16_000)
+    expect(parseFleetMessageConfiguration(base).memberContextCeilingTokens).toBe(0)
     expect(parseFleetMessageConfiguration({
       ...base,
       visibilityReminderContextGrowthTokens: 0,

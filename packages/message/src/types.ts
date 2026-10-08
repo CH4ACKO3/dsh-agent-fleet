@@ -51,6 +51,7 @@ export type FleetSystemNotificationKind =
   | 'sole_active_fyi'
   | 'schedule_notice'
   | 'calendar_notice'
+  | 'context_ceiling_stop'
 export type FleetMessageKind =
   | 'text'
   | 'reply'
@@ -64,6 +65,14 @@ export type FleetMessageKind =
   | 'task_notification'
   | 'calendar_notification'
 
+/** Trusted connector provenance. Only host ingress can attach this envelope. */
+export interface FleetExternalSource {
+  readonly connector: string
+  readonly conversationId: string
+  readonly externalUserId: string
+  readonly messageId: string
+}
+
 export interface FleetMessage {
   readonly id: string
   readonly sequence: number
@@ -75,6 +84,7 @@ export interface FleetMessage {
   readonly fromName?: string
   /** Trusted host input that should retain native direct-human semantics when delivered. */
   readonly origin?: 'user'
+  readonly external?: FleetExternalSource
   /** Immutable delivery audience selected when the message was created. Absent only on legacy events. */
   readonly recipientIds?: string[]
   readonly text: string
@@ -349,6 +359,8 @@ export interface CastVoteInput {
 
 export type FleetCoordinationEvent =
   | { readonly type: 'message'; readonly message: FleetMessage }
+  | { readonly type: 'reply_handoff'; readonly messageId: string; readonly from: string; readonly to: string }
+  | { readonly type: 'external_delivered'; readonly messageId: string }
   | {
       readonly type: 'system_notification'
       readonly action: FleetSystemNotificationResult['disposition']

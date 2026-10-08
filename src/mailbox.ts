@@ -1,4 +1,4 @@
-import type { FleetCoordinationEvent } from '@dsh-agent-fleet/message'
+import type { FleetCoordinationEvent, FleetMessage, FleetExternalSource } from '@dsh-agent-fleet/message'
 
 import type { FleetRunRecord, FleetRunService } from './run.js'
 
@@ -41,20 +41,19 @@ interface FleetMailboxRuns {
     readonly to: `@${string}`
     readonly text: string
     readonly delivery: 'wakeup'
-  }): unknown
+    readonly external: FleetExternalSource
+  }): { readonly messageId: string }
+  pendingMailboxReplies(): Array<{ runId: string; message: FleetMessage }>
+  acknowledgeMailboxReply(runId: string, messageId: string): void
   subscribeCoordination(listener: (runId: string, event: FleetCoordinationEvent) => void): () => void
-}
-
-interface UserRoute {
-  readonly connector: string
-  readonly conversationId: string
 }
 
 const MAX_RECENT_INBOUND_MESSAGES = 4_096
 
 export class FleetMailboxService implements FleetMailboxPort {
   private readonly listeners = new Set<(message: FleetMailboxGatewayOutbound) => Promise<void>>()
-  private readonly routes = new Map<string, UserRoute>()
+  private draining = false
+  private retry: ReturnType<typeof setTimeout> | undefined
   private readonly recentInbound = new Set<string>()
   private readonly stopCoordination: () => void
   private closed = false
@@ -77,12 +76,6 @@ export class FleetMailboxService implements FleetMailboxPort {
       run.id, assistant.view.id,
     ])
     if (this.recentInbound.has(messageKey)) return
-    const route = routeKey(run.id, assistant.view.id)
-    const previousRoute = this.routes.get(route)
-    this.routes.set(route, {
-      connector: message.connector,
-      conversationId: payload.conversationId,
-    })
     this.recentInbound.add(messageKey)
     try {
       this.runs.sendUserConversationMessage({
@@ -90,11 +83,11 @@ export class FleetMailboxService implements FleetMailboxPort {
         to: `@${assistant.view.id}`,
         text: payload.text,
         delivery: 'wakeup',
+        external: { connector: message.connector, conversationId: payload.conversationId,
+          externalUserId: payload.externalUserId, messageId: payload.messageId },
       })
     } catch (error) {
       this.recentInbound.delete(messageKey)
-      if (previousRoute === undefined) this.routes.delete(route)
-      else this.routes.set(route, previousRoute)
       throw error
     }
     if (this.recentInbound.size > MAX_RECENT_INBOUND_MESSAGES) {
@@ -104,6 +97,7 @@ export class FleetMailboxService implements FleetMailboxPort {
 
   onOutbound(listener: (message: FleetMailboxGatewayOutbound) => Promise<void>): () => void {
     this.listeners.add(listener)
+    this.scheduleDrain()
     return () => { this.listeners.delete(listener) }
   }
 
@@ -111,7 +105,7 @@ export class FleetMailboxService implements FleetMailboxPort {
     if (this.closed) return
     this.closed = true
     this.stopCoordination()
-    this.routes.clear()
+    if (this.retry !== undefined) clearTimeout(this.retry)
     this.recentInbound.clear()
     this.listeners.clear()
   }
@@ -128,28 +122,50 @@ export class FleetMailboxService implements FleetMailboxPort {
     return candidates[0]!
   }
 
-  private coordination(runId: string, event: FleetCoordinationEvent): void {
-    if (this.closed || event.type !== 'message' || event.message.conversation !== `@fleet-user:${runId}`) return
-    const run = this.runs.status(runId)
-    const assistant = run.assistants.find(candidate =>
-      candidate.view.id === event.message.from || candidate.sessionId === event.message.from)
-    if (assistant === undefined) return
-    const route = this.routes.get(routeKey(runId, assistant.view.id))
-    if (route === undefined) return
-    const outbound: FleetMailboxGatewayOutbound = {
-      connector: route.connector,
-      payload: {
-        kind: 'user-message',
-        conversationId: route.conversationId,
-        text: event.message.text,
-      } satisfies FleetUserMailboxOutbound,
-    }
-    for (const listener of this.listeners) {
-      void listener(outbound).catch(error => {
-        this.warn(`Fleet Mailbox outbound delivery failed: ${errorText(error)}`)
-      })
+  private coordination(_runId: string, event: FleetCoordinationEvent): void {
+    if (event.type === 'message') this.scheduleDrain()
+  }
+
+  private scheduleDrain(): void {
+    if (this.closed || this.draining || this.listeners.size === 0) return
+    this.draining = true
+    queueMicrotask(() => { void this.drain() })
+  }
+
+  private async drain(): Promise<void> {
+    try {
+      for (const { runId, message } of this.runs.pendingMailboxReplies()) {
+        if (this.closed || this.listeners.size === 0) break
+        const route = message.external
+        if (route === undefined) continue
+        const outbound: FleetMailboxGatewayOutbound = {
+          connector: route.connector,
+          payload: { kind: 'user-message', conversationId: route.conversationId, text: message.text } satisfies FleetUserMailboxOutbound,
+        }
+        try {
+          await Promise.all([...this.listeners].map(listener => listener(outbound)))
+          if (!this.closed) this.runs.acknowledgeMailboxReply(runId, message.id)
+        } catch (error) {
+          this.warn(`Fleet Mailbox outbound delivery failed: ${errorText(error)}`)
+        }
+      }
+    } catch (error) {
+      this.warn(`Fleet Mailbox outbound delivery failed: ${errorText(error)}`)
+    } finally {
+      this.draining = false
+      // The journal is the outbox. Failed delivery remains pending across
+      // retries/restarts; only a successful connector call writes its receipt.
+      if (!this.closed && this.listeners.size > 0 && this.retry === undefined
+        && this.runs.pendingMailboxReplies().length > 0) {
+        this.retry = setTimeout(() => {
+          this.retry = undefined
+          this.scheduleDrain()
+        }, 1_000)
+        this.retry.unref?.()
+      }
     }
   }
+
 }
 
 export function createFleetMailbox(runs: FleetRunService, warn?: (message: string) => void): FleetMailboxService {
@@ -181,10 +197,6 @@ function parseUserMessage(value: unknown): FleetUserMailboxInbound {
   optionalString(value, 'teamId')
   optionalString(value, 'assistantId')
   return value as unknown as FleetUserMailboxInbound
-}
-
-function routeKey(teamId: string, assistantId: string): string {
-  return `${teamId}\u0000${assistantId}`
 }
 
 function requireString(value: Record<string, unknown>, field: string): void {
