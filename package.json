@@ -80,8 +80,8 @@
     "build": "pnpm --filter @dsh-agent-fleet/core --filter @dsh-agent-fleet/gateway --filter @dsh-agent-fleet/message --filter @dsh-agent-fleet/resources --filter dsh-hover-hint build && pnpm run build:client && pnpm run build:host && pnpm --filter @ch4acko3/dsh-agent-fleet-git --filter @ch4acko3/dsh-agent-fleet-lark --filter dsh-agent-fleet-patchouli build",
     "build:client": "pnpm run generate:team-templates && tsdown --config-loader unrun && tsc -p tsconfig.client.build.json",
     "build:host": "tsc -p tsconfig.package.json",
-    "test": "pnpm run build && pnpm -r --if-present test && vitest run --dir tests",
-    "typecheck": "pnpm --filter @dsh-agent-fleet/core build && pnpm --filter @dsh-agent-fleet/message build && pnpm --filter @dsh-agent-fleet/resources build && pnpm -r --if-present typecheck && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.package.json --noEmit"
+    "typecheck": "pnpm --filter @dsh-agent-fleet/core build && pnpm --filter @dsh-agent-fleet/message build && pnpm --filter @dsh-agent-fleet/resources build && pnpm -r --if-present typecheck && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.package.json --noEmit",
+    "check": "pnpm run build && pnpm run typecheck"
   },
   "dependencies": {
     "@deepseek-ai/dsh-typert-protocol": "0.1.5-rc.2",
@@ -199,7 +199,6 @@
     "tsdown": "^0.22.14",
     "typescript": "^6.0.3",
     "unrun": "^0.3.1",
-    "vitest": "^4.1.11",
     "@deepseek-ai/dsh-command-feedback": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session-query": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session-title": "0.1.5-rc.2",

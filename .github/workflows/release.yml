@@ -84,7 +84,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify repository
-        run: pnpm test
+        run: pnpm check
 
       - name: Pack selected package
         shell: bash

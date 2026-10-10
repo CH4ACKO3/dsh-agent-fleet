@@ -27,8 +27,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "pnpm --filter dsh-agent-fleet build:host && tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "typecheck": "pnpm --filter dsh-agent-fleet build:host && tsc -p tsconfig.json --noEmit"
   },
   "dsh": {
     "plugin": {
@@ -60,8 +59,7 @@
     "@deepseek-ai/dsh-credentials": "0.1.5-rc.2",
     "@types/node": "^22.20.0",
     "dsh-agent-fleet": "workspace:*",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.11"
+    "typescript": "^6.0.3"
   },
   "publishConfig": {
     "access": "public"

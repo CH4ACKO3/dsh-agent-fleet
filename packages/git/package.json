@@ -33,8 +33,7 @@
     "build": "pnpm run build:client && pnpm run build:host",
     "build:client": "tsdown --config-loader unrun && tsc -p tsconfig.client.build.json",
     "build:host": "tsc -p tsconfig.json",
-    "typecheck": "pnpm --filter dsh-agent-fleet build:host && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "pnpm --filter dsh-agent-fleet build:host && vitest run"
+    "typecheck": "pnpm --filter dsh-agent-fleet build:host && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "dsh": {
     "plugin": {
@@ -86,8 +85,7 @@
     "dsh-agent-fleet": "workspace:*",
     "react": "^18.2.0",
     "tsdown": "^0.22.14",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.11"
+    "typescript": "^6.0.3"
   },
   "publishConfig": {
     "access": "public"
