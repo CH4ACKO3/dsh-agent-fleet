@@ -13,6 +13,24 @@ function replaceExactly(context, before, after) {
 }
 
 module.exports = [
+  {
+    id: 'fleet-target-session-scope',
+    description: 'Binds an embedded native member view to its own Session scope.',
+    target: { package: '@deepseek-ai/dsh-client-ui-renderer', version: '>=0.1.5-rc.3 <0.1.6-0', file: 'lib/client.js' },
+    select: 'SourceFile',
+    expect: 1,
+    apply(context) {
+      replaceExactly(context,
+        'return renderArea(useScopeBinding(), props);',
+        `const current = useScopeBinding();
+        const binding = props.sessionId === undefined ? current : adapter.resolve(props.sessionId);
+        if (binding === undefined) return props.empty?.() ?? null;
+        return (0, react_jsx_runtime.jsx)(ScopeBindingContext.Provider, {
+          value: binding, children: renderArea(binding, props)
+        });`,
+      )
+    },
+  },
   component({
     id: 'fleet-team-button',
     description: 'Adds a team creation action beside the native agent preset control.',

@@ -1553,7 +1553,7 @@ interface FleetTeamPanelProps {
 interface FleetTargetSessionProviderProps {
   readonly sessionId?: string
   readonly empty?: () => ReactNode
-  readonly children: (sessionId: string) => ReactNode
+  readonly children: ReactNode | ((sessionId: string) => ReactNode)
 }
 
 export type FleetSnapshotSelectorHook = <Selection>(
@@ -1583,6 +1583,8 @@ export interface FleetNativeSessionFace {
 }
 
 export interface FleetNativeContext {
+  openSession?(sessionId: string): Promise<void>
+  chatRuntime?(sessionId: string): Readonly<Record<string, any>> | undefined
   session(sessionId: string): FleetNativeSessionFace | undefined
   executeSessionCommand(sessionId: string, line: string): Promise<{
     readonly kind: 'success' | 'error'
@@ -6748,6 +6750,10 @@ function resolveMemberFilePath(cwd: string | undefined, path: string): string {
 }
 
 function createFleetNativeContext(ctx: FleetPanelClientContext): FleetNativeContext {
+  let uiSession: { adapter: { resolve(id: string): any } } | undefined
+  ctx.inject<{ uiSession: NonNullable<typeof uiSession> }>(['uiSession'], scoped => {
+    uiSession = scoped.uiSession
+  })
   const sessions = ctx.sessions as unknown as {
     readonly list: { getSnapshot(): { readonly byId: Readonly<Record<string, { readonly cwd?: string }>> } }
     binding(sessionId: string): { readonly session: FleetNativeSessionFace } | undefined
@@ -6769,6 +6775,42 @@ function createFleetNativeContext(ctx: FleetPanelClientContext): FleetNativeCont
     readonly events?: { dispatch(type: string, args: readonly unknown[]): ((...args: any[]) => unknown)[] }
   }).events
   return {
+    openSession: async sessionId => {
+      const controller = ctx.sessions as unknown as {
+        list: { getSnapshot(): any }
+        refreshSubagents?(parentId: string): Promise<void>
+      }
+      const parentId = controller.list.getSnapshot().byId[sessionId]?.parentId
+      if (parentId !== undefined) await controller.refreshSubagents?.(parentId)
+      const session = sessions?.binding(sessionId)?.session as FleetNativeSessionFace & {
+        configureSubagent?(address: { parentSessionId: string; childSessionId: string; mode: string }, available: boolean): void
+      } | undefined
+      const catalog = controller.list.getSnapshot().subagentsByParent?.[parentId]
+      const child = catalog?.entries.find((entry: any) => entry.kind === 'child' && entry.id === sessionId)
+      if (child !== undefined) session?.configureSubagent?.({ parentSessionId: parentId, childSessionId: sessionId, mode: child.mode }, catalog.parentAvailable)
+      await session?.open?.()
+    },
+    chatRuntime: sessionId => {
+      const binding = uiSession?.adapter.resolve(sessionId)
+      if (binding?.hooks?.chat === undefined) return undefined
+      const slots = ctx.slots as FleetPanelSlots & { entries(name: string): readonly any[] }
+      const entry = slots.entries('conversation.view').find(candidate => candidate.options?.id === 'chat')
+      if (entry === undefined) return undefined
+      const injected = entry.inject?.(sessionId) ?? {}
+      const props: Record<string, any> = { ...binding.props, ...injected }
+      const hook = (source: any) => (selector: (value: any) => any = value => value) => {
+        const value = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
+        return selector(value)
+      }
+      for (const [name, source] of Object.entries({ ...binding.hooks, ...injected.hooks })) {
+        props[`use${name[0]!.toUpperCase()}${name.slice(1)}`] = hook(source)
+      }
+      for (const [name, resolve] of Object.entries({ ...binding.keyedHooks, ...injected.keyedHooks })) {
+        props[`use${name[0]!.toUpperCase()}${name.slice(1)}`] = (key: string, selector?: (value: any) => any) =>
+          hook((resolve as (key: string) => any)(key))(selector)
+      }
+      return props
+    },
     session: sessionId => sessions?.binding(sessionId)?.session,
     executeSessionCommand: async (sessionId, line) => {
       if (commandRemote === undefined) {

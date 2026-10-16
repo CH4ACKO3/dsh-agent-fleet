@@ -966,6 +966,7 @@ export function FleetNativeMemberChat({ owner, session, sessionId, source }: {
   readonly source?: FleetChatReceiptSource
 }): ReactElement {
   const scrollKey = `${owner.snapshot.teamId}:${sessionId}`
+  const memberChatRuntime = useMemo(() => owner.nativeContext.chatRuntime?.(sessionId), [owner.nativeContext, sessionId])
   const root = useRef<HTMLDivElement>(null)
   const [target, setTarget] = useState<
     | { readonly status: 'idle' | 'loading' | 'missing' }
@@ -977,7 +978,7 @@ export function FleetNativeMemberChat({ owner, session, sessionId, source }: {
     // DSH lazily opens history only for the foreground Session. Fleet renders a
     // different listed Session in-place, so explicitly open its idempotent
     // history window before reusing the native ChatView.
-    void session.open?.()
+    void (owner.nativeContext.openSession?.(sessionId) ?? session.open?.())
     return () => {
       nativeChatScroll.delete(scrollKey)
       if (!nativeCurrentRef.current) releaseFleetNativeSessionWindow(session)
@@ -1079,15 +1080,18 @@ export function FleetNativeMemberChat({ owner, session, sessionId, source }: {
         className: 'dsh-fleet-panel-native-context-scroll',
         'data-conversation-scroll': '',
         children: jsx(ChatView, {
+          ...runtime,
+          ...memberChatRuntime,
           useSession: useMemberSession,
           useSessions: runtime.useSessions,
           useStore: runtime.useStore ?? useNativeChatStore,
           renderSlot: runtime.renderSlot,
           sessionId,
-          openFile: (path: string) => owner.nativeContext.openFile(sessionId, path),
+          openFile: memberChatRuntime?.openFile ?? ((path: string) => owner.nativeContext.openFile(sessionId, path)),
           loadOlder: () => { void session.loadOlder() },
-          loadImage: (attachment: unknown) => owner.nativeContext.loadImage(sessionId, attachment),
+          loadImage: memberChatRuntime?.loadImage ?? ((attachment: unknown) => owner.nativeContext.loadImage(sessionId, attachment)),
           inspectCall: () => {},
+          openView: () => {},
           chatScroll: {
             save: (position: unknown) => {
               if (position === null) nativeChatScroll.delete(scrollKey)
@@ -1096,7 +1100,7 @@ export function FleetNativeMemberChat({ owner, session, sessionId, source }: {
             read: () => nativeChatScroll.get(scrollKey) ?? null,
           },
           forkAt: () => {},
-          fileMentions: (value: unknown) => owner.nativeContext.fileMentions(value),
+          fileMentions: memberChatRuntime?.fileMentions ?? ((value: unknown) => owner.nativeContext.fileMentions(value)),
           t: runtime.t ?? owner.t,
         }),
       }),
@@ -1398,7 +1402,9 @@ export function AgentContextMain({ owner, member }: {
   )
   const getSessionSnapshot = useCallback(() => session?.getSnapshot() ?? null, [session])
   const sessionSnapshot = useSyncExternalStore(subscribeSession, getSessionSnapshot, getSessionSnapshot)
-  useEffect(() => { void session?.open?.() }, [session])
+  useEffect(() => {
+    if (contextSessionId !== undefined) void (owner.nativeContext.openSession?.(contextSessionId) ?? session?.open?.())
+  }, [session, contextSessionId, owner.nativeContext])
   const assistant = owner.snapshot.assistants?.some(candidate => candidate.id === member.id) === true
   const emptyAssistantSession = assistant && session !== undefined && nativeContextNodeCount(sessionSnapshot) === 0
   const usePersistedTrace = session === undefined || contextSessionId === undefined || emptyAssistantSession
@@ -1429,6 +1435,11 @@ export function AgentContextMain({ owner, member }: {
       }),
       usePersistedTrace
         ? jsx(FleetPersistedMemberTrace, { owner, member, ...(source === undefined ? {} : { source }) }, `${owner.snapshot.teamId}:${member.id}:${source?.sessionId ?? ''}:${source?.contextMessageId ?? ''}`)
+        : owner.nativeContext.chatRuntime?.(contextSessionId) !== undefined
+        ? jsx(owner.SessionProvider, {
+            sessionId: contextSessionId,
+            children: jsx(FleetNativeMemberChat, { owner, session, sessionId: contextSessionId, ...(source === undefined ? {} : { source }) }),
+          })
         : jsx(owner.SessionProvider, {
             sessionId: contextSessionId,
             empty: () => jsx(PanelUnavailable, { label: panelText('成员 Session 当前不在 DSH 可见范围内', 'The member Session is not currently visible in DSH') }),
