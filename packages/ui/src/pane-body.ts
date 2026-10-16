@@ -30,6 +30,7 @@ import { panelText, fleetPanelMemberIsOnline } from './panel-utils.js'
 import { isChineseLocale } from './locale.js'
 import { PanelMessageLog, PanelColumnResizeHandle, rememberBounded } from './panel-log.js'
 import { PanelIcon } from './panel-icons.js'
+import { useFleetChatColumnWidth } from './chat-column-width.js'
 import { FLEET_PANEL_SLOTS, operator, teamAgents, PanelUnavailable, groupFleetMessageThreads } from './team-panel.js'
 import { updateFleetOperatorProfile } from './operator-profile.js'
 import {
@@ -408,6 +409,8 @@ export function FleetMemberMentionPopover({ member, label, showDetails, showCont
 }
 
 export function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
+  const chat = useRef<HTMLElement>(null)
+  const column = useFleetChatColumnWidth(chat)
   const conversation = operatorConversations(owner.snapshot).find(item => item.id === owner.activeItem)
   const recentMessages = conversation === undefined
     ? []
@@ -430,7 +433,9 @@ export function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
   const onlineMembers = channelMembers?.filter(fleetPanelMemberIsOnline)
   const messages = history.messages
   return jsxs('section', {
+    ref: chat,
     className: 'dsh-fleet-panel-chat',
+    style: { '--dsh-fleet-panel-chat-column-width': `${column.width}px` } as CSSProperties,
     children: [
       jsx(FleetConversationHeader, {
         kind: conversation.kind,
@@ -467,6 +472,7 @@ export function ChatMain(owner: FleetPanelPaneOwner): ReactElement {
         conversationKey: `${owner.snapshot.teamId}:chat:${conversation.id}`,
         messageCount: messages.length,
         resizable: true,
+        column,
         hasOlder: history.hasOlder,
         loadingOlder: history.loadingOlder,
         loadOlder: history.loadOlder,

@@ -110,6 +110,7 @@ function PanelMessageLog({
   messageCount,
   children,
   resizable = false,
+  column: sharedColumn,
   resizeLabel = panelText('调整消息区域宽度', 'Resize message area'),
   initialScroll = 'bottom',
   hasOlder = false,
@@ -120,6 +121,7 @@ function PanelMessageLog({
   readonly messageCount: number
   readonly children: ReactNode
   readonly resizable?: boolean
+  readonly column?: ReturnType<typeof useFleetChatColumnWidth>
   readonly resizeLabel?: string
   readonly initialScroll?: 'top' | 'bottom'
   readonly hasOlder?: boolean
@@ -131,7 +133,8 @@ function PanelMessageLog({
   const atBottom = useRef(true)
   const [hasNewMessages, setHasNewMessages] = useState(false)
   const prepend = useRef<{ readonly height: number; readonly top: number }>()
-  const column = useFleetChatColumnWidth(log)
+  const localColumn = useFleetChatColumnWidth(log)
+  const column = sharedColumn ?? localColumn
 
   const rememberScroll = (): void => {
     const node = log.current

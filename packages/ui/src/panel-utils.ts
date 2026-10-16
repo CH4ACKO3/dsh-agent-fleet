@@ -2665,12 +2665,15 @@ flex: none;
 
 .dsh-fleet-official-composer {
 --dsh-composer-side-clearance: 0px;
-  --dsh-composer-card-max-width: 780px;
+  --dsh-composer-card-max-width: var(--dsh-fleet-panel-chat-column-width, 760px);
   padding-bottom: 12px;
 }
 
 .dsh-fleet-official-composer > div {
-padding: 0;
+max-width: var(--dsh-fleet-panel-chat-column-width, 760px);
+  margin-inline: auto;
+  width: 100%;
+  padding: 0;
 }
 
 .dsh-fleet-session-goal-dock {
@@ -6195,7 +6198,7 @@ background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, trans
 
 .dsh-fleet-official-composer {
 --dsh-composer-side-clearance: 0px;
-  --dsh-composer-card-max-width: 780px;
+  --dsh-composer-card-max-width: var(--dsh-fleet-panel-chat-column-width, 760px);
   padding-bottom: 12px;
 }
 
