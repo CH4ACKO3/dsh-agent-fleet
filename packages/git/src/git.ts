@@ -205,6 +205,7 @@ function git(cwd: string, args: readonly string[], allowFailure = false): string
   try {
     return execFileSync('git', ['-C', cwd, ...args], {
       encoding: 'utf8',
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim()
   } catch (error) {
@@ -219,6 +220,7 @@ function gitOutput(cwd: string, args: readonly string[], maxBuffer = 8 * 1024 * 
   try {
     return execFileSync('git', ['-C', cwd, ...args], {
       encoding: 'utf8',
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       maxBuffer,
     })
@@ -232,6 +234,7 @@ function gitOutput(cwd: string, args: readonly string[], maxBuffer = 8 * 1024 * 
 function gitBoundedOutput(cwd: string, args: readonly string[], maxBytes: number): { readonly output: string; readonly truncated: boolean } {
   const result = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
+    windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: maxBytes + 64 * 1024,
   })
@@ -249,7 +252,7 @@ function gitBoundedOutput(cwd: string, args: readonly string[], maxBytes: number
 }
 
 function gitSucceeds(cwd: string, args: readonly string[]): boolean {
-  return spawnSync('git', ['-C', cwd, ...args], { stdio: 'ignore' }).status === 0
+  return spawnSync('git', ['-C', cwd, ...args], { stdio: 'ignore', windowsHide: true }).status === 0
 }
 
 function reflogCreatesCommit(subject: string): boolean {
@@ -615,6 +618,7 @@ export class FleetGit {
     const overlappingPaths = [...currentPaths].filter(path => targetPaths.has(path)).sort()
     const merged = spawnSync('git', ['-C', cwd, 'merge-tree', '--write-tree', comparison.currentHead, comparison.targetHead], {
       encoding: 'utf8',
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     if (merged.status !== 0 && merged.status !== 1) {
