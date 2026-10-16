@@ -1734,10 +1734,14 @@ export function withFleetNativeChatView<T extends ComponentType<any>>(ChatView: 
       }
     }, [welcome?.sessionId, welcome?.streaming, welcome?.text, welcome?.time])
     const nativeUseSession = props.useSession as FleetSnapshotSelectorHook
-    const decoratedUseSession: FleetSnapshotSelectorHook = (selector, equality) => nativeUseSession(
-      source => selector(decorateSnapshot(source)),
-      equality,
-    )
+    const decoratedUseSession: FleetSnapshotSelectorHook = (selector, equality) => {
+      const chat = props.useChat?.((snapshot: any) => snapshot)
+      const queue = props.useInput?.((snapshot: any) => snapshot?.queue)
+      return nativeUseSession(
+        source => selector(decorateSnapshot({ ...source, chat: chat ?? source.chat, queue: queue ?? source.queue ?? [] })),
+        equality,
+      )
+    }
     const mentionMembers = useMemo<readonly FleetPanelMember[]>(() => {
       const team = fleetSnapshot.team?.teamId === conversationTeamId ? fleetSnapshot.team : undefined
       return team === undefined ? [] : [operator, ...teamAgents(team)]
@@ -4250,6 +4254,7 @@ export function FleetOfficialConversationComposer({ owner, conversation }: {
     draft: owner.draft,
     phase: owner.sending || commandRunning ? 'submitting' : 'plain',
     imageIds: fileIds,
+    attachmentIds: fileIds,
     occurrences: [],
     queue: [],
   }
@@ -4703,6 +4708,11 @@ export function FleetOfficialConversationComposer({ owner, conversation }: {
         if (!tutorial && !owner.sending && !commandRunning) attachments.addFiles(added)
         return null
       },
+      addFiles: (added: readonly File[]) => {
+        if (!tutorial && !owner.sending && !commandRunning) attachments.addFiles(added)
+      },
+      removeAttachment: attachments.removeFile,
+      resolveDraftAttachments: (ids: readonly string[]) => ids.flatMap(id => attachments.items.filter(item => item.id === id)),
       removeImage: attachments.removeFile,
       draftImages: (ids: readonly string[]) => ids.flatMap(id => attachments.items.filter(item => item.id === id)),
       resolveSubmitMode: () => 'queue',

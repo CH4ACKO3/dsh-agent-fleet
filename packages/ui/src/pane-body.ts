@@ -1406,7 +1406,8 @@ export function AgentContextMain({ owner, member }: {
     if (contextSessionId !== undefined) void (owner.nativeContext.openSession?.(contextSessionId) ?? session?.open?.())
   }, [session, contextSessionId, owner.nativeContext])
   const assistant = owner.snapshot.assistants?.some(candidate => candidate.id === member.id) === true
-  const emptyAssistantSession = assistant && session !== undefined && nativeContextNodeCount(sessionSnapshot) === 0
+  const memberRuntime = contextSessionId === undefined ? undefined : owner.nativeContext.chatRuntime?.(contextSessionId)
+  const emptyAssistantSession = assistant && session !== undefined && memberRuntime === undefined && nativeContextNodeCount(sessionSnapshot) === 0
   const usePersistedTrace = session === undefined || contextSessionId === undefined || emptyAssistantSession
   return jsxs('section', {
     className: 'dsh-fleet-panel-chat',
@@ -1435,7 +1436,7 @@ export function AgentContextMain({ owner, member }: {
       }),
       usePersistedTrace
         ? jsx(FleetPersistedMemberTrace, { owner, member, ...(source === undefined ? {} : { source }) }, `${owner.snapshot.teamId}:${member.id}:${source?.sessionId ?? ''}:${source?.contextMessageId ?? ''}`)
-        : owner.nativeContext.chatRuntime?.(contextSessionId) !== undefined
+        : memberRuntime !== undefined
         ? jsx(owner.SessionProvider, {
             sessionId: contextSessionId,
             children: jsx(FleetNativeMemberChat, { owner, session, sessionId: contextSessionId, ...(source === undefined ? {} : { source }) }),

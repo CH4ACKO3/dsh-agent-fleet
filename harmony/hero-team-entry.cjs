@@ -16,7 +16,7 @@ module.exports = [
   {
     id: 'fleet-target-session-scope',
     description: 'Binds an embedded native member view to its own Session scope.',
-    target: { package: '@deepseek-ai/dsh-client-ui-renderer', version: '>=0.1.5-rc.3 <0.1.6-0', file: 'lib/client.js' },
+    target: { package: '@deepseek-ai/dsh-client-ui-renderer', version: DSH_CLIENT_VERSION, file: 'lib/client.js' },
     select: 'SourceFile',
     expect: 1,
     apply(context) {
